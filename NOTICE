@@ -1,0 +1,22 @@
+Gonimbus
+Copyright 2025 3 Leaps, LLC
+
+This product includes software developed at 3 Leaps, LLC (https://3leaps.net/).
+
+This product was bootstrapped from forge-workhorse-groningen, a template from
+the Fulmen ecosystem (https://github.com/fulmenhq).
+
+---
+
+Third-Party Licenses
+
+This software uses the following third-party libraries:
+
+- gofulmen (https://github.com/fulmenhq/gofulmen) - Apache 2.0
+- AWS SDK for Go v2 (https://github.com/aws/aws-sdk-go-v2) - Apache 2.0
+- Cobra (https://github.com/spf13/cobra) - Apache 2.0
+- Viper (https://github.com/spf13/viper) - MIT
+- Chi (https://github.com/go-chi/chi) - MIT
+- Zap (https://github.com/uber-go/zap) - MIT
+
+See go.mod for the complete list of dependencies and their versions.

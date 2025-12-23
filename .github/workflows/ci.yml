@@ -1,0 +1,107 @@
+# yamllint disable rule:document-start
+# yamllint disable rule:truthy
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  # Container-based format checking (LOW friction - v0.3.14+)
+  # Uses goneat-tools-runner which has foundation tools pre-installed
+  format-check:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+      # goneat-tools-runner is a full CI runner image.
+      # Use UID 1001 to match GitHub-hosted runner workspace ownership.
+      options: --user 1001
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify foundation tools
+        run: |
+          set -euo pipefail
+          prettier --version
+          yamlfmt --version
+          jq --version
+          yq --version
+          rg --version
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          yamlfmt -lint .
+          prettier --check "**/*.{md,json}" || \
+            echo "Prettier differences found (non-blocking)"
+  # Build and test using goneat-tools-runner container
+  # Runner provides foundation tools + goneat/sfetch; Go is set up separately.
+  build-test:
+    needs: [format-check]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+      # goneat-tools-runner is a full CI runner image.
+      # Use UID 1001 to match GitHub-hosted runner workspace ownership.
+      options: --user 1001
+    env:
+      FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check Go presence (pre-setup)
+        run: |
+          set -euo pipefail
+          if command -v go >/dev/null 2>&1; then
+            echo "Go already present:"; go version
+          else
+            echo "Go not present (expected); installing via actions/setup-go"
+          fi
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Verify runner + Go toolchain
+        run: |
+          set -euo pipefail
+          prettier --version
+          yamlfmt --version
+          sfetch --version
+          goneat --version
+          command -v go
+          go version
+          go env GOPATH
+          go mod download
+      - name: Format (using goneat - fail on diff)
+        run: |
+          set -euo pipefail
+          make fmt
+          git diff --exit-code
+      - name: Install golangci-lint (v2)
+        # goneat-tools-runner does not ship golangci-lint yet.
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.4.0
+          args: --help
+      - name: Verify golangci-lint
+        run: |
+          set -euo pipefail
+          golangci-lint --version
+      - name: Lint
+        run: |
+          set -euo pipefail
+          make lint
+      - name: Test
+        run: |
+          set -euo pipefail
+          make test
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          make build

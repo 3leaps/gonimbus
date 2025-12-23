@@ -1,0 +1,14 @@
+# Fulmen Application Identity
+# Embedded identity for standalone binary distribution.
+# Keep in sync with .fulmen/app.yaml via `make sync-embedded-identity`
+app:
+  vendor: 3leaps
+  binary_name: gonimbus
+  env_prefix: GONIMBUS_
+  config_name: gonimbus
+  description: Gonimbus - cloud object storage crawl/inspect engine (library + CLI + server)
+  version: 0.1.0
+metadata:
+  repository_category: workhorse
+  project_url: https://github.com/3leaps/gonimbus
+  license: Apache-2.0

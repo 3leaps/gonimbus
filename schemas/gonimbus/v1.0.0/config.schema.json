@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/config",
+  "title": "Gonimbus Workhorse Configuration Schema",
+  "description": "Configuration schema for forge-workhorse-gonimbus template following Fulmen Forge Workhorse Standard",
+  "type": "object",
+  "properties": {
+    "server": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "read_timeout": {
+          "type": "string"
+        },
+        "write_timeout": {
+          "type": "string"
+        },
+        "idle_timeout": {
+          "type": "string"
+        },
+        "shutdown_timeout": {
+          "type": "string"
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "SIMPLE",
+            "STRUCTURED",
+            "ENTERPRISE"
+          ]
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "debug": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "pprof_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "workers": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}

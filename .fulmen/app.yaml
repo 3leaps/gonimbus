@@ -1,0 +1,14 @@
+# Fulmen Application Identity
+# This file defines the application's identity metadata for integration with
+# the Fulmen ecosystem (gofulmen, Crucible, etc.)
+app:
+  vendor: 3leaps
+  binary_name: gonimbus
+  env_prefix: GONIMBUS_
+  config_name: gonimbus
+  description: Gonimbus - cloud object storage crawl/inspect engine (library + CLI + server)
+  version: 0.1.0
+metadata:
+  repository_category: workhorse
+  project_url: https://github.com/3leaps/gonimbus
+  license: Apache-2.0
