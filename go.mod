@@ -3,7 +3,7 @@ module github.com/3leaps/gonimbus
 go 1.25.1
 
 require (
-	github.com/fulmenhq/gofulmen v0.1.25
+	github.com/fulmenhq/gofulmen v0.1.27
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
@@ -17,7 +17,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/fulmenhq/crucible v0.2.26 // indirect
+	github.com/fulmenhq/crucible v0.2.27 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect

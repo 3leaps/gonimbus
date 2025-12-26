@@ -52,22 +52,28 @@ make build
 ## Core Capabilities
 
 ### Providers
+
 - **S3/S3-compatible**: First-class support with access key/secret
 - **AWS profiles**: Assume-role chains, SSO, cached tokens
 - **GCS**: Fast-follow (v0.2.x)
 
 ### Authentication
+
 Uses SDK default auth chains - no reinventing the wheel:
+
 - AWS: env vars, shared config/credentials, profiles, web identity/IRSA
 - Raw keys supported as explicit fallback (Wasabi, DigitalOcean Spaces)
 
 ### Matching
+
 - Doublestar semantics over normalized keys
 - Derives strongest possible list prefix per pattern (critical for scale)
 - Include/exclude pattern support
 
 ### Outputs
+
 Stream-friendly JSONL records:
+
 ```json
 {"type":"gonimbus.object.v1","ts":"2025-01-15T10:30:00.000Z","job_id":"abc123","provider":"s3","data":{...}}
 ```
@@ -139,6 +145,7 @@ See [docs/development/](docs/development/) for detailed development guides.
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for component design:
+
 - Provider Layer
 - Match Layer (Cloud-Doublestar)
 - Crawl Engine

@@ -129,4 +129,3 @@ Conceptual module map (actual layout follows workhorse forge structure):
 For explicit non-goals and scope boundaries, see [non-goals.md](non-goals.md).
 
 Key boundary: if a requirement is about "local filesystem semantics" (mounts, sync, caching), it belongs in NimbusNest or another app, not in gonimbus core.
-
