@@ -207,6 +207,13 @@ func TestIsProviderUnavailable(t *testing.T) {
 	assert.False(t, provider.IsProviderUnavailable(provider.ErrNotFound))
 }
 
+func TestIsThrottled(t *testing.T) {
+	assert.True(t, provider.IsThrottled(provider.ErrThrottled))
+	assert.True(t, provider.IsThrottled(&provider.ProviderError{Err: provider.ErrThrottled}))
+	assert.False(t, provider.IsThrottled(provider.ErrNotFound))
+	assert.False(t, provider.IsThrottled(provider.ErrProviderUnavailable))
+}
+
 func TestCleanETag(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -330,6 +337,9 @@ func TestWrapError_FromMessage(t *testing.T) {
 		{"no such bucket", "NoSuchBucket: bucket does not exist", provider.ErrBucketNotFound},
 		{"invalid access key", "InvalidAccessKeyId: key not found", provider.ErrInvalidCredentials},
 		{"signature mismatch", "SignatureDoesNotMatch: invalid signature", provider.ErrInvalidCredentials},
+		{"slow down", "SlowDown: Please reduce your request rate", provider.ErrThrottled},
+		{"throttling", "Throttling: Rate exceeded", provider.ErrThrottled},
+		{"429", "operation error: https response error StatusCode: 429", provider.ErrThrottled},
 		{"service unavailable", "ServiceUnavailable: try again", provider.ErrProviderUnavailable},
 		{"503", "operation error: https response error StatusCode: 503", provider.ErrProviderUnavailable},
 	}
@@ -357,8 +367,10 @@ func TestWrapError_APIError(t *testing.T) {
 		{"Forbidden", "Forbidden", provider.ErrAccessDenied},
 		{"InvalidAccessKeyId", "InvalidAccessKeyId", provider.ErrInvalidCredentials},
 		{"SignatureDoesNotMatch", "SignatureDoesNotMatch", provider.ErrInvalidCredentials},
+		{"SlowDown", "SlowDown", provider.ErrThrottled},
+		{"Throttling", "Throttling", provider.ErrThrottled},
+		{"RequestLimitExceeded", "RequestLimitExceeded", provider.ErrThrottled},
 		{"ServiceUnavailable", "ServiceUnavailable", provider.ErrProviderUnavailable},
-		{"SlowDown", "SlowDown", provider.ErrProviderUnavailable},
 		{"InternalError", "InternalError", provider.ErrProviderUnavailable},
 	}
 

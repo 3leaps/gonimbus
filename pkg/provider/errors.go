@@ -21,6 +21,9 @@ var (
 
 	// ErrProviderUnavailable indicates the provider service is unavailable.
 	ErrProviderUnavailable = errors.New("provider unavailable")
+
+	// ErrThrottled indicates the request was rate limited by the provider.
+	ErrThrottled = errors.New("request throttled")
 )
 
 // ProviderError wraps provider-specific errors with context.
@@ -80,4 +83,9 @@ func IsInvalidCredentials(err error) bool {
 // IsProviderUnavailable returns true if the error indicates the provider service is unavailable.
 func IsProviderUnavailable(err error) bool {
 	return errors.Is(err, ErrProviderUnavailable)
+}
+
+// IsThrottled returns true if the error indicates the request was rate limited.
+func IsThrottled(err error) bool {
+	return errors.Is(err, ErrThrottled)
 }

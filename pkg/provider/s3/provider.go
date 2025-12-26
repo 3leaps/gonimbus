@@ -223,7 +223,9 @@ func (p *Provider) wrapError(op, key string, err error) error {
 			wrapped.Err = provider.ErrAccessDenied
 		case "InvalidAccessKeyId", "SignatureDoesNotMatch":
 			wrapped.Err = provider.ErrInvalidCredentials
-		case "ServiceUnavailable", "SlowDown", "InternalError":
+		case "SlowDown", "Throttling", "RequestLimitExceeded":
+			wrapped.Err = provider.ErrThrottled
+		case "ServiceUnavailable", "InternalError":
 			wrapped.Err = provider.ErrProviderUnavailable
 		}
 		return wrapped
@@ -240,6 +242,8 @@ func (p *Provider) wrapError(op, key string, err error) error {
 		wrapped.Err = provider.ErrAccessDenied
 	case strings.Contains(errMsg, "InvalidAccessKeyId") || strings.Contains(errMsg, "SignatureDoesNotMatch"):
 		wrapped.Err = provider.ErrInvalidCredentials
+	case strings.Contains(errMsg, "SlowDown") || strings.Contains(errMsg, "Throttling") || strings.Contains(errMsg, "429"):
+		wrapped.Err = provider.ErrThrottled
 	case strings.Contains(errMsg, "ServiceUnavailable") || strings.Contains(errMsg, "503"):
 		wrapped.Err = provider.ErrProviderUnavailable
 	}
