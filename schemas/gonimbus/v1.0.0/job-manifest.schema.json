@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/job-manifest",
+  "title": "Gonimbus Job Manifest",
+  "description": "Configuration manifest for gonimbus crawl jobs",
+  "type": "object",
+  "required": [
+    "version",
+    "connection",
+    "match"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference for editor support"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Manifest schema version"
+    },
+    "connection": {
+      "$ref": "#/$defs/connection"
+    },
+    "match": {
+      "$ref": "#/$defs/match"
+    },
+    "crawl": {
+      "$ref": "#/$defs/crawl"
+    },
+    "output": {
+      "$ref": "#/$defs/output"
+    }
+  },
+  "$defs": {
+    "connection": {
+      "type": "object",
+      "description": "Cloud storage connection configuration",
+      "required": [
+        "provider",
+        "bucket"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "s3"
+          ],
+          "description": "Storage provider type"
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bucket name"
+        },
+        "region": {
+          "type": "string",
+          "description": "AWS region (e.g., us-east-1)"
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Custom endpoint URL for S3-compatible storage"
+        },
+        "profile": {
+          "type": "string",
+          "description": "AWS credential profile name"
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "description": "Object matching configuration",
+      "required": [
+        "includes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "description": "Glob patterns for objects to include"
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Glob patterns for objects to exclude"
+        },
+        "include_hidden": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include hidden files (starting with .)"
+        }
+      }
+    },
+    "crawl": {
+      "type": "object",
+      "description": "Crawl behavior configuration",
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 4,
+          "description": "Number of concurrent list operations"
+        },
+        "rate_limit": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Maximum requests per second (0 = unlimited)"
+        },
+        "progress_every": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000,
+          "description": "Emit progress every N matched objects"
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "Output configuration",
+      "additionalProperties": false,
+      "properties": {
+        "destination": {
+          "type": "string",
+          "default": "stdout",
+          "description": "Output destination: stdout or file:/path/to/output.jsonl"
+        },
+        "progress": {
+          "type": "boolean",
+          "default": true,
+          "description": "Emit progress records during crawl"
+        }
+      }
+    }
+  }
+}
