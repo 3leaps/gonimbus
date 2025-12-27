@@ -1,0 +1,22 @@
+# Basic crawl manifest - minimal configuration
+#
+# Usage:
+#   gonimbus crawl --job examples/manifests/basic-crawl.yaml
+#
+# Prerequisites:
+#   - AWS credentials configured (env vars, profile, or IAM role)
+
+version: "1.0"
+
+connection:
+  provider: s3
+  bucket: my-data-bucket
+  region: us-east-1
+
+match:
+  includes:
+    - "**/*"
+
+output:
+  destination: stdout
+  progress: true

@@ -1,0 +1,1 @@
+{"type":"gonimbus.summary.v1","ts":"2025-01-15T10:30:03.500000Z","job_id":"abc12345-1234-5678-9abc-def012345678","provider":"s3","data":{"objects_found":2500,"objects_matched":1100,"bytes_total":115343360,"duration_ns":3500000000,"duration":"3.5s","errors":0,"prefixes":["data/2024/"]}}

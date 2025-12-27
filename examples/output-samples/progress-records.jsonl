@@ -1,0 +1,4 @@
+{"type":"gonimbus.progress.v1","ts":"2025-01-15T10:30:00.000000Z","job_id":"abc12345-1234-5678-9abc-def012345678","provider":"s3","data":{"phase":"starting","objects_found":0,"objects_matched":0,"bytes_total":0}}
+{"type":"gonimbus.progress.v1","ts":"2025-01-15T10:30:01.000000Z","job_id":"abc12345-1234-5678-9abc-def012345678","provider":"s3","data":{"phase":"listing","objects_found":1000,"objects_matched":450,"bytes_total":47185920,"prefix":"data/2024/"}}
+{"type":"gonimbus.progress.v1","ts":"2025-01-15T10:30:02.000000Z","job_id":"abc12345-1234-5678-9abc-def012345678","provider":"s3","data":{"phase":"listing","objects_found":2000,"objects_matched":920,"bytes_total":96468992,"prefix":"data/2024/"}}
+{"type":"gonimbus.progress.v1","ts":"2025-01-15T10:30:03.000000Z","job_id":"abc12345-1234-5678-9abc-def012345678","provider":"s3","data":{"phase":"complete","objects_found":2500,"objects_matched":1100,"bytes_total":115343360}}

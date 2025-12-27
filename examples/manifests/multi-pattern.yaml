@@ -1,0 +1,32 @@
+# Multi-pattern crawl - complex include/exclude rules
+#
+# Usage:
+#   gonimbus crawl --job examples/manifests/multi-pattern.yaml
+#
+# Use case: Selective backup inventory, compliance scanning
+
+version: "1.0"
+
+connection:
+  provider: s3
+  bucket: enterprise-bucket
+  region: us-east-1
+
+match:
+  includes:
+    - "data/2024/**/*.csv"
+    - "data/2024/**/*.json"
+    - "reports/**/*.pdf"
+  excludes:
+    - "**/archive/**"
+    - "**/temp/**"
+    - "**/*.tmp"
+  include_hidden: false
+
+crawl:
+  concurrency: 4
+  progress_every: 500
+
+output:
+  destination: stdout
+  progress: true

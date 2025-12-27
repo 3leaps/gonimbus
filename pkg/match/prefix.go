@@ -217,3 +217,19 @@ func HasEmptyPrefix(patterns []string) bool {
 	}
 	return false
 }
+
+// IsGlobPattern returns true if the pattern contains unescaped glob metacharacters.
+//
+// This is escape-aware: literal metacharacters escaped with backslash (\*, \?, \[, \{)
+// are not considered glob characters. This allows matching filenames that contain
+// literal asterisks, question marks, or brackets.
+//
+// Examples:
+//
+//	"data/**/*.parquet"  → true  (unescaped glob)
+//	"data/file\*.txt"    → false (escaped asterisk is literal)
+//	"data/file?.csv"     → true  (unescaped question mark)
+//	"path/to/file.txt"   → false (no metacharacters)
+func IsGlobPattern(pattern string) bool {
+	return findFirstUnescapedMeta(pattern) != -1
+}
