@@ -49,6 +49,84 @@ func (m *mockProvider) Close() error {
 	return nil
 }
 
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{1, "1 B"},
+		{512, "512 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{1572864, "1.5 MB"},
+		{1073741824, "1.0 GB"},
+		{1610612736, "1.5 GB"},
+		{1099511627776, "1.0 TB"},
+		{1649267441664, "1.5 TB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := formatSize(tt.bytes)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestListObjects_ErrorPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     *ObjectURI
+		headErr error
+		listErr error
+		wantErr bool
+	}{
+		{
+			name: "head error propagates",
+			uri: &ObjectURI{
+				Provider: "s3",
+				Bucket:   "bucket",
+				Key:      "path/to/file.txt",
+			},
+			headErr: provider.ErrNotFound,
+			wantErr: true,
+		},
+		{
+			name: "list error propagates",
+			uri: &ObjectURI{
+				Provider: "s3",
+				Bucket:   "bucket",
+				Key:      "path/to/",
+			},
+			listErr: provider.ErrAccessDenied,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockProvider{
+				headErr: tt.headErr,
+				listErr: tt.listErr,
+			}
+
+			oldLimit := inspectLimit
+			inspectLimit = 100
+			defer func() { inspectLimit = oldLimit }()
+
+			_, err := listObjects(context.Background(), mock, tt.uri)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 	now := time.Now()
 
