@@ -102,3 +102,140 @@ func TestDetermineOverallStatusTreatsTimeoutAsDegraded(t *testing.T) {
 		t.Fatalf("expected degraded status, got %s", status)
 	}
 }
+
+func TestInitHealthManager(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	// Reset global
+	globalHealthManager = nil
+
+	InitHealthManager("test-version")
+
+	if globalHealthManager == nil {
+		t.Fatal("expected global manager to be initialized")
+	}
+}
+
+func TestGetHealthManager(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	t.Run("returns nil when not initialized", func(t *testing.T) {
+		globalHealthManager = nil
+		manager := GetHealthManager()
+		if manager != nil {
+			t.Fatal("expected nil manager")
+		}
+	})
+
+	t.Run("returns manager after init", func(t *testing.T) {
+		InitHealthManager("1.0.0")
+		manager := GetHealthManager()
+		if manager == nil {
+			t.Fatal("expected non-nil manager")
+		}
+	})
+}
+
+func TestGlobalHealthHandler(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	InitHealthManager("test-version")
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+
+	HealthHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestGlobalLivenessHandler(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	InitHealthManager("test-version")
+
+	req := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	rec := httptest.NewRecorder()
+
+	LivenessHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestGlobalReadinessHandler(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	InitHealthManager("test-version")
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+
+	ReadinessHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestGlobalStartupHandler(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	InitHealthManager("test-version")
+
+	req := httptest.NewRequest(http.MethodGet, "/health/startup", nil)
+	rec := httptest.NewRecorder()
+
+	StartupHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestGlobalHandlers_WhenNotInitialized(t *testing.T) {
+	// Save original
+	original := globalHealthManager
+	defer func() { globalHealthManager = original }()
+
+	globalHealthManager = nil
+
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"HealthHandler", HealthHandler},
+		{"LivenessHandler", LivenessHandler},
+		{"ReadinessHandler", ReadinessHandler},
+		{"StartupHandler", StartupHandler},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rec := httptest.NewRecorder()
+
+			tt.handler(rec, req)
+
+			// Should return 503 when not initialized
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected status 503 when not initialized, got %d", rec.Code)
+			}
+		})
+	}
+}
