@@ -240,3 +240,118 @@ func TestConfigReload(t *testing.T) {
 	current := GetConfig()
 	assert.Equal(t, cfg2.Server.Port, current.Server.Port)
 }
+
+// resetAppIdentity resets package state for isolated tests.
+// Must only be used in tests.
+func resetAppIdentity() {
+	configMu.Lock()
+	defer configMu.Unlock()
+	appIdentity = nil
+	appConfig = nil
+}
+
+func TestGetUserConfigPathsNilIdentity(t *testing.T) {
+	// Save and restore state
+	resetAppIdentity()
+	defer func() {
+		ctx := context.Background()
+		_, _ = Load(ctx) // Restore state for other tests
+	}()
+
+	// When appIdentity is nil, getUserConfigPaths should return empty slice
+	paths := getUserConfigPaths()
+	assert.Empty(t, paths)
+}
+
+func TestGetEnvSpecsNilIdentity(t *testing.T) {
+	// Save and restore state
+	resetAppIdentity()
+	defer func() {
+		ctx := context.Background()
+		_, _ = Load(ctx) // Restore state for other tests
+	}()
+
+	// When appIdentity is nil, getEnvSpecs should return empty slice
+	specs := getEnvSpecs()
+	assert.Empty(t, specs)
+}
+
+func TestFindProjectRootCIBoundaryEdgeCases(t *testing.T) {
+	repoRoot := findRepoRootForTest(t)
+
+	t.Run("CITrueButEmptyBoundaryVars", func(t *testing.T) {
+		// Set CI=true but leave all boundary vars empty
+		t.Setenv("CI", "true")
+		t.Setenv("FULMEN_WORKSPACE_ROOT", "")
+		t.Setenv("GITHUB_WORKSPACE", "")
+		t.Setenv("CI_PROJECT_DIR", "")
+		t.Setenv("WORKSPACE", "")
+
+		// Should still find root via fallback
+		root, err := findProjectRoot()
+		require.NoError(t, err)
+		assert.NotEmpty(t, root)
+	})
+
+	t.Run("CITrueWithRelativeBoundary", func(t *testing.T) {
+		t.Setenv("CI", "true")
+		t.Setenv("FULMEN_WORKSPACE_ROOT", "./relative/path") // Not absolute
+
+		// Should fall back to default discovery
+		root, err := findProjectRoot()
+		require.NoError(t, err)
+		assert.NotEmpty(t, root)
+	})
+
+	t.Run("CITrueWithNonexistentBoundary", func(t *testing.T) {
+		t.Setenv("CI", "true")
+		t.Setenv("FULMEN_WORKSPACE_ROOT", "/nonexistent/path/that/does/not/exist")
+
+		// Should fall back to default discovery
+		root, err := findProjectRoot()
+		require.NoError(t, err)
+		assert.NotEmpty(t, root)
+	})
+
+	t.Run("CITrueWithBoundaryNotContainingCwd", func(t *testing.T) {
+		t.Setenv("CI", "true")
+		// Use a valid directory that doesn't contain our cwd
+		t.Setenv("FULMEN_WORKSPACE_ROOT", os.TempDir())
+
+		// Should fall back to default discovery
+		root, err := findProjectRoot()
+		require.NoError(t, err)
+		assert.NotEmpty(t, root)
+	})
+
+	t.Run("GitHubActionsEnvVar", func(t *testing.T) {
+		t.Setenv("GITHUB_ACTIONS", "true")
+		t.Setenv("GITHUB_WORKSPACE", repoRoot)
+
+		root, err := findProjectRoot()
+		require.NoError(t, err)
+		assert.Equal(t, repoRoot, root)
+	})
+}
+
+func TestEnvSpecsPrefixHandling(t *testing.T) {
+	ctx := context.Background()
+
+	// Ensure appIdentity is loaded
+	_, err := Load(ctx)
+	require.NoError(t, err)
+
+	specs := getEnvSpecs()
+	require.NotEmpty(t, specs)
+
+	// Verify all specs have the GONIMBUS_ prefix
+	for _, spec := range specs {
+		assert.True(t, len(spec.Name) > 0, "env var name should not be empty")
+		assert.Contains(t, spec.Name, "GONIMBUS_", "all specs should have GONIMBUS_ prefix")
+	}
+
+	// Verify path structure
+	for _, spec := range specs {
+		assert.NotEmpty(t, spec.Path, "env var %s should have a path", spec.Name)
+	}
+}

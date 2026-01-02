@@ -1,7 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,6 +271,156 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 
 			// Verify result count
 			assert.Len(t, objects, tt.wantCount)
+		})
+	}
+}
+
+func TestOutputJSON(t *testing.T) {
+	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		objects []provider.ObjectSummary
+		want    []objectOutput
+	}{
+		{
+			name:    "empty list",
+			objects: []provider.ObjectSummary{},
+			want:    nil,
+		},
+		{
+			name: "single object",
+			objects: []provider.ObjectSummary{
+				{Key: "path/to/file.txt", Size: 1024, LastModified: now, ETag: "abc123"},
+			},
+			want: []objectOutput{
+				{Key: "path/to/file.txt", Size: 1024, LastModified: now, ETag: "abc123"},
+			},
+		},
+		{
+			name: "multiple objects",
+			objects: []provider.ObjectSummary{
+				{Key: "file1.txt", Size: 100, LastModified: now},
+				{Key: "file2.txt", Size: 200, LastModified: now, ETag: "etag2"},
+			},
+			want: []objectOutput{
+				{Key: "file1.txt", Size: 100, LastModified: now},
+				{Key: "file2.txt", Size: 200, LastModified: now, ETag: "etag2"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Capture stdout
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			err := outputJSON(tt.objects)
+			require.NoError(t, err)
+
+			w.Close()
+			os.Stdout = old
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			output := buf.String()
+
+			// Parse JSONL output
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			if len(tt.objects) == 0 {
+				assert.Equal(t, "", strings.TrimSpace(output))
+				return
+			}
+
+			require.Len(t, lines, len(tt.want))
+
+			for i, line := range lines {
+				var got objectOutput
+				err := json.Unmarshal([]byte(line), &got)
+				require.NoError(t, err)
+				assert.Equal(t, tt.want[i].Key, got.Key)
+				assert.Equal(t, tt.want[i].Size, got.Size)
+				assert.Equal(t, tt.want[i].ETag, got.ETag)
+			}
+		})
+	}
+}
+
+func TestOutputTable(t *testing.T) {
+	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		objects  []provider.ObjectSummary
+		contains []string
+	}{
+		{
+			name:    "empty list shows message",
+			objects: []provider.ObjectSummary{},
+			contains: []string{
+				"No objects found.",
+			},
+		},
+		{
+			name: "single object table",
+			objects: []provider.ObjectSummary{
+				{Key: "path/to/file.txt", Size: 1024, LastModified: now},
+			},
+			contains: []string{
+				"KEY",
+				"SIZE",
+				"MODIFIED",
+				"path/to/file.txt",
+				"1.0 KB",
+				"Found 1 object(s)",
+			},
+		},
+		{
+			name: "multiple objects shows total",
+			objects: []provider.ObjectSummary{
+				{Key: "file1.txt", Size: 1024, LastModified: now},
+				{Key: "file2.txt", Size: 2048, LastModified: now},
+				{Key: "file3.txt", Size: 512, LastModified: now},
+			},
+			contains: []string{
+				"Found 3 object(s)",
+				"3.5 KB total", // 1024 + 2048 + 512 = 3584 bytes = 3.5 KB
+			},
+		},
+		{
+			name: "large file sizes",
+			objects: []provider.ObjectSummary{
+				{Key: "large.bin", Size: 1073741824, LastModified: now}, // 1 GB
+			},
+			contains: []string{
+				"1.0 GB",
+				"Found 1 object(s)",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Capture stdout
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			err := outputTable(tt.objects)
+			require.NoError(t, err)
+
+			w.Close()
+			os.Stdout = old
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			output := buf.String()
+
+			for _, want := range tt.contains {
+				assert.Contains(t, output, want, "output should contain %q", want)
+			}
 		})
 	}
 }
