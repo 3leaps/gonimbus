@@ -4,13 +4,13 @@ This document maps gonimbus configuration parameters to S3-compatible storage pr
 
 ## Quick Reference
 
-| Parameter | AWS S3 | Wasabi | Cloudflare R2 |
-|-----------|--------|--------|---------------|
-| `endpoint` | (not needed) | `s3.<region>.wasabisys.com` | `<account_id>.r2.cloudflarestorage.com` |
-| `region` | Required | Required (must match endpoint) | `auto` (placeholder) |
-| `bucket` | Bucket name | Bucket name | Bucket name |
-| Auth | SDK chain / keys | Access key + secret | Access key + secret (token-scoped) |
-| **Status** | Validated | Validated | Validated |
+| Parameter  | AWS S3           | Wasabi                         | Cloudflare R2                           |
+| ---------- | ---------------- | ------------------------------ | --------------------------------------- |
+| `endpoint` | (not needed)     | `s3.<region>.wasabisys.com`    | `<account_id>.r2.cloudflarestorage.com` |
+| `region`   | Required         | Required (must match endpoint) | `auto` (placeholder)                    |
+| `bucket`   | Bucket name      | Bucket name                    | Bucket name                             |
+| Auth       | SDK chain / keys | Access key + secret            | Access key + secret (token-scoped)      |
+| **Status** | Validated        | Validated                      | Validated                               |
 
 ## Provider Details
 
@@ -22,7 +22,7 @@ Standard AWS S3 uses the SDK default credential chain and region resolution. No 
 connection:
   provider: s3
   bucket: my-bucket
-  region: us-east-1  # or omit to use SDK resolution
+  region: us-east-1 # or omit to use SDK resolution
 ```
 
 **Auth options:** Environment variables, shared credentials, instance profiles, IRSA.
@@ -41,16 +41,16 @@ connection:
 
 **Regions:** See [Wasabi Regions](https://docs.wasabi.com/docs/what-are-the-service-urls-for-wasabis-different-storage-regions)
 
-| Region | Endpoint |
-|--------|----------|
-| us-east-1 | s3.us-east-1.wasabisys.com |
-| us-east-2 | s3.us-east-2.wasabisys.com |
-| us-central-1 | s3.us-central-1.wasabisys.com |
-| us-west-1 | s3.us-west-1.wasabisys.com |
-| eu-central-1 | s3.eu-central-1.wasabisys.com |
-| eu-central-2 | s3.eu-central-2.wasabisys.com |
-| eu-west-1 | s3.eu-west-1.wasabisys.com |
-| eu-west-2 | s3.eu-west-2.wasabisys.com |
+| Region         | Endpoint                        |
+| -------------- | ------------------------------- |
+| us-east-1      | s3.us-east-1.wasabisys.com      |
+| us-east-2      | s3.us-east-2.wasabisys.com      |
+| us-central-1   | s3.us-central-1.wasabisys.com   |
+| us-west-1      | s3.us-west-1.wasabisys.com      |
+| eu-central-1   | s3.eu-central-1.wasabisys.com   |
+| eu-central-2   | s3.eu-central-2.wasabisys.com   |
+| eu-west-1      | s3.eu-west-1.wasabisys.com      |
+| eu-west-2      | s3.eu-west-2.wasabisys.com      |
 | ap-northeast-1 | s3.ap-northeast-1.wasabisys.com |
 | ap-northeast-2 | s3.ap-northeast-2.wasabisys.com |
 | ap-southeast-1 | s3.ap-southeast-1.wasabisys.com |
@@ -67,7 +67,7 @@ connection:
   provider: s3
   bucket: my-bucket
   endpoint: https://<account_id>.r2.cloudflarestorage.com
-  region: auto  # Required placeholder for SDK endpoint resolution
+  region: auto # Required placeholder for SDK endpoint resolution
 ```
 
 **Location hints:** R2 determines bucket location at creation time. Hints (`wnam`, `enam`, `weur`, `eeur`, `apac`, `oc`) are best-effort suggestions, not guarantees. The `region` parameter in gonimbus does not affect data placement.
@@ -75,7 +75,7 @@ connection:
 **Jurisdiction-restricted buckets:** For EU or FedRAMP compliance, use jurisdiction-specific endpoints:
 
 ```yaml
-endpoint: https://<account_id>.eu.r2.cloudflarestorage.com   # EU jurisdiction
+endpoint: https://<account_id>.eu.r2.cloudflarestorage.com # EU jurisdiction
 ```
 
 See [R2 Data Location](https://developers.cloudflare.com/r2/reference/data-location/) for details.
@@ -84,26 +84,26 @@ See [R2 Data Location](https://developers.cloudflare.com/r2/reference/data-locat
 
 ### DigitalOcean Spaces
 
-*(Coming soon)*
+_(Coming soon)_
 
 ```yaml
 connection:
   provider: s3
   bucket: my-bucket
   endpoint: https://<region>.digitaloceanspaces.com
-  region: <region>  # e.g., nyc3, sfo3, ams3, sgp1
+  region: <region> # e.g., nyc3, sfo3, ams3, sgp1
 ```
 
 ## Environment Variables
 
 All providers support standard AWS SDK environment variables:
 
-| Variable | Description |
-|----------|-------------|
-| `AWS_ACCESS_KEY_ID` | Access key |
-| `AWS_SECRET_ACCESS_KEY` | Secret key |
-| `AWS_REGION` | Default region (if not in config) |
-| `AWS_PROFILE` | Named profile from ~/.aws/credentials |
+| Variable                | Description                           |
+| ----------------------- | ------------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | Access key                            |
+| `AWS_SECRET_ACCESS_KEY` | Secret key                            |
+| `AWS_REGION`            | Default region (if not in config)     |
+| `AWS_PROFILE`           | Named profile from ~/.aws/credentials |
 
 ## See Also
 

@@ -92,7 +92,7 @@ Error: /match: missing properties: 'includes'
 Error: /match: additionalProperties 'include' not allowed
 
 # Use 'includes' not 'include'
-# Use 'excludes' not 'exclude'  
+# Use 'excludes' not 'exclude'
 # Use 'include_hidden' not 'includeHidden'
 ```
 

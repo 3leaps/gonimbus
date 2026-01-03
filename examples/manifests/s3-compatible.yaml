@@ -8,9 +8,7 @@
 # Prerequisites:
 #   export AWS_ACCESS_KEY_ID="your-access-key"
 #   export AWS_SECRET_ACCESS_KEY="your-secret-key"
-
 version: "1.0"
-
 connection:
   provider: s3
   bucket: my-bucket
@@ -21,14 +19,11 @@ connection:
   # Spaces:     https://nyc3.digitaloceanspaces.com
   # MinIO:      http://localhost:9000
   endpoint: https://s3.us-east-2.wasabisys.com
-
 match:
   includes:
     - "**/*"
-
 crawl:
   concurrency: 10
-
 output:
   destination: stdout
   progress: true

@@ -65,6 +65,7 @@ gonimbus inspect 's3://my-bucket/**/*.json' --profile staging
 ## Output Formats
 
 ### Table (default)
+
 ```
 KEY                          SIZE  MODIFIED
 data/2024/01/sales.parquet   1 MB  2025-01-14 08:00:00
@@ -74,6 +75,7 @@ Found 2 object(s) (3 MB total)
 ```
 
 ### JSON (--json)
+
 ```jsonl
 {"key":"data/2024/01/sales.parquet","size":1048576,"last_modified":"2025-01-14T08:00:00Z","etag":"..."}
 {"key":"data/2024/01/inventory.parquet","size":2097152,"last_modified":"2025-01-14T09:30:00Z","etag":"..."}

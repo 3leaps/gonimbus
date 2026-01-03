@@ -4,24 +4,19 @@
 #   gonimbus crawl --job examples/manifests/parquet-filter.yaml
 #
 # Use case: Data lake inventory, analytics file discovery
-
 version: "1.0"
-
 connection:
   provider: s3
   bucket: my-data-lake
   region: us-west-2
-
 match:
   includes:
     - "**/*.parquet"
   excludes:
     - "**/_temporary/**"
     - "**/.spark-staging/**"
-
 crawl:
   concurrency: 8
-
 output:
   destination: stdout
   progress: true
