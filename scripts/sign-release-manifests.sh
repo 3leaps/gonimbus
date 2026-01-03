@@ -8,13 +8,10 @@ set -euo pipefail
 # Usage: sign-release-manifests.sh <tag> [dir]
 #
 # Env:
-#   SIGNING_ENV_PREFIX - prefix for "<APP>_" env var lookups (ex: GRONINGEN)
-#   SIGNING_APP_NAME   - human-readable name for signing metadata (ex: groningen)
-#   MINISIGN_KEY       - path to minisign secret key (required for minisign signing)
-#   MINISIGN_PUB       - optional path to minisign public key (not required for signing)
-#   PGP_KEY_ID         - gpg key/email/fingerprint for PGP signing (optional)
-#   GPG_HOME           - isolated gpg homedir for signing (required if PGP_KEY_ID is set)
-#   CI                 - if "true", signing is refused (safety guard)
+#   GONIMBUS_MINISIGN_KEY - path to minisign secret key (required for minisign signing)
+#   GONIMBUS_PGP_KEY_ID   - gpg key/email/fingerprint for PGP signing (optional)
+#   GONIMBUS_GPG_HOME     - isolated gpg homedir for signing (required if PGP_KEY_ID set)
+#   CI                    - if "true", signing is refused (safety guard)
 
 TAG=${1:?'usage: sign-release-manifests.sh <tag> [dir]'}
 DIR=${2:-dist/release}
@@ -29,39 +26,16 @@ if [ ! -d "$DIR" ]; then
     exit 1
 fi
 
-SIGNING_ENV_PREFIX=${SIGNING_ENV_PREFIX:-}
-SIGNING_APP_NAME=${SIGNING_APP_NAME:-workhorse}
-
-get_var() {
-    local name="$1"
-    local val="${!name:-}"
-    if [ -n "$val" ]; then
-        echo "$val"
-        return 0
-    fi
-
-    if [ -n "${SIGNING_ENV_PREFIX}" ]; then
-        local prefixed_name="${SIGNING_ENV_PREFIX}_${name}"
-        echo "${!prefixed_name:-}"
-        return 0
-    fi
-
-    echo ""
-}
-
-MINISIGN_KEY="$(get_var MINISIGN_KEY)"
-MINISIGN_PUB="$(get_var MINISIGN_PUB)"
-PGP_KEY_ID="$(get_var PGP_KEY_ID)"
-GPG_HOME="$(get_var GPG_HOME)"
-
-# NOTE: MINISIGN_PUB is intentionally unused for signing; it is used by export-release-keys.sh.
+MINISIGN_KEY="${GONIMBUS_MINISIGN_KEY:-}"
+PGP_KEY_ID="${GONIMBUS_PGP_KEY_ID:-}"
+GPG_HOME="${GONIMBUS_GPG_HOME:-}"
 
 has_minisign=false
 has_pgp=false
 
 if [ -n "${MINISIGN_KEY}" ]; then
     if [ ! -f "${MINISIGN_KEY}" ]; then
-        echo "error: MINISIGN_KEY=${MINISIGN_KEY} not found" >&2
+        echo "error: GONIMBUS_MINISIGN_KEY=${MINISIGN_KEY} not found" >&2
         exit 1
     fi
     if ! command -v minisign > /dev/null 2>&1; then
@@ -75,15 +49,15 @@ fi
 
 if [ -n "${PGP_KEY_ID}" ]; then
     if ! command -v gpg > /dev/null 2>&1; then
-        echo "error: PGP_KEY_ID set but gpg not found in PATH" >&2
+        echo "error: GONIMBUS_PGP_KEY_ID set but gpg not found in PATH" >&2
         exit 1
     fi
     if [ -z "${GPG_HOME}" ]; then
-        echo "error: GPG_HOME (or ${SIGNING_ENV_PREFIX}_GPG_HOME) must be set for PGP signing" >&2
+        echo "error: GONIMBUS_GPG_HOME must be set for PGP signing" >&2
         exit 1
     fi
     if ! gpg --homedir "${GPG_HOME}" --list-secret-keys "${PGP_KEY_ID}" > /dev/null 2>&1; then
-        echo "error: secret key ${PGP_KEY_ID} not found in GPG_HOME=${GPG_HOME}" >&2
+        echo "error: secret key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOME=${GPG_HOME}" >&2
         exit 1
     fi
     has_pgp=true
@@ -94,8 +68,8 @@ echo ""
 
 if [ "${has_minisign}" = false ] && [ "${has_pgp}" = false ]; then
     echo "error: no signing method available" >&2
-    echo "  set MINISIGN_KEY (or ${SIGNING_ENV_PREFIX}_MINISIGN_KEY) for minisign signing" >&2
-    echo "  optionally set PGP_KEY_ID (or ${SIGNING_ENV_PREFIX}_PGP_KEY_ID) for PGP signing" >&2
+    echo "  set GONIMBUS_MINISIGN_KEY for minisign signing" >&2
+    echo "  optionally set GONIMBUS_PGP_KEY_ID for PGP signing" >&2
     exit 1
 fi
 
@@ -116,7 +90,7 @@ sign_minisign() {
 
     echo "🔏 [minisign] Signing ${manifest}"
     rm -f "${base}.minisig"
-    minisign -S -s "${MINISIGN_KEY}" -t "${SIGNING_APP_NAME} ${TAG} ${timestamp}" -m "${base}"
+    minisign -S -s "${MINISIGN_KEY}" -t "gonimbus ${TAG} ${timestamp}" -m "${base}"
 }
 
 sign_pgp() {

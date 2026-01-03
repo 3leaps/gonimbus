@@ -96,7 +96,7 @@ tools:  ## Verify external tools are available
 	@echo "✅ All tools verified"
 
 sync:  ## Sync assets from Crucible SSOT (placeholder)
-	@echo "⚠️  Groningen does not consume SSOT assets directly"
+	@echo "⚠️  Gonimbus does not consume SSOT assets directly"
 	@echo "✅ Sync target satisfied (no-op)"
 
 dependencies:  ## Generate SBOM for supply-chain security
@@ -152,15 +152,15 @@ release-prepare:  ## Prepare for release (tests, version bump)
 # - Stages artifacts in dist/release to avoid bin/ footguns
 # - Generates SHA256SUMS and SHA512SUMS manifests
 # - Signs manifests only (do not sign each artifact)
-# - Supports env vars in two forms:
-#     MINISIGN_KEY / PGP_KEY_ID / GPG_HOME (generic)
-#     <APP>_MINISIGN_KEY / <APP>_PGP_KEY_ID / <APP>_GPG_HOME (preferred)
-#   where <APP> defaults to $(SIGNING_ENV_PREFIX)
+# - Env vars (all GONIMBUS_ prefixed):
+#     GONIMBUS_MINISIGN_KEY - path to minisign secret key
+#     GONIMBUS_MINISIGN_PUB - path to minisign public key (optional)
+#     GONIMBUS_PGP_KEY_ID   - gpg key for PGP signing (optional)
+#     GONIMBUS_GPG_HOME     - isolated gpg homedir (required if PGP_KEY_ID set)
 # ─────────────────────────────────────────────────────────────────────────────
 
 RELEASE_TAG ?= v$(shell cat VERSION 2>/dev/null || echo "0.0.0")
 DIST_RELEASE ?= dist/release
-SIGNING_ENV_PREFIX ?= $(shell echo "$(BINARY_NAME)" | tr '[:lower:]-' '[:upper:]_')
 
 sync-embedded-identity: ## Sync embedded identity mirror from .fulmen/app.yaml
 	@./scripts/sync-embedded-identity.sh
@@ -195,14 +195,14 @@ release-download: ## Download GitHub release assets (RELEASE_TAG=vX.Y.Z)
 	@./scripts/release-download.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-sign: ## Sign checksum manifests (minisign required; PGP optional)
-	@SIGNING_ENV_PREFIX="$(SIGNING_ENV_PREFIX)" SIGNING_APP_NAME="$(BINARY_NAME)" RELEASE_TAG="$(RELEASE_TAG)" ./scripts/sign-release-manifests.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
+	@./scripts/sign-release-manifests.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-export-keys: ## Export public signing keys into dist/release
-	@SIGNING_ENV_PREFIX="$(SIGNING_ENV_PREFIX)" SIGNING_APP_NAME="$(BINARY_NAME)" ./scripts/export-release-keys.sh "$(DIST_RELEASE)"
+	@./scripts/export-release-keys.sh "$(DIST_RELEASE)"
 
 release-verify-keys: ## Verify exported public keys are public-only
-	@if [ -f "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub" ]; then ./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub"; else echo "ℹ️  No minisign public key found (skipping)"; fi
-	@if [ -f "$(DIST_RELEASE)/fulmenhq-release-signing-key.asc" ]; then ./scripts/verify-public-key.sh "$(DIST_RELEASE)/fulmenhq-release-signing-key.asc"; else echo "ℹ️  No PGP public key found (skipping)"; fi
+	@if [ -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then ./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/gonimbus-minisign.pub"; else echo "ℹ️  No minisign public key found (skipping)"; fi
+	@if [ -f "$(DIST_RELEASE)/gonimbus-pgp-signing-key.asc" ]; then ./scripts/verify-public-key.sh "$(DIST_RELEASE)/gonimbus-pgp-signing-key.asc"; else echo "ℹ️  No PGP public key found (skipping)"; fi
 
 # Deprecated alias (kept for one cycle).
 verify-release-keys: release-verify-keys ## Deprecated: use release-verify-keys
