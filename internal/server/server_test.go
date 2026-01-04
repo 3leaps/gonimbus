@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	apperrors "github.com/3leaps/gonimbus/internal/errors"
@@ -110,8 +109,8 @@ func TestServer_RoutesRegistered(t *testing.T) {
 
 func TestServer_AdminEndpointDisabledByDefault(t *testing.T) {
 	// Ensure no admin token is set
-	os.Unsetenv("GONIMBUS_ADMIN_TOKEN")
-	os.Unsetenv("WORKHORSE_ADMIN_TOKEN")
+	t.Setenv("GONIMBUS_ADMIN_TOKEN", "")
+	t.Setenv("WORKHORSE_ADMIN_TOKEN", "")
 
 	srv := New("127.0.0.1", 0)
 

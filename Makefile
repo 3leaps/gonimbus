@@ -1,4 +1,5 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test build build-all clean fmt version check-all precommit prepush run install test-cov
+.PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
@@ -259,9 +260,7 @@ test-cov:  ## Run tests with coverage
 	@echo "✓ Coverage report: coverage.html"
 
 lint:  ## Run lint checks
-	@echo "Running Go vet..."
-	@$(GOCMD) vet ./...
-	@echo "Running goneat assess..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories lint
+	@echo "Running goneat assess (lint)..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories lint
 	@echo "✅ Lint checks passed"
 
 fmt:  ## Format code with goneat
@@ -276,9 +275,36 @@ precommit:  ## Run pre-commit hooks
 	@echo "Running pre-commit validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint --fail-on critical
 	@echo "✅ Pre-commit checks passed"
 
-prepush:  ## Run pre-push hooks
+prepush: license-audit ## Run pre-push hooks
 	@echo "Running pre-push validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint,security --fail-on high
 	@echo "✅ Pre-push checks passed"
+
+# License compliance
+license-inventory: ## Generate CSV inventory of dependency licenses
+	@echo "Generating license inventory (CSV)..."
+	@mkdir -p docs/licenses dist/reports
+	@if ! command -v go-licenses >/dev/null 2>&1; then \
+		echo "Installing go-licenses..."; \
+		go install github.com/google/go-licenses@latest; \
+	fi
+	go-licenses csv ./... > docs/licenses/inventory.csv
+	@echo "✅ Wrote docs/licenses/inventory.csv"
+
+license-save: ## Save third-party license texts
+	@echo "Saving third-party license texts..."
+	@rm -rf docs/licenses/third-party
+	@if ! command -v go-licenses >/dev/null 2>&1; then \
+		echo "Installing go-licenses..."; \
+		go install github.com/google/go-licenses@latest; \
+	fi
+	go-licenses save ./... --save_path=docs/licenses/third-party
+	@echo "✅ Saved third-party licenses to docs/licenses/third-party"
+
+license-audit: ## Audit for forbidden licenses and cooling policy
+	@echo "Auditing dependency licenses and cooling policy..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories dependencies --check --fail-on high
+	@echo "✅ License audit passed"
+
+update-licenses: license-inventory license-save ## Update license inventory and texts
 
 clean:  ## Clean build artifacts and reports
 	@echo "Cleaning artifacts..."

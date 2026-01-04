@@ -320,7 +320,7 @@ func TestOutputJSON(t *testing.T) {
 			err := outputJSON(tt.objects)
 			require.NoError(t, err)
 
-			w.Close()
+			require.NoError(t, w.Close())
 			os.Stdout = old
 
 			var buf bytes.Buffer
@@ -411,7 +411,7 @@ func TestOutputTable(t *testing.T) {
 			err := outputTable(tt.objects)
 			require.NoError(t, err)
 
-			w.Close()
+			require.NoError(t, w.Close())
 			os.Stdout = old
 
 			var buf bytes.Buffer

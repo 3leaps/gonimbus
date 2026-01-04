@@ -21,7 +21,7 @@ scopes:
       - yq
       - go
       - go-licenses
-      # golangci-lint: installed via official golangci-lint-action in CI
+      - golangci-lint
       - yamlfmt
       - prettier
       - gosec
@@ -43,7 +43,7 @@ scopes:
       - yq
       - go
       - go-licenses
-      # golangci-lint: installed via official golangci-lint-action in CI
+      - golangci-lint
       - yamlfmt
       - prettier
   sbom:

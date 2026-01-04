@@ -322,8 +322,8 @@ func (c *Crawler) runListers(ctx context.Context, prefixes []string, out chan<- 
 		// so we use a select that either acquires or returns early.
 		select {
 		case <-ctx.Done():
-			// Context cancelled before we could acquire - don't release anything
-			break
+			// Context cancelled before we could acquire - exit the loop
+			// (break here only exits select, so we rely on the ctx.Err check below)
 		case sem <- struct{}{}:
 			// Successfully acquired semaphore - proceed to launch goroutine
 		}

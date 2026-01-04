@@ -89,7 +89,7 @@ func TestShowCrawlPlan(t *testing.T) {
 			err := showCrawlPlan(tt.manifest)
 			require.NoError(t, err)
 
-			w.Close()
+			require.NoError(t, w.Close())
 			os.Stdout = old
 
 			var buf bytes.Buffer

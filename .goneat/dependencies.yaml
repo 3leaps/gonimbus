@@ -1,0 +1,99 @@
+# ============================================================================
+# Gonimbus Dependency Protection Configuration
+# ============================================================================
+# This file configures license compliance, package cooling (supply chain
+# security), and SBOM generation for the project.
+#
+# Quick Start:
+#   1. Review the forbidden/allowed licenses below
+#   2. Cooling policy is enabled with 7-day minimum age
+#   3. 3leaps and FulmenHQ packages are pre-trusted
+#   4. Test: goneat dependencies --licenses --cooling
+#   5. Makefile targets: make license-audit, make prepush
+#
+# ============================================================================
+version: v1
+# ============================================================================
+# LICENSE COMPLIANCE POLICY
+# ============================================================================
+# Automatically detect and enforce license policies across dependencies.
+# Works OFFLINE - uses local go.mod.
+#
+# Commands:
+#   goneat dependencies --licenses
+#   make license-audit
+#
+licenses:
+  # Forbidden licenses (build fails if detected)
+  forbidden:
+    - GPL-3.0 # Strong copyleft - requires derivative works to be GPL
+    - GPL-2.0 # Strong copyleft
+    - AGPL-3.0 # Network copyleft - triggers on network use
+    - MPL-2.0 # Mozilla Public License - weak copyleft with patent concerns
+    - LGPL-3.0 # Lesser GPL - linking concerns
+    - LGPL-2.1 # Lesser GPL
+    - CDDL-1.0 # Common Development and Distribution License
+  # Explicitly allow only safe, permissive licenses
+  allowed:
+    - MIT
+    - Apache-2.0
+    - BSD-3-Clause
+    - BSD-2-Clause
+    - ISC
+    - 0BSD
+    - Unlicense
+    - CC0-1.0
+# ============================================================================
+# PACKAGE COOLING POLICY (Supply Chain Security)
+# ============================================================================
+# Enforces a waiting period before adopting newly published packages.
+# Protects against supply chain attacks (compromised maintainer accounts,
+# malicious code injection, typosquatting).
+#
+# Commands:
+#   goneat dependencies --cooling
+#   make prepush (includes license-audit)
+#
+cooling:
+  enabled: true
+  # Minimum package age (days since publication)
+  min_age_days: 7
+  # Minimum total downloads (lifetime)
+  min_downloads: 100
+  # Minimum downloads in last 30 days
+  min_downloads_recent: 10
+  # Enforcement mode: false = fail build, true = warn only
+  alert_only: false
+  # Grace period (days) to fix violations without blocking
+  grace_period_days: 3
+  # Trusted package exceptions
+  exceptions:
+    # Trust 3leaps organization packages
+    - pattern: "github.com/3leaps/*"
+      reason: "Internal 3leaps packages are pre-vetted by maintainers"
+      approved_by: "@3leapsdave"
+      approved_date: "2025-01-01"
+    # Trust FulmenHQ organization packages
+    - pattern: "github.com/fulmenhq/*"
+      reason: "FulmenHQ packages are pre-vetted (gofulmen, etc.)"
+      approved_by: "@3leapsdave"
+      approved_date: "2025-01-01"
+# ============================================================================
+# POLICY ENGINE CONFIGURATION
+# ============================================================================
+policy_engine:
+  type: embedded
+
+# ============================================================================
+# SBOM CONFIGURATION (Software Bill of Materials)
+# ============================================================================
+# Generate SBOMs for compliance and security auditing.
+#
+# Commands:
+#   goneat dependencies --sbom
+#   make dependencies
+#
+# sbom:
+#   output_dir: sbom
+#   format: cyclonedx-json
+#   include_dev_dependencies: false

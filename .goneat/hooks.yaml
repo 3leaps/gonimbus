@@ -7,7 +7,7 @@ hooks:
       timeout: "90s"
   pre-push:
     - command: "assess"
-      args: ["--categories", "format,lint,security", "--fail-on", "high", "--package-mode"]
+      args: ["--categories", "format,lint,security,dependencies", "--fail-on", "high", "--package-mode"]
       priority: 10
       timeout: "2m"
 optimization:

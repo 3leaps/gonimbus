@@ -279,49 +279,67 @@ func TestGetEnvSpecsNilIdentity(t *testing.T) {
 func TestFindProjectRootCIBoundaryEdgeCases(t *testing.T) {
 	repoRoot := findRepoRootForTest(t)
 
-	t.Run("CITrueButEmptyBoundaryVars", func(t *testing.T) {
-		// Set CI=true but leave all boundary vars empty
-		t.Setenv("CI", "true")
-		t.Setenv("FULMEN_WORKSPACE_ROOT", "")
-		t.Setenv("GITHUB_WORKSPACE", "")
-		t.Setenv("CI_PROJECT_DIR", "")
-		t.Setenv("WORKSPACE", "")
-
-		// Should still find root via fallback
-		root, err := findProjectRoot()
+	// Helper to run test from repo root context (needed for fallback discovery in CI)
+	runFromRepoRoot := func(t *testing.T, testFn func(t *testing.T)) {
+		t.Helper()
+		oldWd, err := os.Getwd()
 		require.NoError(t, err)
-		assert.NotEmpty(t, root)
+		require.NoError(t, os.Chdir(repoRoot))
+		t.Cleanup(func() { _ = os.Chdir(oldWd) })
+		testFn(t)
+	}
+
+	t.Run("CITrueButEmptyBoundaryVars", func(t *testing.T) {
+		runFromRepoRoot(t, func(t *testing.T) {
+			// Set CI=true but leave all boundary vars empty
+			t.Setenv("CI", "true")
+			t.Setenv("FULMEN_WORKSPACE_ROOT", "")
+			t.Setenv("GITHUB_WORKSPACE", "")
+			t.Setenv("CI_PROJECT_DIR", "")
+			t.Setenv("WORKSPACE", "")
+
+			// Should still find root via fallback
+			root, err := findProjectRoot()
+			require.NoError(t, err)
+			assert.NotEmpty(t, root)
+		})
 	})
 
 	t.Run("CITrueWithRelativeBoundary", func(t *testing.T) {
-		t.Setenv("CI", "true")
-		t.Setenv("FULMEN_WORKSPACE_ROOT", "./relative/path") // Not absolute
+		runFromRepoRoot(t, func(t *testing.T) {
+			t.Setenv("CI", "true")
+			t.Setenv("FULMEN_WORKSPACE_ROOT", "./relative/path") // Not absolute
 
-		// Should fall back to default discovery
-		root, err := findProjectRoot()
-		require.NoError(t, err)
-		assert.NotEmpty(t, root)
+			// Should fall back to default discovery
+			root, err := findProjectRoot()
+			require.NoError(t, err)
+			assert.NotEmpty(t, root)
+		})
 	})
 
 	t.Run("CITrueWithNonexistentBoundary", func(t *testing.T) {
-		t.Setenv("CI", "true")
-		t.Setenv("FULMEN_WORKSPACE_ROOT", "/nonexistent/path/that/does/not/exist")
+		runFromRepoRoot(t, func(t *testing.T) {
+			t.Setenv("CI", "true")
+			t.Setenv("FULMEN_WORKSPACE_ROOT", "/nonexistent/path/that/does/not/exist")
 
-		// Should fall back to default discovery
-		root, err := findProjectRoot()
-		require.NoError(t, err)
-		assert.NotEmpty(t, root)
+			// Should fall back to default discovery
+			root, err := findProjectRoot()
+			require.NoError(t, err)
+			assert.NotEmpty(t, root)
+		})
 	})
 
 	t.Run("CITrueWithBoundaryNotContainingCwd", func(t *testing.T) {
-		t.Setenv("CI", "true")
-		// Use a valid directory that doesn't contain our cwd
-		t.Setenv("FULMEN_WORKSPACE_ROOT", os.TempDir())
+		runFromRepoRoot(t, func(t *testing.T) {
+			t.Setenv("CI", "true")
+			// Use a valid directory that doesn't contain our cwd
+			t.Setenv("FULMEN_WORKSPACE_ROOT", os.TempDir())
 
-		// Should fall back to default discovery
-		root, err := findProjectRoot()
-		require.NoError(t, err)
-		assert.NotEmpty(t, root)
+			// Should fall back to default discovery
+			root, err := findProjectRoot()
+			require.NoError(t, err)
+			assert.NotEmpty(t, root)
+		})
 	})
 
 	t.Run("GitHubActionsEnvVar", func(t *testing.T) {
