@@ -107,8 +107,12 @@ dependencies:  ## Generate SBOM for supply-chain security
 verify-dependencies:  ## Alias for dependencies (compatibility)
 	@$(MAKE) dependencies
 
-install:  ## Install dependencies (alias for bootstrap)
-	@$(MAKE) bootstrap
+install: build ## Install binary to user bin directory
+	@$(BINDIR_RESOLVE); \
+	mkdir -p "$$BINDIR"; \
+	cp bin/$(BINARY_NAME) "$$BINDIR/$(BINARY_NAME)"; \
+	chmod 755 "$$BINDIR/$(BINARY_NAME)"; \
+	echo "✅ Installed $(BINARY_NAME) to $$BINDIR/$(BINARY_NAME)"
 
 run:  ## Run server in development mode
 	@go run ./cmd/$(BINARY_NAME) serve --verbose
