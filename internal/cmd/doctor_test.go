@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -60,9 +61,51 @@ func TestPrintAWSCredentialsHelp(t *testing.T) {
 
 	// This test verifies the function doesn't panic
 	// It logs help text for configuring AWS credentials
-	t.Run("does not panic", func(t *testing.T) {
+	t.Run("does not panic without profile", func(t *testing.T) {
 		assert.NotPanics(t, func() {
-			printAWSCredentialsHelp()
+			printAWSCredentialsHelp("")
 		})
 	})
+
+	t.Run("does not panic with profile", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			printAWSCredentialsHelp("my-profile")
+		})
+	})
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{
+		{
+			name:     "hours and minutes",
+			duration: 5*time.Hour + 30*time.Minute,
+			want:     "5h 30m",
+		},
+		{
+			name:     "just minutes",
+			duration: 45 * time.Minute,
+			want:     "45m",
+		},
+		{
+			name:     "zero",
+			duration: 0,
+			want:     "0m",
+		},
+		{
+			name:     "negative (expired)",
+			duration: -1 * time.Hour,
+			want:     "expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatDuration(tt.duration)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
