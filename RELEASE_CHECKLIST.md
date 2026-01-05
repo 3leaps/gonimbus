@@ -71,11 +71,17 @@ Follow the Fulmen "manifest-only" provenance pattern:
 - Sign manifests with minisign (primary) and optionally PGP
 - Ship trust anchors (public keys) with the release
 
+- [ ] Verify VERSION file matches the release tag:
+
+  ```bash
+  make release-guard-tag-version RELEASE_TAG=v<version>
+  ```
+
 - [ ] Download CI-built artifacts and generate manifests:
 
   ```bash
   make release-clean
-  make release-download
+  make release-download RELEASE_TAG=v<version>
   make release-checksums
   make release-verify-checksums
   ```
@@ -87,7 +93,7 @@ Follow the Fulmen "manifest-only" provenance pattern:
   export GONIMBUS_MINISIGN_KEY=/path/to/gonimbus.key
   export GONIMBUS_MINISIGN_PUB=/path/to/gonimbus.pub
   export GONIMBUS_PGP_KEY_ID="security@fulmenhq.dev"   # optional
-  export GONIMBUS_GPG_HOME=/path/to/gnupg-fulmenhq    # required if PGP_KEY_ID set
+  export GONIMBUS_GPG_HOMEDIR=/path/to/gnupg-fulmenhq # required if PGP_KEY_ID set
 
   make release-sign RELEASE_TAG=$RELEASE_TAG
   ```

@@ -9,7 +9,7 @@ set -euo pipefail
 #   GONIMBUS_MINISIGN_KEY - path to minisign secret key (used to locate .pub)
 #   GONIMBUS_MINISIGN_PUB - optional explicit path to minisign public key
 #   GONIMBUS_PGP_KEY_ID   - gpg key/email/fingerprint to export (optional)
-#   GONIMBUS_GPG_HOME     - isolated gpg homedir containing the signing key (required if PGP_KEY_ID set)
+#   GONIMBUS_GPG_HOMEDIR     - isolated gpg homedir containing the signing key (required if PGP_KEY_ID set)
 
 DIR=${1:-dist/release}
 mkdir -p "$DIR"
@@ -17,7 +17,7 @@ mkdir -p "$DIR"
 MINISIGN_KEY="${GONIMBUS_MINISIGN_KEY:-}"
 MINISIGN_PUB="${GONIMBUS_MINISIGN_PUB:-}"
 PGP_KEY_ID="${GONIMBUS_PGP_KEY_ID:-}"
-GPG_HOME="${GONIMBUS_GPG_HOME:-}"
+GPG_HOME="${GONIMBUS_GPG_HOMEDIR:-}"
 
 exported_any=false
 
@@ -46,14 +46,14 @@ if [ -n "${PGP_KEY_ID}" ]; then
         exit 1
     fi
     if [ -z "${GPG_HOME}" ]; then
-        echo "error: GONIMBUS_GPG_HOME must be set for PGP export" >&2
+        echo "error: GONIMBUS_GPG_HOMEDIR must be set for PGP export" >&2
         exit 1
     fi
     if ! gpg --homedir "${GPG_HOME}" --list-keys "${PGP_KEY_ID}" > /dev/null 2>&1; then
-        echo "error: public key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOME=${GPG_HOME}" >&2
+        echo "error: public key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOMEDIR=${GPG_HOME}" >&2
         exit 1
     fi
-    out="${DIR}/gonimbus-pgp-signing-key.asc"
+    out="${DIR}/gonimbus-release-signing-key.asc"
     gpg --homedir "${GPG_HOME}" --armor --output "${out}" --export "${PGP_KEY_ID}"
     echo "✅ Exported PGP public key to ${out} (homedir: ${GPG_HOME})"
     exported_any=true

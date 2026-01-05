@@ -10,7 +10,7 @@ set -euo pipefail
 # Env:
 #   GONIMBUS_MINISIGN_KEY - path to minisign secret key (required for minisign signing)
 #   GONIMBUS_PGP_KEY_ID   - gpg key/email/fingerprint for PGP signing (optional)
-#   GONIMBUS_GPG_HOME     - isolated gpg homedir for signing (required if PGP_KEY_ID set)
+#   GONIMBUS_GPG_HOMEDIR     - isolated gpg homedir for signing (required if PGP_KEY_ID set)
 #   CI                    - if "true", signing is refused (safety guard)
 
 TAG=${1:?'usage: sign-release-manifests.sh <tag> [dir]'}
@@ -28,7 +28,7 @@ fi
 
 MINISIGN_KEY="${GONIMBUS_MINISIGN_KEY:-}"
 PGP_KEY_ID="${GONIMBUS_PGP_KEY_ID:-}"
-GPG_HOME="${GONIMBUS_GPG_HOME:-}"
+GPG_HOME="${GONIMBUS_GPG_HOMEDIR:-}"
 
 has_minisign=false
 has_pgp=false
@@ -53,11 +53,11 @@ if [ -n "${PGP_KEY_ID}" ]; then
         exit 1
     fi
     if [ -z "${GPG_HOME}" ]; then
-        echo "error: GONIMBUS_GPG_HOME must be set for PGP signing" >&2
+        echo "error: GONIMBUS_GPG_HOMEDIR must be set for PGP signing" >&2
         exit 1
     fi
     if ! gpg --homedir "${GPG_HOME}" --list-secret-keys "${PGP_KEY_ID}" > /dev/null 2>&1; then
-        echo "error: secret key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOME=${GPG_HOME}" >&2
+        echo "error: secret key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOMEDIR=${GPG_HOME}" >&2
         exit 1
     fi
     has_pgp=true
