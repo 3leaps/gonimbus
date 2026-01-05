@@ -1,6 +1,7 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test build build-all clean fmt version check-all precommit prepush run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
+.PHONY: test-cloud moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
@@ -271,6 +272,44 @@ test-cov:  ## Run tests with coverage
 	$(GOTEST) ./... -coverprofile=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "✓ Coverage report: coverage.html"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cloud Integration Tests (requires moto server)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Moto port 5555 avoids conflict with macOS AirTunes on 5000
+MOTO_PORT ?= 5555
+MOTO_ENDPOINT ?= http://localhost:$(MOTO_PORT)
+
+test-cloud: sync-embedded-identity ## Run tests including cloud integration (requires moto)
+	@if ! curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
+		echo "❌ Moto server not available at $(MOTO_ENDPOINT)"; \
+		echo "   Start with: make moto-start"; \
+		echo "   Or run: docker-compose -f docker-compose.test.yml up -d"; \
+		exit 1; \
+	fi
+	@echo "Running tests with cloud integration..."
+	MOTO_ENDPOINT=$(MOTO_ENDPOINT) $(GOTEST) ./... -v -tags=cloudintegration
+
+moto-start:  ## Start moto server for cloud integration tests
+	@if curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
+		echo "✅ Moto server already running at $(MOTO_ENDPOINT)"; \
+	else \
+		echo "→ Starting moto server on port $(MOTO_PORT)..."; \
+		docker run --rm -d -p $(MOTO_PORT):5000 --name gonimbus-moto motoserver/moto:latest; \
+		sleep 3; \
+		echo "✅ Moto server started at $(MOTO_ENDPOINT)"; \
+	fi
+
+moto-stop:  ## Stop moto server
+	@docker stop gonimbus-moto 2>/dev/null && echo "✅ Moto server stopped" || echo "ℹ️  Moto server not running"
+
+moto-status:  ## Check moto server status
+	@if curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
+		echo "✅ Moto server running at $(MOTO_ENDPOINT)"; \
+	else \
+		echo "❌ Moto server not available at $(MOTO_ENDPOINT)"; \
+	fi
 
 lint:  ## Run lint checks
 	@echo "Running goneat assess (lint)..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories lint

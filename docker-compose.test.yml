@@ -1,0 +1,20 @@
+# Docker Compose for cloud integration tests
+# Usage: docker-compose -f docker-compose.test.yml up -d
+#
+# Provides moto server for S3 API emulation.
+# See: https://docs.getmoto.org/en/latest/docs/server_mode.html
+#
+# Port 5555 avoids conflict with macOS AirTunes on 5000.
+services:
+  moto:
+    image: motoserver/moto:latest
+    ports:
+      - "5555:5000"
+    environment:
+      - MOTO_PORT=5000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/moto-api/"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
