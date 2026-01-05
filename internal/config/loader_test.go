@@ -277,20 +277,41 @@ func TestGetEnvSpecsNilIdentity(t *testing.T) {
 }
 
 func TestFindProjectRootCIBoundaryEdgeCases(t *testing.T) {
-	repoRoot := findRepoRootForTest(t)
+	// These tests verify CI boundary edge cases using isolated temp directories
+	// with proper repo markers. This avoids os.Chdir issues in parallel test runs.
+	//
+	// IMPORTANT: We create the temp dir inside HOME because pathfinder uses $HOME
+	// as the default boundary ceiling. System temp dirs (/var/folders, /tmp) are
+	// outside HOME and would fail the boundary check before marker discovery.
 
-	// Helper to run test from repo root context (needed for fallback discovery in CI)
-	runFromRepoRoot := func(t *testing.T, testFn func(t *testing.T)) {
+	// Helper to create a temp directory with repo markers and run test from there
+	withTempRepoRoot := func(t *testing.T, testFn func(t *testing.T, tempRoot string)) {
 		t.Helper()
+
+		// Create temp dir inside HOME to satisfy pathfinder's default boundary
+		homeDir, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		tempDir, err := os.MkdirTemp(homeDir, "gonimbus-test-*")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
+
+		// Create go.mod marker so findProjectRoot can discover this as a repo root
+		goModPath := filepath.Join(tempDir, "go.mod")
+		err = os.WriteFile(goModPath, []byte("module testmodule\n\ngo 1.21\n"), 0644)
+		require.NoError(t, err)
+
+		// Change to temp dir for the test
 		oldWd, err := os.Getwd()
 		require.NoError(t, err)
-		require.NoError(t, os.Chdir(repoRoot))
+		require.NoError(t, os.Chdir(tempDir))
 		t.Cleanup(func() { _ = os.Chdir(oldWd) })
-		testFn(t)
+
+		testFn(t, tempDir)
 	}
 
 	t.Run("CITrueButEmptyBoundaryVars", func(t *testing.T) {
-		runFromRepoRoot(t, func(t *testing.T) {
+		withTempRepoRoot(t, func(t *testing.T, tempRoot string) {
 			// Set CI=true but leave all boundary vars empty
 			t.Setenv("CI", "true")
 			t.Setenv("FULMEN_WORKSPACE_ROOT", "")
@@ -298,39 +319,39 @@ func TestFindProjectRootCIBoundaryEdgeCases(t *testing.T) {
 			t.Setenv("CI_PROJECT_DIR", "")
 			t.Setenv("WORKSPACE", "")
 
-			// Should still find root via fallback
+			// Should still find root via fallback (go.mod marker in tempRoot)
 			root, err := findProjectRoot()
 			require.NoError(t, err)
-			assert.NotEmpty(t, root)
+			assert.Equal(t, tempRoot, root)
 		})
 	})
 
 	t.Run("CITrueWithRelativeBoundary", func(t *testing.T) {
-		runFromRepoRoot(t, func(t *testing.T) {
+		withTempRepoRoot(t, func(t *testing.T, tempRoot string) {
 			t.Setenv("CI", "true")
 			t.Setenv("FULMEN_WORKSPACE_ROOT", "./relative/path") // Not absolute
 
 			// Should fall back to default discovery
 			root, err := findProjectRoot()
 			require.NoError(t, err)
-			assert.NotEmpty(t, root)
+			assert.Equal(t, tempRoot, root)
 		})
 	})
 
 	t.Run("CITrueWithNonexistentBoundary", func(t *testing.T) {
-		runFromRepoRoot(t, func(t *testing.T) {
+		withTempRepoRoot(t, func(t *testing.T, tempRoot string) {
 			t.Setenv("CI", "true")
 			t.Setenv("FULMEN_WORKSPACE_ROOT", "/nonexistent/path/that/does/not/exist")
 
 			// Should fall back to default discovery
 			root, err := findProjectRoot()
 			require.NoError(t, err)
-			assert.NotEmpty(t, root)
+			assert.Equal(t, tempRoot, root)
 		})
 	})
 
 	t.Run("CITrueWithBoundaryNotContainingCwd", func(t *testing.T) {
-		runFromRepoRoot(t, func(t *testing.T) {
+		withTempRepoRoot(t, func(t *testing.T, tempRoot string) {
 			t.Setenv("CI", "true")
 			// Use a valid directory that doesn't contain our cwd
 			t.Setenv("FULMEN_WORKSPACE_ROOT", os.TempDir())
@@ -338,17 +359,19 @@ func TestFindProjectRootCIBoundaryEdgeCases(t *testing.T) {
 			// Should fall back to default discovery
 			root, err := findProjectRoot()
 			require.NoError(t, err)
-			assert.NotEmpty(t, root)
+			assert.Equal(t, tempRoot, root)
 		})
 	})
 
 	t.Run("GitHubActionsEnvVar", func(t *testing.T) {
-		t.Setenv("GITHUB_ACTIONS", "true")
-		t.Setenv("GITHUB_WORKSPACE", repoRoot)
+		withTempRepoRoot(t, func(t *testing.T, tempRoot string) {
+			t.Setenv("GITHUB_ACTIONS", "true")
+			t.Setenv("GITHUB_WORKSPACE", tempRoot)
 
-		root, err := findProjectRoot()
-		require.NoError(t, err)
-		assert.Equal(t, repoRoot, root)
+			root, err := findProjectRoot()
+			require.NoError(t, err)
+			assert.Equal(t, tempRoot, root)
+		})
 	})
 }
 
