@@ -171,7 +171,7 @@ Level 0: Crucible (SSOT - schemas, standards)
 
 ## License
 
-Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 **Trademarks**: "Fulmen" and "3 Leaps" are trademarks of 3 Leaps, LLC.
 

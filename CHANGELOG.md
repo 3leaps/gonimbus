@@ -63,10 +63,14 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 
 ### Infrastructure
 
-- Makefile with quality gates (`make check-all`)
+- Makefile with quality gates (`make check-all`, `make prepush`)
+- License-audit target with dependency cooling policy (`.goneat/dependencies.yaml`)
+- golangci-lint integrated via goneat assess
 - Release signing workflow (minisign + optional PGP)
 - Embedded app identity via `.fulmen/app.yaml`
-- gofulmen v0.1.29 / Crucible v0.3.0 integration
+- gofulmen v0.2.1 / Crucible v0.3.0 integration
+- ADR-0001: Embedded assets over directory walking
+- ADR-0002: Pathfinder boundary constraints in tests
 
 [Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/3leaps/gonimbus/releases/tag/v0.1.0
