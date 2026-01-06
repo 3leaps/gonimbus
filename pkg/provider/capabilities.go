@@ -31,3 +31,10 @@ type MultipartUploader interface {
 	CreateMultipartUpload(ctx context.Context, key string) (uploadID string, err error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
 }
+
+// ObjectGetter can download objects as a stream.
+//
+// For v0.1.x this is used for streaming transfer operations.
+type ObjectGetter interface {
+	GetObject(ctx context.Context, key string) (body io.ReadCloser, contentLength int64, err error)
+}

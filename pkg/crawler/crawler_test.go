@@ -148,6 +148,14 @@ func (w *mockWriter) WritePreflight(ctx context.Context, preflight *output.Prefl
 	return nil
 }
 
+func (w *mockWriter) WriteTransfer(ctx context.Context, transfer *output.TransferRecord) error {
+	return nil
+}
+
+func (w *mockWriter) WriteSkip(ctx context.Context, skip *output.SkipRecord) error {
+	return nil
+}
+
 func (w *mockWriter) Close() error {
 	return nil
 }

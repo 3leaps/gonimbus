@@ -27,6 +27,7 @@ type Provider struct {
 // Ensure Provider implements the interfaces.
 var (
 	_ provider.Provider          = (*Provider)(nil)
+	_ provider.ObjectGetter      = (*Provider)(nil)
 	_ provider.ObjectPutter      = (*Provider)(nil)
 	_ provider.ObjectDeleter     = (*Provider)(nil)
 	_ provider.MultipartUploader = (*Provider)(nil)
@@ -185,6 +186,17 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 	}
 
 	return meta, nil
+}
+
+// GetObject downloads an object as a stream.
+//
+// Caller must close the returned body.
+func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, 0, p.wrapError("GetObject", key, err)
+	}
+	return out.Body, aws.ToInt64(out.ContentLength), nil
 }
 
 // PutObject uploads an object.

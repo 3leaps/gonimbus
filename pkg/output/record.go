@@ -28,6 +28,12 @@ const (
 
 	// TypePreflight identifies preflight capability check records.
 	TypePreflight = "gonimbus.preflight.v1"
+
+	// TypeTransfer identifies per-object transfer results.
+	TypeTransfer = "gonimbus.transfer.v1"
+
+	// TypeSkip identifies per-object skips (dedup/on_exists).
+	TypeSkip = "gonimbus.skip.v1"
 )
 
 // Record is the envelope for all JSONL output.
@@ -97,6 +103,20 @@ type PreflightCheckResult struct {
 	Method     string `json:"method,omitempty"`
 	ErrorCode  string `json:"error_code,omitempty"`
 	Detail     string `json:"detail,omitempty"`
+}
+
+// TransferRecord is the data payload for a successful transfer.
+type TransferRecord struct {
+	SourceKey string `json:"source_key"`
+	TargetKey string `json:"target_key"`
+	Bytes     int64  `json:"bytes"`
+}
+
+// SkipRecord is the data payload for skipped objects.
+type SkipRecord struct {
+	SourceKey string `json:"source_key"`
+	TargetKey string `json:"target_key"`
+	Reason    string `json:"reason"`
 }
 
 // ErrorRecord is the data payload for errors.

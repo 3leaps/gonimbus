@@ -29,6 +29,12 @@ type Writer interface {
 	// WritePreflight emits a preflight record.
 	WritePreflight(ctx context.Context, preflight *PreflightRecord) error
 
+	// WriteTransfer emits a transfer record.
+	WriteTransfer(ctx context.Context, transfer *TransferRecord) error
+
+	// WriteSkip emits a skip record.
+	WriteSkip(ctx context.Context, skip *SkipRecord) error
+
 	// Close flushes any buffered output and releases resources.
 	Close() error
 }
@@ -84,6 +90,14 @@ func (jw *JSONLWriter) WriteSummary(ctx context.Context, sum *SummaryRecord) err
 // WritePreflight emits a preflight record.
 func (jw *JSONLWriter) WritePreflight(ctx context.Context, preflight *PreflightRecord) error {
 	return jw.writeRecord(ctx, TypePreflight, preflight)
+}
+
+func (jw *JSONLWriter) WriteTransfer(ctx context.Context, transfer *TransferRecord) error {
+	return jw.writeRecord(ctx, TypeTransfer, transfer)
+}
+
+func (jw *JSONLWriter) WriteSkip(ctx context.Context, skip *SkipRecord) error {
+	return jw.writeRecord(ctx, TypeSkip, skip)
 }
 
 // Close marks the writer as closed.
