@@ -13,3 +13,11 @@ import _ "embed"
 //
 //go:embed job-manifest.schema.json
 var JobManifestSchema []byte
+
+// TransferManifestSchema is the embedded transfer-manifest JSON schema.
+//
+// This allows transfer manifest validation to work in installed binaries and library
+// consumers without requiring the schema files to be present on disk.
+//
+//go:embed transfer-manifest.schema.json
+var TransferManifestSchema []byte

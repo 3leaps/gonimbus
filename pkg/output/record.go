@@ -25,6 +25,9 @@ const (
 
 	// TypeSummary identifies final summary records.
 	TypeSummary = "gonimbus.summary.v1"
+
+	// TypePreflight identifies preflight capability check records.
+	TypePreflight = "gonimbus.preflight.v1"
 )
 
 // Record is the envelope for all JSONL output.
@@ -73,6 +76,27 @@ type ObjectRecord struct {
 	// Metadata contains user-defined metadata key-value pairs.
 	// Only populated if metadata enrichment is enabled.
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// PreflightRecord is the data payload for preflight capability checks.
+//
+// Preflight records are emitted early, before long-running operations.
+// They provide an explicit contract for what was checked and whether the
+// principal appears to have the required permissions.
+type PreflightRecord struct {
+	Mode          string                 `json:"mode"`
+	ProbeStrategy string                 `json:"probe_strategy,omitempty"`
+	ProbePrefix   string                 `json:"probe_prefix,omitempty"`
+	Results       []PreflightCheckResult `json:"results"`
+}
+
+// PreflightCheckResult is a single capability check result.
+type PreflightCheckResult struct {
+	Capability string `json:"capability"`
+	Allowed    bool   `json:"allowed"`
+	Method     string `json:"method,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 // ErrorRecord is the data payload for errors.

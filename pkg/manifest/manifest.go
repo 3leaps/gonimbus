@@ -99,6 +99,28 @@ type CrawlConfig struct {
 	// A progress record is emitted every N matched objects.
 	// Default: 1000.
 	ProgressEvery int `json:"progress_every,omitempty" yaml:"progress_every,omitempty"`
+
+	// Preflight configures permission checks and provider probes.
+	//
+	// This is part of the plan/inspect/execute model for long-running jobs.
+	Preflight PreflightConfig `json:"preflight,omitempty" yaml:"preflight,omitempty"`
+}
+
+// PreflightConfig controls how aggressively gonimbus probes permissions.
+//
+// Preflight is a capability contract, not a data operation.
+// - plan-only: no provider calls
+// - read-safe: no writes/deletes
+// - write-probe: explicit opt-in minimal side effects (for transfer operations)
+//
+// Note: write-probe fields are included for schema consistency, but crawl jobs
+// should generally use plan-only/read-safe.
+//
+// Values are schema-validated.
+type PreflightConfig struct {
+	Mode          string `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ProbeStrategy string `json:"probe_strategy,omitempty" yaml:"probe_strategy,omitempty"`
+	ProbePrefix   string `json:"probe_prefix,omitempty" yaml:"probe_prefix,omitempty"`
 }
 
 // OutputConfig configures output destination and format.
@@ -134,6 +156,15 @@ const (
 
 	// DefaultProgress is the default value for progress emission.
 	DefaultProgress = true
+
+	// DefaultPreflightMode is the default preflight mode.
+	DefaultPreflightMode = "read-safe"
+
+	// DefaultProbeStrategy is the default provider probe strategy.
+	DefaultProbeStrategy = "multipart-abort"
+
+	// DefaultProbePrefix is the default prefix under which probe keys are created.
+	DefaultProbePrefix = "_gonimbus/probe/"
 )
 
 // ApplyDefaults fills in default values for optional fields.
@@ -149,6 +180,18 @@ func (m *Manifest) ApplyDefaults() {
 		m.Crawl.ProgressEvery = DefaultProgressEvery
 	}
 	// RateLimit: 0 is a valid value (unlimited), so no default needed
+
+	// Preflight defaults (schema applies defaults too, but we normalize here
+	// so callers don't need to reason about empty strings).
+	if m.Crawl.Preflight.Mode == "" {
+		m.Crawl.Preflight.Mode = DefaultPreflightMode
+	}
+	if m.Crawl.Preflight.ProbeStrategy == "" {
+		m.Crawl.Preflight.ProbeStrategy = DefaultProbeStrategy
+	}
+	if m.Crawl.Preflight.ProbePrefix == "" {
+		m.Crawl.Preflight.ProbePrefix = DefaultProbePrefix
+	}
 
 	// Output defaults
 	if m.Output.Destination == "" {

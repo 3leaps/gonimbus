@@ -102,6 +102,39 @@
         }
       }
     },
+    "preflight": {
+      "type": "object",
+      "description": "Preflight capability checks and provider probes (ENTARCH)",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "plan-only",
+            "read-safe",
+            "write-probe"
+          ],
+          "default": "read-safe",
+          "description": "Preflight probe level: plan-only has no provider calls; read-safe performs no writes/deletes; write-probe uses explicit opt-in minimal side effects"
+        },
+        "probe_strategy": {
+          "type": "string",
+          "enum": [
+            "multipart-abort",
+            "put-delete"
+          ],
+          "default": "multipart-abort",
+          "description": "Provider-specific write-probe strategy (write-probe mode only)"
+        },
+        "probe_prefix": {
+          "type": "string",
+          "default": "_gonimbus/probe/",
+          "minLength": 1,
+          "pattern": "/$",
+          "description": "Prefix under which probe keys are created (write-probe mode only). Must end with '/'."
+        }
+      }
+    },
     "crawl": {
       "type": "object",
       "description": "Crawl behavior configuration",
@@ -125,6 +158,9 @@
           "minimum": 1,
           "default": 1000,
           "description": "Emit progress every N matched objects"
+        },
+        "preflight": {
+          "$ref": "#/$defs/preflight"
         }
       }
     },

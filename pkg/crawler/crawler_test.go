@@ -143,6 +143,11 @@ func (w *mockWriter) WriteSummary(ctx context.Context, sum *output.SummaryRecord
 	return nil
 }
 
+func (w *mockWriter) WritePreflight(ctx context.Context, preflight *output.PreflightRecord) error {
+	// Crawler package doesn't emit preflight records; ignore.
+	return nil
+}
+
 func (w *mockWriter) Close() error {
 	return nil
 }

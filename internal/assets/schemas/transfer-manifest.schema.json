@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gonimbus/v1.0.0/job-manifest",
-  "title": "Gonimbus Job Manifest",
-  "description": "Configuration manifest for gonimbus crawl jobs",
+  "$id": "gonimbus/v1.0.0/transfer-manifest",
+  "title": "Gonimbus Transfer Manifest",
+  "description": "Configuration manifest for gonimbus transfer (copy/move) jobs",
   "type": "object",
   "required": [
     "version",
-    "connection",
-    "match"
+    "source",
+    "target",
+    "match",
+    "transfer"
   ],
   "additionalProperties": false,
   "properties": {
@@ -20,14 +22,17 @@
       "const": "1.0",
       "description": "Manifest schema version"
     },
-    "connection": {
+    "source": {
+      "$ref": "#/$defs/connection"
+    },
+    "target": {
       "$ref": "#/$defs/connection"
     },
     "match": {
       "$ref": "#/$defs/match"
     },
-    "crawl": {
-      "$ref": "#/$defs/crawl"
+    "transfer": {
+      "$ref": "#/$defs/transfer"
     },
     "output": {
       "$ref": "#/$defs/output"
@@ -135,29 +140,61 @@
         }
       }
     },
-    "crawl": {
+    "transfer": {
       "type": "object",
-      "description": "Crawl behavior configuration",
+      "description": "Transfer behavior configuration",
       "additionalProperties": false,
       "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "copy",
+            "move"
+          ],
+          "default": "copy",
+          "description": "Transfer mode (move implies delete on source after successful copy)"
+        },
         "concurrency": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 32,
-          "default": 4,
-          "description": "Number of concurrent list operations"
+          "maximum": 128,
+          "default": 16,
+          "description": "Number of concurrent transfer workers"
         },
-        "rate_limit": {
-          "type": "number",
-          "minimum": 0,
-          "default": 0,
-          "description": "Maximum requests per second (0 = unlimited)"
+        "on_exists": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "overwrite",
+            "fail"
+          ],
+          "default": "skip",
+          "description": "Behavior when target key already exists"
         },
-        "progress_every": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 1000,
-          "description": "Emit progress every N matched objects"
+        "dedup": {
+          "type": "object",
+          "description": "Deduplication configuration",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "strategy": {
+              "type": "string",
+              "enum": [
+                "etag",
+                "key",
+                "none"
+              ],
+              "default": "etag",
+              "description": "Deduplication strategy"
+            }
+          }
+        },
+        "path_template": {
+          "type": "string",
+          "description": "Optional path template for mapping source keys to target keys"
         },
         "preflight": {
           "$ref": "#/$defs/preflight"
@@ -177,7 +214,7 @@
         "progress": {
           "type": "boolean",
           "default": true,
-          "description": "Emit progress records during crawl"
+          "description": "Emit progress records during transfer"
         }
       }
     }

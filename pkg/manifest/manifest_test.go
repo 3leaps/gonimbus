@@ -98,6 +98,9 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, []string{"**/*.parquet"}, m.Match.Includes)
 				// Check defaults were applied
 				assert.Equal(t, DefaultConcurrency, m.Crawl.Concurrency)
+				assert.Equal(t, DefaultPreflightMode, m.Crawl.Preflight.Mode)
+				assert.Equal(t, DefaultProbeStrategy, m.Crawl.Preflight.ProbeStrategy)
+				assert.Equal(t, DefaultProbePrefix, m.Crawl.Preflight.ProbePrefix)
 				assert.Equal(t, DefaultDestination, m.Output.Destination)
 				assert.True(t, m.Output.ProgressEnabled())
 			},

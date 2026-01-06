@@ -13,6 +13,7 @@ This directory collects focused guides for Gonimbus development. Start with `REA
 - [Architecture](../architecture.md) - Component design and system architecture
 - [Non-Goals](../non-goals.md) - Explicit scope boundaries (what gonimbus is NOT)
 - [Testing Strategy](testing.md) - Unit tests, cloud integration tests, and coverage philosophy
+- [Preflight & Probing](preflight.md) - Standards for permission checks and minimal-side-effect probes
 - [CI Configuration](ci.md) - Container-based CI/CD setup
 - [Accessing Crucible Documentation via gofulmen](accessing-crucible-docs-via-gofulmen.md) - Learn how to read embedded Crucible docs, schemas, and config shipped with gofulmen
 - [Metrics Reference](../metrics.md) - Prometheus metrics documentation

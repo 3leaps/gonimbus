@@ -16,6 +16,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 )
 
@@ -36,10 +37,12 @@ Example:
 }
 
 var (
-	crawlJobPath string
-	crawlOutput  string
-	crawlQuiet   bool
-	crawlDryRun  bool
+	crawlJobPath       string
+	crawlOutput        string
+	crawlQuiet         bool
+	crawlDryRun        bool
+	crawlPlan          bool
+	crawlPreflightMode string
 )
 
 func init() {
@@ -49,6 +52,8 @@ func init() {
 	crawlCmd.Flags().StringVarP(&crawlOutput, "output", "o", "", "Override output destination")
 	crawlCmd.Flags().BoolVarP(&crawlQuiet, "quiet", "q", false, "Suppress progress records")
 	crawlCmd.Flags().BoolVar(&crawlDryRun, "dry-run", false, "Validate manifest and show plan without executing")
+	crawlCmd.Flags().BoolVar(&crawlPlan, "plan", false, "Alias for --dry-run")
+	crawlCmd.Flags().StringVar(&crawlPreflightMode, "preflight", "", "Override preflight mode (plan-only|read-safe|write-probe)")
 
 	_ = crawlCmd.MarkFlagRequired("job")
 }
@@ -76,14 +81,24 @@ func runCrawl(cmd *cobra.Command, args []string) error {
 		m.Output.Destination = crawlOutput
 	}
 
+	// Apply preflight override if specified
+	if crawlPreflightMode != "" {
+		switch crawlPreflightMode {
+		case "plan-only", "read-safe", "write-probe":
+			m.Crawl.Preflight.Mode = crawlPreflightMode
+		default:
+			return exitError(foundry.ExitInvalidArgument, "Invalid --preflight value", fmt.Errorf("unsupported preflight mode: %s", crawlPreflightMode))
+		}
+	}
+
 	// Apply quiet flag
 	if crawlQuiet {
 		enabled := false
 		m.Output.Progress = &enabled
 	}
 
-	// Dry run mode: show plan and exit
-	if crawlDryRun {
+	// Plan mode: show plan and exit
+	if crawlPlan || crawlDryRun {
 		return showCrawlPlan(m)
 	}
 
@@ -119,6 +134,9 @@ func showCrawlPlan(m *manifest.Manifest) error {
 	fmt.Printf("Concurrency: %d\n", m.Crawl.Concurrency)
 	if m.Crawl.RateLimit > 0 {
 		fmt.Printf("Rate Limit:  %.1f req/s\n", m.Crawl.RateLimit)
+	}
+	if m.Crawl.Preflight.Mode != "" {
+		fmt.Printf("Preflight:   %s\n", m.Crawl.Preflight.Mode)
 	}
 	fmt.Printf("Output:      %s\n", m.Output.Destination)
 	fmt.Printf("Progress:    %v\n", m.Output.ProgressEnabled())
@@ -158,6 +176,21 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 		return exitError(foundry.ExitFileWriteError, "Failed to create output", err)
 	}
 	defer cleanup()
+
+	// Preflight checks (plan-only/read-safe/write-probe)
+	pfSpec := preflight.Spec{
+		Mode:          preflight.Mode(m.Crawl.Preflight.Mode),
+		ProbeStrategy: preflight.ProbeStrategy(m.Crawl.Preflight.ProbeStrategy),
+		ProbePrefix:   m.Crawl.Preflight.ProbePrefix,
+	}
+	pfRec, pfErr := preflight.Crawl(ctx, prov, matcher.Prefixes(), pfSpec)
+	if err := writer.WritePreflight(ctx, pfRec); err != nil {
+		observability.CLILogger.Warn("Failed to write preflight record", zap.Error(err))
+	}
+	if pfErr != nil {
+		observability.CLILogger.Error("Preflight failed", zap.Error(pfErr))
+		return exitError(foundry.ExitExternalServiceUnavailable, "Preflight failed", pfErr)
+	}
 
 	// Create crawler config
 	cfg := crawler.Config{
