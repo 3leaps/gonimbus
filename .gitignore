@@ -8,7 +8,9 @@ dist/
 
 # Test artifacts
 coverage.out
+coverage*.out
 coverage.html
+coverage*.html
 *.test
 
 # SBOM artifacts (generated)

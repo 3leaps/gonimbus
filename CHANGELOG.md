@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-01-05
+
+### Added
+
+- **AWS Profile Authentication** (`internal/cmd/doctor.go`)
+  - `--profile` flag on `doctor` command for enterprise SSO diagnostics
+  - Credential expiry check with warning when < 1 hour remaining
+  - IMDS timeout optimization when profile/env credentials available
+  - SSO-aware help text (`aws sso login` guidance)
+  - Documentation: `docs/auth/aws-profiles.md`
+
+- **Cloud Integration Tests** (`test/cloudtest/`, `pkg/provider/s3/`, `internal/cmd/`)
+  - S3 provider integration tests using moto (AWS mock server)
+  - CLI inspect command end-to-end tests
+  - Test helpers for bucket creation, object upload, and isolation
+  - Makefile targets: `test-cloud`, `moto-start`, `moto-stop`, `moto-status`
+  - CI workflow with moto service container
+  - Documentation: `docs/development/testing.md`
+
+### Changed
+
+- S3 provider test coverage increased from 49% to 97% with cloud integration tests
+- `ec2/imds` promoted from indirect to direct dependency (IMDS timeout control)
+
+### Fixed
+
+- `make install` now correctly installs binary to `~/.local/bin`
+
 ## [0.1.0] - 2026-01-03
 
 Initial public release of Gonimbus - a Go-first library + CLI + server for large-scale inspection and crawl of cloud object storage.
@@ -72,5 +100,6 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/3leaps/gonimbus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/3leaps/gonimbus/releases/tag/v0.1.0

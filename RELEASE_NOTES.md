@@ -4,6 +4,62 @@ This file contains release notes for the three most recent releases in reverse c
 
 ---
 
+## v0.1.1 (2026-01-05)
+
+**Enterprise Authentication & Test Infrastructure**
+
+This release adds enterprise AWS SSO support with improved diagnostics, plus comprehensive cloud integration tests that bring S3 provider coverage from 49% to 97%.
+
+### Highlights
+
+- **AWS Profile & SSO Support**: `doctor --profile` flag for enterprise SSO diagnostics
+- **Credential Expiry Warnings**: Proactive alerts when SSO tokens expire within 1 hour
+- **Cloud Integration Tests**: S3 provider and CLI tests using moto (AWS mock server)
+- **Faster Doctor**: IMDS timeout eliminated when profile/env credentials available
+
+### New Commands
+
+```bash
+# Check SSO profile credentials
+gonimbus doctor --provider s3 --profile my-sso-profile
+
+# Run cloud integration tests (for contributors)
+make moto-start && make test-cloud
+```
+
+### For Enterprise Users
+
+AWS SSO (Identity Center) users can now validate their configuration:
+
+```bash
+# Login to SSO
+aws sso login --profile my-sso-profile
+
+# Verify credentials work with gonimbus
+gonimbus doctor --provider s3 --profile my-sso-profile
+
+# Run inspection
+gonimbus inspect s3://bucket/ --profile my-sso-profile
+```
+
+See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for multi-account SSO patterns.
+
+### For Contributors
+
+Cloud integration tests now run in CI using moto as a service container. To run locally:
+
+```bash
+make moto-start    # Start moto on port 5555
+make test-cloud    # Run cloud integration tests
+make moto-stop     # Clean up
+```
+
+See [docs/development/testing.md](docs/development/testing.md) for testing philosophy and coverage approach.
+
+See [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md) for full release notes.
+
+---
+
 ## v0.1.0 (2026-01-03)
 
 **Initial Public Release**

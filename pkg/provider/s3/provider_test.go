@@ -383,15 +383,10 @@ func TestWrapError_APIError(t *testing.T) {
 	}
 }
 
-// Integration test placeholder - requires real S3 or LocalStack
+// Integration tests are in provider_cloudintegration_test.go
+// Run with: make test-cloud (requires moto server)
 func TestProvider_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	// This test would run against LocalStack or a real S3 bucket
-	// Environment variables would configure the endpoint and credentials
-	t.Skip("integration tests require LocalStack or real S3 - run manually")
+	t.Skip("see provider_cloudintegration_test.go - run with: make test-cloud")
 }
 
 func TestNew_ValidationError(t *testing.T) {

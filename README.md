@@ -35,6 +35,9 @@ gonimbus crawl --job crawl-manifest.yaml
 # Check environment and auth
 gonimbus doctor
 
+# Check with specific AWS profile
+gonimbus doctor --provider s3 --profile my-sso-profile
+
 # Start server mode
 gonimbus serve
 ```
@@ -61,8 +64,11 @@ make build
 
 Uses SDK default auth chains - no reinventing the wheel:
 
-- AWS: env vars, shared config/credentials, profiles, web identity/IRSA
+- AWS: env vars, shared config/credentials, profiles, SSO, web identity/IRSA
+- Enterprise SSO: `--profile` flag with `aws sso login` workflow
 - Raw keys supported as explicit fallback (Wasabi, DigitalOcean Spaces)
+
+See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for enterprise authentication patterns.
 
 ### Matching
 
@@ -135,12 +141,23 @@ NimbusNest is the mount/sync/UX client. Gonimbus provides the crawl/match/auth/b
 make help          # Show all targets
 make bootstrap     # Install dependencies
 make build         # Build binary
-make test          # Run tests
+make test          # Run unit tests
+make test-cloud    # Run cloud integration tests (requires moto)
 make lint          # Run linting
 make check-all     # Lint + test
 ```
 
-See [docs/development/](docs/development/) for detailed development guides.
+### Cloud Integration Tests
+
+Cloud integration tests run against a local S3-compatible endpoint (moto):
+
+```bash
+make moto-start    # Start moto server (Docker)
+make test-cloud    # Run cloud integration tests
+make moto-stop     # Stop moto server
+```
+
+See [docs/development/](docs/development/) for detailed development guides including [testing strategy](docs/development/testing.md).
 
 ## Architecture
 
