@@ -98,6 +98,9 @@ func createInspectProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, e
 		Region:   inspectRegion,
 		Endpoint: inspectEndpoint,
 		Profile:  inspectProfile,
+		// Force path-style URLs when custom endpoint is set.
+		// S3-compatible services (moto, MinIO, etc.) require this.
+		ForcePathStyle: inspectEndpoint != "",
 	}
 	return s3.New(ctx, cfg)
 }

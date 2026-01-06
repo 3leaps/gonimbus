@@ -205,6 +205,9 @@ func createProvider(ctx context.Context, m *manifest.Manifest) (*s3.Provider, er
 		Region:   m.Connection.Region,
 		Endpoint: m.Connection.Endpoint,
 		Profile:  m.Connection.Profile,
+		// Force path-style URLs when custom endpoint is set.
+		// S3-compatible services (moto, MinIO, etc.) require this.
+		ForcePathStyle: m.Connection.Endpoint != "",
 	}
 	return s3.New(ctx, cfg)
 }
