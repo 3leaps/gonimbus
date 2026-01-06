@@ -224,6 +224,21 @@ func DeleteBucket(t *testing.T, ctx context.Context, bucket string) {
 	}
 }
 
+// PutBucketPolicy sets a bucket policy.
+func PutBucketPolicy(t *testing.T, ctx context.Context, bucket, policyJSON string) {
+	t.Helper()
+
+	c := ClientT(t)
+
+	_, err := c.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(bucket),
+		Policy: aws.String(policyJSON),
+	})
+	if err != nil {
+		t.Fatalf("failed to put bucket policy for %s: %v", bucket, err)
+	}
+}
+
 // PutObject uploads an object to the bucket.
 func PutObject(t *testing.T, ctx context.Context, bucket, key string, content []byte) {
 	t.Helper()

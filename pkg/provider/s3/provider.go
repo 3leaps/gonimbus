@@ -1,8 +1,10 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,8 +24,13 @@ type Provider struct {
 	maxKeys int
 }
 
-// Ensure Provider implements the interface.
-var _ provider.Provider = (*Provider)(nil)
+// Ensure Provider implements the interfaces.
+var (
+	_ provider.Provider          = (*Provider)(nil)
+	_ provider.ObjectPutter      = (*Provider)(nil)
+	_ provider.ObjectDeleter     = (*Provider)(nil)
+	_ provider.MultipartUploader = (*Provider)(nil)
+)
 
 // New creates a new S3 provider with the given configuration.
 //
@@ -180,10 +187,66 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 	return meta, nil
 }
 
+// PutObject uploads an object.
+//
+// This is used for write-probe preflight and future transfer operations.
+func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	input := &s3.PutObjectInput{
+		Bucket:        aws.String(p.bucket),
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: &contentLength,
+	}
+
+	_, err := p.client.PutObject(ctx, input)
+	if err != nil {
+		return p.wrapError("PutObject", key, err)
+	}
+	return nil
+}
+
+// DeleteObject deletes an object.
+//
+// This is used for write-probe preflight and future move operations.
+func (p *Provider) DeleteObject(ctx context.Context, key string) error {
+	_, err := p.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
+	if err != nil {
+		return p.wrapError("DeleteObject", key, err)
+	}
+	return nil
+}
+
+// CreateMultipartUpload starts a multipart upload.
+//
+// This is used for minimal-side-effect write probes.
+func (p *Provider) CreateMultipartUpload(ctx context.Context, key string) (string, error) {
+	out, err := p.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
+	if err != nil {
+		return "", p.wrapError("CreateMultipartUpload", key, err)
+	}
+	return aws.ToString(out.UploadId), nil
+}
+
+// AbortMultipartUpload aborts a multipart upload.
+func (p *Provider) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	_, err := p.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key), UploadId: aws.String(uploadID)})
+	if err != nil {
+		return p.wrapError("AbortMultipartUpload", key, err)
+	}
+	return nil
+}
+
 // Close releases any resources held by the provider.
 // The S3 client doesn't require explicit cleanup, but this satisfies the interface.
 func (p *Provider) Close() error {
 	return nil
+}
+
+// PutObjectEmpty uploads a 0-byte object.
+//
+// This helper exists for probe operations.
+func (p *Provider) PutObjectEmpty(ctx context.Context, key string) error {
+	return p.PutObject(ctx, key, bytes.NewReader(nil), 0)
 }
 
 // wrapError converts S3 errors to provider errors with appropriate sentinel errors.
