@@ -94,6 +94,158 @@ connection:
   region: <region> # e.g., nyc3, sfo3, ams3, sgp1
 ```
 
+## Preflight Permission Probes
+
+Before running large-scale operations (crawling millions of objects, cross-account transfers), use the `preflight` command to validate that your credentials have the required permissions. This avoids discovering permission issues after minutes of enumeration.
+
+### Why Preflight?
+
+Cloud object stores do not provide a universal "check my permissions" API. The only reliable approach is to perform minimal probe operations:
+
+- **Crawl operations** need `ListObjectsV2` (and optionally `HeadObject` for enrichment)
+- **Transfer operations** need read permissions on source and write/delete on target
+
+Without preflight validation, a job might:
+- Spend 10 minutes listing 1M objects, then fail on the first `HeadObject` call
+- Complete source enumeration, then discover it cannot write to the target bucket
+
+### Preflight Modes
+
+| Mode | Provider Calls | Use Case |
+|------|---------------|----------|
+| `plan-only` | None | Validate configuration syntax |
+| `read-safe` | List, Head | Validate read permissions before crawl |
+| `write-probe` | CreateMultipartUpload+Abort or PutObject+DeleteObject | Validate write permissions before transfer |
+
+### Crawl Preflight
+
+Validate list permissions before a crawl:
+
+```bash
+# AWS S3
+gonimbus preflight crawl s3://my-bucket/data/**/*.parquet --mode read-safe
+
+# Wasabi
+gonimbus preflight crawl s3://my-bucket/data/**/*.parquet \
+  --endpoint https://s3.us-east-2.wasabisys.com \
+  --region us-east-2 \
+  --mode read-safe
+
+# Cloudflare R2
+gonimbus preflight crawl s3://my-bucket/data/**/*.parquet \
+  --endpoint https://<account_id>.r2.cloudflarestorage.com \
+  --region auto \
+  --mode read-safe
+```
+
+For exact object keys (not patterns), the crawl preflight also validates `HeadObject`:
+
+```bash
+gonimbus preflight crawl s3://my-bucket/path/to/specific-file.json --mode read-safe
+```
+
+### Write Preflight
+
+Validate write permissions before transfer operations. This uses minimal-side-effect probes under an isolated prefix (`_gonimbus/probe/` by default).
+
+**Preferred strategy: multipart-abort**
+
+Creates and immediately aborts a multipart upload. No objects are durably stored.
+
+```bash
+gonimbus preflight write s3://target-bucket/ \
+  --mode write-probe \
+  --probe-strategy multipart-abort
+```
+
+**Fallback strategy: put-delete**
+
+Writes a 0-byte object and deletes it. Use when multipart operations are restricted.
+
+```bash
+gonimbus preflight write s3://target-bucket/ \
+  --mode write-probe \
+  --probe-strategy put-delete
+```
+
+### Output Format
+
+Preflight emits a `gonimbus.preflight.v1` JSONL record:
+
+```json
+{
+  "type": "gonimbus.preflight.v1",
+  "ts": "2024-01-15T10:00:00Z",
+  "job_id": "abc123",
+  "provider": "s3",
+  "data": {
+    "mode": "read-safe",
+    "probe_strategy": "multipart-abort",
+    "probe_prefix": "_gonimbus/probe/",
+    "results": [
+      {
+        "capability": "source.list",
+        "allowed": true,
+        "method": "List(prefix=\"data/\",maxKeys=1)"
+      }
+    ]
+  }
+}
+```
+
+Failed probes include error details:
+
+```json
+{
+  "capability": "target.write",
+  "allowed": false,
+  "method": "CreateMultipartUpload+Abort",
+  "error_code": "ACCESS_DENIED",
+  "detail": "access denied"
+}
+```
+
+### Provider-Specific Notes
+
+**AWS S3**: Both probe strategies work with standard IAM policies.
+
+**Cloudflare R2**: Both strategies supported. Requires `--region auto` placeholder.
+
+**Wasabi**: Some IAM configurations may allow `CreateMultipartUpload` but deny `AbortMultipartUpload`. If multipart-abort fails, use the put-delete fallback strategy.
+
+### Required IAM Permissions
+
+For crawl preflight (`read-safe`):
+- `s3:ListBucket` (on bucket)
+- `s3:GetObject` (on objects, if probing exact keys)
+
+For write preflight (`write-probe` with multipart-abort):
+- `s3:PutObject` (on probe prefix)
+- `s3:AbortMultipartUpload` (on probe prefix)
+
+For write preflight (`write-probe` with put-delete):
+- `s3:PutObject` (on probe prefix)
+- `s3:DeleteObject` (on probe prefix)
+
+Example IAM policy for probe prefix:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::my-bucket/_gonimbus/probe/*"
+    }
+  ]
+}
+```
+
 ## Environment Variables
 
 All providers support standard AWS SDK environment variables:
