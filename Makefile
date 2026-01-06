@@ -2,7 +2,7 @@
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
 .PHONY: test-cloud moto-start moto-stop moto-status
-.PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version
+.PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
 # Binary and version information
@@ -218,6 +218,36 @@ release-export-keys: ## Export public signing keys into dist/release
 release-verify-keys: ## Verify exported public keys are public-only
 	@if [ -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then ./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/gonimbus-minisign.pub"; else echo "ℹ️  No minisign public key found (skipping)"; fi
 	@if [ -f "$(DIST_RELEASE)/gonimbus-release-signing-key.asc" ]; then ./scripts/verify-public-key.sh "$(DIST_RELEASE)/gonimbus-release-signing-key.asc"; else echo "ℹ️  No PGP public key found (skipping)"; fi
+
+release-verify-signatures: ## Verify signatures on checksum manifests
+	@echo "🔍 Verifying signatures in $(DIST_RELEASE)..."
+	@has_any=false; \
+	if [ -f "$(DIST_RELEASE)/SHA256SUMS.minisig" ]; then \
+		if [ ! -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then \
+			echo "❌ minisign public key not found; run 'make release-export-keys' first"; exit 1; \
+		fi; \
+		echo "🔐 Verifying minisign signatures..."; \
+		cd "$(DIST_RELEASE)" && minisign -V -p gonimbus-minisign.pub -m SHA256SUMS; \
+		if [ -f SHA512SUMS.minisig ]; then minisign -V -p gonimbus-minisign.pub -m SHA512SUMS; fi; \
+		echo "✅ Minisign signatures verified"; \
+		has_any=true; \
+	fi; \
+	if [ -f "$(DIST_RELEASE)/SHA256SUMS.asc" ]; then \
+		echo "🔐 Verifying PGP signatures..."; \
+		GPG_HOME="$${GONIMBUS_GPG_HOMEDIR:-}"; \
+		if [ -n "$$GPG_HOME" ]; then \
+			cd "$(DIST_RELEASE)" && gpg --homedir "$$GPG_HOME" --verify SHA256SUMS.asc SHA256SUMS; \
+			if [ -f SHA512SUMS.asc ]; then gpg --homedir "$$GPG_HOME" --verify SHA512SUMS.asc SHA512SUMS; fi; \
+		else \
+			cd "$(DIST_RELEASE)" && gpg --verify SHA256SUMS.asc SHA256SUMS; \
+			if [ -f SHA512SUMS.asc ]; then gpg --verify SHA512SUMS.asc SHA512SUMS; fi; \
+		fi; \
+		echo "✅ PGP signatures verified"; \
+		has_any=true; \
+	fi; \
+	if [ "$$has_any" = false ]; then \
+		echo "❌ No signatures found to verify"; exit 1; \
+	fi
 
 # Deprecated alias (kept for one cycle).
 verify-release-keys: release-verify-keys ## Deprecated: use release-verify-keys

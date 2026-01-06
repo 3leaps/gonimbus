@@ -100,6 +100,8 @@ Follow the Fulmen "manifest-only" provenance pattern:
 
 - [ ] Export public keys: `make release-export-keys`
 - [ ] Verify exported keys are public-only: `make release-verify-keys`
+- [ ] Verify signatures: `make release-verify-signatures`
+- [ ] Copy release notes: `make release-notes RELEASE_TAG=v<version>`
 - [ ] Upload provenance assets: `make release-upload`
 
 ### Tagging
