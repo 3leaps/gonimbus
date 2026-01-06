@@ -93,6 +93,9 @@ func showTransferPlan(m *manifest.TransferManifest) error {
 	fmt.Printf("OnExists: %s\n", m.Transfer.OnExists)
 	fmt.Printf("Dedup:    enabled=%v strategy=%s\n", m.Transfer.Dedup.DedupEnabled(), m.Transfer.Dedup.Strategy)
 	fmt.Printf("Preflight: mode=%s probe_strategy=%s probe_prefix=%s\n", m.Transfer.Preflight.Mode, m.Transfer.Preflight.ProbeStrategy, m.Transfer.Preflight.ProbePrefix)
+	if m.Transfer.PathTemplate != "" {
+		fmt.Printf("Template: %s\n", m.Transfer.PathTemplate)
+	}
 	fmt.Printf("Output:   %s\n", m.Output.Destination)
 	fmt.Println()
 	fmt.Println("Manifest validated successfully. Remove --plan to execute.")
@@ -109,6 +112,26 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 	}
 	defer cleanup()
 
+	matcher, err := match.New(match.Config{Includes: m.Match.Includes, Excludes: m.Match.Excludes, IncludeHidden: m.Match.IncludeHidden})
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid match patterns", err)
+	}
+
+	if m.Transfer.PathTemplate != "" {
+		if _, err := transfer.CompilePathTemplate(m.Transfer.PathTemplate); err != nil {
+			return exitError(foundry.ExitInvalidArgument, "Invalid path_template", err)
+		}
+	}
+
+	// In plan-only mode we never hit provider endpoints. Use --plan, or use
+	// --dry-run with plan-only to validate config without side effects.
+	if m.Transfer.Preflight.Mode == string(preflight.ModePlanOnly) {
+		if dryRun {
+			return showTransferPlan(m)
+		}
+		return exitError(foundry.ExitInvalidArgument, "preflight.mode=plan-only cannot execute transfers", fmt.Errorf("set transfer.preflight.mode to read-safe or write-probe"))
+	}
+
 	srcProv, err := createTransferProvider(ctx, m.Source)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to source", err)
@@ -120,16 +143,6 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to target", err)
 	}
 	defer func() { _ = dstProv.Close() }()
-
-	matcher, err := match.New(match.Config{Includes: m.Match.Includes, Excludes: m.Match.Excludes, IncludeHidden: m.Match.IncludeHidden})
-	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid match patterns", err)
-	}
-
-	if m.Transfer.PathTemplate != "" {
-		return exitError(foundry.ExitInvalidArgument, "path_template is not implemented yet", fmt.Errorf("unsupported path_template"))
-	}
-
 	// Preflight: fail fast before heavy listing.
 	spec := preflight.Spec{
 		Mode:          preflight.Mode(m.Transfer.Preflight.Mode),
@@ -137,20 +150,16 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 		ProbePrefix:   m.Transfer.Preflight.ProbePrefix,
 	}
 
-	// Source list check
-	srcPF, srcErr := preflight.Crawl(ctx, srcProv, matcher.Prefixes(), spec)
-	_ = writer.WritePreflight(ctx, srcPF)
-	if srcErr != nil {
-		return exitError(foundry.ExitExternalServiceUnavailable, "Preflight failed (source)", srcErr)
+	opts := preflight.TransferOptions{
+		RequireSourceRead:       true,
+		RequireTargetHead:       m.Transfer.OnExists != "overwrite",
+		RequireTargetWriteProbe: spec.Mode == preflight.ModeWriteProbe,
 	}
 
-	// Target write probe when requested
-	if spec.Mode == preflight.ModeWriteProbe {
-		dstPF, dstErr := preflight.WriteProbe(ctx, dstProv, spec)
-		_ = writer.WritePreflight(ctx, dstPF)
-		if dstErr != nil {
-			return exitError(foundry.ExitExternalServiceUnavailable, "Preflight failed (target write probe)", dstErr)
-		}
+	pfRec, pfErr := preflight.Transfer(ctx, srcProv, dstProv, matcher.Prefixes(), spec, opts)
+	_ = writer.WritePreflight(ctx, pfRec)
+	if pfErr != nil {
+		return exitError(foundry.ExitExternalServiceUnavailable, "Preflight failed", pfErr)
 	}
 
 	if dryRun {
@@ -158,9 +167,10 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 	}
 
 	cfg := transfer.Config{
-		Concurrency: m.Transfer.Concurrency,
-		OnExists:    m.Transfer.OnExists,
-		Mode:        m.Transfer.Mode,
+		Concurrency:  m.Transfer.Concurrency,
+		OnExists:     m.Transfer.OnExists,
+		Mode:         m.Transfer.Mode,
+		PathTemplate: m.Transfer.PathTemplate,
 		Dedup: transfer.DedupConfig{
 			Enabled:  m.Transfer.Dedup.DedupEnabled(),
 			Strategy: m.Transfer.Dedup.Strategy,

@@ -16,10 +16,11 @@ import (
 )
 
 type Config struct {
-	Concurrency int
-	OnExists    string // skip | overwrite | fail
-	Dedup       DedupConfig
-	Mode        string // copy | move
+	Concurrency  int
+	OnExists     string // skip | overwrite | fail
+	Dedup        DedupConfig
+	Mode         string // copy | move
+	PathTemplate string
 }
 
 type DedupConfig struct {
@@ -55,6 +56,7 @@ type Transfer struct {
 	writer  output.Writer
 	jobID   string
 	cfg     Config
+	mapper  *PathTemplate
 
 	listed      atomic.Int64
 	matched     atomic.Int64
@@ -76,7 +78,20 @@ func New(src provider.Provider, dst provider.Provider, matcher *match.Matcher, w
 	if cfg.Dedup.Strategy == "" {
 		cfg.Dedup.Strategy = DefaultConfig().Dedup.Strategy
 	}
-	return &Transfer{src: src, dst: dst, matcher: matcher, writer: writer, jobID: jobID, cfg: cfg}
+
+	var mapper *PathTemplate
+	if cfg.PathTemplate != "" {
+		tpl, err := CompilePathTemplate(cfg.PathTemplate)
+		if err != nil {
+			// Keep constructor non-fatal by deferring to runtime errors.
+			// Callers should validate templates before executing.
+			mapper = nil
+		} else {
+			mapper = tpl
+		}
+	}
+
+	return &Transfer{src: src, dst: dst, matcher: matcher, writer: writer, jobID: jobID, cfg: cfg, mapper: mapper}
 }
 
 func (t *Transfer) Run(ctx context.Context) (*Summary, error) {
@@ -184,26 +199,35 @@ func (t *Transfer) listPrefix(ctx context.Context, prefix string, out chan<- obj
 func (t *Transfer) transferOne(ctx context.Context, obj provider.ObjectSummary) error {
 	srcKey := obj.Key
 	dstKey := obj.Key
+	if t.mapper != nil {
+		mapped, err := t.mapper.Apply(srcKey)
+		if err != nil {
+			return err
+		}
+		dstKey = mapped
+	}
 
 	// on_exists / dedup
-	dstMeta, err := t.dst.Head(ctx, dstKey)
-	if err == nil {
-		// Exists
-		if t.cfg.OnExists == "fail" {
-			return fmt.Errorf("target exists: %s", dstKey)
-		}
-		if t.cfg.OnExists == "skip" {
-			if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "etag" && dstMeta.ETag == obj.ETag {
-				return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "dedup.etag"})
+	if t.cfg.OnExists != "overwrite" {
+		dstMeta, err := t.dst.Head(ctx, dstKey)
+		if err == nil {
+			// Exists
+			switch t.cfg.OnExists {
+			case "fail":
+				return fmt.Errorf("target exists: %s", dstKey)
+			case "skip":
+				if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "etag" && dstMeta.ETag == obj.ETag {
+					return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "dedup.etag"})
+				}
+				if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "key" {
+					return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "dedup.key"})
+				}
+				return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "on_exists.skip"})
 			}
-			if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "key" {
-				return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "dedup.key"})
-			}
-			return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "on_exists.skip"})
 		}
-	}
-	if err != nil && !provider.IsNotFound(err) {
-		return err
+		if err != nil && !provider.IsNotFound(err) {
+			return err
+		}
 	}
 
 	getter, ok := t.src.(provider.ObjectGetter)

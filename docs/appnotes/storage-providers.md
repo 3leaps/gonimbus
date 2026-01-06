@@ -106,15 +106,16 @@ Cloud object stores do not provide a universal "check my permissions" API. The o
 - **Transfer operations** need read permissions on source and write/delete on target
 
 Without preflight validation, a job might:
+
 - Spend 10 minutes listing 1M objects, then fail on the first `HeadObject` call
 - Complete source enumeration, then discover it cannot write to the target bucket
 
 ### Preflight Modes
 
-| Mode | Provider Calls | Use Case |
-|------|---------------|----------|
-| `plan-only` | None | Validate configuration syntax |
-| `read-safe` | List, Head | Validate read permissions before crawl |
+| Mode          | Provider Calls                                        | Use Case                                   |
+| ------------- | ----------------------------------------------------- | ------------------------------------------ |
+| `plan-only`   | None                                                  | Validate configuration syntax              |
+| `read-safe`   | List, Head                                            | Validate read permissions before crawl     |
 | `write-probe` | CreateMultipartUpload+Abort or PutObject+DeleteObject | Validate write permissions before transfer |
 
 ### Crawl Preflight
@@ -216,14 +217,17 @@ Failed probes include error details:
 ### Required IAM Permissions
 
 For crawl preflight (`read-safe`):
+
 - `s3:ListBucket` (on bucket)
 - `s3:GetObject` (on objects, if probing exact keys)
 
 For write preflight (`write-probe` with multipart-abort):
+
 - `s3:PutObject` (on probe prefix)
 - `s3:AbortMultipartUpload` (on probe prefix)
 
 For write preflight (`write-probe` with put-delete):
+
 - `s3:PutObject` (on probe prefix)
 - `s3:DeleteObject` (on probe prefix)
 
@@ -235,11 +239,7 @@ Example IAM policy for probe prefix:
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:AbortMultipartUpload"
-      ],
+      "Action": ["s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
       "Resource": "arn:aws:s3:::my-bucket/_gonimbus/probe/*"
     }
   ]
