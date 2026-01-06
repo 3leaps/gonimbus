@@ -31,6 +31,7 @@ var (
 	_ provider.ObjectPutter      = (*Provider)(nil)
 	_ provider.ObjectDeleter     = (*Provider)(nil)
 	_ provider.MultipartUploader = (*Provider)(nil)
+	_ provider.PrefixLister      = (*Provider)(nil)
 )
 
 // New creates a new S3 provider with the given configuration.
@@ -160,6 +161,43 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 	}
 
 	return result, nil
+}
+
+func (p *Provider) ListCommonPrefixes(ctx context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	maxKeys := clampMaxKeys(opts.MaxKeys, p.maxKeys)
+
+	input := &s3.ListObjectsV2Input{
+		Bucket:    aws.String(p.bucket),
+		Delimiter: aws.String(opts.Delimiter),
+		MaxKeys:   aws.Int32(int32(maxKeys)),
+	}
+
+	if opts.Prefix != "" {
+		input.Prefix = aws.String(opts.Prefix)
+	}
+
+	if opts.ContinuationToken != "" {
+		input.ContinuationToken = aws.String(opts.ContinuationToken)
+	}
+
+	out, err := p.client.ListObjectsV2(ctx, input)
+	if err != nil {
+		return nil, p.wrapError("ListCommonPrefixes", "", err)
+	}
+
+	prefixes := make([]string, 0, len(out.CommonPrefixes))
+	for _, cp := range out.CommonPrefixes {
+		prefixes = append(prefixes, aws.ToString(cp.Prefix))
+	}
+
+	res := &provider.ListCommonPrefixesResult{
+		Prefixes:    prefixes,
+		IsTruncated: aws.ToBool(out.IsTruncated),
+	}
+	if out.NextContinuationToken != nil {
+		res.ContinuationToken = *out.NextContinuationToken
+	}
+	return res, nil
 }
 
 // Head returns metadata for a single object.

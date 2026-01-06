@@ -45,7 +45,7 @@ func TestTransfer_Copy_SkipOnExists(t *testing.T) {
 	w := output.NewJSONLWriter(&buf, "job-123", "s3")
 	defer w.Close()
 
-	tx := transfer.New(src, dst, m, w, "job-123", transfer.Config{Concurrency: 4, OnExists: "skip", Mode: "copy", PathTemplate: "{dir[0]}/{filename}", Dedup: transfer.DedupConfig{Enabled: false, Strategy: "none"}})
+	tx := transfer.New(src, dst, m, w, "job-123", transfer.Config{Concurrency: 4, OnExists: "skip", Mode: "copy", PathTemplate: "{dir[0]}/{filename}", Sharding: transfer.ShardingConfig{Enabled: true, Depth: 1, ListConcurrency: 4, Delimiter: "/"}, Dedup: transfer.DedupConfig{Enabled: false, Strategy: "none"}})
 	_, err = tx.Run(ctx)
 	require.NoError(t, err)
 

@@ -91,6 +91,9 @@ func showTransferPlan(m *manifest.TransferManifest) error {
 	}
 	fmt.Printf("Workers:  %d\n", m.Transfer.Concurrency)
 	fmt.Printf("OnExists: %s\n", m.Transfer.OnExists)
+	if m.Transfer.Sharding.Enabled {
+		fmt.Printf("Sharding: enabled=true depth=%d max_shards=%d list_concurrency=%d delimiter=%q\n", m.Transfer.Sharding.Depth, m.Transfer.Sharding.MaxShards, m.Transfer.Sharding.ListConcurrency, m.Transfer.Sharding.Delimiter)
+	}
 	fmt.Printf("Dedup:    enabled=%v strategy=%s\n", m.Transfer.Dedup.DedupEnabled(), m.Transfer.Dedup.Strategy)
 	fmt.Printf("Preflight: mode=%s probe_strategy=%s probe_prefix=%s\n", m.Transfer.Preflight.Mode, m.Transfer.Preflight.ProbeStrategy, m.Transfer.Preflight.ProbePrefix)
 	if m.Transfer.PathTemplate != "" {
@@ -171,6 +174,13 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 		OnExists:     m.Transfer.OnExists,
 		Mode:         m.Transfer.Mode,
 		PathTemplate: m.Transfer.PathTemplate,
+		Sharding: transfer.ShardingConfig{
+			Enabled:         m.Transfer.Sharding.Enabled,
+			Depth:           m.Transfer.Sharding.Depth,
+			MaxShards:       m.Transfer.Sharding.MaxShards,
+			ListConcurrency: m.Transfer.Sharding.ListConcurrency,
+			Delimiter:       m.Transfer.Sharding.Delimiter,
+		},
 		Dedup: transfer.DedupConfig{
 			Enabled:  m.Transfer.Dedup.DedupEnabled(),
 			Strategy: m.Transfer.Dedup.Strategy,

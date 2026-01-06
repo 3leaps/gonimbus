@@ -39,45 +39,45 @@ match:
     - "**/_temporary/**"
 
 transfer:
-  mode: copy              # copy or move
-  concurrency: 16         # parallel workers
-  on_exists: skip         # skip, overwrite, or fail
-  path_template: ""       # optional path transformation
+  mode: copy # copy or move
+  concurrency: 16 # parallel workers
+  on_exists: skip # skip, overwrite, or fail
+  path_template: "" # optional path transformation
   dedup:
     enabled: true
-    strategy: etag        # etag, key, or none
+    strategy: etag # etag, key, or none
   preflight:
-    mode: write-probe     # plan-only, read-safe, or write-probe
+    mode: write-probe # plan-only, read-safe, or write-probe
     probe_strategy: multipart-abort
 
 output:
-  destination: stdout     # or file:/path/to/output.jsonl
+  destination: stdout # or file:/path/to/output.jsonl
 ```
 
 ## Transfer Modes
 
-| Mode | Description |
-|------|-------------|
-| `copy` | Copy objects, keep source intact (default) |
+| Mode   | Description                                       |
+| ------ | ------------------------------------------------- |
+| `copy` | Copy objects, keep source intact (default)        |
 | `move` | Copy objects, delete source after successful copy |
 
 ## On-Exists Behavior
 
-| Setting | Description |
-|---------|-------------|
-| `skip` | Skip if target exists (default) |
+| Setting     | Description                     |
+| ----------- | ------------------------------- |
+| `skip`      | Skip if target exists (default) |
 | `overwrite` | Replace existing target objects |
-| `fail` | Error if target exists |
+| `fail`      | Error if target exists          |
 
 ## Deduplication
 
 When `on_exists: skip`, deduplication prevents redundant transfers:
 
-| Strategy | Comparison | Use Case |
-|----------|------------|----------|
-| `etag` | Compare ETags | Same content detection (default) |
-| `key` | Key exists | Skip if target key exists |
-| `none` | Disabled | Always transfer |
+| Strategy | Comparison    | Use Case                         |
+| -------- | ------------- | -------------------------------- |
+| `etag`   | Compare ETags | Same content detection (default) |
+| `key`    | Key exists    | Skip if target key exists        |
+| `none`   | Disabled      | Always transfer                  |
 
 **Note:** ETag comparison may not work reliably for multipart uploads or server-side encrypted objects.
 
@@ -87,11 +87,11 @@ The `path_template` field transforms source keys to target keys during transfer.
 
 ### Supported Placeholders
 
-| Placeholder | Description | Example Input | Example Output |
-|-------------|-------------|---------------|----------------|
-| `{filename}` | Final path segment | `a/b/c.txt` | `c.txt` |
-| `{dir[n]}` | Nth directory (0-based) | `a/b/c.txt` with `{dir[0]}` | `a` |
-| `{key}` | Full source key | `a/b/c.txt` | `a/b/c.txt` |
+| Placeholder  | Description             | Example Input               | Example Output |
+| ------------ | ----------------------- | --------------------------- | -------------- |
+| `{filename}` | Final path segment      | `a/b/c.txt`                 | `c.txt`        |
+| `{dir[n]}`   | Nth directory (0-based) | `a/b/c.txt` with `{dir[0]}` | `a`            |
+| `{key}`      | Full source key         | `a/b/c.txt`                 | `a/b/c.txt`    |
 
 ### Examples
 
@@ -141,11 +141,11 @@ Transfer operations run preflight checks before enumeration to fail fast on perm
 
 ### Preflight Modes
 
-| Mode | Provider Calls | Use Case |
-|------|---------------|----------|
-| `plan-only` | None | Validate manifest syntax only |
-| `read-safe` | List, Head, Get | Validate read permissions |
-| `write-probe` | Above + write probe | Validate write permissions |
+| Mode          | Provider Calls      | Use Case                      |
+| ------------- | ------------------- | ----------------------------- |
+| `plan-only`   | None                | Validate manifest syntax only |
+| `read-safe`   | List, Head, Get     | Validate read permissions     |
+| `write-probe` | Above + write probe | Validate write permissions    |
 
 ### Capability Checks
 
@@ -158,10 +158,10 @@ Preflight validates these capabilities in fail-fast order:
 
 ### Write Probe Strategies
 
-| Strategy | Operation | Side Effects |
-|----------|-----------|--------------|
-| `multipart-abort` | Create + abort multipart upload | None (preferred) |
-| `put-delete` | Put 0-byte object + delete | Minimal (fallback) |
+| Strategy          | Operation                       | Side Effects       |
+| ----------------- | ------------------------------- | ------------------ |
+| `multipart-abort` | Create + abort multipart upload | None (preferred)   |
+| `put-delete`      | Put 0-byte object + delete      | Minimal (fallback) |
 
 ## Output Records
 
@@ -226,12 +226,12 @@ For transfers between different AWS accounts, use separate credentials:
 source:
   provider: s3
   bucket: source-bucket
-  profile: source-account  # Uses ~/.aws/credentials [source-account]
+  profile: source-account # Uses ~/.aws/credentials [source-account]
 
 target:
   provider: s3
   bucket: target-bucket
-  profile: target-account  # Uses ~/.aws/credentials [target-account]
+  profile: target-account # Uses ~/.aws/credentials [target-account]
 ```
 
 Or use environment variables with role assumption.
@@ -256,7 +256,7 @@ target:
 transfer:
   preflight:
     mode: write-probe
-    probe_strategy: put-delete  # Use fallback for Wasabi
+    probe_strategy: put-delete # Use fallback for Wasabi
 ```
 
 ## Best Practices

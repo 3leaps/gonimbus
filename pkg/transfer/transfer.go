@@ -13,6 +13,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/shard"
 )
 
 type Config struct {
@@ -21,6 +22,16 @@ type Config struct {
 	Dedup        DedupConfig
 	Mode         string // copy | move
 	PathTemplate string
+
+	Sharding ShardingConfig
+}
+
+type ShardingConfig struct {
+	Enabled         bool
+	Depth           int
+	MaxShards       int
+	ListConcurrency int
+	Delimiter       string
 }
 
 type DedupConfig struct {
@@ -79,6 +90,16 @@ func New(src provider.Provider, dst provider.Provider, matcher *match.Matcher, w
 		cfg.Dedup.Strategy = DefaultConfig().Dedup.Strategy
 	}
 
+	if cfg.Sharding.Depth == 0 {
+		cfg.Sharding.Depth = 1
+	}
+	if cfg.Sharding.ListConcurrency == 0 {
+		cfg.Sharding.ListConcurrency = 16
+	}
+	if cfg.Sharding.Delimiter == "" {
+		cfg.Sharding.Delimiter = "/"
+	}
+
 	var mapper *PathTemplate
 	if cfg.PathTemplate != "" {
 		tpl, err := CompilePathTemplate(cfg.PathTemplate)
@@ -106,20 +127,33 @@ func (t *Transfer) Run(ctx context.Context) (*Summary, error) {
 	workCh := make(chan objectItem, 1000)
 	errCh := make(chan error, 1)
 
+	// Listing stage: bounded prefix enumeration.
+	prefixCh := make(chan string, 1024)
 	var listWg sync.WaitGroup
-	for _, pfx := range prefixes {
-		pfx := pfx
+	for i := 0; i < t.cfg.Sharding.ListConcurrency; i++ {
 		listWg.Add(1)
 		go func() {
 			defer listWg.Done()
-			if err := t.listPrefix(ctx, pfx, listCh); err != nil {
-				select {
-				case errCh <- err:
-				default:
+			for prefix := range prefixCh {
+				if err := t.listPrefix(ctx, prefix, listCh); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
 				}
 			}
 		}()
 	}
+
+	go func() {
+		defer close(prefixCh)
+		for _, pfx := range prefixes {
+			for _, shardPrefix := range t.expandShardPrefixes(ctx, pfx) {
+				prefixCh <- shardPrefix
+			}
+		}
+	}()
 
 	go func() {
 		listWg.Wait()
@@ -176,6 +210,25 @@ func (t *Transfer) Run(ctx context.Context) (*Summary, error) {
 type objectItem struct {
 	summary provider.ObjectSummary
 	prefix  string
+}
+
+func (t *Transfer) expandShardPrefixes(ctx context.Context, basePrefix string) []string {
+	if !t.cfg.Sharding.Enabled {
+		return []string{basePrefix}
+	}
+
+	shards, err := shard.Discover(ctx, t.src, basePrefix, shard.Config{
+		Enabled:         true,
+		Depth:           t.cfg.Sharding.Depth,
+		MaxShards:       t.cfg.Sharding.MaxShards,
+		ListConcurrency: t.cfg.Sharding.ListConcurrency,
+		Delimiter:       t.cfg.Sharding.Delimiter,
+	})
+	if err != nil {
+		// Best-effort: fall back to base prefix to avoid hard-failing.
+		return []string{basePrefix}
+	}
+	return shards
 }
 
 func (t *Transfer) listPrefix(ctx context.Context, prefix string, out chan<- objectItem) error {

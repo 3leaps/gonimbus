@@ -196,6 +196,44 @@
           "type": "string",
           "description": "Optional path template for mapping source keys to target keys"
         },
+        "sharding": {
+          "type": "object",
+          "description": "Prefix sharding configuration for parallel enumeration",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable delimiter-based prefix sharding"
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8,
+              "default": 1,
+              "description": "Shard depth (number of delimiter levels to expand)"
+            },
+            "max_shards": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Maximum number of shard prefixes to use (0 = no limit)"
+            },
+            "list_concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128,
+              "default": 16,
+              "description": "Concurrent shard listing workers (bounded; separate from transfer concurrency)"
+            },
+            "delimiter": {
+              "type": "string",
+              "default": "/",
+              "minLength": 1,
+              "description": "Delimiter used for shard discovery (S3 typically '/')"
+            }
+          }
+        },
         "preflight": {
           "$ref": "#/$defs/preflight"
         }

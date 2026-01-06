@@ -71,6 +71,9 @@ type TransferConfig struct {
 	// PathTemplate optionally maps source keys to target keys.
 	PathTemplate string `json:"path_template,omitempty" yaml:"path_template,omitempty"`
 
+	// Sharding configures delimiter-based prefix sharding for enumeration.
+	Sharding ShardingConfig `json:"sharding,omitempty" yaml:"sharding,omitempty"`
+
 	// Preflight configures permission checks and provider probes.
 	Preflight PreflightConfig `json:"preflight,omitempty" yaml:"preflight,omitempty"`
 }
@@ -79,6 +82,18 @@ type TransferConfig struct {
 type DedupConfig struct {
 	Enabled  *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+}
+
+// ShardingConfig configures delimiter-based prefix sharding for enumeration.
+//
+// This allows large buckets to be enumerated in parallel without relying on a
+// single flat list stream.
+type ShardingConfig struct {
+	Enabled         bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Depth           int    `json:"depth,omitempty" yaml:"depth,omitempty"`
+	MaxShards       int    `json:"max_shards,omitempty" yaml:"max_shards,omitempty"`
+	ListConcurrency int    `json:"list_concurrency,omitempty" yaml:"list_concurrency,omitempty"`
+	Delimiter       string `json:"delimiter,omitempty" yaml:"delimiter,omitempty"`
 }
 
 const (
@@ -96,6 +111,10 @@ const (
 
 	// DefaultDedupStrategy is the default dedup strategy.
 	DefaultDedupStrategy = "etag"
+
+	DefaultShardDepth           = 1
+	DefaultShardListConcurrency = 16
+	DefaultShardDelimiter       = "/"
 )
 
 // ApplyDefaults fills in default values for optional fields.
@@ -116,6 +135,16 @@ func (m *TransferManifest) ApplyDefaults() {
 	if m.Transfer.Dedup.Strategy == "" {
 		m.Transfer.Dedup.Strategy = DefaultDedupStrategy
 	}
+	if m.Transfer.Sharding.Depth == 0 {
+		m.Transfer.Sharding.Depth = DefaultShardDepth
+	}
+	if m.Transfer.Sharding.ListConcurrency == 0 {
+		m.Transfer.Sharding.ListConcurrency = DefaultShardListConcurrency
+	}
+	if m.Transfer.Sharding.Delimiter == "" {
+		m.Transfer.Sharding.Delimiter = DefaultShardDelimiter
+	}
+
 	if m.Transfer.Preflight.Mode == "" {
 		m.Transfer.Preflight.Mode = DefaultPreflightMode
 	}

@@ -38,3 +38,23 @@ type MultipartUploader interface {
 type ObjectGetter interface {
 	GetObject(ctx context.Context, key string) (body io.ReadCloser, contentLength int64, err error)
 }
+
+// PrefixLister supports delimiter-based prefix discovery.
+//
+// For S3 this maps to ListObjectsV2 with a Delimiter.
+type PrefixLister interface {
+	ListCommonPrefixes(ctx context.Context, opts ListCommonPrefixesOptions) (*ListCommonPrefixesResult, error)
+}
+
+type ListCommonPrefixesOptions struct {
+	Prefix            string
+	Delimiter         string
+	ContinuationToken string
+	MaxKeys           int
+}
+
+type ListCommonPrefixesResult struct {
+	Prefixes          []string
+	ContinuationToken string
+	IsTruncated       bool
+}
