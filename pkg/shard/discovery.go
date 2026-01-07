@@ -3,6 +3,9 @@ package shard
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
+	"sync/atomic"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -40,23 +43,19 @@ func Discover(ctx context.Context, p provider.Provider, basePrefix string, cfg C
 		delimiter = "/"
 	}
 
+	listConcurrency := cfg.ListConcurrency
+	if listConcurrency <= 0 {
+		listConcurrency = 1
+	}
+
 	current := []string{basePrefix}
 	for i := 0; i < depth; i++ {
-		next := make([]string, 0)
-		for _, prefix := range current {
-			children, err := listAllPrefixes(ctx, lister, prefix, delimiter)
-			if err != nil {
-				return nil, err
-			}
-			if len(children) == 0 {
-				next = append(next, prefix)
-				continue
-			}
-			next = append(next, children...)
-			if cfg.MaxShards > 0 && len(next) >= cfg.MaxShards {
-				return next[:cfg.MaxShards], nil
-			}
+		next, err := expandLevel(ctx, lister, current, delimiter, listConcurrency, cfg.MaxShards)
+		if err != nil {
+			return nil, err
 		}
+		// Keep deterministic ordering for plans/tests.
+		sort.Strings(next)
 		current = next
 	}
 
@@ -64,6 +63,76 @@ func Discover(ctx context.Context, p provider.Provider, basePrefix string, cfg C
 		return current[:cfg.MaxShards], nil
 	}
 	return current, nil
+}
+
+func expandLevel(ctx context.Context, lister provider.PrefixLister, prefixes []string, delimiter string, concurrency int, maxShards int) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+
+	workCh := make(chan string, len(prefixes))
+	for _, p := range prefixes {
+		workCh <- p
+	}
+	close(workCh)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var total atomic.Int64
+	var mu sync.Mutex
+	var out []string
+	var firstErr atomic.Value
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for prefix := range workCh {
+				if ctx.Err() != nil {
+					return
+				}
+
+				children, err := listAllPrefixes(ctx, lister, prefix, delimiter)
+				if err != nil {
+					if firstErr.Load() == nil {
+						firstErr.Store(err)
+						cancel()
+					}
+					return
+				}
+
+				mu.Lock()
+				if len(children) == 0 {
+					out = append(out, prefix)
+					total.Add(1)
+				} else {
+					out = append(out, children...)
+					total.Add(int64(len(children)))
+				}
+				mu.Unlock()
+
+				if maxShards > 0 && total.Load() >= int64(maxShards) {
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err := firstErr.Load(); err != nil {
+		return nil, err.(error)
+	}
+
+	if maxShards > 0 && len(out) > maxShards {
+		out = out[:maxShards]
+	}
+	return out, nil
 }
 
 func listAllPrefixes(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string) ([]string, error) {
