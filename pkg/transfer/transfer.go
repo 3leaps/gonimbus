@@ -23,6 +23,11 @@ type Config struct {
 	Mode         string // copy | move
 	PathTemplate string
 
+	// RetryBufferMaxMemoryBytes controls how large an object we buffer in memory to
+	// make the PUT request body seekable for SDK retries.
+	// Larger objects are spooled to a temp file.
+	RetryBufferMaxMemoryBytes int64
+
 	Sharding ShardingConfig
 }
 
@@ -88,6 +93,10 @@ func New(src provider.Provider, dst provider.Provider, matcher *match.Matcher, w
 	}
 	if cfg.Dedup.Strategy == "" {
 		cfg.Dedup.Strategy = DefaultConfig().Dedup.Strategy
+	}
+
+	if cfg.RetryBufferMaxMemoryBytes == 0 {
+		cfg.RetryBufferMaxMemoryBytes = DefaultRetryBufferMaxMemoryBytes
 	}
 
 	if cfg.Sharding.Depth == 0 {
@@ -296,9 +305,14 @@ func (t *Transfer) transferOne(ctx context.Context, obj provider.ObjectSummary) 
 	if err != nil {
 		return err
 	}
-	defer func() { _ = body.Close() }()
 
-	if err := putter.PutObject(ctx, dstKey, body, size); err != nil {
+	retryBody, err := newRetryableBody(ctx, body, size, t.cfg.RetryBufferMaxMemoryBytes)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = retryBody.Close() }()
+
+	if err := putter.PutObject(ctx, dstKey, retryBody.Reader(), size); err != nil {
 		return err
 	}
 
