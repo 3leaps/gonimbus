@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-01-XX (in progress)
+
+### Added
+
+- **Transfer Engine** (`pkg/transfer/`, `internal/cmd/transfer.go`)
+  - Manifest-driven copy/move operations between S3 buckets
+  - `gonimbus transfer --job manifest.yaml` CLI command
+  - Support for same-bucket, cross-account, and cross-provider transfers
+  - Configurable concurrency and `on_exists` behavior (skip, overwrite, fail)
+  - Path templates for destination key transformation (`{key}`, `{basename}`, `{ext}`)
+
+- **Preflight Permission Probing** (`pkg/preflight/`, `internal/cmd/preflight.go`)
+  - Pre-transfer capability verification (read, write, delete permissions)
+  - `gonimbus preflight --job manifest.yaml` standalone command
+  - Zero-side-effect probes: `multipart-abort` (preferred) and `put-delete` strategies
+  - Detailed JSONL preflight records with per-capability results
+  - Documentation: `docs/appnotes/preflight.md`
+
+- **Prefix Sharding for Parallel Enumeration** (`pkg/shard/`)
+  - `sharding.enabled`, `sharding.depth`, `sharding.list_concurrency` manifest options
+  - Parallel prefix discovery using delimiter listing
+  - Bounded concurrency with configurable worker pools
+  - Up to 14x speedup for multi-level prefix trees (tested with 4K prefixes, scales to millions)
+  - Live benchmark test: `pkg/shard/discovery_benchmark_test.go`
+
+- **Documentation**
+  - Transfer operations user guide: `docs/user-guide/transfer.md`
+  - Preflight permission probe app note: `docs/appnotes/preflight.md`
+
+### Changed
+
+- Preflight probe ordering: write probes now run before read probes for faster fail-fast
+- Transfer manifest schema extended with `sharding` and `path_template` fields
+
+### Fixed
+
+- **Retryable PUT Bodies** (`pkg/transfer/`)
+  - Fixed "failed to rewind transport stream for retry" errors on transient failures
+  - Small objects now buffered with seekable wrapper for SDK retry support
+
+### Performance
+
+- **Parallel Prefix Discovery**: 14x speedup at 32 concurrency for multi-level prefix trees
+  - Sequential: 21.2s → Parallel: 1.5s (tested with 4K prefixes, designed for millions)
+  - Recommended: `list_concurrency: 16-32` for large buckets
+
 ## [0.1.1] - 2026-01-05
 
 ### Added
@@ -100,6 +146,7 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/3leaps/gonimbus/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/3leaps/gonimbus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/3leaps/gonimbus/releases/tag/v0.1.0

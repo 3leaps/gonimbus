@@ -4,6 +4,91 @@ This file contains release notes for the three most recent releases in reverse c
 
 ---
 
+## v0.1.2 (2026-01-XX) - In Progress
+
+**Transfer Engine & Parallel Discovery**
+
+This release adds a full transfer engine for copy/move operations between S3 buckets, preflight permission probing, and parallel prefix discovery with up to 14x speedup for large-scale enumeration.
+
+### Highlights
+
+- **Transfer Operations**: Copy and move objects between buckets with manifest-driven configuration
+- **Preflight Probing**: Verify read/write/delete permissions before transfer with zero-side-effect probes
+- **Parallel Discovery**: 14x faster prefix enumeration with bounded concurrency (scales to millions of objects)
+- **Cross-Provider Support**: Same-bucket, cross-account, and cross-provider (AWS → R2/Wasabi) transfers
+- **Retry Resilience**: Fixed stream retry issues with seekable buffering for PUT operations
+
+### New Commands
+
+```bash
+# Run a transfer job (copy objects between buckets)
+gonimbus transfer --job transfer-manifest.yaml
+
+# Check permissions before transfer (dry-run)
+gonimbus preflight --job transfer-manifest.yaml
+
+# Quick copy with sharding for large buckets
+gonimbus transfer --job manifest.yaml  # with sharding.enabled: true
+```
+
+### Transfer Manifest Example
+
+```yaml
+version: "1.0"
+source:
+  provider: s3
+  bucket: source-bucket
+  region: us-east-1
+
+target:
+  provider: s3
+  bucket: target-bucket
+  region: us-west-2
+
+match:
+  includes:
+    - "data/**/*.parquet"
+
+transfer:
+  mode: copy
+  concurrency: 32
+  on_exists: skip
+  path_template: "archive/{key}"
+  sharding:
+    enabled: true
+    depth: 2
+    list_concurrency: 16
+```
+
+### Performance Benchmarks
+
+Parallel prefix discovery on multi-level prefix trees (tested with 100K objects, 4K prefixes):
+
+| Configuration | Time | Speedup |
+|---------------|------|---------|
+| Sequential | 21.2s | 1.0x |
+| Parallel (8 workers) | 3.2s | 6.6x |
+| Parallel (16 workers) | 2.2s | 9.5x |
+| Parallel (32 workers) | 1.5s | **14x** |
+
+Designed for buckets with millions of objects - speedup increases with prefix count.
+
+### For Operators
+
+- Use `sharding.enabled: true` with appropriate `depth` for buckets with millions of objects
+- `list_concurrency: 16` is the recommended default; 32 for very large workloads
+- `on_exists: overwrite` is fastest for initial migrations; `skip` for incremental sync
+- Preflight probes use `multipart-abort` by default (zero storage side effects)
+
+### Bug Fixes
+
+- Fixed "failed to rewind transport stream for retry" errors during transfer
+- Small objects now properly buffered for SDK retry support
+
+See [docs/user-guide/transfer.md](docs/user-guide/transfer.md) for complete transfer documentation.
+
+---
+
 ## v0.1.1 (2026-01-05)
 
 **Enterprise Authentication & Test Infrastructure**
