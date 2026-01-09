@@ -77,6 +77,31 @@ func TestShowCrawlPlan(t *testing.T) {
 				"Output:      results.jsonl",
 			},
 		},
+		{
+			name: "with filters",
+			manifest: &manifest.Manifest{
+				Connection: manifest.ConnectionConfig{
+					Provider: "s3",
+					Bucket:   "test-bucket",
+				},
+				Match: manifest.MatchConfig{
+					Includes: []string{"data/**/*.parquet"},
+					Filters: &manifest.FilterConfig{
+						Size:     &manifest.SizeFilterConfig{Min: "1KB", Max: "100MB"},
+						Modified: &manifest.DateFilterConfig{After: "2024-01-01", Before: "2024-12-31"},
+						KeyRegex: "\\.parquet$",
+					},
+				},
+				Crawl:  manifest.CrawlConfig{Concurrency: 5},
+				Output: manifest.OutputConfig{Destination: "stdout"},
+			},
+			contains: []string{
+				"Filters:",
+				"Size:      min=1KB max=100MB",
+				"Modified:  after=2024-01-01 before=2024-12-31",
+				"Key Regex: \\.parquet$",
+			},
+		},
 	}
 
 	for _, tt := range tests {

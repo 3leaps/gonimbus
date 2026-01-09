@@ -83,6 +83,7 @@ type Summary struct {
 type Crawler struct {
 	provider provider.Provider
 	matcher  *match.Matcher
+	filter   *match.CompositeFilter // Optional metadata filter
 	writer   output.Writer
 	config   Config
 	jobID    string
@@ -91,10 +92,11 @@ type Crawler struct {
 	limiter *rate.Limiter
 
 	// Atomic counters for stats
-	objectsListed  atomic.Int64
-	objectsMatched atomic.Int64
-	bytesTotal     atomic.Int64
-	errorCount     atomic.Int64
+	objectsListed   atomic.Int64
+	objectsMatched  atomic.Int64
+	objectsFiltered atomic.Int64 // Objects that passed glob but failed filter
+	bytesTotal      atomic.Int64
+	errorCount      atomic.Int64
 }
 
 // New creates a new crawler.
@@ -105,6 +107,8 @@ type Crawler struct {
 //   - w: Writer for JSONL output
 //   - jobID: Correlation ID for this crawl job
 //   - cfg: Crawler configuration (use DefaultConfig() as base)
+//
+// Use WithFilter() to add metadata filters after creation.
 func New(p provider.Provider, m *match.Matcher, w output.Writer, jobID string, cfg Config) *Crawler {
 	// Apply defaults for zero values
 	if cfg.Concurrency <= 0 {
@@ -130,6 +134,14 @@ func New(p provider.Provider, m *match.Matcher, w output.Writer, jobID string, c
 		c.limiter = rate.NewLimiter(rate.Limit(cfg.RateLimit), 1)
 	}
 
+	return c
+}
+
+// WithFilter sets an optional metadata filter for the crawler.
+// Filters are applied after glob pattern matching with AND semantics.
+// Returns the crawler for method chaining.
+func (c *Crawler) WithFilter(f *match.CompositeFilter) *Crawler {
+	c.filter = f
 	return c
 }
 
@@ -411,7 +423,8 @@ func (c *Crawler) listPrefix(ctx context.Context, prefix string, out chan<- obje
 	return nil
 }
 
-// runMatcher filters objects and forwards matches to the writer channel.
+// runMatcher filters objects by glob patterns and optional metadata filters,
+// then forwards matches to the writer channel.
 func (c *Crawler) runMatcher(ctx context.Context, in <-chan objectItem, out chan<- objectItem) {
 	for {
 		select {
@@ -422,16 +435,24 @@ func (c *Crawler) runMatcher(ctx context.Context, in <-chan objectItem, out chan
 				return // Input channel closed
 			}
 
-			// Apply pattern matching
-			if c.matcher.Match(item.summary.Key) {
-				c.objectsMatched.Add(1)
-				c.bytesTotal.Add(item.summary.Size)
+			// Apply glob pattern matching first
+			if !c.matcher.Match(item.summary.Key) {
+				continue
+			}
 
-				select {
-				case <-ctx.Done():
-					return
-				case out <- item:
-				}
+			// Apply optional metadata filters (size, date, regex)
+			if c.filter != nil && !c.filter.Match(&item.summary) {
+				c.objectsFiltered.Add(1)
+				continue
+			}
+
+			c.objectsMatched.Add(1)
+			c.bytesTotal.Add(item.summary.Size)
+
+			select {
+			case <-ctx.Done():
+				return
+			case out <- item:
 			}
 		}
 	}

@@ -99,6 +99,61 @@
           "type": "boolean",
           "default": false,
           "description": "Include hidden files (starting with .)"
+        },
+        "filters": {
+          "$ref": "#/$defs/filters"
+        }
+      }
+    },
+    "filters": {
+      "type": "object",
+      "description": "Optional metadata-based filters applied after glob matching",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "$ref": "#/$defs/size_filter"
+        },
+        "modified": {
+          "$ref": "#/$defs/date_filter"
+        },
+        "key_regex": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Regex pattern applied to object keys after glob matching"
+        }
+      }
+    },
+    "size_filter": {
+      "type": "object",
+      "description": "Object size constraints",
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Minimum size (inclusive), e.g. 1KB or 100MiB"
+        },
+        "max": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Maximum size (inclusive), e.g. 1GB or 1GiB"
+        }
+      }
+    },
+    "date_filter": {
+      "type": "object",
+      "description": "Last-modified date range constraints (exclusive bounds)",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Only objects modified after this time (exclusive)"
+        },
+        "before": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Only objects modified before this time (exclusive)"
         }
       }
     },

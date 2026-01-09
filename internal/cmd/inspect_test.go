@@ -121,7 +121,7 @@ func TestListObjects_ErrorPaths(t *testing.T) {
 			inspectLimit = 100
 			defer func() { inspectLimit = oldLimit }()
 
-			_, err := listObjects(context.Background(), mock, tt.uri)
+			_, err := listObjects(context.Background(), mock, tt.uri, nil)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -254,7 +254,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 			inspectLimit = 100
 			defer func() { inspectLimit = oldLimit }()
 
-			objects, err := listObjects(context.Background(), mock, tt.uri)
+			objects, err := listObjects(context.Background(), mock, tt.uri, nil)
 			require.NoError(t, err)
 
 			// Verify correct method was called

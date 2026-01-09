@@ -70,7 +70,7 @@ type ConnectionConfig struct {
 	Profile string `json:"profile,omitempty" yaml:"profile,omitempty"`
 }
 
-// MatchConfig configures object filtering by glob patterns.
+// MatchConfig configures object filtering by glob patterns and metadata filters.
 type MatchConfig struct {
 	// Includes is a list of glob patterns for objects to include.
 	// At least one pattern is required.
@@ -81,6 +81,49 @@ type MatchConfig struct {
 
 	// IncludeHidden includes hidden files (starting with .). Default: false.
 	IncludeHidden bool `json:"include_hidden,omitempty" yaml:"include_hidden,omitempty"`
+
+	// Filters specifies additional metadata-based filters. Optional.
+	// Filters are applied after glob pattern matching with AND semantics.
+	Filters *FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"`
+}
+
+// FilterConfig specifies metadata-based object filters.
+// All filters are optional and compose with AND semantics.
+type FilterConfig struct {
+	// Size specifies min/max size constraints.
+	// Supports human-readable values: "1KB", "100MiB", "1GB".
+	Size *SizeFilterConfig `json:"size,omitempty" yaml:"size,omitempty"`
+
+	// Modified specifies last-modified date range constraints.
+	// Dates are in ISO 8601 format: "2024-01-15" or "2024-01-15T10:30:00Z".
+	Modified *DateFilterConfig `json:"modified,omitempty" yaml:"modified,omitempty"`
+
+	// ContentType specifies allowed MIME types.
+	// Requires enrichment (HEAD calls) to evaluate.
+	ContentType []string `json:"content_type,omitempty" yaml:"content_type,omitempty"`
+
+	// KeyRegex is a regex pattern applied to object keys after glob matching.
+	// Use for patterns not expressible with globs, e.g., "TXN-\\d{8}".
+	KeyRegex string `json:"key_regex,omitempty" yaml:"key_regex,omitempty"`
+}
+
+// SizeFilterConfig specifies size constraints.
+type SizeFilterConfig struct {
+	// Min is the minimum size (inclusive).
+	// Supports: raw bytes "1024", base-10 "1KB", base-2 "1KiB".
+	Min string `json:"min,omitempty" yaml:"min,omitempty"`
+
+	// Max is the maximum size (inclusive).
+	Max string `json:"max,omitempty" yaml:"max,omitempty"`
+}
+
+// DateFilterConfig specifies date range constraints.
+type DateFilterConfig struct {
+	// After filters to objects modified after this time (exclusive).
+	After string `json:"after,omitempty" yaml:"after,omitempty"`
+
+	// Before filters to objects modified before this time (exclusive).
+	Before string `json:"before,omitempty" yaml:"before,omitempty"`
 }
 
 // CrawlConfig configures crawl behavior.

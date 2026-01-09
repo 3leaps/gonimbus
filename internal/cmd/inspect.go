@@ -41,6 +41,12 @@ var (
 	inspectEndpoint string
 	inspectLimit    int
 	inspectJSON     bool
+	// Filter flags
+	inspectMinSize  string
+	inspectMaxSize  string
+	inspectAfter    string
+	inspectBefore   string
+	inspectKeyRegex string
 )
 
 func init() {
@@ -51,6 +57,13 @@ func init() {
 	inspectCmd.Flags().StringVar(&inspectEndpoint, "endpoint", "", "Custom S3 endpoint")
 	inspectCmd.Flags().IntVarP(&inspectLimit, "limit", "n", 100, "Max objects to list")
 	inspectCmd.Flags().BoolVar(&inspectJSON, "json", false, "Output as JSON")
+
+	// Filter flags
+	inspectCmd.Flags().StringVar(&inspectMinSize, "min-size", "", "Minimum object size (e.g., 1KB, 100MiB)")
+	inspectCmd.Flags().StringVar(&inspectMaxSize, "max-size", "", "Maximum object size (e.g., 100MB, 1GiB)")
+	inspectCmd.Flags().StringVar(&inspectAfter, "after", "", "Only objects modified after date (ISO 8601: 2024-01-15)")
+	inspectCmd.Flags().StringVar(&inspectBefore, "before", "", "Only objects modified before date (ISO 8601: 2024-06-30)")
+	inspectCmd.Flags().StringVar(&inspectKeyRegex, "key-regex", "", "Regex pattern for object keys")
 }
 
 func runInspect(cmd *cobra.Command, args []string) error {
@@ -70,6 +83,13 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		zap.String("key", parsed.Key),
 		zap.String("pattern", parsed.Pattern))
 
+	// Build filter from CLI flags
+	filter, err := buildInspectFilter()
+	if err != nil {
+		observability.CLILogger.Error("Invalid filter", zap.Error(err))
+		return exitError(foundry.ExitInvalidArgument, "Invalid filter", err)
+	}
+
 	// Create provider
 	prov, err := createInspectProvider(ctx, parsed)
 	if err != nil {
@@ -78,7 +98,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	// List objects
-	objects, err := listObjects(ctx, prov, parsed)
+	objects, err := listObjects(ctx, prov, parsed, filter)
 	if err != nil {
 		observability.CLILogger.Error("Failed to list objects", zap.Error(err))
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to list objects", err)
@@ -89,6 +109,42 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		return outputJSON(objects)
 	}
 	return outputTable(objects)
+}
+
+// buildInspectFilter creates a composite filter from CLI flags.
+func buildInspectFilter() (*match.CompositeFilter, error) {
+	cfg := &match.FilterConfig{}
+	hasFilter := false
+
+	// Size filter
+	if inspectMinSize != "" || inspectMaxSize != "" {
+		cfg.Size = &match.SizeFilterConfig{
+			Min: inspectMinSize,
+			Max: inspectMaxSize,
+		}
+		hasFilter = true
+	}
+
+	// Date filter
+	if inspectAfter != "" || inspectBefore != "" {
+		cfg.Modified = &match.DateFilterConfig{
+			After:  inspectAfter,
+			Before: inspectBefore,
+		}
+		hasFilter = true
+	}
+
+	// Regex filter
+	if inspectKeyRegex != "" {
+		cfg.KeyRegex = inspectKeyRegex
+		hasFilter = true
+	}
+
+	if !hasFilter {
+		return nil, nil
+	}
+
+	return match.NewFilterFromConfig(cfg)
 }
 
 // createInspectProvider creates an S3 provider for inspect command.
@@ -105,8 +161,8 @@ func createInspectProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, e
 	return s3.New(ctx, cfg)
 }
 
-// listObjects lists objects matching the URI.
-func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI) ([]provider.ObjectSummary, error) {
+// listObjects lists objects matching the URI and optional filter.
+func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, filter *match.CompositeFilter) ([]provider.ObjectSummary, error) {
 	// If URI is an exact object key (not a pattern, not a prefix), use Head
 	// for precise lookup. This avoids prefix-based listing which could return
 	// unrelated objects (e.g., "object.txt" vs "object.txt.bak").
@@ -114,6 +170,10 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI) ([
 		meta, err := prov.Head(ctx, uri.Key)
 		if err != nil {
 			return nil, err
+		}
+		// Apply filter to single object
+		if filter != nil && !filter.Match(&meta.ObjectSummary) {
+			return []provider.ObjectSummary{}, nil
 		}
 		return []provider.ObjectSummary{meta.ObjectSummary}, nil
 	}
@@ -145,8 +205,13 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI) ([
 		}
 
 		for _, obj := range result.Objects {
-			// Apply pattern filter if specified
+			// Apply glob pattern filter if specified
 			if matcher != nil && !matcher.Match(obj.Key) {
+				continue
+			}
+
+			// Apply metadata filter if specified
+			if filter != nil && !filter.Match(&obj) {
 				continue
 			}
 

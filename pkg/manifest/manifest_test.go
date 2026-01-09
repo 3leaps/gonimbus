@@ -67,6 +67,14 @@ match:
     - "**/_temporary/**"
     - "**/.spark-*"
   include_hidden: true
+  filters:
+    size:
+      min: 1KB
+      max: 100MB
+    modified:
+      after: 2024-01-01
+      before: 2024-12-31
+    key_regex: "\\.parquet$"
 crawl:
   concurrency: 8
   rate_limit: 100.5
@@ -142,6 +150,14 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, []string{"data/2024/**/*.parquet", "data/2024/**/*.csv"}, m.Match.Includes)
 				assert.Equal(t, []string{"**/_temporary/**", "**/.spark-*"}, m.Match.Excludes)
 				assert.True(t, m.Match.IncludeHidden)
+				require.NotNil(t, m.Match.Filters)
+				require.NotNil(t, m.Match.Filters.Size)
+				assert.Equal(t, "1KB", m.Match.Filters.Size.Min)
+				assert.Equal(t, "100MB", m.Match.Filters.Size.Max)
+				require.NotNil(t, m.Match.Filters.Modified)
+				assert.Equal(t, "2024-01-01", m.Match.Filters.Modified.After)
+				assert.Equal(t, "2024-12-31", m.Match.Filters.Modified.Before)
+				assert.Equal(t, "\\.parquet$", m.Match.Filters.KeyRegex)
 				// Crawl
 				assert.Equal(t, 8, m.Crawl.Concurrency)
 				assert.InDelta(t, 100.5, m.Crawl.RateLimit, 0.001)

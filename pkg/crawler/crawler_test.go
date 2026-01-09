@@ -254,6 +254,39 @@ func TestCrawler_Run_PatternFiltering(t *testing.T) {
 	assert.Len(t, objects, 2)
 }
 
+func TestCrawler_Run_MetadataFiltering(t *testing.T) {
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	p := newMockProvider()
+	p.addObjects("data/",
+		provider.ObjectSummary{Key: "data/small.txt", Size: 100, LastModified: now},
+		provider.ObjectSummary{Key: "data/big.txt", Size: 2000, LastModified: now},
+	)
+
+	m, err := match.New(match.Config{Includes: []string{"data/**"}})
+	require.NoError(t, err)
+
+	f, err := match.NewFilterFromConfig(&match.FilterConfig{
+		Size: &match.SizeFilterConfig{Min: "1KB"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, f)
+
+	w := newMockWriter()
+	c := New(p, m, w, "job-123", DefaultConfig()).WithFilter(f)
+
+	summary, err := c.Run(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(2), summary.ObjectsListed)
+	assert.Equal(t, int64(1), summary.ObjectsMatched)
+	assert.Equal(t, int64(2000), summary.BytesTotal)
+
+	objects := w.getObjects()
+	assert.Len(t, objects, 1)
+	assert.Equal(t, "data/big.txt", objects[0].Key)
+}
+
 func TestCrawler_Run_HiddenFilesExcluded(t *testing.T) {
 	p := newMockProvider()
 	// Pattern ** with empty prefix means full bucket listing

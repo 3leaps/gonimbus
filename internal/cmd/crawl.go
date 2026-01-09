@@ -131,6 +131,21 @@ func showCrawlPlan(m *manifest.Manifest) error {
 		}
 	}
 	fmt.Println()
+
+	if m.Match.Filters != nil {
+		fmt.Println("Filters:")
+		if m.Match.Filters.Size != nil {
+			fmt.Printf("  Size:      min=%s max=%s\n", m.Match.Filters.Size.Min, m.Match.Filters.Size.Max)
+		}
+		if m.Match.Filters.Modified != nil {
+			fmt.Printf("  Modified:  after=%s before=%s\n", m.Match.Filters.Modified.After, m.Match.Filters.Modified.Before)
+		}
+		if m.Match.Filters.KeyRegex != "" {
+			fmt.Printf("  Key Regex: %s\n", m.Match.Filters.KeyRegex)
+		}
+		fmt.Println()
+	}
+
 	fmt.Printf("Concurrency: %d\n", m.Crawl.Concurrency)
 	if m.Crawl.RateLimit > 0 {
 		fmt.Printf("Rate Limit:  %.1f req/s\n", m.Crawl.RateLimit)
@@ -169,6 +184,12 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 		return exitError(foundry.ExitInvalidArgument, "Invalid match patterns", err)
 	}
 
+	filter, err := buildCrawlFilter(m)
+	if err != nil {
+		observability.CLILogger.Error("Invalid filters", zap.Error(err))
+		return exitError(foundry.ExitInvalidArgument, "Invalid filters", err)
+	}
+
 	// Create output writer
 	writer, cleanup, err := createWriter(m, jobID)
 	if err != nil {
@@ -201,6 +222,9 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 
 	// Create and run crawler
 	c := crawler.New(prov, matcher, writer, jobID, cfg)
+	if filter != nil {
+		c.WithFilter(filter)
+	}
 
 	observability.CLILogger.Info("Starting crawl",
 		zap.String("job_id", jobID),
@@ -229,6 +253,33 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 		zap.Duration("duration", summary.Duration))
 
 	return nil
+}
+
+func buildCrawlFilter(m *manifest.Manifest) (*match.CompositeFilter, error) {
+	if m.Match.Filters == nil {
+		return nil, nil
+	}
+
+	cfg := &match.FilterConfig{
+		KeyRegex:    m.Match.Filters.KeyRegex,
+		ContentType: m.Match.Filters.ContentType,
+	}
+
+	if m.Match.Filters.Size != nil {
+		cfg.Size = &match.SizeFilterConfig{
+			Min: m.Match.Filters.Size.Min,
+			Max: m.Match.Filters.Size.Max,
+		}
+	}
+
+	if m.Match.Filters.Modified != nil {
+		cfg.Modified = &match.DateFilterConfig{
+			After:  m.Match.Filters.Modified.After,
+			Before: m.Match.Filters.Modified.Before,
+		}
+	}
+
+	return match.NewFilterFromConfig(cfg)
 }
 
 // createProvider creates a storage provider from manifest configuration.
