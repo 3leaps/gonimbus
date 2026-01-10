@@ -202,8 +202,13 @@ func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.Delim
 			return err
 		}
 
+		// tabwriter is not safe for concurrent writes.
+		var twMu sync.Mutex
+
 		err = traversePrefixes(ctx2, lister, uri.Key, treeDelimiter, treeDepth, treeMaxObjects, treeMaxPages, treeMaxPrefixes, treeParallel, allowPrefix,
 			func(rec *output.PrefixRecord) error {
+				twMu.Lock()
+				defer twMu.Unlock()
 
 				if err := outputTreeTableRow(tw, rec); err != nil {
 					return err
@@ -227,10 +232,13 @@ func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.Delim
 		if err != nil {
 			if errorsIsContext(err) {
 				markPartial("timeout")
+				// Treat timeouts as partial results; do not hard-fail.
+			} else {
+				return err
 			}
-			return err
 		}
 
+		// Flush after traversal completes so widths are stable.
 		if err := tw.Flush(); err != nil {
 			return err
 		}
@@ -296,8 +304,10 @@ func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.Delim
 	if err != nil {
 		if errorsIsContext(err) {
 			markPartial("timeout")
+			// Treat timeouts as partial results; do not hard-fail.
+		} else {
+			return err
 		}
-		return err
 	}
 
 	dur := time.Since(start)
@@ -503,6 +513,12 @@ func summarizeDirectPrefix(
 			ContinuationToken: token,
 		})
 		if err != nil {
+			// If the context was canceled (timeout), return the context error so
+			// callers can report partial results instead of surfacing provider
+			// transport/deserialization errors.
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			return nil, nil, err
 		}
 
