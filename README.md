@@ -86,6 +86,10 @@ Stream-friendly JSONL records:
 
 Optional DuckDB sink for local indexing.
 
+## Examples
+
+See `docs/user-guide/examples/README.md` for copy/paste recipes (advanced filtering, s3-compatible endpoints, and more as this project grows).
+
 ## CLI Commands
 
 ```bash

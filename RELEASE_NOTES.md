@@ -64,12 +64,12 @@ transfer:
 
 Parallel prefix discovery on multi-level prefix trees (tested with 100K objects, 4K prefixes):
 
-| Configuration | Time | Speedup |
-|---------------|------|---------|
-| Sequential | 21.2s | 1.0x |
-| Parallel (8 workers) | 3.2s | 6.6x |
-| Parallel (16 workers) | 2.2s | 9.5x |
-| Parallel (32 workers) | 1.5s | **14x** |
+| Configuration         | Time  | Speedup |
+| --------------------- | ----- | ------- |
+| Sequential            | 21.2s | 1.0x    |
+| Parallel (8 workers)  | 3.2s  | 6.6x    |
+| Parallel (16 workers) | 2.2s  | 9.5x    |
+| Parallel (32 workers) | 1.5s  | **14x** |
 
 Designed for buckets with millions of objects - speedup increases with prefix count.
 
