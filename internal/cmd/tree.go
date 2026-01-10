@@ -312,9 +312,16 @@ func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.Delim
 
 	dur := time.Since(start)
 
+	writeCtx := ctx2
+	if writeCtx.Err() != nil {
+		// JSONLWriter refuses writes after ctx cancellation. After a timeout we
+		// still want to emit final error/summary records.
+		writeCtx = context.Background()
+	}
+
 	if partial.Load() {
 		reasons := sortedKeys(reasonsSet)
-		_ = w.WriteError(ctx2, &output.ErrorRecord{
+		_ = w.WriteError(writeCtx, &output.ErrorRecord{
 			Code:    output.ErrCodeInternal,
 			Message: "tree traversal produced partial results due to safety limits",
 			Prefix:  uri.Key,
@@ -335,7 +342,7 @@ func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.Delim
 		sum.Errors = 1
 	}
 
-	return w.WriteSummary(ctx2, sum)
+	return w.WriteSummary(writeCtx, sum)
 }
 
 func buildTreeScopeFilter(includes, excludes []string) (func(prefix string) bool, error) {
