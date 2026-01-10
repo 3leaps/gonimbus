@@ -66,13 +66,19 @@ type Record struct {
 // Prefix records are emitted by directory-like commands (tree/du).
 // The fields are intended to be stable across providers.
 type PrefixRecord struct {
-	Prefix          string `json:"prefix"`
-	Delimiter       string `json:"delimiter"`
-	ObjectsDirect   int64  `json:"objects_direct"`
-	BytesDirect     int64  `json:"bytes_direct"`
-	CommonPrefixes  int64  `json:"common_prefixes"`
-	Pages           int64  `json:"pages"`
-	Truncated       bool   `json:"truncated"`
+	Prefix    string `json:"prefix"`
+	Delimiter string `json:"delimiter"`
+
+	// Depth indicates the traversal depth of this prefix relative to the root.
+	// Wave 1 emits a single record at depth=0.
+	Depth int `json:"depth,omitempty"`
+
+	ObjectsDirect  int64 `json:"objects_direct"`
+	BytesDirect    int64 `json:"bytes_direct"`
+	CommonPrefixes int64 `json:"common_prefixes"`
+	Pages          int64 `json:"pages"`
+	Truncated      bool  `json:"truncated"`
+
 	TruncatedReason string `json:"truncated_reason,omitempty"`
 }
 

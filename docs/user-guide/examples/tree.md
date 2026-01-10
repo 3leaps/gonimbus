@@ -4,6 +4,8 @@ The `gonimbus tree` command gives a safe, directory-like summary of an object-st
 
 Wave 1 is **direct-only** (non-recursive): it does not traverse into child prefixes.
 
+Wave 2 enables **depth-limited traversal** via `--depth N`.
+
 ## Quick Start
 
 ```bash
@@ -35,6 +37,29 @@ gonimbus tree s3://my-bucket/data/ \
   --max-pages 500
 ```
 
+## Depth traversal (Wave 2)
+
+Depth traversal is still read-only (delimiter listing only), but it can visit many prefixes.
+Use the safety limits to keep traversals bounded.
+
+```bash
+# Traverse two levels under the starting prefix
+# Defaults: --max-prefixes 50000 --timeout 10m
+
+gonimbus tree s3://my-bucket/production/ --depth 2 --output table
+```
+
+Scope limiting (pathfinder-style) uses include/exclude globs applied to discovered prefixes:
+
+```bash
+# Restrict traversal to a subset of prefixes
+
+gonimbus tree s3://my-bucket/production/ \
+  --depth 4 \
+  --include 'production/kickback/**' \
+  --exclude '**/_temporary/**'
+```
+
 ## Output formats
 
 ```bash
@@ -50,4 +75,4 @@ gonimbus tree s3://my-bucket/data/ --output table
 ## Notes
 
 - `tree` requires a prefix URI (append `/`).
-- Patterns (globs) are not supported in Wave 1.
+- Prefix globs in the URI (e.g. `.../*`) are not supported; use `--include/--exclude` for traversal scoping.
