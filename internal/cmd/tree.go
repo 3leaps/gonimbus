@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -60,6 +61,7 @@ func init() {
 func runTree(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	uri := args[0]
+	start := time.Now()
 
 	parsed, err := ParseURI(uri)
 	if err != nil {
@@ -106,10 +108,14 @@ func runTree(cmd *cobra.Command, args []string) error {
 	if err := w.WritePrefix(ctx, rec); err != nil {
 		return err
 	}
+
+	dur := time.Since(start)
 	if err := w.WriteSummary(ctx, &output.SummaryRecord{
 		ObjectsFound:   rec.ObjectsDirect,
 		ObjectsMatched: rec.ObjectsDirect,
 		BytesTotal:     rec.BytesDirect,
+		Duration:       dur,
+		DurationHuman:  formatDuration(dur),
 		Prefixes:       []string{rec.Prefix},
 	}); err != nil {
 		return err
