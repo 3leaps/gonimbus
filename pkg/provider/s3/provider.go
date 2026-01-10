@@ -32,6 +32,7 @@ var (
 	_ provider.ObjectDeleter     = (*Provider)(nil)
 	_ provider.MultipartUploader = (*Provider)(nil)
 	_ provider.PrefixLister      = (*Provider)(nil)
+	_ provider.DelimiterLister   = (*Provider)(nil)
 )
 
 // New creates a new S3 provider with the given configuration.
@@ -161,6 +162,54 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 	}
 
 	return result, nil
+}
+
+func (p *Provider) ListWithDelimiter(ctx context.Context, opts provider.ListWithDelimiterOptions) (*provider.ListWithDelimiterResult, error) {
+	maxKeys := clampMaxKeys(opts.MaxKeys, p.maxKeys)
+
+	input := &s3.ListObjectsV2Input{
+		Bucket:    aws.String(p.bucket),
+		Delimiter: aws.String(opts.Delimiter),
+		MaxKeys:   aws.Int32(int32(maxKeys)),
+	}
+
+	if opts.Prefix != "" {
+		input.Prefix = aws.String(opts.Prefix)
+	}
+
+	if opts.ContinuationToken != "" {
+		input.ContinuationToken = aws.String(opts.ContinuationToken)
+	}
+
+	out, err := p.client.ListObjectsV2(ctx, input)
+	if err != nil {
+		return nil, p.wrapError("ListWithDelimiter", "", err)
+	}
+
+	objects := make([]provider.ObjectSummary, 0, len(out.Contents))
+	for _, obj := range out.Contents {
+		objects = append(objects, provider.ObjectSummary{
+			Key:          aws.ToString(obj.Key),
+			Size:         aws.ToInt64(obj.Size),
+			ETag:         cleanETag(aws.ToString(obj.ETag)),
+			LastModified: aws.ToTime(obj.LastModified),
+		})
+	}
+
+	prefixes := make([]string, 0, len(out.CommonPrefixes))
+	for _, cp := range out.CommonPrefixes {
+		prefixes = append(prefixes, aws.ToString(cp.Prefix))
+	}
+
+	res := &provider.ListWithDelimiterResult{
+		Objects:        objects,
+		CommonPrefixes: prefixes,
+		IsTruncated:    aws.ToBool(out.IsTruncated),
+	}
+	if out.NextContinuationToken != nil {
+		res.ContinuationToken = *out.NextContinuationToken
+	}
+	return res, nil
 }
 
 func (p *Provider) ListCommonPrefixes(ctx context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {

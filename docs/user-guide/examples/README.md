@@ -19,6 +19,7 @@ When dogfooding against real buckets, consider running with the global safety la
 
 ## Index
 
+- Tree (prefix summary): `docs/user-guide/examples/tree.md`
 - Advanced filtering (size/date/regex): `docs/user-guide/examples/advanced-filtering.md`
 - Transfer operations (copy/move): `docs/user-guide/transfer.md`
 

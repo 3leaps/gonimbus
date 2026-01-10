@@ -34,6 +34,9 @@ const (
 
 	// TypeSkip identifies per-object skips (dedup/on_exists).
 	TypeSkip = "gonimbus.skip.v1"
+
+	// TypePrefix identifies prefix summary records.
+	TypePrefix = "gonimbus.prefix.v1"
 )
 
 // Record is the envelope for all JSONL output.
@@ -56,6 +59,21 @@ type Record struct {
 
 	// Data contains the type-specific payload as raw JSON.
 	Data json.RawMessage `json:"data"`
+}
+
+// PrefixRecord is the data payload for prefix summaries.
+//
+// Prefix records are emitted by directory-like commands (tree/du).
+// The fields are intended to be stable across providers.
+type PrefixRecord struct {
+	Prefix          string `json:"prefix"`
+	Delimiter       string `json:"delimiter"`
+	ObjectsDirect   int64  `json:"objects_direct"`
+	BytesDirect     int64  `json:"bytes_direct"`
+	CommonPrefixes  int64  `json:"common_prefixes"`
+	Pages           int64  `json:"pages"`
+	Truncated       bool   `json:"truncated"`
+	TruncatedReason string `json:"truncated_reason,omitempty"`
 }
 
 // ObjectRecord is the data payload for object listings.

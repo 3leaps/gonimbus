@@ -26,6 +26,9 @@ type Writer interface {
 	// WriteSummary emits a summary record.
 	WriteSummary(ctx context.Context, sum *SummaryRecord) error
 
+	// WritePrefix emits a prefix summary record.
+	WritePrefix(ctx context.Context, prefix *PrefixRecord) error
+
 	// WritePreflight emits a preflight record.
 	WritePreflight(ctx context.Context, preflight *PreflightRecord) error
 
@@ -85,6 +88,10 @@ func (jw *JSONLWriter) WriteProgress(ctx context.Context, prog *ProgressRecord) 
 // WriteSummary emits a summary record.
 func (jw *JSONLWriter) WriteSummary(ctx context.Context, sum *SummaryRecord) error {
 	return jw.writeRecord(ctx, TypeSummary, sum)
+}
+
+func (jw *JSONLWriter) WritePrefix(ctx context.Context, prefix *PrefixRecord) error {
+	return jw.writeRecord(ctx, TypePrefix, prefix)
 }
 
 // WritePreflight emits a preflight record.
