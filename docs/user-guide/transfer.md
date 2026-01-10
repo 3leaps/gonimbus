@@ -8,10 +8,17 @@ The `gonimbus transfer` command copies or moves objects between S3-compatible bu
 # Validate manifest syntax
 gonimbus transfer --job transfer.yaml --plan
 
+# Safety latch (recommended when dogfooding): disable all provider-side mutations
+# This blocks both transfers and write-probe preflight.
+export GONIMBUS_READONLY=1
+
 # Run preflight checks without transferring
 gonimbus transfer --job transfer.yaml --dry-run
 
-# Execute transfer
+# Execute transfer (requires readonly disabled)
+unset GONIMBUS_READONLY
+# or: gonimbus transfer --job transfer.yaml --readonly=false
+
 gonimbus transfer --job transfer.yaml
 ```
 
@@ -138,6 +145,8 @@ Templates are validated before any transfers occur. Invalid templates (unsupport
 ## Preflight Checks
 
 Transfer operations run preflight checks before enumeration to fail fast on permission issues.
+
+**Readonly safety latch:** If `--readonly` (or `GONIMBUS_READONLY=1`) is set, Gonimbus refuses `write-probe` preflight and refuses to execute transfers.
 
 ### Preflight Modes
 

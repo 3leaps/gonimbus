@@ -121,6 +121,16 @@ Run it:
 gonimbus crawl --job my-filtered-crawl.yaml
 ```
 
+## Safety
+
+When dogfooding against real buckets, consider enabling the global safety latch:
+
+```bash
+export GONIMBUS_READONLY=1
+```
+
+This disables provider-side mutations (blocks transfers and write-probe preflight).
+
 ## Performance Guidance
 
 - Prefer **prefix-first include patterns** (e.g. `data/2026/**`) rather than `**` at bucket root.

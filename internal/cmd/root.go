@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/fulmenhq/gofulmen/appidentity"
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -18,8 +20,9 @@ import (
 )
 
 var (
-	cfgFile string
-	verbose bool
+	cfgFile  string
+	verbose  bool
+	readOnly bool
 
 	// App identity loaded from .fulmen/app.yaml
 	appIdentity *appidentity.Identity
@@ -44,6 +47,30 @@ func GetAppIdentity() *appidentity.Identity {
 	return appIdentity
 }
 
+// IsReadOnly reports whether the CLI is running with provider-side mutations
+// disabled. It can be enabled via `--readonly` or by setting the environment
+// variable `GONIMBUS_READONLY=1`.
+func IsReadOnly() bool {
+	if readOnly {
+		return true
+	}
+	if viper.GetBool("readonly") {
+		return true
+	}
+	if value, ok := os.LookupEnv("GONIMBUS_READONLY"); ok {
+		if value == "" {
+			return true
+		}
+		b, err := strconv.ParseBool(value)
+		if err == nil {
+			return b
+		}
+		// If set but unparsable, treat as enabled.
+		return true
+	}
+	return false
+}
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	// NOTE: initConfig() overwrites these from app identity.
@@ -66,9 +93,11 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (optional; defaults to app identity config path)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output (sets log level to debug)")
+	rootCmd.PersistentFlags().BoolVar(&readOnly, "readonly", false, "Disable provider-side mutations (blocks transfers and write-probe preflight)")
 
 	// Bind flags to viper
 	_ = viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
+	_ = viper.BindPFlag("readonly", rootCmd.PersistentFlags().Lookup("readonly"))
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -131,8 +160,11 @@ func initConfig() {
 		viper.SetConfigType("yaml")
 	}
 
-	// Read in environment variables with prefix from app identity
-	viper.SetEnvPrefix(appIdentity.EnvPrefix)
+	// Read in environment variables with prefix from app identity.
+	// App identity prefixes end with an underscore (e.g., "GONIMBUS_"), while
+	// Viper adds its own underscore separator. Trim the trailing underscore so
+	// env vars remain idiomatic: "GONIMBUS_READONLY", not "GONIMBUS__READONLY".
+	viper.SetEnvPrefix(strings.TrimSuffix(appIdentity.EnvPrefix, "_"))
 	viper.AutomaticEnv()
 
 	// If a config file is found, read it in
@@ -178,6 +210,9 @@ func setDefaults() {
 
 	// Worker defaults
 	viper.SetDefault("workers", 4)
+
+	// Safety defaults
+	viper.SetDefault("readonly", false)
 
 	// Debug defaults
 	viper.SetDefault("debug.enabled", false)

@@ -11,6 +11,12 @@ The goal is to keep these examples:
 
 This area is expected to expand as we add providers (GCS, etc.), multi-region/site-to-site workflows, and new operations beyond crawl/inspect.
 
+## Safety
+
+When dogfooding against real buckets, consider running with the global safety latch enabled:
+
+- `--readonly` (or `GONIMBUS_READONLY=1`) disables provider-side mutations, including `transfer` execution and `write-probe` preflight.
+
 ## Index
 
 - Advanced filtering (size/date/regex): `docs/user-guide/examples/advanced-filtering.md`

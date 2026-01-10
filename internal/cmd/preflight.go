@@ -34,7 +34,10 @@ Examples:
   gonimbus preflight crawl s3://bucket/data/**/*.parquet --mode read-safe
 
   # Write-probe: minimal opt-in side effects under probe prefix
-  gonimbus preflight write s3://bucket/ --mode write-probe --probe-strategy multipart-abort`,
+  gonimbus preflight write s3://bucket/ --mode write-probe --probe-strategy multipart-abort
+
+  # Safety latch: disable all provider-side mutations
+  gonimbus preflight crawl s3://bucket/data/**/*.parquet --mode read-safe --readonly`,
 }
 
 var preflightCrawlCmd = &cobra.Command{
@@ -65,6 +68,8 @@ func init() {
 	preflightCmd.AddCommand(preflightCrawlCmd)
 	preflightCmd.AddCommand(preflightWriteCmd)
 
+	preflightCmd.Long += "\n\nSafety:\n- --readonly (or GONIMBUS_READONLY=1) disables write-probe preflight and other provider-side mutations."
+
 	for _, c := range []*cobra.Command{preflightCrawlCmd, preflightWriteCmd} {
 		c.Flags().StringVarP(&preflightRegion, "region", "r", "", "AWS region")
 		c.Flags().StringVarP(&preflightProfile, "profile", "p", "", "AWS profile")
@@ -94,6 +99,15 @@ func runPreflightCrawl(cmd *cobra.Command, args []string) error {
 		Mode:          preflight.Mode(preflightMode),
 		ProbeStrategy: preflight.ProbeStrategy(preflightProbeStrategy),
 		ProbePrefix:   preflightProbePrefix,
+	}
+	switch spec.Mode {
+	case preflight.ModePlanOnly, preflight.ModeReadSafe, preflight.ModeWriteProbe:
+		// ok
+	default:
+		return exitError(foundry.ExitInvalidArgument, "Invalid --mode value", fmt.Errorf("unsupported preflight mode: %s", preflightMode))
+	}
+	if IsReadOnly() && spec.Mode == preflight.ModeWriteProbe {
+		return exitError(foundry.ExitInvalidArgument, "readonly mode enabled: refusing write-probe preflight", fmt.Errorf("use --mode read-safe or disable --readonly"))
 	}
 	if spec.Mode == preflight.ModePlanOnly {
 		rec := &output.PreflightRecord{
@@ -173,6 +187,15 @@ func runPreflightWrite(cmd *cobra.Command, args []string) error {
 		Mode:          preflight.Mode(preflightMode),
 		ProbeStrategy: preflight.ProbeStrategy(preflightProbeStrategy),
 		ProbePrefix:   preflightProbePrefix,
+	}
+	switch spec.Mode {
+	case preflight.ModePlanOnly, preflight.ModeWriteProbe:
+		// ok
+	default:
+		return exitError(foundry.ExitInvalidArgument, "Invalid --mode for preflight write", fmt.Errorf("use --mode write-probe or plan-only"))
+	}
+	if IsReadOnly() && spec.Mode == preflight.ModeWriteProbe {
+		return exitError(foundry.ExitInvalidArgument, "readonly mode enabled: refusing write-probe preflight", fmt.Errorf("disable --readonly or unset GONIMBUS_READONLY"))
 	}
 	if spec.Mode == preflight.ModePlanOnly {
 		rec := &output.PreflightRecord{

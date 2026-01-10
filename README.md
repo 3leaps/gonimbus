@@ -94,6 +94,8 @@ See `docs/user-guide/examples/README.md` for copy/paste recipes (advanced filter
 
 ```bash
 gonimbus crawl --job <path>    # Run crawl job (prints JSONL)
+# Safety latch: hard-disable provider-side mutations
+# gonimbus --readonly <command>
 gonimbus inspect <uri>         # Quick single-object or prefix inspection
 gonimbus doctor                # Environment/auth checks
 gonimbus serve                 # Run server mode
@@ -117,6 +119,7 @@ GONIMBUS_PORT=8080              # Server port
 GONIMBUS_HOST=localhost         # Server host
 GONIMBUS_LOG_LEVEL=info         # Log level (trace/debug/info/warn/error)
 GONIMBUS_METRICS_PORT=9090      # Metrics port
+GONIMBUS_READONLY=1             # Disable provider-side mutations
 ```
 
 Copy `.env.example` to `.env` for local development.

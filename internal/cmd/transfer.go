@@ -28,6 +28,10 @@ var transferCmd = &cobra.Command{
 This is the multi-step engine for bucket-to-bucket operations. Preflight is run
 first to fail fast on missing permissions.
 
+Safety:
+- Use --dry-run to validate without executing transfers.
+- Use --readonly (or GONIMBUS_READONLY=1) to hard-disable provider-side mutations.
+
 Examples:
   gonimbus transfer --job transfer.yaml
   gonimbus transfer --job transfer.yaml --plan
@@ -106,6 +110,15 @@ func showTransferPlan(m *manifest.TransferManifest) error {
 }
 
 func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun bool) error {
+	if IsReadOnly() {
+		if preflight.Mode(m.Transfer.Preflight.Mode) == preflight.ModeWriteProbe {
+			return exitError(foundry.ExitInvalidArgument, "readonly mode enabled: refusing write-probe preflight", fmt.Errorf("set transfer.preflight.mode=read-safe or disable --readonly"))
+		}
+		if !dryRun {
+			return exitError(foundry.ExitInvalidArgument, "readonly mode enabled: refusing to execute transfer", fmt.Errorf("use --dry-run/--plan or disable --readonly"))
+		}
+	}
+
 	jobID := uuid.New().String()
 
 	writer, cleanup, err := createTransferWriter(m, jobID)

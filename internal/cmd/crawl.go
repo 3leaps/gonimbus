@@ -162,6 +162,10 @@ func showCrawlPlan(m *manifest.Manifest) error {
 
 // executeCrawl runs the actual crawl job.
 func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
+	if IsReadOnly() && preflight.Mode(m.Crawl.Preflight.Mode) == preflight.ModeWriteProbe {
+		return exitError(foundry.ExitInvalidArgument, "readonly mode enabled: refusing write-probe preflight", fmt.Errorf("set crawl.preflight.mode=read-safe or disable --readonly"))
+	}
+
 	// Generate job ID early so we can use it in writer
 	jobID := uuid.New().String()
 

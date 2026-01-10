@@ -28,6 +28,15 @@ Preflight modes are schema-backed and appear in manifests as `crawl.preflight` (
   - Must isolate probes to a dedicated prefix (default `_gonimbus/probe/`).
   - Intended to validate: target write/delete permissions early.
 
+## Safety Latch (Readonly)
+
+Gonimbus also supports a global safety latch:
+
+- `--readonly` (or `GONIMBUS_READONLY=1`) disables provider-side mutations.
+- In readonly mode, Gonimbus refuses `write-probe` preflight and refuses to execute transfer jobs.
+
+This is intended for dogfooding on real buckets and for lower-trust automation/agents.
+
 ## Probe Strategy
 
 Provider implementations must choose the lowest-impact probe available.
