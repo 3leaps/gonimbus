@@ -49,7 +49,10 @@ Use the safety limits to keep traversals bounded.
 gonimbus tree s3://my-bucket/production/ --depth 2 --output table
 ```
 
-Scope limiting (pathfinder-style) uses include/exclude globs applied to discovered prefixes:
+Scope limiting (pathfinder-style) uses include/exclude globs applied to discovered prefixes.
+
+These are traversal-scope controls, not a general search mechanism. Patterns that require
+look-ahead (e.g. `**/needle/**`) may not reduce traversal work without an index.
 
 ```bash
 # Restrict traversal to a subset of prefixes
@@ -98,4 +101,5 @@ gonimbus tree s3://my-bucket/data/ --output table
 ## Notes
 
 - `tree` requires a prefix URI (append `/`).
-- Prefix globs in the URI (e.g. `.../*`) are not supported; use `--include/--exclude` for traversal scoping.
+- Prefix globs in the URI (e.g. `.../*`) are not supported.
+- `--include/--exclude` are traversal-scope controls (matching discovered prefixes), not a wildcard search across the whole bucket.
