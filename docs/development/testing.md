@@ -46,6 +46,17 @@ Cloud integration tests cover:
 - Built-in reset API for test isolation
 - Sufficient for S3 operations
 
+**Known Moto Limitations:**
+
+Moto is a best-effort AWS emulator and does not fully implement all S3 behaviors:
+
+| Feature                                         | Behavior                          | Mitigation                                                       |
+| ----------------------------------------------- | --------------------------------- | ---------------------------------------------------------------- |
+| `s3:CreateMultipartUpload` bucket policy denial | Ignored (succeeds despite policy) | Unit test with mock provider (`pkg/preflight/preflight_test.go`) |
+| `s3:PutObject` bucket policy denial             | Enforced correctly                | Cloud integration test validates                                 |
+
+See [CI Configuration](ci.md#cloud-integration-testing) for detailed test strategy and moto limitations.
+
 ### CLI Integration Tests
 
 CLI tests in `internal/cmd/inspect_cloudintegration_test.go` run the built binary via `exec.Command`. This approach:
