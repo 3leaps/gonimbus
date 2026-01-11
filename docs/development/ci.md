@@ -52,8 +52,70 @@ Add `set -euo pipefail` at the top of every multi-line `run` script. This catche
 
 1. **format-check**: Validates formatting using container tools (yamlfmt, prettier)
 2. **build-test**: Builds and tests the application using container tools + goneat
+3. **cloud-integration**: Runs cloud integration tests against moto (S3 emulation)
 
 Note: `actions/setup-go` installs Go inside the container job, and `golangci-lint-action` installs `golangci-lint` (not currently included in the runner image).
+
+### Cloud Integration Testing
+
+#### Infrastructure
+
+Cloud integration tests run against **moto** (`motoserver/moto:latest`), an AWS service emulator:
+
+```yaml
+services:
+  moto:
+    image: motoserver/moto:latest
+    ports:
+      - 5555:5000
+```
+
+#### Test Execution
+
+CI runs cloud integration tests directly (no make target):
+
+```bash
+go test ./... -v -tags=cloudintegration
+```
+
+Local equivalent:
+
+```bash
+make moto-start  # Start moto on localhost:5555
+make test-cloud  # Run tests with -tags=cloudintegration
+make moto-stop   # Clean up
+```
+
+#### Known Moto Limitations
+
+Moto is a best-effort AWS emulator. Some S3 behaviors are not fully implemented:
+
+| Feature                                         | Moto Behavior                                                    | Mitigation                                                                                                 |
+| ----------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `s3:CreateMultipartUpload` bucket policy denial | **Ignored** - CreateMultipartUpload succeeds despite deny policy | Unit test with stub provider (`pkg/preflight/preflight_test.go:TestWriteProbe_MultipartAbort_Denied_Unit`) |
+| `s3:PutObject` bucket policy denial             | Enforced correctly                                               | Cloud integration test validates denied path                                                               |
+
+**Impact on Test Strategy:**
+
+- **Allowed scenarios**: Validated via cloud integration tests against moto (real SDK flow)
+- **Denied scenarios**: For actions moto doesn't enforce, we use **unit tests with mock providers** to verify error handling behavior
+- **Real AWS testing**: When adding real AWS integration environments, denied-path tests can be run directly without mocks
+
+This approach ensures:
+
+- CI runs fast and deterministically (no external dependencies)
+- Critical error handling logic is tested (unit tests)
+- SDK integration is validated (cloud integration tests)
+
+#### Test File Tag Convention
+
+Files with cloud integration tests use a build constraint:
+
+```go
+//go:build cloudintegration
+```
+
+This excludes these tests from `make test` (unit tests only). They only run when `go test -tags=cloudintegration` is explicitly invoked.
 
 ### Local Development
 
