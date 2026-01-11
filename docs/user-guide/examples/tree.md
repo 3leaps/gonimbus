@@ -60,6 +60,29 @@ gonimbus tree s3://my-bucket/production/ \
   --exclude '**/_temporary/**'
 ```
 
+## Partial results (timeouts and limits)
+
+For long traversals, prefer JSONL output so you can stream results to a file and still get a well-formed terminal record set.
+
+When a traversal hits a safety bound like `--timeout` or `--max-prefixes`, Gonimbus:
+
+- streams whatever `gonimbus.prefix.v1` records were computed before stopping
+- emits a final `gonimbus.error.v1` indicating the run was partial
+- emits a final `gonimbus.summary.v1` with `errors=1`
+
+Example (timeout):
+
+```bash
+export GONIMBUS_READONLY=1
+
+# Capture streamed results for later analysis
+
+gonimbus tree s3://my-bucket/production/kickback/ \
+  --depth 3 \
+  --timeout 30s \
+  --output jsonl > tree-partial.jsonl
+```
+
 ## Output formats
 
 ```bash
