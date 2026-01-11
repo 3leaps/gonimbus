@@ -4,65 +4,82 @@ This file contains release notes for the three most recent releases in reverse c
 
 ---
 
-## v0.1.2 (2026-01-XX) - In Progress
+## v0.1.2 (2026-01-11)
 
-**Transfer Engine & Parallel Discovery**
+**Transfer Engine, Tree Command, and Advanced Filtering**
 
-This release adds a full transfer engine for copy/move operations between S3 buckets, preflight permission probing, and parallel prefix discovery with up to 14x speedup for large-scale enumeration.
+This release adds comprehensive transfer operations with preflight probing, parallel prefix discovery (14x speedup), a new tree command for prefix summaries, advanced metadata filtering, and a global readonly safety latch.
 
-### Highlights
-
-- **Transfer Operations**: Copy and move objects between buckets with manifest-driven configuration
-- **Preflight Probing**: Verify read/write/delete permissions before transfer with zero-side-effect probes
-- **Parallel Discovery**: 14x faster prefix enumeration with bounded concurrency (scales to millions of objects)
-- **Cross-Provider Support**: Same-bucket, cross-account, and cross-provider (AWS → R2/Wasabi) transfers
-- **Retry Resilience**: Fixed stream retry issues with seekable buffering for PUT operations
-
-### New Commands
+### Transfer Workflow
 
 ```bash
-# Run a transfer job (copy objects between buckets)
-gonimbus transfer --job transfer-manifest.yaml
+# Validate manifest and check permissions
+gonimbus preflight --job transfer.yaml --dry-run
 
-# Check permissions before transfer (dry-run)
-gonimbus preflight --job transfer-manifest.yaml
-
-# Quick copy with sharding for large buckets
-gonimbus transfer --job manifest.yaml  # with sharding.enabled: true
+# Execute transfer (copy or move)
+gonimbus transfer --job transfer.yaml
 ```
 
-### Transfer Manifest Example
+Features:
 
-```yaml
-version: "1.0"
-source:
-  provider: s3
-  bucket: source-bucket
-  region: us-east-1
+- Copy/move objects between buckets with path transformation
+- Same-bucket, cross-account, and cross-provider (AWS → R2/Wasabi) transfers
+- Preflight permission probing: verify read/write/delete before enumeration
+- Parallel prefix discovery with 14x speedup for large buckets
+- Deduplication: skip by ETag, key, or always transfer
 
-target:
-  provider: s3
-  bucket: target-bucket
-  region: us-west-2
+### Tree Workflow
 
-match:
-  includes:
-    - "data/**/*.parquet"
+```bash
+# Direct prefix summary (non-recursive)
+gonimbus tree s3://my-bucket/data/
 
-transfer:
-  mode: copy
-  concurrency: 32
-  on_exists: skip
-  path_template: "archive/{key}"
-  sharding:
-    enabled: true
-    depth: 2
-    list_concurrency: 16
+# Depth-limited traversal with safety limits
+gonimbus tree s3://my-bucket/production/ --depth 2 --timeout 5m
+
+# Include/exclude patterns for traversal scope
+gonimbus tree s3://my-bucket/ --depth 4 --include 'production/**' --exclude '**/_temporary/**'
 ```
+
+Features:
+
+- Directory-like summaries with table or JSONL output
+- Depth-limited traversal with bounded safety limits
+- Partial results on timeout/max limits (streamed JSONL)
+- Include/exclude patterns for pathfinder-style scope control
+
+### Inspect Workflow (Advanced Filtering)
+
+```bash
+# Size range filtering (supports KB/KiB, MB/MiB, GB/GiB)
+gonimbus inspect s3://my-bucket/data/ --min-size 1KB --max-size 100MB
+
+# Date range filtering (ISO 8601)
+gonimbus inspect s3://my-bucket/data/ --after 2024-01-01 --before 2024-06-30
+
+# Key regex filtering
+gonimbus inspect s3://my-bucket/data/ --key-regex '\.json$'
+```
+
+### Safety Features
+
+**Global Readonly Safety Latch:**
+
+```bash
+export GONIMBUS_READONLY=1
+```
+
+Blocks provider-side mutations:
+
+- Refuses transfer jobs
+- Refuses write-probe preflight
+- Intended for dogfooding and lower-trust automation
 
 ### Performance Benchmarks
 
-Parallel prefix discovery on multi-level prefix trees (tested with 100K objects, 4K prefixes):
+**Parallel Prefix Discovery (Sharding):**
+
+Multi-level prefix trees (4K prefixes, scales to millions):
 
 | Configuration         | Time  | Speedup |
 | --------------------- | ----- | ------- |
@@ -71,21 +88,27 @@ Parallel prefix discovery on multi-level prefix trees (tested with 100K objects,
 | Parallel (16 workers) | 2.2s  | 9.5x    |
 | Parallel (32 workers) | 1.5s  | **14x** |
 
-Designed for buckets with millions of objects - speedup increases with prefix count.
+**Tree Parallel Sweep (Depth Traversal):**
 
-### For Operators
+| Configuration | Result              |
+| ------------- | ------------------- |
+| `parallel=1`  | Timeout (10m limit) |
+| `parallel=32` | 25s completion      |
 
-- Use `sharding.enabled: true` with appropriate `depth` for buckets with millions of objects
-- `list_concurrency: 16` is the recommended default; 32 for very large workloads
-- `on_exists: overwrite` is fastest for initial migrations; `skip` for incremental sync
-- Preflight probes use `multipart-abort` by default (zero storage side effects)
+### Documentation
+
+- [Transfer Operations](docs/user-guide/transfer.md) - Full transfer guide with examples
+- [Preflight Probing](docs/appnotes/preflight.md) - Permission verification contract
+- [Tree Command Examples](docs/user-guide/examples/tree.md) - Prefix summary recipes
+- [Advanced Filtering](docs/user-guide/examples/advanced-filtering.md) - Size/date/regex filtering
 
 ### Bug Fixes
 
 - Fixed "failed to rewind transport stream for retry" errors during transfer
-- Small objects now properly buffered for SDK retry support
+- Fixed missing duration in tree summary records
+- Fixed table output serialization for timeout/partial results; timeout now emits clean `error.v1` + `summary.v1` (was FATAL)
 
-See [docs/user-guide/transfer.md](docs/user-guide/transfer.md) for complete transfer documentation.
+See [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md) for complete release notes.
 
 ---
 
