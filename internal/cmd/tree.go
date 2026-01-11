@@ -33,6 +33,10 @@ directly under the given prefix and counts the immediate child prefixes (common 
 
 Wave 2 enables depth-limited traversal via --depth N.
 
+Note: --include/--exclude are traversal-scope controls applied to discovered prefixes.
+Patterns that require look-ahead (e.g. "**/needle/**") may not reduce traversal work.
+For wildcard-in-the-middle search, use indexing (v0.1.3).
+
 Examples:
   gonimbus tree s3://bucket/prefix/
   gonimbus tree s3://bucket/prefix/ --max-objects 100000 --max-pages 500
@@ -79,8 +83,8 @@ func init() {
 	treeCmd.Flags().IntVar(&treeMaxPrefixes, "max-prefixes", 50_000, "Max prefixes to traverse before stopping (wave 2)")
 	treeCmd.Flags().DurationVar(&treeTimeout, "timeout", 10*time.Minute, "Traversal timeout (wave 2)")
 	treeCmd.Flags().IntVar(&treeParallel, "parallel", 8, "Max concurrent prefix listings (wave 2)")
-	treeCmd.Flags().StringArrayVar(&treeIncludes, "include", nil, "Include glob pattern for traversal scope (repeatable; wave 2)")
-	treeCmd.Flags().StringArrayVar(&treeExcludes, "exclude", nil, "Exclude glob pattern for traversal scope (repeatable; wave 2)")
+	treeCmd.Flags().StringArrayVar(&treeIncludes, "include", nil, "Include glob for traversal scope (repeatable). Matches discovered prefixes; not a key search.")
+	treeCmd.Flags().StringArrayVar(&treeExcludes, "exclude", nil, "Exclude glob for traversal scope (repeatable). Matches discovered prefixes; not a key search.")
 	treeCmd.Flags().IntVar(&treeProgressEvery, "progress-every", 500, "Emit progress logs every N prefixes (0=disable; wave 2)")
 	treeCmd.Flags().BoolVar(&treeNoProgress, "no-progress", false, "Disable progress logs (wave 2)")
 }
