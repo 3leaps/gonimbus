@@ -7,23 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-01-XX (in progress)
+## [0.1.2] - 2026-01-11
 
 ### Added
+
+#### Transfer Workflow
 
 - **Transfer Engine** (`pkg/transfer/`, `internal/cmd/transfer.go`)
   - Manifest-driven copy/move operations between S3 buckets
   - `gonimbus transfer --job manifest.yaml` CLI command
   - Support for same-bucket, cross-account, and cross-provider transfers
   - Configurable concurrency and `on_exists` behavior (skip, overwrite, fail)
-  - Path templates for destination key transformation (`{key}`, `{basename}`, `{ext}`)
-
-- **Preflight Permission Probing** (`pkg/preflight/`, `internal/cmd/preflight.go`)
-  - Pre-transfer capability verification (read, write, delete permissions)
-  - `gonimbus preflight --job manifest.yaml` standalone command
-  - Zero-side-effect probes: `multipart-abort` (preferred) and `put-delete` strategies
-  - Detailed JSONL preflight records with per-capability results
-  - Documentation: `docs/appnotes/preflight.md`
+  - Path templates for destination key transformation (`{filename}`, `{dir[n]}`, `{key}`)
+  - Deduplication strategies: `etag` (default), `key`, or `none`
 
 - **Prefix Sharding for Parallel Enumeration** (`pkg/shard/`)
   - `sharding.enabled`, `sharding.depth`, `sharding.list_concurrency` manifest options
@@ -32,14 +28,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Up to 14x speedup for multi-level prefix trees (tested with 4K prefixes, scales to millions)
   - Live benchmark test: `pkg/shard/discovery_benchmark_test.go`
 
-- **Documentation**
-  - Transfer operations user guide: `docs/user-guide/transfer.md`
-  - Preflight permission probe app note: `docs/appnotes/preflight.md`
+- **Preflight Permission Probing** (`pkg/preflight/`, `internal/cmd/preflight.go`)
+  - Pre-transfer capability verification (read, write, delete permissions)
+  - `gonimbus preflight --job manifest.yaml` standalone command
+  - Three modes: `plan-only` (no calls), `read-safe` (List/Head/Get), `write-probe` (with probes)
+  - Zero-side-effect probes: `multipart-abort` (preferred) and `put-delete` strategies
+  - Detailed JSONL preflight records with per-capability results
+  - Documentation: `docs/appnotes/preflight.md`
+
+#### Tree Workflow
+
+- **Tree Command for Prefix Summaries** (`internal/cmd/tree.go`)
+  - `gonimbus tree <uri>` CLI command for directory-like summaries
+  - Direct-only (non-recursive) operation by default
+  - Depth-limited traversal with `--depth N` flag
+  - Safety limits: `--timeout`, `--max-prefixes`, `--max-objects`, `--max-pages`
+  - Include/exclude patterns for traversal scope (pathfinder-style)
+  - Table output with formatted sizes and counts
+  - JSONL output for streaming and partial results
+
+#### Inspect Workflow
+
+- **Advanced Metadata Filtering** (`pkg/match/filter.go`)
+  - Size filtering: `min_size`, `max_size` with KB/KiB/MB/MiB/GB/GiB units
+  - Date filtering: `after`, `before` with ISO 8601 dates/datetimes
+  - Key regex filtering: `key_regex` with Go regexp syntax
+  - CLI flags: `--min-size`, `--max-size`, `--after`, `--before`, `--key-regex`
+  - Manifest configuration: `match.filters.size`, `match.filters.modified`, `match.filters.key_regex`
+
+#### General & Safety
+
+- **Global Readonly Safety Latch** (`internal/cmd/root.go`)
+  - `--readonly` flag and `GONIMBUS_READONLY=1` environment variable
+  - Blocks provider-side mutations (transfers, write-probe preflight)
+  - Intended for dogfooding and lower-trust automation
+  - Readonly tests: `internal/cmd/readonly_test.go`
+
+#### Documentation
+
+- Transfer operations user guide: `docs/user-guide/transfer.md`
+- Preflight permission probe app note: `docs/appnotes/preflight.md`
+- Examples cookbook: `docs/user-guide/examples/README.md`
+- Tree command examples: `docs/user-guide/examples/tree.md`
+- Advanced filtering examples: `docs/user-guide/examples/advanced-filtering.md`
 
 ### Changed
 
 - Preflight probe ordering: write probes now run before read probes for faster fail-fast
-- Transfer manifest schema extended with `sharding` and `path_template` fields
+- Transfer manifest schema extended with `sharding`, `path_template`, `dedup` fields
+- Job manifest schema extended with `preflight` and `filters` fields
 
 ### Fixed
 
@@ -47,11 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed "failed to rewind transport stream for retry" errors on transient failures
   - Small objects now buffered with seekable wrapper for SDK retry support
 
+- **Tree Command** (`internal/cmd/tree.go`)
+  - Fixed missing duration field in summary records
+  - Fixed table output serialization for timeout/partial results
+  - Ensure summary is emitted even when timeout occurs
+  - Fixed timeout producing FATAL instead of clean partial output with `error.v1` + `summary.v1`
+
 ### Performance
 
 - **Parallel Prefix Discovery**: 14x speedup at 32 concurrency for multi-level prefix trees
   - Sequential: 21.2s → Parallel: 1.5s (tested with 4K prefixes, designed for millions)
-  - Recommended: `list_concurrency: 16-32` for large buckets
+  - Recommended: `list_concurrency: 16` default, 32 for very large workloads
 
 ## [0.1.1] - 2026-01-05
 
