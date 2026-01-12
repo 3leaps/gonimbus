@@ -152,10 +152,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	}
 
 	// v3: add index_run_events table for structured partial reasons.
-	if current < 3 {
-		// Events table is created in base stmts, just need to verify it exists
-		// Table creation is idempotent due to CREATE TABLE IF NOT EXISTS
-	}
+	// Events table is created in base stmts via CREATE TABLE IF NOT EXISTS.
+	// No additional migration steps needed for v3.
 
 	if current != SchemaVersion {
 		if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=? WHERE id=1`, SchemaVersion); err != nil {

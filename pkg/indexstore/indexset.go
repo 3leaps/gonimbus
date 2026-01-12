@@ -38,6 +38,7 @@ type IndexSetParams struct {
 	RegionKind      string
 	Region          string
 	Endpoint        string
+	EndpointHost    string // Explicit endpoint host; if empty and Endpoint is set, derived from Endpoint
 	BuildParams     BuildParams
 }
 
@@ -70,14 +71,14 @@ func ComputeBuildParamsHash(bp BuildParams) (string, error) {
 	h := sha256.New()
 
 	h.Write([]byte(bp.SourceType))
-	h.Write([]byte(fmt.Sprintf("schema=%d", bp.SchemaVersion)))
-	h.Write([]byte(fmt.Sprintf("version=%s", bp.GonimbusVersion)))
+	_, _ = fmt.Fprintf(h, "schema=%d", bp.SchemaVersion)
+	_, _ = fmt.Fprintf(h, "version=%s", bp.GonimbusVersion)
 
 	if bp.PathDateExtraction != nil {
 		h.Write([]byte("path_date=1"))
 		h.Write([]byte(bp.PathDateExtraction.Method))
 		h.Write([]byte(bp.PathDateExtraction.Regex))
-		h.Write([]byte(fmt.Sprintf("segment=%d", bp.PathDateExtraction.SegmentIndex)))
+		_, _ = fmt.Fprintf(h, "segment=%d", bp.PathDateExtraction.SegmentIndex)
 	}
 
 	// Include match/filtering parameters in hash for uniqueness.
@@ -117,7 +118,11 @@ func FindOrCreateIndexSet(ctx context.Context, db *sql.DB, params IndexSetParams
 		return nil, false, fmt.Errorf("compute build params hash: %w", err)
 	}
 
-	endpointHost := deriveEndpointHost(params.Endpoint)
+	// Use explicit EndpointHost if provided; otherwise derive from Endpoint.
+	endpointHost := params.EndpointHost
+	if endpointHost == "" && params.Endpoint != "" {
+		endpointHost = deriveEndpointHost(params.Endpoint)
+	}
 
 	// Try to find existing by full explicit identity tuple.
 	// ENTARCH: Match on all identity fields, don't treat NULL as wildcard.
@@ -224,7 +229,7 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 	if err != nil {
 		return nil, fmt.Errorf("list index_sets: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var sets []IndexSet
 	for rows.Next() {
