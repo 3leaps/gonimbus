@@ -6,9 +6,7 @@
 # Usage:
 #   gonimbus index build --job examples/index/index.yaml --dry-run
 #   gonimbus index build --job examples/index/index.yaml
-
 version: "1.0"
-
 # Connection configures the cloud storage source
 connection:
   provider: s3
@@ -20,7 +18,6 @@ connection:
   # endpoint: "https://s3.us-east-1.wasabisys.com"
   # Optional: AWS profile name
   # profile: my-sso-profile
-
 # Identity provides explicit provider identity (ENTARCH: never auto-inferred)
 # All identity fields must be explicit - no fallback to connection values.
 # CLI flags can override these values.
@@ -34,12 +31,10 @@ identity:
   region: us-east-1
   # endpoint_host is REQUIRED when connection.endpoint is set
   # endpoint_host: s3.us-east-1.wasabisys.com
-
 # Build configures the index build behavior
 build:
   # Source type: crawl (v0.1.3), inventory (future)
   source: crawl
-
   # Match configures object filtering during build
   # NOTE: Only includes/excludes/include_hidden are supported at build time.
   # Metadata filters (size, modified, key_regex) must be applied at query time.
@@ -53,7 +48,6 @@ build:
       - "**/.trash/**"
     # Include hidden files (default: false)
     include_hidden: false
-
   # Crawl-specific settings
   crawl:
     # Concurrent list operations (1-32, default: 4)

@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,10 +11,14 @@ import (
 	"strings"
 
 	gfconfig "github.com/fulmenhq/gofulmen/config"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
+	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/provider/s3"
 )
 
 var indexBuildCmd = &cobra.Command{
@@ -161,12 +167,46 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  base_uri: %s\n", indexSet.BaseURI)
 	_, _ = fmt.Fprintf(os.Stderr, "  source_type: %s\n", sourceType)
 
-	// TODO: Checkpoint 2b - Run crawl and ingest records
-	// TODO: Checkpoint 2c - Handle partial runs and finalize status
+	// Run crawl and ingest records (streaming - memory-bounded)
+	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run)
+	if crawlErr != nil {
+		// ENTARCH: Distinguish context cancellation from fatal errors.
+		// - Cancellation (Ctrl-C, timeout): record as "partial" (data was flushed, just incomplete)
+		// - Other errors: record as "failed" (something actually broke)
+		if errors.Is(crawlErr, context.Canceled) || errors.Is(crawlErr, context.DeadlineExceeded) {
+			// Context cancellation - mark as partial, skip soft-delete
+			_ = indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusPartial, nil)
+			_, _ = fmt.Fprintf(os.Stderr, "\nIndex build interrupted\n")
+			_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", run.RunID)
+			_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", indexstore.RunStatusPartial)
+			_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
+			_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
+			_, _ = fmt.Fprintf(os.Stderr, "  note: run cancelled, data flushed but incomplete\n")
+			return fmt.Errorf("index build cancelled: %w", crawlErr)
+		}
+		// Fatal error - mark as failed
+		_ = indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailed, nil)
+		return fmt.Errorf("index build failed: %w", crawlErr)
+	}
 
-	_, _ = fmt.Fprintf(os.Stderr, "\nIndex build initiated (ingestion not yet implemented)\n")
-	_, _ = fmt.Fprintf(os.Stderr, "run_id=%s\n", run.RunID)
-	_, _ = fmt.Fprintf(os.Stderr, "index_set_id=%s\n", indexSet.IndexSetID)
+	// Finalize run status based on collected errors (soft-delete only on success)
+	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result); err != nil {
+		return fmt.Errorf("finalize index run: %w", err)
+	}
+
+	// Report results
+	_, _ = fmt.Fprintf(os.Stderr, "\nIndex build completed\n")
+	_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", run.RunID)
+	_, _ = fmt.Fprintf(os.Stderr, "  index_set_id: %s\n", indexSet.IndexSetID)
+	_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", result.FinalStatus)
+	_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
+	_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
+	if result.ObjectsDeleted > 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "  objects_soft_deleted: %d\n", result.ObjectsDeleted)
+	}
+	if result.FinalStatus == indexstore.RunStatusPartial {
+		_, _ = fmt.Fprintf(os.Stderr, "  note: partial run (some errors encountered)\n")
+	}
 
 	return nil
 }
@@ -393,6 +433,144 @@ func validateNoMetadataFilters(m *manifest.IndexManifest) error {
 	}
 	if filters.KeyRegex != "" {
 		return fmt.Errorf("build-time key_regex filter not supported in v0.1.3; use 'gonimbus index query' with --key-regex")
+	}
+
+	return nil
+}
+
+// indexBuildResult holds the outcome of crawl-to-index ingestion.
+type indexBuildResult struct {
+	FinalStatus      indexstore.RunStatus
+	ObjectsIngested  int64
+	PrefixesIngested int64
+	ObjectsDeleted   int64
+}
+
+// runCrawlForIndex executes the crawl with streaming ingestion.
+//
+// Records are ingested in batches as they arrive, keeping memory usage
+// bounded regardless of bucket size. This is critical for 1M+ object buckets.
+func runCrawlForIndex(
+	ctx context.Context,
+	m *manifest.IndexManifest,
+	db *sql.DB,
+	indexSetID string,
+	run *indexstore.IndexRun,
+) (*indexBuildResult, error) {
+	// Create provider
+	cfg := s3.Config{
+		Bucket:         m.Connection.Bucket,
+		Region:         m.Connection.Region,
+		Endpoint:       m.Connection.Endpoint,
+		Profile:        m.Connection.Profile,
+		ForcePathStyle: m.Connection.Endpoint != "",
+	}
+	prov, err := s3.New(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create provider: %w", err)
+	}
+	defer func() { _ = prov.Close() }()
+
+	// Create matcher from build config with nil-guard
+	matchCfg := match.Config{
+		IncludeHidden: false,
+	}
+	if m.Build != nil && m.Build.Match != nil {
+		matchCfg.Includes = m.Build.Match.Includes
+		matchCfg.Excludes = m.Build.Match.Excludes
+		matchCfg.IncludeHidden = m.Build.Match.IncludeHidden
+	}
+	// Default to include everything if no patterns specified
+	if len(matchCfg.Includes) == 0 {
+		matchCfg.Includes = []string{"**"}
+	}
+
+	matcher, err := match.New(matchCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create matcher: %w", err)
+	}
+
+	// Create streaming ingest writer
+	writer := newIndexIngestWriter(db, indexSetID, run, m.Connection.BaseURI, indexIngestWriterConfig{
+		ObjectBatchSize: DefaultObjectBatchSize,
+		PrefixBatchSize: DefaultPrefixBatchSize,
+	})
+
+	// Create crawler config with nil-guard
+	crawlCfg := crawler.Config{
+		Concurrency:   4,    // default
+		RateLimit:     0,    // unlimited
+		ProgressEvery: 1000, // default
+	}
+	if m.Build != nil && m.Build.Crawl != nil {
+		if m.Build.Crawl.Concurrency > 0 {
+			crawlCfg.Concurrency = m.Build.Crawl.Concurrency
+		}
+		crawlCfg.RateLimit = m.Build.Crawl.RateLimit
+		if m.Build.Crawl.ProgressEvery > 0 {
+			crawlCfg.ProgressEvery = m.Build.Crawl.ProgressEvery
+		}
+	}
+
+	// Run crawler with streaming writer
+	jobID := uuid.New().String()
+	c := crawler.New(prov, matcher, writer, jobID, crawlCfg)
+	_, crawlErr := c.Run(ctx)
+
+	// Always close writer to flush remaining batches, even on error.
+	// This persists what we've seen so far.
+	closeErr := writer.Close()
+
+	// Get result from writer state
+	result := writer.Result()
+
+	// ENTARCH: Context cancellation (Ctrl-C, timeout) must NOT look like success.
+	// If context was cancelled, mark as partial and return the context error.
+	// This prevents soft-delete from running on incomplete traversals.
+	if ctx.Err() != nil {
+		result.FinalStatus = indexstore.RunStatusPartial
+		return result, ctx.Err()
+	}
+
+	// Handle fatal crawl errors (not context cancellation)
+	if crawlErr != nil {
+		return result, fmt.Errorf("crawl failed: %w", crawlErr)
+	}
+
+	// Handle flush errors
+	if closeErr != nil {
+		return result, fmt.Errorf("flush final batch: %w", closeErr)
+	}
+
+	return result, nil
+}
+
+// finalizeIndexRun updates run status and handles soft-deletes.
+//
+// IMPORTANT (ENTARCH): Soft-delete is ONLY performed for successful runs.
+// For partial runs, missing objects may be due to incomplete traversal
+// (throttling, access denied), not actual deletions.
+func finalizeIndexRun(
+	ctx context.Context,
+	db *sql.DB,
+	indexSetID string,
+	run *indexstore.IndexRun,
+	result *indexBuildResult,
+) error {
+	// Update run status
+	if err := indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, result.FinalStatus, nil); err != nil {
+		return fmt.Errorf("update run status: %w", err)
+	}
+
+	// ENTARCH: Only soft-delete for successful runs
+	// Per softdelete.go policy: partial runs may have missing objects due to
+	// incomplete traversal, not actual deletions.
+	if result.FinalStatus == indexstore.RunStatusSuccess {
+		deleted, err := indexstore.MarkObjectsDeletedNotSeenInRun(ctx, db, indexSetID, run.RunID, run.StartedAt)
+		if err != nil {
+			return fmt.Errorf("mark deleted objects: %w", err)
+		}
+		result.ObjectsDeleted = deleted
 	}
 
 	return nil
