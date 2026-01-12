@@ -161,16 +161,27 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		params.ModifiedBefore = t
 	}
 
-	// Execute query
-	results, err := indexstore.QueryObjects(ctx, db, params)
-	if err != nil {
-		return fmt.Errorf("query failed: %w", err)
+	// Handle count-only mode with optimized path
+	// Note: --count ignores --limit (count returns total matches, not capped)
+	if countOnly {
+		if limit > 0 {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: --limit is ignored with --count (use without --count to limit output)\n")
+		}
+		// Clear limit for count - we want total matches
+		countParams := params
+		countParams.Limit = 0
+		count, err := indexstore.QueryObjectCount(ctx, db, countParams)
+		if err != nil {
+			return fmt.Errorf("count query failed: %w", err)
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "%d\n", count)
+		return nil
 	}
 
-	// Output results
-	if countOnly {
-		_, _ = fmt.Fprintf(os.Stdout, "%d\n", len(results))
-		return nil
+	// Execute full query
+	results, stats, err := indexstore.QueryObjects(ctx, db, params)
+	if err != nil {
+		return fmt.Errorf("query failed: %w", err)
 	}
 
 	// Emit JSONL records
@@ -210,6 +221,9 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 
 	// Summary to stderr
 	_, _ = fmt.Fprintf(os.Stderr, "Matched %d objects\n", len(results))
+	if stats.TimestampParseErrors > 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: %d rows had unparseable timestamps (fields set to null)\n", stats.TimestampParseErrors)
+	}
 
 	return nil
 }
