@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/3leaps/gonimbus/pkg/match"
 )
 
 // QueryParams specifies filters for querying indexed objects.
@@ -59,13 +62,29 @@ type QueryResult struct {
 	DeletedAt    *time.Time
 }
 
+// QueryStats holds statistics about the query execution.
+type QueryStats struct {
+	// TimestampParseErrors is the count of rows with unparseable timestamps.
+	// These rows are included in results but with nil timestamp fields.
+	TimestampParseErrors int64
+}
+
 // QueryObjects queries the objects_current table with the given filters.
 //
 // Pattern matching uses doublestar semantics (same as crawl).
 // Results are returned in rel_key order for deterministic output.
-func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryResult, error) {
+//
+// Optimization: when Pattern has a derivable prefix (e.g., "data/2025/**"),
+// prefix pushdown is applied via SQL LIKE to use the primary key index.
+//
+// Timestamp parse failures are handled gracefully: the row is included with
+// nil timestamp fields, and the count is tracked in QueryStats. Callers should
+// check stats.TimestampParseErrors and warn if non-zero.
+func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryResult, QueryStats, error) {
+	var stats QueryStats
+
 	if params.IndexSetID == "" {
-		return nil, fmt.Errorf("index_set_id is required")
+		return nil, stats, fmt.Errorf("index_set_id is required")
 	}
 
 	// Compile regex if provided
@@ -74,14 +93,17 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		var err error
 		keyRe, err = regexp.Compile(params.KeyRegex)
 		if err != nil {
-			return nil, fmt.Errorf("invalid key regex: %w", err)
+			return nil, stats, fmt.Errorf("invalid key regex: %w", err)
 		}
 	}
 
 	// Validate pattern if provided
 	if params.Pattern != "" && !doublestar.ValidatePattern(params.Pattern) {
-		return nil, fmt.Errorf("invalid glob pattern: %s", params.Pattern)
+		return nil, stats, fmt.Errorf("invalid glob pattern: %s", params.Pattern)
 	}
+
+	// Determine if we need client-side filtering
+	needsClientFilter := params.Pattern != "" || keyRe != nil
 
 	// Build SQL query with filters that can be pushed to DB
 	query := `SELECT rel_key, size_bytes, last_modified, etag, deleted_at
@@ -92,6 +114,18 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	// Deleted filter
 	if !params.IncludeDeleted {
 		query += ` AND deleted_at IS NULL`
+	}
+
+	// OPTIMIZATION A: Prefix pushdown for glob patterns
+	// Derive literal prefix from pattern and push to SQL via LIKE
+	if params.Pattern != "" {
+		prefix := match.DerivePrefix(params.Pattern)
+		if prefix != "" {
+			// Use LIKE for prefix matching - SQLite can use indexes with LIKE 'prefix%'
+			// Escape SQL LIKE wildcards in the prefix to ensure exact matching
+			query += ` AND rel_key LIKE ? ESCAPE '\'`
+			args = append(args, escapeLikePrefix(prefix)+"%")
+		}
 	}
 
 	// Size filters (can be pushed to DB)
@@ -116,9 +150,15 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 
 	query += ` ORDER BY rel_key`
 
+	// OPTIMIZATION D: SQL LIMIT when no client-side filtering needed
+	if !needsClientFilter && params.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, params.Limit)
+	}
+
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query objects: %w", err)
+		return nil, stats, fmt.Errorf("query objects: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -133,14 +173,14 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		)
 
 		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &deletedAt); err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
+			return nil, stats, fmt.Errorf("scan row: %w", err)
 		}
 
-		// Apply glob pattern filter (client-side)
+		// Apply glob pattern filter (client-side, after prefix pushdown)
 		if params.Pattern != "" {
 			matched, err := doublestar.Match(params.Pattern, relKey)
 			if err != nil {
-				return nil, fmt.Errorf("match pattern: %w", err)
+				return nil, stats, fmt.Errorf("match pattern: %w", err)
 			}
 			if !matched {
 				continue
@@ -157,10 +197,13 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 			SizeBytes: sizeBytes,
 		}
 
+		// Parse timestamps - warn+skip on failure (don't fail the query)
+		// This handles varied timestamp formats from different providers gracefully.
 		if lastModified.Valid {
-			t, err := time.Parse(time.RFC3339, lastModified.String)
-			if err == nil {
+			if t, err := parseTimestamp(lastModified.String); err == nil {
 				result.LastModified = &t
+			} else {
+				stats.TimestampParseErrors++
 			}
 		}
 
@@ -169,25 +212,204 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		}
 
 		if deletedAt.Valid {
-			t, err := time.Parse(time.RFC3339, deletedAt.String)
-			if err == nil {
+			if t, err := parseTimestamp(deletedAt.String); err == nil {
 				result.DeletedAt = &t
+			} else {
+				stats.TimestampParseErrors++
 			}
 		}
 
 		results = append(results, result)
 
-		// Apply limit after all filters
+		// Apply limit after all client-side filters
 		if params.Limit > 0 && len(results) >= params.Limit {
 			break
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
+		return nil, stats, fmt.Errorf("iterate rows: %w", err)
 	}
 
-	return results, nil
+	return results, stats, nil
+}
+
+// QueryObjectCount counts objects matching the query without materializing results.
+//
+// This is optimized for --count scenarios:
+// - When no Pattern/KeyRegex: uses COUNT(*) at DB level (fast)
+// - Otherwise: streams rows and counts matches (constant memory)
+//
+// Optimization: prefix pushdown is applied when Pattern has a derivable prefix.
+func QueryObjectCount(ctx context.Context, db *sql.DB, params QueryParams) (int64, error) {
+	if params.IndexSetID == "" {
+		return 0, fmt.Errorf("index_set_id is required")
+	}
+
+	// Compile regex if provided
+	var keyRe *regexp.Regexp
+	if params.KeyRegex != "" {
+		var err error
+		keyRe, err = regexp.Compile(params.KeyRegex)
+		if err != nil {
+			return 0, fmt.Errorf("invalid key regex: %w", err)
+		}
+	}
+
+	// Validate pattern if provided
+	if params.Pattern != "" && !doublestar.ValidatePattern(params.Pattern) {
+		return 0, fmt.Errorf("invalid glob pattern: %s", params.Pattern)
+	}
+
+	// Fast path: no client-side filtering needed, use COUNT(*)
+	if params.Pattern == "" && keyRe == nil {
+		return queryCountFast(ctx, db, params)
+	}
+
+	// Slow path: stream rows and count matches
+	return queryCountStreaming(ctx, db, params, keyRe)
+}
+
+// queryCountFast uses COUNT(*) when no client-side filtering is needed.
+// Note: Limit is ignored for count queries (count returns total matches).
+func queryCountFast(ctx context.Context, db *sql.DB, params QueryParams) (int64, error) {
+	query := `SELECT COUNT(*) FROM objects_current WHERE index_set_id = ?`
+	args := []interface{}{params.IndexSetID}
+
+	if !params.IncludeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	if params.MinSize > 0 {
+		query += ` AND size_bytes >= ?`
+		args = append(args, params.MinSize)
+	}
+	if params.MaxSize > 0 {
+		query += ` AND size_bytes <= ?`
+		args = append(args, params.MaxSize)
+	}
+	if !params.ModifiedAfter.IsZero() {
+		query += ` AND last_modified >= ?`
+		args = append(args, params.ModifiedAfter.Format(time.RFC3339))
+	}
+	if !params.ModifiedBefore.IsZero() {
+		query += ` AND last_modified <= ?`
+		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
+	}
+
+	var count int64
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count objects: %w", err)
+	}
+
+	return count, nil
+}
+
+// queryCountStreaming counts matches by streaming rows (constant memory).
+func queryCountStreaming(ctx context.Context, db *sql.DB, params QueryParams, keyRe *regexp.Regexp) (int64, error) {
+	// Only select rel_key - we don't need other columns for counting
+	query := `SELECT rel_key FROM objects_current WHERE index_set_id = ?`
+	args := []interface{}{params.IndexSetID}
+
+	if !params.IncludeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+
+	// Prefix pushdown for glob patterns
+	if params.Pattern != "" {
+		prefix := match.DerivePrefix(params.Pattern)
+		if prefix != "" {
+			// Escape SQL LIKE wildcards in the prefix
+			query += ` AND rel_key LIKE ? ESCAPE '\'`
+			args = append(args, escapeLikePrefix(prefix)+"%")
+		}
+	}
+
+	if params.MinSize > 0 {
+		query += ` AND size_bytes >= ?`
+		args = append(args, params.MinSize)
+	}
+	if params.MaxSize > 0 {
+		query += ` AND size_bytes <= ?`
+		args = append(args, params.MaxSize)
+	}
+	if !params.ModifiedAfter.IsZero() {
+		query += ` AND last_modified >= ?`
+		args = append(args, params.ModifiedAfter.Format(time.RFC3339))
+	}
+	if !params.ModifiedBefore.IsZero() {
+		query += ` AND last_modified <= ?`
+		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
+	}
+
+	// No ORDER BY for counting - unnecessary overhead at scale
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("query objects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int64
+	for rows.Next() {
+		var relKey string
+		if err := rows.Scan(&relKey); err != nil {
+			return 0, fmt.Errorf("scan row: %w", err)
+		}
+
+		// Apply glob pattern filter
+		if params.Pattern != "" {
+			matched, err := doublestar.Match(params.Pattern, relKey)
+			if err != nil {
+				return 0, fmt.Errorf("match pattern: %w", err)
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// Apply regex filter
+		if keyRe != nil && !keyRe.MatchString(relKey) {
+			continue
+		}
+
+		count++
+		// Note: Limit is ignored for count queries (count returns total matches)
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	return count, nil
+}
+
+// escapeLikePrefix escapes SQL LIKE wildcard characters in a prefix string.
+// This ensures that literal %, _, and \ characters in object keys are matched exactly.
+// Uses backslash as the escape character (requires ESCAPE '\' in the LIKE clause).
+func escapeLikePrefix(s string) string {
+	// Order matters: escape backslash first, then the wildcards
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// parseTimestamp parses a timestamp string with RFC3339Nano fallback.
+// Returns error on parse failure to surface data quality issues.
+func parseTimestamp(s string) (time.Time, error) {
+	// Try RFC3339Nano first (more precise)
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	// Fall back to RFC3339
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	// Try match.ParseDate for additional formats (date-only, etc.)
+	if t, err := match.ParseDate(s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp format: %q", s)
 }
 
 // GetIndexSetByBaseURI finds an IndexSet by its base_uri.
