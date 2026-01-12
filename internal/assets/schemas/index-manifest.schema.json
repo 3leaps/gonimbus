@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/index-manifest",
+  "title": "Gonimbus Index Manifest",
+  "description": "Configuration manifest for gonimbus index build operations",
+  "type": "object",
+  "required": [
+    "version",
+    "connection"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference for editor support"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Manifest schema version"
+    },
+    "connection": {
+      "$ref": "#/$defs/connection"
+    },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    },
+    "build": {
+      "$ref": "#/$defs/build"
+    },
+    "path_date": {
+      "$ref": "#/$defs/path_date"
+    }
+  },
+  "$defs": {
+    "connection": {
+      "type": "object",
+      "description": "Cloud storage connection configuration",
+      "required": [
+        "provider",
+        "bucket",
+        "base_uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "s3"
+          ],
+          "description": "Storage provider type"
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bucket name"
+        },
+        "base_uri": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*/$",
+          "description": "Base prefix URI for index (must end with '/')"
+        },
+        "region": {
+          "type": "string",
+          "description": "AWS region (e.g., us-east-1)"
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Custom endpoint URL for S3-compatible storage"
+        },
+        "profile": {
+          "type": "string",
+          "description": "AWS credential profile name"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "description": "Explicit provider identity (ENTARCH: never infer as authoritative)",
+      "additionalProperties": false,
+      "properties": {
+        "storage_provider": {
+          "type": "string",
+          "description": "Canonical backend/variant (e.g., aws_s3, r2, wasabi)"
+        },
+        "cloud_provider": {
+          "type": "string",
+          "description": "Broader cloud (e.g., aws, gcp, azure)"
+        },
+        "region_kind": {
+          "type": "string",
+          "description": "Region naming scheme (e.g., aws, gcp, azure)"
+        },
+        "region": {
+          "type": "string",
+          "description": "Region name"
+        },
+        "endpoint_host": {
+          "type": "string",
+          "description": "Host part of endpoint URL"
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "Index build configuration",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "crawl",
+            "inventory",
+            "auto"
+          ],
+          "default": "crawl",
+          "description": "Index source type (v0.1.3: crawl-only, inventory reserved for future)"
+        },
+        "match": {
+          "$ref": "#/$defs/match"
+        },
+        "crawl": {
+          "$ref": "#/$defs/crawl_build"
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "description": "Object matching for index build (defaults to index everything under base_uri)",
+      "additionalProperties": false,
+      "properties": {
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Glob patterns for objects to include (default: ['**'])"
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Glob patterns for objects to exclude"
+        },
+        "include_hidden": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include hidden files (starting with .)"
+        },
+        "filters": {
+          "$ref": "#/$defs/filters"
+        }
+      }
+    },
+    "filters": {
+      "type": "object",
+      "description": "Optional metadata-based filters applied during build",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "$ref": "#/$defs/size_filter"
+        },
+        "modified": {
+          "$ref": "#/$defs/date_filter"
+        },
+        "key_regex": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Regex pattern applied to object keys after glob matching"
+        }
+      }
+    },
+    "size_filter": {
+      "type": "object",
+      "description": "Object size constraints",
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Minimum size (inclusive), e.g. 1KB or 100MiB"
+        },
+        "max": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Maximum size (inclusive), e.g. 1GB or 1GiB"
+        }
+      }
+    },
+    "date_filter": {
+      "type": "object",
+      "description": "Last-modified date range constraints (exclusive bounds)",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Only objects modified after this time (exclusive)"
+        },
+        "before": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Only objects modified before this time (exclusive)"
+        }
+      }
+    },
+    "crawl_build": {
+      "type": "object",
+      "description": "Crawl-specific build configuration",
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 4,
+          "description": "Number of concurrent list operations"
+        },
+        "rate_limit": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Maximum requests per second (0 = unlimited)"
+        },
+        "progress_every": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000,
+          "description": "Emit progress every N indexed objects"
+        }
+      }
+    },
+    "path_date": {
+      "type": "object",
+      "description": "Path date extraction configuration",
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "regex",
+            "segment"
+          ],
+          "description": "Extraction method"
+        },
+        "regex": {
+          "type": "string",
+          "description": "Regex pattern for extracting date from key path"
+        },
+        "segment_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-indexed segment number containing date"
+        }
+      }
+    }
+  }
+}

@@ -21,3 +21,11 @@ var JobManifestSchema []byte
 //
 //go:embed transfer-manifest.schema.json
 var TransferManifestSchema []byte
+
+// IndexManifestSchema is the embedded index-manifest JSON schema.
+//
+// This allows index manifest validation to work in installed binaries and library
+// consumers without requiring the schema files to be present on disk.
+//
+//go:embed index-manifest.schema.json
+var IndexManifestSchema []byte
