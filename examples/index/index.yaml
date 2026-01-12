@@ -1,0 +1,70 @@
+# Example index manifest for gonimbus index build
+#
+# This manifest configures an index build job. The index stores object metadata
+# locally for fast pattern matching without live bucket listing.
+#
+# Usage:
+#   gonimbus index build --job examples/index/index.yaml --dry-run
+#   gonimbus index build --job examples/index/index.yaml
+
+version: "1.0"
+
+# Connection configures the cloud storage source
+connection:
+  provider: s3
+  bucket: my-data-bucket
+  # base_uri MUST end with '/' - this is the root of what gets indexed
+  base_uri: "s3://my-data-bucket/production/data/"
+  region: us-east-1
+  # Optional: custom endpoint for S3-compatible storage
+  # endpoint: "https://s3.us-east-1.wasabisys.com"
+  # Optional: AWS profile name
+  # profile: my-sso-profile
+
+# Identity provides explicit provider identity (ENTARCH: never auto-inferred)
+# All identity fields must be explicit - no fallback to connection values.
+# CLI flags can override these values.
+#
+# Canonical storage_provider values:
+#   aws_s3, cloudflare_r2, wasabi, gcs, azure_blob, generic_s3
+identity:
+  storage_provider: aws_s3
+  cloud_provider: aws
+  region_kind: aws
+  region: us-east-1
+  # endpoint_host is REQUIRED when connection.endpoint is set
+  # endpoint_host: s3.us-east-1.wasabisys.com
+
+# Build configures the index build behavior
+build:
+  # Source type: crawl (v0.1.3), inventory (future)
+  source: crawl
+
+  # Match configures object filtering during build
+  # NOTE: Only includes/excludes/include_hidden are supported at build time.
+  # Metadata filters (size, modified, key_regex) must be applied at query time.
+  match:
+    # Glob patterns for objects to include (default: ["**"])
+    includes:
+      - "**"
+    # Glob patterns for objects to exclude
+    excludes:
+      - "**/_temporary/**"
+      - "**/.trash/**"
+    # Include hidden files (default: false)
+    include_hidden: false
+
+  # Crawl-specific settings
+  crawl:
+    # Concurrent list operations (1-32, default: 4)
+    concurrency: 4
+    # Max requests per second (0 = unlimited)
+    rate_limit: 0
+    # Emit progress every N objects (default: 1000)
+    progress_every: 1000
+
+# Optional: Extract dates from object key paths
+# Useful for time-partitioned datasets
+# path_date:
+#   method: segment
+#   segment_index: 3  # e.g., for paths like store/device/YYYY-MM-DD/files

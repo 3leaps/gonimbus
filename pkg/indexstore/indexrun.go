@@ -164,7 +164,7 @@ func ListIndexRuns(ctx context.Context, db *sql.DB, indexSetID string) ([]IndexR
 	if err != nil {
 		return nil, fmt.Errorf("list index_runs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var runs []IndexRun
 	for rows.Next() {
@@ -265,7 +265,7 @@ func ListRunEvents(ctx context.Context, db *sql.DB, runID string, category *Even
 	if err != nil {
 		return nil, fmt.Errorf("list run events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []RunEvent
 	for rows.Next() {
