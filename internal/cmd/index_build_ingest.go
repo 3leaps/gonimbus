@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +38,7 @@ type indexIngestWriter struct {
 	indexSetID string
 	run        *indexstore.IndexRun
 	baseURI    string
+	basePrefix string
 
 	// Batch sizes
 	objectBatchSize int
@@ -57,7 +60,11 @@ type indexIngestWriter struct {
 	sawOtherError   bool
 
 	// Guards for one-time event recording
-	recordedTimeout bool
+	recordedTimeout        bool
+	recordedScopeViolation bool
+
+	// Scope violation tracking (guardrail)
+	scopeViolationCount int64
 
 	// Mutex for concurrent safety (crawler may call from multiple goroutines)
 	mu sync.Mutex
@@ -75,6 +82,7 @@ func newIndexIngestWriter(
 	indexSetID string,
 	run *indexstore.IndexRun,
 	baseURI string,
+	basePrefix string,
 	cfg indexIngestWriterConfig,
 ) *indexIngestWriter {
 	objectBatchSize := cfg.ObjectBatchSize
@@ -86,11 +94,17 @@ func newIndexIngestWriter(
 		prefixBatchSize = DefaultPrefixBatchSize
 	}
 
+	// Ensure basePrefix ends with '/' when set.
+	if basePrefix != "" && !strings.HasSuffix(basePrefix, "/") {
+		basePrefix += "/"
+	}
+
 	return &indexIngestWriter{
 		db:              db,
 		indexSetID:      indexSetID,
 		run:             run,
 		baseURI:         baseURI,
+		basePrefix:      basePrefix,
 		objectBatchSize: objectBatchSize,
 		prefixBatchSize: prefixBatchSize,
 		objectBatch:     make([]indexstore.ObjectRow, 0, objectBatchSize),
@@ -102,6 +116,23 @@ func newIndexIngestWriter(
 func (w *indexIngestWriter) WriteObject(ctx context.Context, obj *output.ObjectRecord) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	// Guardrail: ensure we never ingest objects outside base_prefix.
+	// This should never happen once matcher patterns are anchored correctly,
+	// but a regression here would cause cross-prefix data isolation failures.
+	if w.basePrefix != "" && !strings.HasPrefix(obj.Key, w.basePrefix) {
+		w.scopeViolationCount++
+		w.sawOtherError = true
+		w.errorCount++
+		if !w.recordedScopeViolation {
+			w.recordedScopeViolation = true
+			// Record only the first violation to avoid spamming the events table.
+			if err := indexstore.RecordScopeViolation(ctx, w.db, w.run.RunID, obj.Key, w.basePrefix); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	// Convert to ObjectRow immediately
 	relKey := indexstore.DeriveRelKey(w.baseURI, obj.Key)
@@ -191,8 +222,23 @@ func (w *indexIngestWriter) WriteError(ctx context.Context, errRec *output.Error
 	return nil
 }
 
-// WriteProgress is a no-op for index ingestion.
-func (w *indexIngestWriter) WriteProgress(_ context.Context, _ *output.ProgressRecord) error {
+// WriteProgress emits human-readable progress to stderr.
+func (w *indexIngestWriter) WriteProgress(_ context.Context, prog *output.ProgressRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	prefix := prog.Prefix
+	if prefix == "" {
+		prefix = "(root)"
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "progress: phase=%s prefix=%s objects_found=%d objects_matched=%d bytes=%d\n",
+		prog.Phase,
+		prefix,
+		prog.ObjectsFound,
+		prog.ObjectsMatched,
+		prog.BytesTotal,
+	)
 	return nil
 }
 

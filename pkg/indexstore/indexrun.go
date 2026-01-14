@@ -71,16 +71,17 @@ const (
 type EventType string
 
 const (
-	EventTypePrefixSkipped EventType = "prefix_skipped"
-	EventTypeAccessDenied  EventType = "access_denied"
-	EventTypeRateLimited   EventType = "rate_limited"
-	EventTypePartial       EventType = "partial_run"
-	EventTypeUnknownError  EventType = "unknown_error"
-	EventTypeObjectAdded   EventType = "object_added"
-	EventTypeObjectDeleted EventType = "object_deleted"
-	EventTypePrefixListed  EventType = "prefix_listed"
-	EventTypeRunStarted    EventType = "run_started"
-	EventTypeRunCompleted  EventType = "run_completed"
+	EventTypePrefixSkipped  EventType = "prefix_skipped"
+	EventTypeAccessDenied   EventType = "access_denied"
+	EventTypeRateLimited    EventType = "rate_limited"
+	EventTypePartial        EventType = "partial_run"
+	EventTypeUnknownError   EventType = "unknown_error"
+	EventTypeObjectAdded    EventType = "object_added"
+	EventTypeObjectDeleted  EventType = "object_deleted"
+	EventTypePrefixListed   EventType = "prefix_listed"
+	EventTypeRunStarted     EventType = "run_started"
+	EventTypeRunCompleted   EventType = "run_completed"
+	EventTypeScopeViolation EventType = "scope_violation"
 )
 
 // CreateIndexRun creates a new IndexRun in running status.
@@ -357,6 +358,30 @@ func RecordAccessDenied(ctx context.Context, db *sql.DB, runID string, key, pref
 		Key:           stringPtr(key),
 		Prefix:        stringPtr(prefix),
 		ErrorCode:     stringPtr("ACCESS_DENIED"),
+	}
+
+	return RecordRunEvent(ctx, db, event)
+}
+
+// RecordScopeViolation records an event when the index builder encounters an object key
+// outside the configured base prefix. This indicates a bug or misconfiguration and should
+// cause the run to be treated as partial.
+func RecordScopeViolation(ctx context.Context, db *sql.DB, runID string, key string, expectedPrefix string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	detail := fmt.Sprintf("object key outside base prefix: expected prefix %q", expectedPrefix)
+	event := RunEvent{
+		EventID:       generateEventID(),
+		RunID:         runID,
+		OccurredAt:    time.Now().UTC(),
+		EventType:     string(EventTypeScopeViolation),
+		EventCategory: string(EventCategoryError),
+		Detail:        &detail,
+		Key:           stringPtr(key),
+		Prefix:        stringPtr(expectedPrefix),
+		ErrorCode:     stringPtr("SCOPE_VIOLATION"),
 	}
 
 	return RecordRunEvent(ctx, db, event)
