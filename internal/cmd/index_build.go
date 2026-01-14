@@ -230,6 +230,49 @@ func validateEndpointURL(endpoint string) error {
 	return nil
 }
 
+func parseS3BaseURI(baseURI string) (bucket string, prefix string, err error) {
+	parsed, err := url.Parse(baseURI)
+	if err != nil {
+		return "", "", err
+	}
+	if parsed.Scheme != "s3" {
+		return "", "", fmt.Errorf("expected s3:// URI, got scheme %q", parsed.Scheme)
+	}
+	bucket = parsed.Host
+	prefix = strings.TrimPrefix(parsed.Path, "/")
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		return "", "", fmt.Errorf("base uri path must end with '/': %s", baseURI)
+	}
+	return bucket, prefix, nil
+}
+
+func prefixPatterns(basePrefix string, patterns []string) []string {
+	if basePrefix == "" {
+		return patterns
+	}
+	// Ensure basePrefix ends with '/'
+	if !strings.HasSuffix(basePrefix, "/") {
+		basePrefix += "/"
+	}
+
+	out := make([]string, 0, len(patterns))
+	for _, raw := range patterns {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		p = strings.TrimPrefix(p, "/")
+
+		// Avoid double-prefixing if user already provided a full-key pattern.
+		if strings.HasPrefix(p, basePrefix) {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, basePrefix+p)
+	}
+	return out
+}
+
 // effectiveIdentity holds the merged identity from manifest + CLI overrides.
 type effectiveIdentity struct {
 	StorageProvider string
@@ -471,18 +514,29 @@ func runCrawlForIndex(
 	}
 	defer func() { _ = prov.Close() }()
 
-	// Create matcher from build config with nil-guard
+	baseBucket, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	if err != nil {
+		return nil, fmt.Errorf("parse base_uri: %w", err)
+	}
+	if baseBucket != "" && baseBucket != m.Connection.Bucket {
+		return nil, fmt.Errorf("base_uri bucket %q does not match connection.bucket %q", baseBucket, m.Connection.Bucket)
+	}
+
+	// Create matcher from build config with nil-guard.
+	// IMPORTANT: patterns are applied to full provider keys, so we prefix all
+	// build patterns with the base prefix derived from base_uri. This ensures
+	// index builds never enumerate outside base_uri (CRITICAL isolation invariant).
 	matchCfg := match.Config{
 		IncludeHidden: false,
 	}
 	if m.Build != nil && m.Build.Match != nil {
-		matchCfg.Includes = m.Build.Match.Includes
-		matchCfg.Excludes = m.Build.Match.Excludes
+		matchCfg.Includes = prefixPatterns(basePrefix, m.Build.Match.Includes)
+		matchCfg.Excludes = prefixPatterns(basePrefix, m.Build.Match.Excludes)
 		matchCfg.IncludeHidden = m.Build.Match.IncludeHidden
 	}
-	// Default to include everything if no patterns specified
+	// Default to include everything under base prefix.
 	if len(matchCfg.Includes) == 0 {
-		matchCfg.Includes = []string{"**"}
+		matchCfg.Includes = []string{basePrefix + "**"}
 	}
 
 	matcher, err := match.New(matchCfg)
@@ -491,7 +545,7 @@ func runCrawlForIndex(
 	}
 
 	// Create streaming ingest writer
-	writer := newIndexIngestWriter(db, indexSetID, run, m.Connection.BaseURI, indexIngestWriterConfig{
+	writer := newIndexIngestWriter(db, indexSetID, run, m.Connection.BaseURI, basePrefix, indexIngestWriterConfig{
 		ObjectBatchSize: DefaultObjectBatchSize,
 		PrefixBatchSize: DefaultPrefixBatchSize,
 	})
