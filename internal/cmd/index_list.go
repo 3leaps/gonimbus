@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 var indexListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List local indexes",
-	Long: `List all indexes in the local index database.
+	Long: `List all indexes in the local index directory.
 
 Displays base URI, provider, object count, size, and run status for each index.
 
@@ -37,15 +38,7 @@ func runIndexList(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
-	// Open index database
-	db, err := openQueryIndexDB(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
-
-	// Get all index sets with stats
-	entries, err := indexstore.ListIndexSetsWithStats(ctx, db)
+	entries, err := loadIndexEntries(ctx)
 	if err != nil {
 		return fmt.Errorf("list indexes: %w", err)
 	}
@@ -54,6 +47,10 @@ func runIndexList(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
 		return nil
 	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].CreatedAt.After(entries[j].CreatedAt)
+	})
 
 	if jsonOutput {
 		return printIndexListJSON(entries)

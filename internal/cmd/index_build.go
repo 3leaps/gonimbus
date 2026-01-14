@@ -60,7 +60,7 @@ func init() {
 	_ = indexBuildCmd.MarkFlagRequired("job")
 
 	// Optional
-	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is XDG data dir)")
+	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
@@ -113,17 +113,31 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return showIndexBuildPlan(cmd, m, identity)
 	}
 
+	// Build IndexSetParams
+	params := buildIndexSetParams(m, identity)
+
+	identityResult, err := indexstore.ComputeIndexSetID(params)
+	if err != nil {
+		return fmt.Errorf("compute index identity: %w", err)
+	}
+
 	// Open index database
-	dbPath, err := resolveIndexDBPath(indexBuildDBPath)
+	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
 	if err != nil {
 		return err
 	}
 
 	cfg := indexstore.Config{}
-	if strings.HasPrefix(dbPath, "libsql://") || strings.HasPrefix(dbPath, "https://") {
-		cfg.URL = dbPath
+	if strings.HasPrefix(resolvedDB.Path, "libsql://") || strings.HasPrefix(resolvedDB.Path, "https://") {
+		cfg.URL = resolvedDB.Path
 	} else {
-		cfg.Path = dbPath
+		cfg.Path = resolvedDB.Path
+	}
+
+	if resolvedDB.WriteIdentity {
+		if err := writeIndexIdentityFile(resolvedDB.IdentityDir, identityResult); err != nil {
+			return err
+		}
 	}
 
 	db, err := indexstore.Open(ctx, cfg)
@@ -136,9 +150,6 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	if err := indexstore.Migrate(ctx, db); err != nil {
 		return fmt.Errorf("migrate index schema: %w", err)
 	}
-
-	// Build IndexSetParams
-	params := buildIndexSetParams(m, identity)
 
 	// Find or create IndexSet
 	indexSet, created, err := indexstore.FindOrCreateIndexSet(ctx, db, params)
@@ -414,19 +425,49 @@ func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident eff
 	return nil
 }
 
+type resolvedIndexDB struct {
+	Path          string
+	IdentityDir   string
+	WriteIdentity bool
+}
+
 // resolveIndexDBPath resolves the index database path.
-func resolveIndexDBPath(explicit string) (string, error) {
+func resolveIndexDBPath(explicit string, identityResult *indexstore.IndexSetIdentityResult) (resolvedIndexDB, error) {
 	if explicit != "" {
-		return explicit, nil
+		return resolvedIndexDB{Path: explicit}, nil
 	}
 
 	identity := GetAppIdentity()
 	if identity == nil || strings.TrimSpace(identity.ConfigName) == "" {
-		return "", fmt.Errorf("app identity is not available to derive default index path")
+		return resolvedIndexDB{}, fmt.Errorf("app identity is not available to derive default index path")
+	}
+	if identityResult == nil {
+		return resolvedIndexDB{}, fmt.Errorf("index identity is required to derive default index path")
 	}
 
 	dataDir := gfconfig.GetAppDataDir(identity.ConfigName)
-	return filepath.Join(dataDir, "indexes", "gonimbus-index.db"), nil
+	indexDir := filepath.Join(dataDir, "indexes", identityResult.DirName)
+	return resolvedIndexDB{
+		Path:          filepath.Join(indexDir, "index.db"),
+		IdentityDir:   indexDir,
+		WriteIdentity: true,
+	}, nil
+}
+
+func writeIndexIdentityFile(indexDir string, identityResult *indexstore.IndexSetIdentityResult) error {
+	if indexDir == "" || identityResult == nil {
+		return nil
+	}
+
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return fmt.Errorf("create index directory: %w", err)
+	}
+
+	identityPath := filepath.Join(indexDir, "identity.json")
+	if err := os.WriteFile(identityPath, []byte(identityResult.CanonicalJSON+"\n"), 0644); err != nil {
+		return fmt.Errorf("write identity.json: %w", err)
+	}
+	return nil
 }
 
 // valueOrDefault returns the value or a default if empty.

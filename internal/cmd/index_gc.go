@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -66,12 +67,14 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Open index database
-	db, err := openQueryIndexDB(ctx)
+	entries, err := loadIndexEntriesWithPaths(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("list indexes: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	if len(entries) == 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
+		return nil
+	}
 
 	// Build GC params
 	params := indexstore.GCParams{
@@ -80,10 +83,13 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 		DryRun:   dryRun,
 	}
 
-	// Run garbage collection
-	result, err := indexstore.GarbageCollect(ctx, db, params)
-	if err != nil {
-		return fmt.Errorf("garbage collect: %w", err)
+	result, candidates := buildGCCandidates(entries, params)
+	if !dryRun {
+		for _, candidate := range candidates {
+			if err := os.RemoveAll(candidate.Dir); err != nil {
+				return fmt.Errorf("remove index directory %s: %w", candidate.Dir, err)
+			}
+		}
 	}
 
 	if jsonOutput {
@@ -168,6 +174,51 @@ func printGCResultJSON(result *indexstore.GCResult, dryRun bool) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+func buildGCCandidates(entries []indexDBEntry, params indexstore.GCParams) (*indexstore.GCResult, []indexDBEntry) {
+	result := &indexstore.GCResult{}
+	if len(entries) == 0 {
+		return result, nil
+	}
+
+	byBaseURI := make(map[string][]indexDBEntry)
+	for _, entry := range entries {
+		byBaseURI[entry.Info.BaseURI] = append(byBaseURI[entry.Info.BaseURI], entry)
+	}
+
+	now := time.Now().UTC()
+	cutoff := time.Time{}
+	if params.MaxAge > 0 {
+		cutoff = now.Add(-params.MaxAge)
+	}
+
+	var candidates []indexDBEntry
+	for _, grouped := range byBaseURI {
+		sort.Slice(grouped, func(i, j int) bool {
+			return grouped[i].Info.CreatedAt.After(grouped[j].Info.CreatedAt)
+		})
+
+		toCheck := grouped
+		if params.KeepLast > 0 && len(grouped) > params.KeepLast {
+			toCheck = grouped[params.KeepLast:]
+		} else if params.KeepLast > 0 {
+			continue
+		}
+
+		for _, entry := range toCheck {
+			if params.MaxAge > 0 && entry.Info.CreatedAt.After(cutoff) {
+				continue
+			}
+			candidates = append(candidates, entry)
+			result.Candidates = append(result.Candidates, entry.Info)
+			result.BytesFreed += entry.Info.TotalSizeBytes
+			result.ObjectsRemoved += entry.Info.ObjectCount
+		}
+	}
+
+	result.IndexSetsRemoved = len(candidates)
+	return result, candidates
 }
 
 // parseDuration parses a duration string that may include day suffix (e.g., "30d").

@@ -5,15 +5,18 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
+	"sort"
+	"strings"
 	"time"
+
+	"github.com/3leaps/gonimbus/pkg/match"
 )
 
 // IndexSet represents a unique index identity.
 //
-// An IndexSet is identified by (base_uri, provider_identity, build_params_hash).
+// An IndexSet is identified by (base_uri, provider_identity, index_build_hash).
 // Different build params (filters, path-date extraction, etc.) produce different IndexSets.
 type IndexSet struct {
 	IndexSetID      string
@@ -25,8 +28,47 @@ type IndexSet struct {
 	Region          string
 	Endpoint        string
 	EndpointHost    string
-	BuildParamsHash string
+	IndexBuildHash  string
 	CreatedAt       time.Time
+}
+
+// IndexSetIdentityPayload captures the canonical identity for hashing.
+type IndexSetIdentityPayload struct {
+	BaseURI         string                    `json:"base_uri"`
+	Provider        string                    `json:"provider"`
+	StorageProvider string                    `json:"storage_provider,omitempty"`
+	CloudProvider   string                    `json:"cloud_provider,omitempty"`
+	RegionKind      string                    `json:"region_kind,omitempty"`
+	Region          string                    `json:"region,omitempty"`
+	EndpointHost    string                    `json:"endpoint_host,omitempty"`
+	Build           IndexSetIdentityBuild     `json:"build"`
+	PathDate        *IndexSetIdentityPathDate `json:"path_date,omitempty"`
+}
+
+// IndexSetIdentityBuild captures build parameters that affect index identity.
+type IndexSetIdentityBuild struct {
+	SourceType      string   `json:"source_type"`
+	SchemaVersion   int      `json:"schema_version"`
+	GonimbusVersion string   `json:"gonimbus_version,omitempty"`
+	Includes        []string `json:"includes"`
+	Excludes        []string `json:"excludes,omitempty"`
+	IncludeHidden   bool     `json:"include_hidden"`
+	FiltersHash     string   `json:"filters_hash,omitempty"`
+}
+
+// IndexSetIdentityPathDate captures path date extraction identity fields.
+type IndexSetIdentityPathDate struct {
+	Method       string `json:"method"`
+	Regex        string `json:"regex,omitempty"`
+	SegmentIndex int    `json:"segment_index,omitempty"`
+}
+
+// IndexSetIdentityResult contains derived identity fields.
+type IndexSetIdentityResult struct {
+	IndexSetID      string
+	DirName         string
+	CanonicalJSON   string
+	CanonicalSHA256 string
 }
 
 // IndexSetParams contains parameters for creating or finding an IndexSet.
@@ -44,7 +86,7 @@ type IndexSetParams struct {
 
 // BuildParams captures parameters that affect index contents.
 //
-// Any change in build_params_hash requires a new IndexSet to ensure
+// Any change in index_build_hash requires a new IndexSet to ensure
 // index consistency and proper query semantics.
 type BuildParams struct {
 	SourceType         string
@@ -66,43 +108,26 @@ type PathDateExtraction struct {
 	SegmentIndex int    // For segment method (0-indexed)
 }
 
-// ComputeBuildParamsHash computes a hash for build parameters.
-func ComputeBuildParamsHash(bp BuildParams) (string, error) {
-	h := sha256.New()
-
-	h.Write([]byte(bp.SourceType))
-	_, _ = fmt.Fprintf(h, "schema=%d", bp.SchemaVersion)
-	_, _ = fmt.Fprintf(h, "version=%s", bp.GonimbusVersion)
-
-	if bp.PathDateExtraction != nil {
-		h.Write([]byte("path_date=1"))
-		h.Write([]byte(bp.PathDateExtraction.Method))
-		h.Write([]byte(bp.PathDateExtraction.Regex))
-		_, _ = fmt.Fprintf(h, "segment=%d", bp.PathDateExtraction.SegmentIndex)
+// ComputeIndexSetID computes canonical identity details for an IndexSet.
+func ComputeIndexSetID(params IndexSetParams) (*IndexSetIdentityResult, error) {
+	payload := buildIndexSetIdentityPayload(params)
+	canonicalJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal identity payload: %w", err)
 	}
 
-	// Include match/filtering parameters in hash for uniqueness.
-	if bp.Includes != nil {
-		for _, inc := range bp.Includes {
-			h.Write([]byte("include="))
-			h.Write([]byte(inc))
-		}
-	}
-	if bp.Excludes != nil {
-		for _, exc := range bp.Excludes {
-			h.Write([]byte("exclude="))
-			h.Write([]byte(exc))
-		}
-	}
-	if bp.IncludeHidden {
-		h.Write([]byte("include_hidden=1"))
-	}
-	if bp.FiltersHash != "" {
-		h.Write([]byte("filters="))
-		h.Write([]byte(bp.FiltersHash))
+	sha := sha256.Sum256(canonicalJSON)
+	shaHex := hex.EncodeToString(sha[:])
+	if len(shaHex) < 16 {
+		return nil, fmt.Errorf("identity hash too short")
 	}
 
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return &IndexSetIdentityResult{
+		IndexSetID:      "idx_" + shaHex,
+		DirName:         "idx_" + shaHex[:16],
+		CanonicalJSON:   string(canonicalJSON),
+		CanonicalSHA256: shaHex,
+	}, nil
 }
 
 // FindOrCreateIndexSet finds an existing IndexSet or creates a new one.
@@ -113,16 +138,12 @@ func FindOrCreateIndexSet(ctx context.Context, db *sql.DB, params IndexSetParams
 		ctx = context.Background()
 	}
 
-	hash, err := ComputeBuildParamsHash(params.BuildParams)
+	identity, err := ComputeIndexSetID(params)
 	if err != nil {
-		return nil, false, fmt.Errorf("compute build params hash: %w", err)
+		return nil, false, fmt.Errorf("compute index set identity: %w", err)
 	}
 
-	// Use explicit EndpointHost if provided; otherwise derive from Endpoint.
-	endpointHost := params.EndpointHost
-	if endpointHost == "" && params.Endpoint != "" {
-		endpointHost = deriveEndpointHost(params.Endpoint)
-	}
+	endpointHost := normalizeEndpointHost(params.EndpointHost)
 
 	// Try to find existing by full explicit identity tuple.
 	// ENTARCH: Match on all identity fields, don't treat NULL as wildcard.
@@ -133,11 +154,11 @@ func FindOrCreateIndexSet(ctx context.Context, db *sql.DB, params IndexSetParams
 		 AND storage_provider = ? AND cloud_provider = ?
 		 AND region_kind = ? AND region = ?
 		 AND endpoint_host = ?
-		 AND build_params_hash = ?`,
-		params.BaseURI, params.Provider,
+		 AND index_build_hash = ?`,
+		normalizeBaseURI(params.BaseURI), params.Provider,
 		params.StorageProvider, params.CloudProvider,
 		params.RegionKind, params.Region,
-		endpointHost, hash).Scan(&existingID)
+		endpointHost, identity.CanonicalSHA256).Scan(&existingID)
 
 	if findErr == nil {
 		// Found existing
@@ -151,16 +172,16 @@ func FindOrCreateIndexSet(ctx context.Context, db *sql.DB, params IndexSetParams
 
 	// Create new
 	now := time.Now().UTC()
-	newID := generateIndexSetID(params.BaseURI, hash)
+	newID := identity.IndexSetID
 
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO index_sets
 		 (index_set_id, base_uri, provider, storage_provider, cloud_provider,
-		  region_kind, region, endpoint, endpoint_host, build_params_hash, created_at)
+		  region_kind, region, endpoint, endpoint_host, index_build_hash, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newID, params.BaseURI, params.Provider, params.StorageProvider,
+		newID, normalizeBaseURI(params.BaseURI), params.Provider, params.StorageProvider,
 		params.CloudProvider, params.RegionKind, params.Region,
-		params.Endpoint, endpointHost, hash, now)
+		params.Endpoint, endpointHost, identity.CanonicalSHA256, now)
 
 	if err != nil {
 		return nil, false, fmt.Errorf("create index_set: %w", err)
@@ -185,12 +206,12 @@ func getFullIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*Index
 	err := db.QueryRowContext(ctx,
 		`SELECT index_set_id, base_uri, provider, storage_provider,
 		        cloud_provider, region_kind, region, endpoint, endpoint_host,
-		        build_params_hash, created_at
+		        index_build_hash, created_at
 		 FROM index_sets WHERE index_set_id = ?`,
 		indexSetID).Scan(
 		&is.IndexSetID, &is.BaseURI, &is.Provider, &is.StorageProvider,
 		&is.CloudProvider, &is.RegionKind, &is.Region, &is.Endpoint,
-		&is.EndpointHost, &is.BuildParamsHash, &is.CreatedAt)
+		&is.EndpointHost, &is.IndexBuildHash, &is.CreatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("index_set not found: %s", indexSetID)
@@ -214,15 +235,17 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 	if baseURI == "" {
 		rows, err = db.QueryContext(ctx,
 			`SELECT index_set_id, base_uri, provider, storage_provider,
-			        cloud_provider, region_kind, region, endpoint, endpoint_host,
-			        build_params_hash, created_at
-			 FROM index_sets ORDER BY created_at DESC`)
+		        cloud_provider, region_kind, region, endpoint, endpoint_host,
+		        index_build_hash, created_at
+		 FROM index_sets ORDER BY created_at DESC`)
+
 	} else {
 		rows, err = db.QueryContext(ctx,
 			`SELECT index_set_id, base_uri, provider, storage_provider,
-			        cloud_provider, region_kind, region, endpoint, endpoint_host,
-			        build_params_hash, created_at
-			 FROM index_sets WHERE base_uri = ? ORDER BY created_at DESC`,
+		        cloud_provider, region_kind, region, endpoint, endpoint_host,
+		        index_build_hash, created_at
+		 FROM index_sets WHERE base_uri = ? ORDER BY created_at DESC`,
+
 			baseURI)
 	}
 
@@ -237,7 +260,8 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 		err := rows.Scan(
 			&is.IndexSetID, &is.BaseURI, &is.Provider, &is.StorageProvider,
 			&is.CloudProvider, &is.RegionKind, &is.Region, &is.Endpoint,
-			&is.EndpointHost, &is.BuildParamsHash, &is.CreatedAt)
+			&is.EndpointHost, &is.IndexBuildHash, &is.CreatedAt)
+
 		if err != nil {
 			return nil, fmt.Errorf("scan index_set: %w", err)
 		}
@@ -288,35 +312,92 @@ func DeleteIndexSet(ctx context.Context, db *sql.DB, indexSetID string) error {
 	return tx.Commit()
 }
 
-// generateIndexSetID generates a stable ID for an IndexSet.
-func generateIndexSetID(baseURI, hash string) string {
-	h := sha256.New()
-	h.Write([]byte(baseURI))
-	h.Write([]byte(hash))
-	return hex.EncodeToString(h.Sum(nil))
+func buildIndexSetIdentityPayload(params IndexSetParams) IndexSetIdentityPayload {
+	endpointHost := normalizeEndpointHost(params.EndpointHost)
+	baseURI := normalizeBaseURI(params.BaseURI)
+
+	includes := normalizePatternList(params.BuildParams.Includes)
+	if includes == nil {
+		includes = []string{}
+	}
+
+	build := IndexSetIdentityBuild{
+		SourceType:      strings.TrimSpace(params.BuildParams.SourceType),
+		SchemaVersion:   params.BuildParams.SchemaVersion,
+		GonimbusVersion: strings.TrimSpace(params.BuildParams.GonimbusVersion),
+		Includes:        includes,
+		Excludes:        normalizePatternList(params.BuildParams.Excludes),
+		IncludeHidden:   params.BuildParams.IncludeHidden,
+		FiltersHash:     strings.TrimSpace(params.BuildParams.FiltersHash),
+	}
+
+	payload := IndexSetIdentityPayload{
+		BaseURI:         baseURI,
+		Provider:        strings.TrimSpace(params.Provider),
+		StorageProvider: strings.TrimSpace(params.StorageProvider),
+		CloudProvider:   strings.TrimSpace(params.CloudProvider),
+		RegionKind:      strings.TrimSpace(params.RegionKind),
+		Region:          strings.TrimSpace(params.Region),
+		EndpointHost:    endpointHost,
+		Build:           build,
+	}
+
+	if params.BuildParams.PathDateExtraction != nil {
+		payload.PathDate = &IndexSetIdentityPathDate{
+			Method:       strings.TrimSpace(params.BuildParams.PathDateExtraction.Method),
+			Regex:        strings.TrimSpace(params.BuildParams.PathDateExtraction.Regex),
+			SegmentIndex: params.BuildParams.PathDateExtraction.SegmentIndex,
+		}
+	}
+
+	return payload
 }
 
-// deriveEndpointHost extracts host from endpoint URL.
-// Handles credentials (user:pass@) and strips port.
-func deriveEndpointHost(endpoint string) string {
-	if endpoint == "" {
+func normalizeBaseURI(baseURI string) string {
+	value := strings.TrimSpace(baseURI)
+	if value == "" {
+		return value
+	}
+	if !strings.HasSuffix(value, "/") {
+		return value + "/"
+	}
+	return value
+}
+
+func normalizeEndpointHost(host string) string {
+	value := strings.TrimSpace(host)
+	if value == "" {
 		return ""
 	}
+	return strings.ToLower(value)
+}
 
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return ""
+func normalizePatternList(values []string) []string {
+	if len(values) == 0 {
+		return nil
 	}
 
-	host := parsed.Host
-	if host == "" {
-		return ""
+	unique := make(map[string]struct{})
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		normalized := match.NormalizePattern(trimmed)
+		normalized = strings.TrimPrefix(normalized, "/")
+		if normalized == "" {
+			continue
+		}
+		unique[normalized] = struct{}{}
+	}
+	if len(unique) == 0 {
+		return nil
 	}
 
-	host, _, err = net.SplitHostPort(host)
-	if err != nil {
-		return host
+	out := make([]string, 0, len(unique))
+	for value := range unique {
+		out = append(out, value)
 	}
-
-	return host
+	sort.Strings(out)
+	return out
 }
