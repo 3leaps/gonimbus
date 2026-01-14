@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	gfconfig "github.com/fulmenhq/gofulmen/config"
 	"github.com/google/uuid"
@@ -112,18 +115,18 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Disallow build-time metadata filters in v0.1.3 (apply filters at query time)
-	if err := validateNoMetadataFilters(m); err != nil {
+	buildFilters, err := computeIndexBuildFilters(m)
+	if err != nil {
 		return err
 	}
 
 	// Show plan in dry-run mode
 	if indexBuildDryRun {
-		return showIndexBuildPlan(cmd, m, identity)
+		return showIndexBuildPlan(cmd, m, identity, buildFilters)
 	}
 
 	// Build IndexSetParams
-	params := buildIndexSetParams(m, identity)
+	params := buildIndexSetParams(m, identity, buildFilters.FiltersHash)
 
 	identityResult, err := indexstore.ComputeIndexSetID(params)
 	if err != nil {
@@ -191,7 +194,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  source_type: %s\n", sourceType)
 
 	// Run crawl and ingest records (streaming - memory-bounded)
-	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run)
+	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run, buildFilters.Filter)
 	if crawlErr != nil {
 		// ENTARCH: Distinguish context cancellation from fatal errors.
 		// - Cancellation (Ctrl-C, timeout): record as "partial" (data was flushed, just incomplete)
@@ -269,6 +272,120 @@ func parseS3BaseURI(baseURI string) (bucket string, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
+type indexBuildFilters struct {
+	Filter      *match.CompositeFilter
+	FiltersHash string
+}
+
+func computeIndexBuildFilters(m *manifest.IndexManifest) (*indexBuildFilters, error) {
+	if m == nil || m.Build == nil || m.Build.Match == nil || m.Build.Match.Filters == nil {
+		return &indexBuildFilters{}, nil
+	}
+
+	mf := m.Build.Match.Filters
+	cfg := &match.FilterConfig{}
+
+	// Size
+	if mf.Size != nil {
+		cfg.Size = &match.SizeFilterConfig{Min: strings.TrimSpace(mf.Size.Min), Max: strings.TrimSpace(mf.Size.Max)}
+	}
+
+	// Modified
+	if mf.Modified != nil {
+		cfg.Modified = &match.DateFilterConfig{After: strings.TrimSpace(mf.Modified.After), Before: strings.TrimSpace(mf.Modified.Before)}
+	}
+
+	// Regex
+	cfg.KeyRegex = strings.TrimSpace(mf.KeyRegex)
+
+	filter, err := match.NewFilterFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build.match.filters: %w", err)
+	}
+	if filter == nil {
+		return &indexBuildFilters{}, nil
+	}
+
+	hash, err := computeFiltersHashFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build.match.filters: %w", err)
+	}
+
+	return &indexBuildFilters{Filter: filter, FiltersHash: hash}, nil
+}
+
+type filtersHashPayload struct {
+	SizeMinBytes   *int64     `json:"size_min_bytes,omitempty"`
+	SizeMaxBytes   *int64     `json:"size_max_bytes,omitempty"`
+	ModifiedAfter  *time.Time `json:"modified_after,omitempty"`
+	ModifiedBefore *time.Time `json:"modified_before,omitempty"`
+	KeyRegex       string     `json:"key_regex,omitempty"`
+}
+
+func computeFiltersHashFromConfig(cfg *match.FilterConfig) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+
+	payload := filtersHashPayload{}
+
+	if cfg.Size != nil {
+		if s := strings.TrimSpace(cfg.Size.Min); s != "" {
+			b, err := match.ParseSize(s)
+			if err != nil {
+				return "", err
+			}
+			payload.SizeMinBytes = &b
+		}
+		if s := strings.TrimSpace(cfg.Size.Max); s != "" {
+			b, err := match.ParseSize(s)
+			if err != nil {
+				return "", err
+			}
+			payload.SizeMaxBytes = &b
+		}
+		if payload.SizeMinBytes != nil && payload.SizeMaxBytes != nil && *payload.SizeMinBytes > *payload.SizeMaxBytes {
+			return "", fmt.Errorf("%w: min (%d) > max (%d)", match.ErrInvalidSize, *payload.SizeMinBytes, *payload.SizeMaxBytes)
+		}
+	}
+
+	if cfg.Modified != nil {
+		if s := strings.TrimSpace(cfg.Modified.After); s != "" {
+			t, err := match.ParseDate(s)
+			if err != nil {
+				return "", err
+			}
+			t = t.UTC()
+			payload.ModifiedAfter = &t
+		}
+		if s := strings.TrimSpace(cfg.Modified.Before); s != "" {
+			t, err := match.ParseDate(s)
+			if err != nil {
+				return "", err
+			}
+			t = t.UTC()
+			payload.ModifiedBefore = &t
+		}
+		if payload.ModifiedAfter != nil && payload.ModifiedBefore != nil && !payload.ModifiedAfter.Before(*payload.ModifiedBefore) {
+			return "", fmt.Errorf("%w: after (%s) >= before (%s)", match.ErrInvalidDate, payload.ModifiedAfter.Format(time.RFC3339Nano), payload.ModifiedBefore.Format(time.RFC3339Nano))
+		}
+	}
+
+	payload.KeyRegex = strings.TrimSpace(cfg.KeyRegex)
+
+	// If nothing is set, no hash.
+	if payload.SizeMinBytes == nil && payload.SizeMaxBytes == nil && payload.ModifiedAfter == nil && payload.ModifiedBefore == nil && payload.KeyRegex == "" {
+		return "", nil
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sha := sha256.Sum256(b)
+	return hex.EncodeToString(sha[:]), nil
+}
+
 func prefixPatterns(basePrefix string, patterns []string) []string {
 	if basePrefix == "" {
 		return patterns
@@ -341,7 +458,7 @@ func buildEffectiveIdentity(m *manifest.IndexManifest) effectiveIdentity {
 }
 
 // buildIndexSetParams constructs IndexSetParams from manifest and effective identity.
-func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity) indexstore.IndexSetParams {
+func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, filtersHash string) indexstore.IndexSetParams {
 	// Build params for hash
 	bp := indexstore.BuildParams{
 		SourceType:      m.Build.Source,
@@ -354,7 +471,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity) ind
 		bp.Includes = m.Build.Match.Includes
 		bp.Excludes = m.Build.Match.Excludes
 		bp.IncludeHidden = m.Build.Match.IncludeHidden
-		// TODO: compute FiltersHash from m.Build.Match.Filters
+		bp.FiltersHash = strings.TrimSpace(filtersHash)
 	}
 
 	// Path date extraction
@@ -380,7 +497,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity) ind
 }
 
 // showIndexBuildPlan displays the build plan without executing.
-func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity) error {
+func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters) error {
 	_, _ = fmt.Fprintln(os.Stdout, "Index Build Plan (dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "==========================")
 	_, _ = fmt.Fprintln(os.Stdout)
@@ -416,6 +533,10 @@ func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident eff
 			_, _ = fmt.Fprintf(os.Stdout, "  excludes: %v\n", m.Build.Match.Excludes)
 		}
 		_, _ = fmt.Fprintf(os.Stdout, "  include_hidden: %v\n", m.Build.Match.IncludeHidden)
+		if buildFilters != nil && buildFilters.Filter != nil {
+			_, _ = fmt.Fprintf(os.Stdout, "  filters: %s\n", buildFilters.Filter.String())
+			_, _ = fmt.Fprintf(os.Stdout, "  filters_hash: %s\n", buildFilters.FiltersHash)
+		}
 	}
 	if m.Build.Crawl != nil {
 		_, _ = fmt.Fprintf(os.Stdout, "  concurrency: %d\n", m.Build.Crawl.Concurrency)
@@ -573,6 +694,7 @@ func runCrawlForIndex(
 	db *sql.DB,
 	indexSetID string,
 	run *indexstore.IndexRun,
+	filter *match.CompositeFilter,
 ) (*indexBuildResult, error) {
 	// Create provider
 	cfg := s3.Config{
@@ -643,6 +765,9 @@ func runCrawlForIndex(
 	// Run crawler with streaming writer
 	jobID := uuid.New().String()
 	c := crawler.New(prov, matcher, writer, jobID, crawlCfg)
+	if filter != nil {
+		c = c.WithFilter(filter)
+	}
 	_, crawlErr := c.Run(ctx)
 
 	// Always close writer to flush remaining batches, even on error.
