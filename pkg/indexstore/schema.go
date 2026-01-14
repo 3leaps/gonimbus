@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // Migrate creates (or upgrades) the index schema in-place.
 //
@@ -52,7 +52,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			endpoint TEXT,
 			-- endpoint_host is derived from endpoint (host[:port]) when applicable.
 			endpoint_host TEXT,
-			build_params_hash TEXT NOT NULL,
+			index_build_hash TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_index_sets_base ON index_sets(base_uri);`,
@@ -155,6 +155,14 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	// Events table is created in base stmts via CREATE TABLE IF NOT EXISTS.
 	// No additional migration steps needed for v3.
 
+	// v4: rename build_params_hash to index_build_hash.
+	if current < 4 {
+		err := renameIndexBuildHash(ctx, tx)
+		if err != nil {
+			return err
+		}
+	}
+
 	if current != SchemaVersion {
 		if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=? WHERE id=1`, SchemaVersion); err != nil {
 			return fmt.Errorf("update schema_version: %w", err)
@@ -165,4 +173,36 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("commit schema tx: %w", err)
 	}
 	return nil
+}
+
+func renameIndexBuildHash(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE index_sets RENAME COLUMN build_params_hash TO index_build_hash;`); err == nil {
+		return nil
+	} else {
+		msg := err.Error()
+		if strings.Contains(msg, "no such column") || strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists") {
+			return nil
+		}
+		if strings.Contains(msg, "syntax error") || strings.Contains(msg, "unsupported") {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE index_sets ADD COLUMN index_build_hash TEXT;`); err != nil {
+				addMsg := err.Error()
+				if !strings.Contains(addMsg, "duplicate column name") && !strings.Contains(addMsg, "already exists") {
+					return fmt.Errorf("exec migration statement: %w", err)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE index_sets SET index_build_hash = COALESCE(index_build_hash, build_params_hash)`); err != nil {
+				updateMsg := err.Error()
+				if strings.Contains(updateMsg, "no such column") {
+					return nil
+				}
+				return fmt.Errorf("exec migration statement: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("exec migration statement: %w", err)
+	}
 }

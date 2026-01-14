@@ -25,7 +25,7 @@ func TestQueryObjects(t *testing.T) {
 	// Create test index set
 	indexSetID := "test-set-1"
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES (?, 's3://test-bucket/', 's3', 'hash123', datetime('now'))
 	`, indexSetID)
 	if err != nil {
@@ -270,7 +270,7 @@ func TestGetIndexSetByBaseURI(t *testing.T) {
 
 	// Insert test index sets
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES
 			('set1', 's3://bucket1/', 's3', 'hash1', '2025-01-01T00:00:00Z'),
 			('set2', 's3://bucket1/', 's3', 'hash2', '2025-01-02T00:00:00Z'),
@@ -334,7 +334,7 @@ func TestQueryObjectCount(t *testing.T) {
 	// Create test index set
 	indexSetID := "count-test-set"
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES (?, 's3://count-bucket/', 's3', 'hash123', datetime('now'))
 	`, indexSetID)
 	if err != nil {
@@ -464,7 +464,7 @@ func TestQueryObjectCount_MatchesQueryObjects(t *testing.T) {
 
 	indexSetID := "consistency-test"
 	_, _ = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES (?, 's3://consistency-bucket/', 's3', 'hash', datetime('now'))
 	`, indexSetID)
 
@@ -528,7 +528,7 @@ func TestQueryObjects_PrefixPushdown(t *testing.T) {
 
 	indexSetID := "prefix-test"
 	_, _ = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES (?, 's3://prefix-bucket/', 's3', 'hash', datetime('now'))
 	`, indexSetID)
 
@@ -657,7 +657,7 @@ func TestQueryObjects_TimestampParseErrors(t *testing.T) {
 
 	indexSetID := "timestamp-test"
 	_, _ = db.ExecContext(ctx, `
-		INSERT INTO index_sets (index_set_id, base_uri, provider, build_params_hash, created_at)
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
 		VALUES (?, 's3://ts-bucket/', 's3', 'hash', datetime('now'))
 	`, indexSetID)
 

@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
-	gfconfig "github.com/fulmenhq/gofulmen/config"
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -38,7 +36,7 @@ func init() {
 	rootCmd.AddCommand(indexCmd)
 	indexCmd.AddCommand(indexInitCmd)
 
-	indexInitCmd.Flags().StringVar(&indexDBPath, "db", "", "Index database path or libsql DSN (default is XDG data dir)")
+	indexInitCmd.Flags().StringVar(&indexDBPath, "db", "", "Index database path or libsql DSN (optional override)")
 }
 
 func runIndexInit(cmd *cobra.Command, args []string) error {
@@ -46,12 +44,16 @@ func runIndexInit(cmd *cobra.Command, args []string) error {
 
 	dbArg := strings.TrimSpace(indexDBPath)
 	if dbArg == "" {
-		identity := GetAppIdentity()
-		if identity == nil || strings.TrimSpace(identity.ConfigName) == "" {
-			return fmt.Errorf("app identity is not available to derive default index path")
+		indexDir, err := indexRootDir()
+		if err != nil {
+			return err
 		}
-		dataDir := gfconfig.GetAppDataDir(identity.ConfigName)
-		dbArg = filepath.Join(dataDir, "indexes", "gonimbus-index.db")
+		if err := os.MkdirAll(indexDir, 0755); err != nil {
+			return fmt.Errorf("create index directory: %w", err)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "Index directory initialized")
+		_, _ = fmt.Fprintf(os.Stdout, "dir=%s\n", indexDir)
+		return nil
 	}
 
 	cfg := indexstore.Config{}

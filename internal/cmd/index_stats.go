@@ -46,21 +46,12 @@ func runIndexStats(cmd *cobra.Command, args []string) error {
 	showPrefixes, _ := cmd.Flags().GetBool("prefixes")
 	showRuns, _ := cmd.Flags().GetBool("runs")
 
-	// Open index database
-	db, err := openQueryIndexDB(ctx)
+	// Open index database for the base URI
+	db, indexSet, err := openIndexDBForBaseURI(ctx, baseURI)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-
-	// Find index set by base URI
-	indexSet, err := indexstore.GetIndexSetByBaseURI(ctx, db, baseURI)
-	if err != nil {
-		return fmt.Errorf("lookup index set: %w", err)
-	}
-	if indexSet == nil {
-		return fmt.Errorf("no index found for base URI: %s", baseURI)
-	}
 
 	// Get summary statistics
 	summary, err := indexstore.GetIndexSetSummary(ctx, db, indexSet.IndexSetID)

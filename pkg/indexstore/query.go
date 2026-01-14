@@ -435,7 +435,7 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 	err := db.QueryRowContext(ctx, `
 		SELECT index_set_id, base_uri, provider, storage_provider,
 		       cloud_provider, region_kind, region, endpoint, endpoint_host,
-		       build_params_hash, created_at
+		       index_build_hash, created_at
 		FROM index_sets
 		WHERE base_uri = ?
 		ORDER BY created_at DESC
@@ -444,7 +444,7 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 		&is.IndexSetID, &is.BaseURI, &is.Provider,
 		&storageProvider, &cloudProvider, &regionKind,
 		&region, &endpoint, &endpointHost,
-		&is.BuildParamsHash, &is.CreatedAt,
+		&is.IndexBuildHash, &is.CreatedAt,
 	)
 
 	if err == sql.ErrNoRows {
