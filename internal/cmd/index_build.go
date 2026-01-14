@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -26,6 +27,12 @@ var indexBuildCmd = &cobra.Command{
 	Short: "Build an index from crawl results",
 	Long: `Build a local index by crawling a cloud storage location.
 
+By default, index builds use a per-index directory under the app data dir:
+  indexes/idx_<hashprefix>/index.db
+
+An identity file is written alongside the DB for interpretability:
+  indexes/idx_<hashprefix>/identity.json
+
 The index build process:
 1. Loads and validates the index manifest
 2. Creates or finds an existing IndexSet based on identity + build params
@@ -33,6 +40,8 @@ The index build process:
 4. Runs a crawl and ingests object/prefix records into the index
 5. Handles partial runs (throttling, access denied) with structured events
 6. Marks objects not seen in this run as soft-deleted
+
+Tip: use 'gonimbus index list' to see IDENTITY status, and 'gonimbus index doctor' to explain a specific idx_<hashprefix> directory.
 
 Example:
   gonimbus index build --job index.yaml
@@ -136,6 +145,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	if resolvedDB.WriteIdentity {
 		if err := writeIndexIdentityFile(resolvedDB.IdentityDir, identityResult); err != nil {
+			return err
+		}
+		if err := writeIndexManifestFile(resolvedDB.IdentityDir, m); err != nil {
 			return err
 		}
 	}
@@ -466,6 +478,27 @@ func writeIndexIdentityFile(indexDir string, identityResult *indexstore.IndexSet
 	identityPath := filepath.Join(indexDir, "identity.json")
 	if err := os.WriteFile(identityPath, []byte(identityResult.CanonicalJSON+"\n"), 0644); err != nil {
 		return fmt.Errorf("write identity.json: %w", err)
+	}
+	return nil
+}
+
+func writeIndexManifestFile(indexDir string, m *manifest.IndexManifest) error {
+	if indexDir == "" || m == nil {
+		return nil
+	}
+
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return fmt.Errorf("create index directory: %w", err)
+	}
+
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+
+	manifestPath := filepath.Join(indexDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, append(b, '\n'), 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil
 }

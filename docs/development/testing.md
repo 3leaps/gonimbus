@@ -139,6 +139,18 @@ make test-cloud
 make moto-stop
 ```
 
+### Note: `GONIMBUS_READONLY` and tests
+
+If you export `GONIMBUS_READONLY=1` while dogfooding, some tests that execute the CLI may fail because readonly mode intentionally refuses provider-side mutations (e.g. `write-probe` preflight and transfer execution).
+
+Run tests with the safety latch unset:
+
+```bash
+env -u GONIMBUS_READONLY make test
+# or:
+env -u GONIMBUS_READONLY go test ./...
+```
+
 ### Port Configuration
 
 Moto runs on port 5555 locally (not 5000) to avoid conflicts with macOS AirTunes. The `MOTO_ENDPOINT` environment variable controls the endpoint:
