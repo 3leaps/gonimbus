@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-01-15
+
+### Added
+
+#### Index Workflow
+
+- **Local Index Store** (`pkg/indexstore/`)
+  - SQLite-based local index for offline bucket inventory
+  - Per-index database isolation (hash-based identity)
+  - Streaming batch ingestion from crawl results
+  - Soft-delete handling for removed objects
+  - Schema version tracking for upgrades
+
+- **Index CLI Commands** (`internal/cmd/index*.go`)
+  - `gonimbus index init` - Initialize local index database
+  - `gonimbus index build --job <manifest>` - Build index from crawl
+  - `gonimbus index list` - List local indexes with stats
+  - `gonimbus index query <uri>` - Query indexed objects by pattern
+  - `gonimbus index stats <uri>` - Detailed index statistics
+  - `gonimbus index gc` - Garbage collect old indexes
+  - `gonimbus index doctor` - Validate index integrity and identity
+  - `gonimbus index show` - Display manifest provenance
+
+- **Index Build Features**
+  - Build-time include patterns for scope control
+  - Derived prefix display during builds
+  - Explicit identity validation (provider, region, endpoint)
+  - Tolerates provider outages via SDK retry
+
+- **Index Query Features**
+  - Pattern matching with doublestar globs
+  - Metadata filters: `--min-size`, `--max-size`, `--after`, `--before`
+  - Count mode: `--count` for quick totals
+  - JSONL output for integration with other tools
+
+- **Index Manifest Schema** (`internal/assets/schemas/index-manifest.schema.json`)
+  - Connection, identity, build, and output configuration
+  - Build-time scope with include patterns
+  - Provider identity for multi-cloud support
+
+### Changed
+
+- Index set identity now includes provider identity hash for isolation
+- Index runs track partial/failed status for operational visibility
+
+### Performance
+
+- **Query Speedup**: 100-1000x faster than live crawl for repeated queries
+- **Build Throughput**: ~3,000 objects/sec ingestion rate
+- **Tested Scale**: 16M objects enumerated, 150K indexed (with filters)
+
 ## [0.1.2] - 2026-01-11
 
 ### Added
@@ -189,7 +240,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/3leaps/gonimbus/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/3leaps/gonimbus/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/3leaps/gonimbus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/3leaps/gonimbus/releases/tag/v0.1.0

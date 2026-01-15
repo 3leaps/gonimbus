@@ -17,8 +17,9 @@ When dogfooding against real buckets, consider running with the global safety la
 
 - `--readonly` (or `GONIMBUS_READONLY=1`) disables provider-side mutations, including `transfer` execution and `write-probe` preflight.
 
-## Index
+## Guides
 
+- Local index (large buckets): `docs/user-guide/index.md`
 - Tree (prefix summary): `docs/user-guide/examples/tree.md`
 - Advanced filtering (size/date/regex): `docs/user-guide/examples/advanced-filtering.md`
 - Transfer operations (copy/move): `docs/user-guide/transfer.md`
