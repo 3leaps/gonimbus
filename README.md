@@ -93,15 +93,28 @@ See `docs/user-guide/examples/README.md` for copy/paste recipes (advanced filter
 ## CLI Commands
 
 ```bash
-gonimbus crawl --job <path>    # Run crawl job (prints JSONL)
-# Safety latch: hard-disable provider-side mutations
-# gonimbus --readonly <command>
-gonimbus inspect <uri>         # Quick single-object or prefix inspection
+# Explore workflow (no index required)
+gonimbus tree <uri>            # Prefix summary (directory-like view)
+gonimbus inspect <uri>         # Quick inspection with filters
+gonimbus crawl --job <path>    # Full crawl to JSONL
+
+# Index workflow (for large buckets)
+gonimbus index init            # Initialize local index database
+gonimbus index build --job <path>  # Build index from crawl
+gonimbus index query <uri>     # Query indexed objects by pattern
+gonimbus index list            # List local indexes
+gonimbus index doctor          # Validate index integrity
+gonimbus index gc              # Clean up old indexes
+
+# Operations
+gonimbus transfer --job <path> # Copy/move objects between buckets
+gonimbus preflight --job <path> # Verify permissions before transfer
 gonimbus doctor                # Environment/auth checks
 gonimbus serve                 # Run server mode
 gonimbus version               # Version info
-gonimbus envinfo               # Dump config/env/SSOT info
-gonimbus health                # Self-check
+
+# Safety latch: hard-disable provider-side mutations
+# gonimbus --readonly <command>
 ```
 
 ## Configuration

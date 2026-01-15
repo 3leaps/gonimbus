@@ -4,6 +4,97 @@ This file contains release notes for the three most recent releases in reverse c
 
 ---
 
+## v0.1.3 (2026-01-15)
+
+**Local Index for Large-Scale Bucket Inventory**
+
+This release adds a local index store for offline bucket inventory. For buckets with millions of objects, the index enables fast repeated queries without re-enumerating via the provider API.
+
+### When to Use the Index
+
+Gonimbus supports two workflows:
+
+| Workflow      | Scale       | Commands                     | Index? |
+| ------------- | ----------- | ---------------------------- | ------ |
+| **Explore**   | <1M objects | `tree`, `inspect`, `crawl`   | No     |
+| **Inventory** | 1M+ objects | `index build`, `index query` | Yes    |
+
+For smaller buckets, `tree` and `inspect` work well for exploration. For larger buckets where live enumeration takes minutes or hours, build an index once and query it repeatedly.
+
+### Index Commands
+
+```bash
+# Initialize local index database
+gonimbus index init
+
+# Build index from a crawl manifest
+gonimbus index build --job index-manifest.yaml
+
+# List local indexes
+gonimbus index list
+
+# Query indexed objects by pattern
+gonimbus index query 's3://bucket/prefix/' --pattern '**/data/*.parquet'
+
+# Query with filters
+gonimbus index query 's3://bucket/prefix/' --after 2025-12-01 --min-size 1KB --count
+
+# View index statistics
+gonimbus index stats 's3://bucket/prefix/'
+
+# Validate index integrity
+gonimbus index doctor
+
+# Clean up old indexes
+gonimbus index gc --keep-last 3
+```
+
+### Index Manifest Example
+
+```yaml
+version: "1.0"
+
+connection:
+  provider: s3
+  bucket: my-bucket
+  region: us-east-1
+  base_uri: s3://my-bucket/data/
+
+identity:
+  storage_provider: aws_s3
+  cloud_provider: aws
+  region_kind: aws
+  region: us-east-1
+
+build:
+  match:
+    includes:
+      - "**/*"
+  crawl:
+    concurrency: 16
+
+output:
+  destination: stdout
+```
+
+### Performance
+
+Index queries are significantly faster than live crawl for repeated access:
+
+| Operation        | Live Crawl | Index Query |
+| ---------------- | ---------- | ----------- |
+| Count objects    | ~30s       | <1s         |
+| Pattern + filter | minutes    | <1s         |
+
+Build throughput scales linearly at approximately 3,000 objects/sec.
+
+### Documentation
+
+- Index commands: `gonimbus index --help`
+- See [docs/releases/v0.1.3.md](docs/releases/v0.1.3.md) for complete release notes
+
+---
+
 ## v0.1.2 (2026-01-11)
 
 **Transfer Engine, Tree Command, and Advanced Filtering**
@@ -165,41 +256,3 @@ make moto-stop     # Clean up
 See [docs/development/testing.md](docs/development/testing.md) for testing philosophy and coverage approach.
 
 See [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md) for full release notes.
-
----
-
-## v0.1.0 (2026-01-03)
-
-**Initial Public Release**
-
-Gonimbus is a Go-first library + CLI + server for large-scale inspection and crawl of cloud object storage (100K-1M+ objects). This release delivers S3 support with prefix-first listing and JSONL output.
-
-### Highlights
-
-- **S3 & S3-Compatible Support**: AWS S3, Wasabi, Cloudflare R2, DigitalOcean Spaces
-- **Pattern Matching**: Doublestar globs with intelligent prefix derivation for scale
-- **Streaming Output**: JSONL records with typed envelopes for objects, errors, and progress
-- **Bounded Pipeline**: Configurable concurrency with backpressure and rate limiting
-- **Schema-Validated Manifests**: YAML/JSON job manifests with strict validation
-
-### CLI Commands
-
-```bash
-# Quick inspection
-gonimbus inspect s3://bucket/prefix/
-
-# Run a crawl job
-gonimbus crawl --job manifest.yaml
-
-# Check environment
-gonimbus doctor
-```
-
-### Getting Started
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.1.0
-gonimbus version
-```
-
-See [docs/releases/v0.1.0.md](docs/releases/v0.1.0.md) for full release notes.
