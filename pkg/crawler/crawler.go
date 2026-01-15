@@ -398,6 +398,11 @@ func (c *Crawler) listPrefix(ctx context.Context, prefix string, out chan<- obje
 				// Could implement retry here, but for now treat as non-fatal
 				return nil
 			}
+			if provider.IsProviderUnavailable(err) {
+				c.writeError(ctx, output.ErrCodeProviderUnavailable, err.Error(), prefix)
+				// Treat as non-fatal: mark run partial and continue other prefixes.
+				return nil
+			}
 			// Fatal error
 			return err
 		}
