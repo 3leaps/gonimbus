@@ -432,6 +432,7 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 		endpointHost    sql.NullString
 	)
 
+	var createdAtRaw any
 	err := db.QueryRowContext(ctx, `
 		SELECT index_set_id, base_uri, provider, storage_provider,
 		       cloud_provider, region_kind, region, endpoint, endpoint_host,
@@ -444,7 +445,7 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 		&is.IndexSetID, &is.BaseURI, &is.Provider,
 		&storageProvider, &cloudProvider, &regionKind,
 		&region, &endpoint, &endpointHost,
-		&is.IndexBuildHash, &is.CreatedAt,
+		&is.IndexBuildHash, &createdAtRaw,
 	)
 
 	if err == sql.ErrNoRows {
@@ -453,6 +454,12 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 	if err != nil {
 		return nil, fmt.Errorf("query index set by base_uri: %w", err)
 	}
+
+	createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
+	is.CreatedAt = createdAt
 
 	// Transfer nullable values
 	if storageProvider.Valid {

@@ -203,6 +203,7 @@ func GetIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*IndexSet,
 func getFullIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*IndexSet, error) {
 	var is IndexSet
 
+	var createdAtRaw any
 	err := db.QueryRowContext(ctx,
 		`SELECT index_set_id, base_uri, provider, storage_provider,
 		        cloud_provider, region_kind, region, endpoint, endpoint_host,
@@ -211,7 +212,7 @@ func getFullIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*Index
 		indexSetID).Scan(
 		&is.IndexSetID, &is.BaseURI, &is.Provider, &is.StorageProvider,
 		&is.CloudProvider, &is.RegionKind, &is.Region, &is.Endpoint,
-		&is.EndpointHost, &is.IndexBuildHash, &is.CreatedAt)
+		&is.EndpointHost, &is.IndexBuildHash, &createdAtRaw)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("index_set not found: %s", indexSetID)
@@ -219,6 +220,12 @@ func getFullIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*Index
 	if err != nil {
 		return nil, fmt.Errorf("get index_set: %w", err)
 	}
+
+	createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
+	is.CreatedAt = createdAt
 
 	return &is, nil
 }
@@ -257,18 +264,68 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 	var sets []IndexSet
 	for rows.Next() {
 		var is IndexSet
+		var createdAtRaw any
 		err := rows.Scan(
 			&is.IndexSetID, &is.BaseURI, &is.Provider, &is.StorageProvider,
 			&is.CloudProvider, &is.RegionKind, &is.Region, &is.Endpoint,
-			&is.EndpointHost, &is.IndexBuildHash, &is.CreatedAt)
+			&is.EndpointHost, &is.IndexBuildHash, &createdAtRaw)
 
 		if err != nil {
 			return nil, fmt.Errorf("scan index_set: %w", err)
 		}
+
+		createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse created_at: %w", err)
+		}
+		is.CreatedAt = createdAt
 		sets = append(sets, is)
 	}
 
 	return sets, nil
+}
+
+func parseIndexSetCreatedAt(value any) (time.Time, error) {
+	switch v := value.(type) {
+	case time.Time:
+		return v.UTC(), nil
+	case string:
+		return parseIndexSetTimeString(v)
+	case []byte:
+		return parseIndexSetTimeString(string(v))
+	case nil:
+		return time.Time{}, fmt.Errorf("created_at is null")
+	default:
+		return time.Time{}, fmt.Errorf("unsupported created_at type %T", value)
+	}
+}
+
+func parseIndexSetTimeString(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, fmt.Errorf("created_at is empty")
+	}
+
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	}
+
+	for _, format := range formats {
+		if parsed, err := time.Parse(format, trimmed); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+
+	if parsed, err := match.ParseDate(trimmed); err == nil {
+		return parsed.UTC(), nil
+	}
+
+	return time.Time{}, fmt.Errorf("invalid created_at: %q", trimmed)
 }
 
 // DeleteIndexSet deletes an IndexSet and all associated data.
