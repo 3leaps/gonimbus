@@ -386,6 +386,32 @@ func computeFiltersHashFromConfig(cfg *match.FilterConfig) (string, error) {
 	return hex.EncodeToString(sha[:]), nil
 }
 
+func deriveCrawlPrefixesForPlan(m *manifest.IndexManifest) ([]string, error) {
+	if m == nil {
+		return nil, fmt.Errorf("nil manifest")
+	}
+	_, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	if err != nil {
+		return nil, err
+	}
+
+	matchCfg := match.Config{IncludeHidden: false}
+	if m.Build != nil && m.Build.Match != nil {
+		matchCfg.Includes = prefixPatterns(basePrefix, m.Build.Match.Includes)
+		matchCfg.Excludes = prefixPatterns(basePrefix, m.Build.Match.Excludes)
+		matchCfg.IncludeHidden = m.Build.Match.IncludeHidden
+	}
+	if len(matchCfg.Includes) == 0 {
+		matchCfg.Includes = []string{basePrefix + "**"}
+	}
+
+	matcher, err := match.New(matchCfg)
+	if err != nil {
+		return nil, err
+	}
+	return matcher.Prefixes(), nil
+}
+
 func prefixPatterns(basePrefix string, patterns []string) []string {
 	if basePrefix == "" {
 		return patterns
@@ -536,6 +562,28 @@ func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident eff
 		if buildFilters != nil && buildFilters.Filter != nil {
 			_, _ = fmt.Fprintf(os.Stdout, "  filters: %s\n", buildFilters.Filter.String())
 			_, _ = fmt.Fprintf(os.Stdout, "  filters_hash: %s\n", buildFilters.FiltersHash)
+		}
+	}
+
+	// Derived crawl prefixes (what will be listed).
+	// This is the most important “cost shape” signal for large buckets.
+	_, _ = fmt.Fprintln(os.Stdout)
+	_, _ = fmt.Fprintln(os.Stdout, "Derived Crawl Prefixes:")
+	_, _ = fmt.Fprintf(os.Stdout, "  source: build.match.includes/excludes (anchored to base_uri)\n")
+	prefixes, err := deriveCrawlPrefixesForPlan(m)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "  error: %v\n", err)
+	} else {
+		_, _ = fmt.Fprintf(os.Stdout, "  count: %d\n", len(prefixes))
+		maxShow := 10
+		if len(prefixes) < maxShow {
+			maxShow = len(prefixes)
+		}
+		for i := 0; i < maxShow; i++ {
+			_, _ = fmt.Fprintf(os.Stdout, "  - %s\n", prefixes[i])
+		}
+		if len(prefixes) > maxShow {
+			_, _ = fmt.Fprintf(os.Stdout, "  ... (%d more)\n", len(prefixes)-maxShow)
 		}
 	}
 	if m.Build.Crawl != nil {

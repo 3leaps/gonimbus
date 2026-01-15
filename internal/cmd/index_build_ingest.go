@@ -60,8 +60,9 @@ type indexIngestWriter struct {
 	sawOtherError   bool
 
 	// Guards for one-time event recording
-	recordedTimeout        bool
-	recordedScopeViolation bool
+	recordedTimeout             bool
+	recordedProviderUnavailable bool
+	recordedScopeViolation      bool
 
 	// Scope violation tracking (guardrail)
 	scopeViolationCount int64
@@ -211,6 +212,15 @@ func (w *indexIngestWriter) WriteError(ctx context.Context, errRec *output.Error
 		if !w.recordedTimeout {
 			w.recordedTimeout = true
 			if err := indexstore.RecordPartialRun(ctx, w.db, w.run.RunID, "timeout"); err != nil {
+				return err
+			}
+		}
+
+	case output.ErrCodeProviderUnavailable:
+		w.sawOtherError = true
+		if !w.recordedProviderUnavailable {
+			w.recordedProviderUnavailable = true
+			if err := indexstore.RecordPartialRun(ctx, w.db, w.run.RunID, "provider_unavailable"); err != nil {
 				return err
 			}
 		}

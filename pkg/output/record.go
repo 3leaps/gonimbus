@@ -180,6 +180,9 @@ const (
 
 	// ErrCodeInternal indicates an unexpected internal error.
 	ErrCodeInternal = "INTERNAL"
+
+	// ErrCodeProviderUnavailable indicates provider or network availability issues.
+	ErrCodeProviderUnavailable = "PROVIDER_UNAVAILABLE"
 )
 
 // ProgressRecord is the data payload for progress updates.
