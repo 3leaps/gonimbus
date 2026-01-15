@@ -459,7 +459,7 @@ func printIndexDoctorTable(entries []indexDoctorEntry) error {
 			status = "-"
 		}
 
-		identity := "-"
+		var identity string
 		switch {
 		case !e.IdentityPresent:
 			identity = "missing"
