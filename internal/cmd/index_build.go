@@ -699,31 +699,6 @@ func validateIdentity(m *manifest.IndexManifest, ident effectiveIdentity) error 
 	return nil
 }
 
-// validateNoMetadataFilters rejects build-time metadata filters in v0.1.3.
-//
-// Policy: Index everything, filter at query time. This keeps IndexSet identity
-// stable and avoids the complexity of build-time filter semantics.
-func validateNoMetadataFilters(m *manifest.IndexManifest) error {
-	if m.Build == nil || m.Build.Match == nil || m.Build.Match.Filters == nil {
-		return nil
-	}
-
-	filters := m.Build.Match.Filters
-
-	// Check if any metadata filters are set
-	if filters.Size != nil && (filters.Size.Min != "" || filters.Size.Max != "") {
-		return fmt.Errorf("build-time size filters not supported in v0.1.3; use 'gonimbus index query' with --min-size/--max-size")
-	}
-	if filters.Modified != nil && (filters.Modified.After != "" || filters.Modified.Before != "") {
-		return fmt.Errorf("build-time date filters not supported in v0.1.3; use 'gonimbus index query' with --after/--before")
-	}
-	if filters.KeyRegex != "" {
-		return fmt.Errorf("build-time key_regex filter not supported in v0.1.3; use 'gonimbus index query' with --key-regex")
-	}
-
-	return nil
-}
-
 // indexBuildResult holds the outcome of crawl-to-index ingestion.
 type indexBuildResult struct {
 	FinalStatus      indexstore.RunStatus

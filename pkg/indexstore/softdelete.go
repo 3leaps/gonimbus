@@ -88,7 +88,7 @@ func RestoreDeletedObjects(ctx context.Context, db *sql.DB, indexSetID string, d
 		 SET deleted_at = NULL
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NOT NULL
-		   AND deleted_at >= ?`,
+		   AND strftime('%s', deleted_at) >= strftime('%s', ?)`,
 		indexSetID, deletedAfter)
 
 	if err != nil {

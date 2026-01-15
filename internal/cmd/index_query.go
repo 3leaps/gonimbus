@@ -279,19 +279,6 @@ func listIndexDBPaths() ([]string, error) {
 	return paths, nil
 }
 
-func loadIndexEntries(ctx context.Context) ([]indexstore.IndexListEntry, error) {
-	entries, err := loadIndexEntriesWithPaths(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]indexstore.IndexListEntry, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, entry.Info)
-	}
-	return out, nil
-}
-
 func loadIndexEntriesWithPaths(ctx context.Context) ([]indexDBEntry, error) {
 	paths, err := listIndexDBPaths()
 	if err != nil {
