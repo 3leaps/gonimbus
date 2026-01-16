@@ -197,14 +197,27 @@ release-checksums: ## Generate SHA256SUMS and SHA512SUMS in dist/release
 checksums: release-checksums ## Deprecated: use release-checksums
 	@:
 
-release-guard-tag-version: ## Guard: ensure RELEASE_TAG matches VERSION file
+release-guard-tag-version: ## Guard: ensure RELEASE_TAG matches VERSION + app identity
 	@TAG="$(RELEASE_TAG)"; \
+	if [ -z "$$TAG" ]; then \
+		echo "❌ RELEASE_TAG required (example: v$(VERSION))" >&2; \
+		exit 1; \
+	fi; \
 	EXPECTED="v$(VERSION)"; \
 	if [ "$$TAG" != "$$EXPECTED" ]; then \
 		echo "❌ RELEASE_TAG mismatch: $$TAG != $$EXPECTED (from VERSION)" >&2; \
 		exit 1; \
 	fi; \
-	echo "✅ RELEASE_TAG matches VERSION ($$TAG)"
+	APP_VERSION="$$(awk -F': ' '/^[[:space:]]*version:/ {print $$2; exit}' .fulmen/app.yaml)"; \
+	if [ -z "$$APP_VERSION" ]; then \
+		echo "❌ Unable to read app version from .fulmen/app.yaml" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$APP_VERSION" != "$(VERSION)" ]; then \
+		echo "❌ App version mismatch: $$APP_VERSION != $(VERSION) (VERSION file)" >&2; \
+		exit 1; \
+	fi; \
+	echo "✅ RELEASE_TAG matches VERSION ($$TAG) and app identity ($$APP_VERSION)"
 
 release-download: release-guard-tag-version ## Download GitHub release assets (RELEASE_TAG=vX.Y.Z)
 	@./scripts/release-download.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"

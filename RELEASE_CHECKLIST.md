@@ -46,6 +46,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] Update VERSION file
 - [ ] Update `.fulmen/app.yaml` version
 - [ ] Sync embedded identity: `make sync-embedded-identity`
+- [ ] Version sanity check: `make release-guard-tag-version RELEASE_TAG=v<version>`
 - [ ] Search for hardcoded version references
 
 ### Git Hygiene
@@ -70,12 +71,6 @@ Follow the Fulmen "manifest-only" provenance pattern:
 - Generate SHA256 + SHA512 manifests
 - Sign manifests with minisign (primary) and optionally PGP
 - Ship trust anchors (public keys) with the release
-
-- [ ] Verify VERSION file matches the release tag:
-
-  ```bash
-  make release-guard-tag-version RELEASE_TAG=v<version>
-  ```
 
 - [ ] Download CI-built artifacts and generate manifests:
 
