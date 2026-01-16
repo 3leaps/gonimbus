@@ -88,6 +88,8 @@ type Crawler struct {
 	config   Config
 	jobID    string
 
+	prefixes []string
+
 	// Rate limiter (nil if unlimited)
 	limiter *rate.Limiter
 
@@ -145,6 +147,14 @@ func (c *Crawler) WithFilter(f *match.CompositeFilter) *Crawler {
 	return c
 }
 
+// WithPrefixes overrides the prefixes to crawl.
+//
+// When set, the crawler uses these prefixes instead of matcher-derived prefixes.
+func (c *Crawler) WithPrefixes(prefixes []string) *Crawler {
+	c.prefixes = prefixes
+	return c
+}
+
 // Run executes the crawl and returns summary statistics.
 //
 // Run blocks until the crawl completes, is cancelled via context, or
@@ -159,7 +169,10 @@ func (c *Crawler) Run(ctx context.Context) (*Summary, error) {
 	startTime := time.Now()
 
 	// Get prefixes to crawl
-	prefixes := c.matcher.Prefixes()
+	prefixes := c.prefixes
+	if prefixes == nil {
+		prefixes = c.matcher.Prefixes()
+	}
 	if len(prefixes) == 0 {
 		// No prefixes means match everything - use empty prefix
 		prefixes = []string{""}

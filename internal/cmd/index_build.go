@@ -218,7 +218,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// Finalize run status based on collected errors (soft-delete only on success)
-	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result); err != nil {
+	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
+	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
 		return fmt.Errorf("finalize index run: %w", err)
 	}
 
@@ -231,6 +232,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
 	if result.ObjectsDeleted > 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_soft_deleted: %d\n", result.ObjectsDeleted)
+	}
+	if result.FinalStatus == indexstore.RunStatusSuccess && !allowSoftDelete {
+		_, _ = fmt.Fprintf(os.Stderr, "  note: soft-delete skipped for scoped build (not full coverage by default)\n")
 	}
 	if result.FinalStatus == indexstore.RunStatusPartial {
 		_, _ = fmt.Fprintf(os.Stderr, "  note: partial run (some errors encountered)\n")
@@ -801,6 +805,22 @@ func runCrawlForIndex(
 		return nil, fmt.Errorf("base_uri bucket %q does not match connection.bucket %q", baseBucket, m.Connection.Bucket)
 	}
 
+	var scopePlan *scope.Plan
+	if m.Build != nil && m.Build.Scope != nil {
+		var lister provider.PrefixLister
+		if scope.RequiresPrefixLister(m.Build.Scope) {
+			lister = prov
+		}
+		plan, err := scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
+		if err != nil {
+			return nil, fmt.Errorf("build.scope: %w", err)
+		}
+		if plan == nil || len(plan.Prefixes) == 0 {
+			return nil, fmt.Errorf("build.scope produced no crawl prefixes")
+		}
+		scopePlan = plan
+	}
+
 	// Create matcher from build config with nil-guard.
 	// IMPORTANT: patterns are applied to full provider keys, so we prefix all
 	// build patterns with the base prefix derived from base_uri. This ensures
@@ -851,6 +871,9 @@ func runCrawlForIndex(
 	if filter != nil {
 		c = c.WithFilter(filter)
 	}
+	if scopePlan != nil {
+		c = c.WithPrefixes(scopePlan.Prefixes)
+	}
 	_, crawlErr := c.Run(ctx)
 
 	// Always close writer to flush remaining batches, even on error.
@@ -892,6 +915,7 @@ func finalizeIndexRun(
 	indexSetID string,
 	run *indexstore.IndexRun,
 	result *indexBuildResult,
+	allowSoftDelete bool,
 ) error {
 	// Update run status
 	if err := indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, result.FinalStatus, nil); err != nil {
@@ -901,7 +925,7 @@ func finalizeIndexRun(
 	// ENTARCH: Only soft-delete for successful runs
 	// Per softdelete.go policy: partial runs may have missing objects due to
 	// incomplete traversal, not actual deletions.
-	if result.FinalStatus == indexstore.RunStatusSuccess {
+	if result.FinalStatus == indexstore.RunStatusSuccess && allowSoftDelete {
 		deleted, err := indexstore.MarkObjectsDeletedNotSeenInRun(ctx, db, indexSetID, run.RunID, run.StartedAt)
 		if err != nil {
 			return fmt.Errorf("mark deleted objects: %w", err)
