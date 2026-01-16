@@ -374,8 +374,7 @@ precommit:  ## Run pre-commit hooks
 	@echo "Running pre-commit validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint --fail-on critical
 	@echo "✅ Pre-commit checks passed"
 
-prepush: license-audit ## Run pre-push hooks
-	@echo "Running pre-push validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint,security --fail-on high
+prepush: license-audit check-all ## Run pre-push hooks
 	@echo "✅ Pre-push checks passed"
 
 # License compliance
