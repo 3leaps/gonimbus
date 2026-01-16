@@ -56,6 +56,19 @@ Add `set -euo pipefail` at the top of every multi-line `run` script. This catche
 
 Note: `actions/setup-go` installs Go inside the container job, and `golangci-lint-action` installs `golangci-lint` (not currently included in the runner image).
 
+### CGO Parity Tests
+
+CI runs with `CGO_ENABLED=0`, which exercises the pure-Go SQLite driver. That driver returns timestamps as strings, so we run an additional CGO-disabled test pass locally to mirror CI behavior.
+
+`make check-all` now runs:
+
+```bash
+make test       # CGO-enabled (default)
+make test-nocgo # CGO-disabled, matches CI
+```
+
+This catches driver-specific scan and timestamp parsing differences before pushing.
+
 ### Cloud Integration Testing
 
 #### Infrastructure
