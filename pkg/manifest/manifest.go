@@ -119,10 +119,10 @@ type SizeFilterConfig struct {
 
 // DateFilterConfig specifies date range constraints.
 type DateFilterConfig struct {
-	// After filters to objects modified after this time (exclusive).
+	// After filters to objects modified at or after this time (inclusive).
 	After string `json:"after,omitempty" yaml:"after,omitempty"`
 
-	// Before filters to objects modified before this time (exclusive).
+	// Before filters to objects modified before this time (exclusive end).
 	Before string `json:"before,omitempty" yaml:"before,omitempty"`
 }
 

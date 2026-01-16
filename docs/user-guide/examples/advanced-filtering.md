@@ -19,8 +19,8 @@ Filters are applied with **AND semantics**:
 - **Date** (`--after` / `--before`)
   - ISO 8601 date: `2024-01-15` (interpreted as start of day UTC)
   - ISO 8601 datetime: `2024-01-15T10:30:00Z` (or with offsets)
-  - Bounds are **exclusive**:
-    - `after`: requires `LastModified > after`
+  - Bounds are **[after, before)**:
+    - `after`: requires `LastModified >= after`
     - `before`: requires `LastModified < before`
 
 - **Key regex** (`--key-regex` / `filters.key_regex`)
