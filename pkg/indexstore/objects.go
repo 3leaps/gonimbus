@@ -108,8 +108,9 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 	}
 
 	var obj ObjectRow
-	var lastModified sql.NullTime
-	var deletedAt sql.NullTime
+	var lastModifiedRaw any
+	var lastSeenAtRaw any
+	var deletedAtRaw any
 
 	err := db.QueryRowContext(ctx,
 		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag,
@@ -117,8 +118,8 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 		 FROM objects_current
 		 WHERE index_set_id = ? AND rel_key = ?`,
 		indexSetID, relKey).Scan(
-		&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModified,
-		&obj.ETag, &obj.LastSeenRunID, &obj.LastSeenAt, &deletedAt)
+		&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
+		&obj.ETag, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -127,12 +128,23 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 		return nil, fmt.Errorf("get object: %w", err)
 	}
 
-	if lastModified.Valid {
-		obj.LastModified = &lastModified.Time
+	lastModified, err := parseOptionalDBTime(lastModifiedRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse last_modified: %w", err)
 	}
-	if deletedAt.Valid {
-		obj.DeletedAt = &deletedAt.Time
+	obj.LastModified = lastModified
+
+	lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse last_seen_at: %w", err)
 	}
+	obj.LastSeenAt = lastSeenAt
+
+	deletedAt, err := parseOptionalDBTime(deletedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse deleted_at: %w", err)
+	}
+	obj.DeletedAt = deletedAt
 
 	return &obj, nil
 }

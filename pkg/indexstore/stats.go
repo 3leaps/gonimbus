@@ -153,17 +153,19 @@ func ListIndexSetsWithStats(ctx context.Context, db *sql.DB) ([]IndexListEntry, 
 		}
 
 		// Get latest run
-		var latestRunAt sql.NullTime
+		var latestRunAtRaw any
 		var latestStatus sql.NullString
 		err = db.QueryRowContext(ctx,
 			`SELECT started_at, status FROM index_runs
 			 WHERE index_set_id = ?
 			 ORDER BY started_at DESC LIMIT 1`,
-			is.IndexSetID).Scan(&latestRunAt, &latestStatus)
+			is.IndexSetID).Scan(&latestRunAtRaw, &latestStatus)
 		if err == nil {
-			if latestRunAt.Valid {
-				entry.LatestRunAt = &latestRunAt.Time
+			latestRunAt, err := parseOptionalDBTime(latestRunAtRaw)
+			if err != nil {
+				return nil, fmt.Errorf("parse latest run started_at: %w", err)
 			}
+			entry.LatestRunAt = latestRunAt
 			if latestStatus.Valid {
 				entry.LatestStatus = latestStatus.String
 			}
