@@ -118,12 +118,106 @@
           "default": "crawl",
           "description": "Index source type (v0.1.3: crawl-only, inventory reserved for future)"
         },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
         "match": {
           "$ref": "#/$defs/match"
         },
         "crawl": {
           "$ref": "#/$defs/crawl_build"
         }
+      }
+    },
+    "scope": {
+      "description": "Optional build-time scoper that compiles to explicit crawl prefixes (provider-cost lever)",
+      "oneOf": [
+        { "$ref": "#/$defs/scope_prefix_list" },
+        { "$ref": "#/$defs/scope_date_partitions" },
+        { "$ref": "#/$defs/scope_union" }
+      ]
+    },
+    "scope_prefix_list": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "prefixes"],
+      "properties": {
+        "type": { "const": "prefix_list" },
+        "base_prefix": { "type": "string", "description": "Optional relative prefix under base_uri" },
+        "delimiter": { "type": "string", "default": "/" },
+        "prefixes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "Explicit relative prefixes (no wildcards)"
+        }
+      }
+    },
+    "scope_union": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scopes"],
+      "properties": {
+        "type": { "const": "union" },
+        "scopes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scope" },
+          "minItems": 1
+        }
+      }
+    },
+    "scope_date_partitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "date"],
+      "properties": {
+        "type": { "const": "date_partitions" },
+        "base_prefix": { "type": "string", "description": "Optional relative prefix under base_uri" },
+        "delimiter": { "type": "string", "default": "/" },
+        "discover": { "$ref": "#/$defs/scope_discover" },
+        "date": { "$ref": "#/$defs/scope_date" }
+      }
+    },
+    "scope_discover": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scope_discover_segment" }
+        }
+      }
+    },
+    "scope_discover_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "glob_allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "glob_deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "scope_date": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segment_index"],
+      "properties": {
+        "segment_index": { "type": "integer", "minimum": 0 },
+        "format": { "type": "string", "description": "Go time layout for folder names (required when using range)" },
+        "glob": { "type": "string", "minLength": 1 },
+        "range": { "$ref": "#/$defs/scope_date_range" }
+      }
+    },
+    "scope_date_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["after", "before"],
+      "properties": {
+        "after": { "type": "string", "minLength": 1 },
+        "before": { "type": "string", "minLength": 1 }
       }
     },
     "match": {
@@ -194,18 +288,18 @@
     },
     "date_filter": {
       "type": "object",
-      "description": "Last-modified date range constraints (exclusive bounds)",
+      "description": "Last-modified date range constraints ([after, before): inclusive start, exclusive end)",
       "additionalProperties": false,
       "properties": {
         "after": {
           "type": "string",
           "minLength": 1,
-          "description": "Only objects modified after this time (exclusive)"
+          "description": "Only objects modified at or after this time (inclusive start)"
         },
         "before": {
           "type": "string",
           "minLength": 1,
-          "description": "Only objects modified before this time (exclusive)"
+          "description": "Only objects modified before this time (exclusive end)"
         }
       }
     },

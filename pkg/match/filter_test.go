@@ -319,10 +319,10 @@ func TestDateFilter(t *testing.T) {
 			want:    false,
 		},
 		{
-			name:    "exact boundary - after is exclusive",
+			name:    "exact boundary - after is inclusive",
 			cfg:     &DateFilterConfig{After: "2024-06-15"},
 			modTime: time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC),
-			want:    false, // after is exclusive
+			want:    true, // after is inclusive
 		},
 		{
 			name:    "exact boundary - before is exclusive",

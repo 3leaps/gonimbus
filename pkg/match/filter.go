@@ -56,11 +56,11 @@ type SizeFilterConfig struct {
 
 // DateFilterConfig specifies date range constraints.
 type DateFilterConfig struct {
-	// After filters to objects modified after this time (exclusive).
+	// After filters to objects modified at or after this time (inclusive).
 	// Supports ISO 8601: "2024-01-15" or "2024-01-15T10:30:00Z".
 	After string `json:"after,omitempty" yaml:"after,omitempty"`
 
-	// Before filters to objects modified before this time (exclusive).
+	// Before filters to objects modified before this time (exclusive end).
 	// Supports ISO 8601: "2024-01-15" or "2024-01-15T10:30:00Z".
 	Before string `json:"before,omitempty" yaml:"before,omitempty"`
 }
@@ -183,7 +183,7 @@ func NewDateFilter(cfg *DateFilterConfig) (*DateFilter, error) {
 
 // Match returns true if object modification time is within range.
 func (f *DateFilter) Match(obj *provider.ObjectSummary) bool {
-	if !f.after.IsZero() && !obj.LastModified.After(f.after) {
+	if !f.after.IsZero() && obj.LastModified.Before(f.after) {
 		return false
 	}
 	if !f.before.IsZero() && !obj.LastModified.Before(f.before) {
@@ -203,7 +203,7 @@ func (f *DateFilter) String() string {
 	case !f.after.IsZero() && !f.before.IsZero():
 		return fmt.Sprintf("modified: %s to %s", f.after.Format("2006-01-02"), f.before.Format("2006-01-02"))
 	case !f.after.IsZero():
-		return fmt.Sprintf("modified: after %s", f.after.Format("2006-01-02"))
+		return fmt.Sprintf("modified: on/after %s", f.after.Format("2006-01-02"))
 	case !f.before.IsZero():
 		return fmt.Sprintf("modified: before %s", f.before.Format("2006-01-02"))
 	default:

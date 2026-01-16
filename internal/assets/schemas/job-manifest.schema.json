@@ -142,18 +142,18 @@
     },
     "date_filter": {
       "type": "object",
-      "description": "Last-modified date range constraints (exclusive bounds)",
+      "description": "Last-modified date range constraints ([after, before): inclusive start, exclusive end)",
       "additionalProperties": false,
       "properties": {
         "after": {
           "type": "string",
           "minLength": 1,
-          "description": "Only objects modified after this time (exclusive)"
+          "description": "Only objects modified at or after this time (inclusive start)"
         },
         "before": {
           "type": "string",
           "minLength": 1,
-          "description": "Only objects modified before this time (exclusive)"
+          "description": "Only objects modified before this time (exclusive end)"
         }
       }
     },
