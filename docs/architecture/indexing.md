@@ -34,7 +34,7 @@ Index building is designed around a small set of provider capabilities.
 
 ### Required for path-based scope compilation
 
-- **Delimiter listing**: list *common prefixes* under a literal `prefix` and delimiter (default `/`).
+- **Delimiter listing**: list _common prefixes_ under a literal `prefix` and delimiter (default `/`).
   - Used to discover segment values (e.g., discover device IDs under a store prefix).
 
 ### Optional
@@ -55,8 +55,8 @@ Providers should normalize common error classes so indexing can remain resilient
 
 Index builds separate concerns:
 
-- **Scoping** decides *what we list* (provider-cost lever).
-- **Matching/filtering** decides *what we ingest* (index size / relevance lever).
+- **Scoping** decides _what we list_ (provider-cost lever).
+- **Matching/filtering** decides _what we ingest_ (index size / relevance lever).
 
 ### Build match (ingest predicates)
 
@@ -70,7 +70,22 @@ These reduce ingest volume and query cost, but do not inherently reduce provider
 
 ### Build scope (provider-cost lever)
 
-Future work introduces `build.scope`, which compiles into an explicit prefix plan.
+`build.scope` is a scoper that compiles into an explicit prefix plan. This is the primary provider-cost lever for huge buckets where data is partitioned in the key path (e.g., date folders).
+
+At a high level:
+
+- `build.scope` constrains what the provider lists (prefix plan)
+- `build.match` constrains what is ingested (predicates/filters)
+
+Initial scope types (v0.1.4):
+
+- `prefix_list`: explicit prefixes (no wildcards)
+- `date_partitions`: discover variable segments + expand a date range
+- `union`: combine child scopes
+
+Schema source of truth:
+
+- `internal/assets/schemas/index-manifest.schema.json`
 
 The intent is to support datasets where a recent window is desired (e.g. last 30 days) but the history is huge.
 

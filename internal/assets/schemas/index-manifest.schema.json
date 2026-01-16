@@ -132,22 +132,42 @@
     "scope": {
       "description": "Optional build-time scoper that compiles to explicit crawl prefixes (provider-cost lever)",
       "oneOf": [
-        { "$ref": "#/$defs/scope_prefix_list" },
-        { "$ref": "#/$defs/scope_date_partitions" },
-        { "$ref": "#/$defs/scope_union" }
+        {
+          "$ref": "#/$defs/scope_prefix_list"
+        },
+        {
+          "$ref": "#/$defs/scope_date_partitions"
+        },
+        {
+          "$ref": "#/$defs/scope_union"
+        }
       ]
     },
     "scope_prefix_list": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "prefixes"],
+      "required": [
+        "type",
+        "prefixes"
+      ],
       "properties": {
-        "type": { "const": "prefix_list" },
-        "base_prefix": { "type": "string", "description": "Optional relative prefix under base_uri" },
-        "delimiter": { "type": "string", "default": "/" },
+        "type": {
+          "const": "prefix_list"
+        },
+        "base_prefix": {
+          "type": "string",
+          "description": "Optional relative prefix under base_uri"
+        },
+        "delimiter": {
+          "type": "string",
+          "default": "/"
+        },
         "prefixes": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "minItems": 1,
           "description": "Explicit relative prefixes (no wildcards)"
         }
@@ -156,12 +176,19 @@
     "scope_union": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "scopes"],
+      "required": [
+        "type",
+        "scopes"
+      ],
       "properties": {
-        "type": { "const": "union" },
+        "type": {
+          "const": "union"
+        },
         "scopes": {
           "type": "array",
-          "items": { "$ref": "#/$defs/scope" },
+          "items": {
+            "$ref": "#/$defs/scope"
+          },
           "minItems": 1
         }
       }
@@ -169,13 +196,28 @@
     "scope_date_partitions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "date"],
+      "required": [
+        "type",
+        "date"
+      ],
       "properties": {
-        "type": { "const": "date_partitions" },
-        "base_prefix": { "type": "string", "description": "Optional relative prefix under base_uri" },
-        "delimiter": { "type": "string", "default": "/" },
-        "discover": { "$ref": "#/$defs/scope_discover" },
-        "date": { "$ref": "#/$defs/scope_date" }
+        "type": {
+          "const": "date_partitions"
+        },
+        "base_prefix": {
+          "type": "string",
+          "description": "Optional relative prefix under base_uri"
+        },
+        "delimiter": {
+          "type": "string",
+          "default": "/"
+        },
+        "discover": {
+          "$ref": "#/$defs/scope_discover"
+        },
+        "date": {
+          "$ref": "#/$defs/scope_date"
+        }
       }
     },
     "scope_discover": {
@@ -184,40 +226,93 @@
       "properties": {
         "segments": {
           "type": "array",
-          "items": { "$ref": "#/$defs/scope_discover_segment" }
+          "items": {
+            "$ref": "#/$defs/scope_discover_segment"
+          }
         }
       }
     },
     "scope_discover_segment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index"],
+      "required": [
+        "index"
+      ],
       "properties": {
-        "index": { "type": "integer", "minimum": 0 },
-        "allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "glob_allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "glob_deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "glob_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "glob_deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "scope_date": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["segment_index"],
+      "required": [
+        "segment_index"
+      ],
       "properties": {
-        "segment_index": { "type": "integer", "minimum": 0 },
-        "format": { "type": "string", "description": "Go time layout for folder names (required when using range)" },
-        "glob": { "type": "string", "minLength": 1 },
-        "range": { "$ref": "#/$defs/scope_date_range" }
+        "segment_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "format": {
+          "type": "string",
+          "description": "Go time layout for folder names (required when using range)"
+        },
+        "glob": {
+          "type": "string",
+          "minLength": 1
+        },
+        "range": {
+          "$ref": "#/$defs/scope_date_range"
+        }
       }
     },
     "scope_date_range": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["after", "before"],
+      "required": [
+        "after",
+        "before"
+      ],
       "properties": {
-        "after": { "type": "string", "minLength": 1 },
-        "before": { "type": "string", "minLength": 1 }
+        "after": {
+          "type": "string",
+          "minLength": 1
+        },
+        "before": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "match": {

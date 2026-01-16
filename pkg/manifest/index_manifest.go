@@ -79,6 +79,10 @@ type IndexBuildConfig struct {
 	// v0.1.3: crawl-only, inventory reserved for future.
 	Source string `json:"source,omitempty" yaml:"source,omitempty"`
 
+	// Scope constrains what prefixes are listed during an index build.
+	// v0.1.4: scope partitions (path scoping).
+	Scope *IndexScopeConfig `json:"scope,omitempty" yaml:"scope,omitempty"`
+
 	// Match configures to object filtering during build (defaults to index everything).
 	Match *IndexMatchConfig `json:"match,omitempty" yaml:"match,omitempty"`
 
@@ -100,6 +104,61 @@ type IndexMatchConfig struct {
 
 	// Filters specifies additional metadata-based filters. Optional.
 	Filters *FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"`
+}
+
+// IndexScopeConfig constrains what prefixes are listed during an index build.
+//
+// ENTARCH: scope is a scoper (provider-cost lever) and must compile to an explicit prefix plan.
+// Match patterns remain ingest predicates.
+type IndexScopeConfig struct {
+	Type string `json:"type" yaml:"type"`
+
+	// Shared options
+	BasePrefix string `json:"base_prefix,omitempty" yaml:"base_prefix,omitempty"`
+	Delimiter  string `json:"delimiter,omitempty" yaml:"delimiter,omitempty"`
+
+	// prefix_list
+	Prefixes []string `json:"prefixes,omitempty" yaml:"prefixes,omitempty"`
+
+	// union
+	Scopes []IndexScopeConfig `json:"scopes,omitempty" yaml:"scopes,omitempty"`
+
+	// date_partitions
+	Discover *IndexScopeDiscoverConfig `json:"discover,omitempty" yaml:"discover,omitempty"`
+	Date     *IndexScopeDateConfig     `json:"date,omitempty" yaml:"date,omitempty"`
+
+	// segments (reserved)
+	Constraints []IndexScopeSegmentConstraint `json:"constraints,omitempty" yaml:"constraints,omitempty"`
+	DepthMode   string                        `json:"depth_mode,omitempty" yaml:"depth_mode,omitempty"`
+}
+
+type IndexScopeDiscoverConfig struct {
+	Segments []IndexScopeDiscoverSegment `json:"segments,omitempty" yaml:"segments,omitempty"`
+}
+
+type IndexScopeDiscoverSegment struct {
+	Index     int      `json:"index" yaml:"index"`
+	Allow     []string `json:"allow,omitempty" yaml:"allow,omitempty"`
+	Deny      []string `json:"deny,omitempty" yaml:"deny,omitempty"`
+	GlobAllow []string `json:"glob_allow,omitempty" yaml:"glob_allow,omitempty"`
+	GlobDeny  []string `json:"glob_deny,omitempty" yaml:"glob_deny,omitempty"`
+}
+
+type IndexScopeDateConfig struct {
+	SegmentIndex int                  `json:"segment_index" yaml:"segment_index"`
+	Format       string               `json:"format,omitempty" yaml:"format,omitempty"`
+	Range        *IndexScopeDateRange `json:"range,omitempty" yaml:"range,omitempty"`
+	Glob         string               `json:"glob,omitempty" yaml:"glob,omitempty"`
+}
+
+type IndexScopeDateRange struct {
+	After  string `json:"after" yaml:"after"`
+	Before string `json:"before" yaml:"before"`
+}
+
+type IndexScopeSegmentConstraint struct {
+	Index int    `json:"index" yaml:"index"`
+	Glob  string `json:"glob" yaml:"glob"`
 }
 
 // IndexCrawlBuildConfig configures to crawl-specific build behavior.
@@ -156,6 +215,11 @@ func (m *IndexManifest) ApplyDefaults() {
 	}
 	if m.Build.Source == "" {
 		m.Build.Source = DefaultIndexSource
+	}
+	if m.Build.Scope != nil {
+		if m.Build.Scope.Delimiter == "" {
+			m.Build.Scope.Delimiter = "/"
+		}
 	}
 
 	// Match defaults
