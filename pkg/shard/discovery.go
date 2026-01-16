@@ -129,9 +129,6 @@ func expandLevel(ctx context.Context, lister provider.PrefixLister, prefixes []s
 		return nil, err.(error)
 	}
 
-	if maxShards > 0 && len(out) > maxShards {
-		out = out[:maxShards]
-	}
 	return out, nil
 }
 
