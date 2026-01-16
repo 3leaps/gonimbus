@@ -88,7 +88,7 @@ func RestoreDeletedObjects(ctx context.Context, db *sql.DB, indexSetID string, d
 		 SET deleted_at = NULL
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NOT NULL
-		   AND strftime('%s', deleted_at) >= strftime('%s', ?)`,
+		   AND deleted_at >= ?`,
 		indexSetID, deletedAfter)
 
 	if err != nil {
@@ -117,24 +117,30 @@ func GetDeletedObjectStats(ctx context.Context, db *sql.DB, indexSetID string) (
 	}
 
 	var stats DeletedObjectStats
-	var oldest, newest sql.NullTime
+	var oldestRaw any
+	var newestRaw any
 
 	err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*), MIN(deleted_at), MAX(deleted_at)
 		 FROM objects_current
 		 WHERE index_set_id = ? AND deleted_at IS NOT NULL`,
-		indexSetID).Scan(&stats.TotalDeleted, &oldest, &newest)
+		indexSetID).Scan(&stats.TotalDeleted, &oldestRaw, &newestRaw)
 
 	if err != nil {
 		return nil, fmt.Errorf("get deleted stats: %w", err)
 	}
 
-	if oldest.Valid {
-		stats.OldestDeleted = &oldest.Time
+	oldest, err := parseOptionalDBTime(oldestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse oldest deleted: %w", err)
 	}
-	if newest.Valid {
-		stats.NewestDeleted = &newest.Time
+	stats.OldestDeleted = oldest
+
+	newest, err := parseOptionalDBTime(newestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse newest deleted: %w", err)
 	}
+	stats.NewestDeleted = newest
 
 	return &stats, nil
 }

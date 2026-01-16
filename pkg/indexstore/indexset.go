@@ -221,7 +221,8 @@ func getFullIndexSet(ctx context.Context, db *sql.DB, indexSetID string) (*Index
 		return nil, fmt.Errorf("get index_set: %w", err)
 	}
 
-	createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+	createdAt, err := parseDBTimeValue(createdAtRaw)
+
 	if err != nil {
 		return nil, fmt.Errorf("parse created_at: %w", err)
 	}
@@ -274,7 +275,8 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 			return nil, fmt.Errorf("scan index_set: %w", err)
 		}
 
-		createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+		createdAt, err := parseDBTimeValue(createdAtRaw)
+
 		if err != nil {
 			return nil, fmt.Errorf("parse created_at: %w", err)
 		}
@@ -285,25 +287,38 @@ func ListIndexSets(ctx context.Context, db *sql.DB, baseURI string) ([]IndexSet,
 	return sets, nil
 }
 
-func parseIndexSetCreatedAt(value any) (time.Time, error) {
+func parseDBTimeValue(value any) (time.Time, error) {
 	switch v := value.(type) {
 	case time.Time:
 		return v.UTC(), nil
 	case string:
-		return parseIndexSetTimeString(v)
+		return parseDBTimeString(v)
 	case []byte:
-		return parseIndexSetTimeString(string(v))
+		return parseDBTimeString(string(v))
 	case nil:
-		return time.Time{}, fmt.Errorf("created_at is null")
+		return time.Time{}, fmt.Errorf("time value is null")
 	default:
-		return time.Time{}, fmt.Errorf("unsupported created_at type %T", value)
+		return time.Time{}, fmt.Errorf("unsupported time value type %T", value)
 	}
 }
 
-func parseIndexSetTimeString(value string) (time.Time, error) {
+func parseOptionalDBTime(value any) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	parsed, err := parseDBTimeValue(value)
+	if err != nil {
+		return nil, err
+	}
+
+	return &parsed, nil
+}
+
+func parseDBTimeString(value string) (time.Time, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return time.Time{}, fmt.Errorf("created_at is empty")
+		return time.Time{}, fmt.Errorf("time value is empty")
 	}
 
 	formats := []string{
@@ -327,7 +342,7 @@ func parseIndexSetTimeString(value string) (time.Time, error) {
 		return parsed.UTC(), nil
 	}
 
-	return time.Time{}, fmt.Errorf("invalid created_at: %q", trimmed)
+	return time.Time{}, fmt.Errorf("invalid time value: %q", trimmed)
 }
 
 // DeleteIndexSet deletes an IndexSet and all associated data.

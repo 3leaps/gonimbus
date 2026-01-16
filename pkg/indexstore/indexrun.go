@@ -120,16 +120,18 @@ func GetIndexRun(ctx context.Context, db *sql.DB, runID string) (*IndexRun, erro
 	}
 
 	var ir IndexRun
-	var endedAt sql.NullTime
-	var snapshotAt sql.NullTime
+	var startedAtRaw any
+	var endedAtRaw any
+	var acquiredAtRaw any
+	var snapshotAtRaw any
 
 	err := db.QueryRowContext(ctx,
 		`SELECT run_id, index_set_id, started_at, ended_at, acquired_at,
 		        source_type, source_snapshot_at, status
 		 FROM index_runs WHERE run_id = ?`,
 		runID).Scan(
-		&ir.RunID, &ir.IndexSetID, &ir.StartedAt, &endedAt, &ir.AcquiredAt,
-		&ir.SourceType, &snapshotAt, &ir.Status)
+		&ir.RunID, &ir.IndexSetID, &startedAtRaw, &endedAtRaw, &acquiredAtRaw,
+		&ir.SourceType, &snapshotAtRaw, &ir.Status)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("index_run not found: %s", runID)
@@ -138,12 +140,29 @@ func GetIndexRun(ctx context.Context, db *sql.DB, runID string) (*IndexRun, erro
 		return nil, fmt.Errorf("get index_run: %w", err)
 	}
 
-	if endedAt.Valid {
-		ir.EndedAt = &endedAt.Time
+	startedAt, err := parseDBTimeValue(startedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse started_at: %w", err)
 	}
-	if snapshotAt.Valid {
-		ir.SourceSnapshotAt = &snapshotAt.Time
+	ir.StartedAt = startedAt
+
+	acquiredAt, err := parseDBTimeValue(acquiredAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse acquired_at: %w", err)
 	}
+	ir.AcquiredAt = acquiredAt
+
+	endedAt, err := parseOptionalDBTime(endedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse ended_at: %w", err)
+	}
+	ir.EndedAt = endedAt
+
+	snapshotAt, err := parseOptionalDBTime(snapshotAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse source_snapshot_at: %w", err)
+	}
+	ir.SourceSnapshotAt = snapshotAt
 
 	return &ir, nil
 }
@@ -170,22 +189,41 @@ func ListIndexRuns(ctx context.Context, db *sql.DB, indexSetID string) ([]IndexR
 	var runs []IndexRun
 	for rows.Next() {
 		var ir IndexRun
-		var endedAt sql.NullTime
-		var snapshotAt sql.NullTime
+		var startedAtRaw any
+		var endedAtRaw any
+		var acquiredAtRaw any
+		var snapshotAtRaw any
 
 		err := rows.Scan(
-			&ir.RunID, &ir.IndexSetID, &ir.StartedAt, &endedAt, &ir.AcquiredAt,
-			&ir.SourceType, &snapshotAt, &ir.Status)
+			&ir.RunID, &ir.IndexSetID, &startedAtRaw, &endedAtRaw, &acquiredAtRaw,
+			&ir.SourceType, &snapshotAtRaw, &ir.Status)
 		if err != nil {
 			return nil, fmt.Errorf("scan index_run: %w", err)
 		}
 
-		if endedAt.Valid {
-			ir.EndedAt = &endedAt.Time
+		startedAt, err := parseDBTimeValue(startedAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse started_at: %w", err)
 		}
-		if snapshotAt.Valid {
-			ir.SourceSnapshotAt = &snapshotAt.Time
+		ir.StartedAt = startedAt
+
+		acquiredAt, err := parseDBTimeValue(acquiredAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse acquired_at: %w", err)
 		}
+		ir.AcquiredAt = acquiredAt
+
+		endedAt, err := parseOptionalDBTime(endedAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse ended_at: %w", err)
+		}
+		ir.EndedAt = endedAt
+
+		snapshotAt, err := parseOptionalDBTime(snapshotAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse source_snapshot_at: %w", err)
+		}
+		ir.SourceSnapshotAt = snapshotAt
 
 		runs = append(runs, ir)
 	}

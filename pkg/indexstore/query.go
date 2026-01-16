@@ -397,19 +397,11 @@ func escapeLikePrefix(s string) string {
 // parseTimestamp parses a timestamp string with RFC3339Nano fallback.
 // Returns error on parse failure to surface data quality issues.
 func parseTimestamp(s string) (time.Time, error) {
-	// Try RFC3339Nano first (more precise)
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t, nil
+	parsed, err := parseDBTimeString(s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timestamp format: %q", s)
 	}
-	// Fall back to RFC3339
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	// Try match.ParseDate for additional formats (date-only, etc.)
-	if t, err := match.ParseDate(s); err == nil {
-		return t, nil
-	}
-	return time.Time{}, fmt.Errorf("invalid timestamp format: %q", s)
+	return parsed, nil
 }
 
 // GetIndexSetByBaseURI finds an IndexSet by its base_uri.
@@ -455,7 +447,7 @@ func GetIndexSetByBaseURI(ctx context.Context, db *sql.DB, baseURI string) (*Ind
 		return nil, fmt.Errorf("query index set by base_uri: %w", err)
 	}
 
-	createdAt, err := parseIndexSetCreatedAt(createdAtRaw)
+	createdAt, err := parseDBTimeValue(createdAtRaw)
 	if err != nil {
 		return nil, fmt.Errorf("parse created_at: %w", err)
 	}
