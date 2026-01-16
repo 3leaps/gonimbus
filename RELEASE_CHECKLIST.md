@@ -55,6 +55,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] Commit messages follow attribution standard
 - [ ] No uncommitted changes: `git status` clean
 - [ ] All commits have proper trailers
+- [ ] Pre-push checks run: `make prepush`
 
 ### Final Validation
 

@@ -67,7 +67,7 @@ make test       # CGO-enabled (default)
 make test-nocgo # CGO-disabled, matches CI
 ```
 
-This catches driver-specific scan and timestamp parsing differences before pushing.
+`make prepush` runs `check-all`, so local pushes catch CI-sensitive test failures.
 
 ### Cloud Integration Testing
 

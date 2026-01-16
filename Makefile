@@ -124,6 +124,8 @@ version-bump:  ## Bump version (usage: make version-bump TYPE=patch|minor|major|
 		exit 1; \
 	fi
 	@echo "Bumping version ($(TYPE))..."; $(GONEAT_RESOLVE); $$GONEAT version bump $(TYPE)
+	@$(MAKE) sync-app-version
+	@$(MAKE) sync-embedded-identity
 	@echo "✅ Version bumped to $$(cat VERSION)"
 
 version-set:  ## Set version to specific value (usage: make version-set VERSION=x.y.z)
@@ -132,6 +134,8 @@ version-set:  ## Set version to specific value (usage: make version-set VERSION=
 		exit 1; \
 	fi
 	@echo "$(VERSION)" > VERSION
+	@$(MAKE) sync-app-version
+	@$(MAKE) sync-embedded-identity
 	@echo "✅ Version set to $(VERSION)"
 
 version-bump-major:  ## Bump major version
@@ -167,6 +171,19 @@ release-prepare:  ## Prepare for release (tests, version bump)
 
 RELEASE_TAG ?= v$(shell cat VERSION 2>/dev/null || echo "0.0.0")
 DIST_RELEASE ?= dist/release
+
+sync-app-version: ## Sync .fulmen/app.yaml version from VERSION
+	@VERSION_VALUE="$$(cat VERSION)"; \
+	if [ -z "$$VERSION_VALUE" ]; then \
+		echo "❌ VERSION file is empty" >&2; \
+		exit 1; \
+	fi; \
+	if [ ! -f .fulmen/app.yaml ]; then \
+		echo "❌ Missing .fulmen/app.yaml" >&2; \
+		exit 1; \
+	fi; \
+	awk -v version="$$VERSION_VALUE" 'BEGIN{updated=0} /^[[:space:]]*version:/ {print "  version: " version; updated=1; next} {print} END{if(updated==0) exit 1}' .fulmen/app.yaml > .fulmen/app.yaml.tmp && mv .fulmen/app.yaml.tmp .fulmen/app.yaml; \
+	echo "✅ App identity version set to $$VERSION_VALUE"
 
 sync-embedded-identity: ## Sync embedded identity mirror from .fulmen/app.yaml
 	@./scripts/sync-embedded-identity.sh
