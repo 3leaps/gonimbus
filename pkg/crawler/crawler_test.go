@@ -438,6 +438,29 @@ func TestCrawler_Run_MultiplePrefixes(t *testing.T) {
 	assert.Len(t, summary.Prefixes, 2)
 }
 
+func TestCrawler_Run_OverridePrefixes(t *testing.T) {
+	p := newMockProvider()
+	p.addObjects("data/2024/",
+		provider.ObjectSummary{Key: "data/2024/file1.txt", Size: 100},
+	)
+	p.addObjects("data/2025/",
+		provider.ObjectSummary{Key: "data/2025/file2.txt", Size: 200},
+	)
+
+	m, err := match.New(match.Config{Includes: []string{"data/2024/**", "data/2025/**"}})
+	require.NoError(t, err)
+
+	w := newMockWriter()
+	c := New(p, m, w, "job-123", DefaultConfig()).WithPrefixes([]string{"data/2024/"})
+
+	summary, err := c.Run(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), summary.ObjectsMatched)
+	assert.Equal(t, int64(100), summary.BytesTotal)
+	assert.Equal(t, []string{"data/2024/"}, summary.Prefixes)
+}
+
 func TestCrawler_Run_Summary(t *testing.T) {
 	p := newMockProvider()
 	p.addObjects("data/",
