@@ -51,7 +51,7 @@ Delimiter listing is used to discover variable path segments (e.g. device IDs) b
 To preserve correctness and safe deletes:
 
 - Access denied, not found, throttled, and provider-unavailable conditions MUST be classifiable.
-- These conditions are treated as non-fatal *per-prefix* and result in `partial` runs.
+- These conditions are treated as non-fatal _per-prefix_ and result in `partial` runs.
 
 Soft-delete is only executed on `success` runs.
 
