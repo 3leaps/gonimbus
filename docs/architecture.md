@@ -4,6 +4,13 @@ This document describes the intended internal architecture for `gonimbus` as a h
 
 ## High-Level Components
 
+## Indexing (Crawl-Backed)
+
+Indexing adds a local, queryable snapshot layer over object stores.
+
+- Architecture and contracts: `docs/architecture/indexing.md`
+- Provider capabilities ADR: `docs/architecture/adr/ADR-0003-index-build-provider-capabilities.md`
+
 ### 1) Provider Layer
 
 Provider clients implement a small, stable surface area:
