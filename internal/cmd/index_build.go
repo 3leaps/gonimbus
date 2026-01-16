@@ -22,7 +22,9 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/scope"
 )
 
 var indexBuildCmd = &cobra.Command{
@@ -122,7 +124,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	// Show plan in dry-run mode
 	if indexBuildDryRun {
-		return showIndexBuildPlan(cmd, m, identity, buildFilters)
+		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters)
 	}
 
 	// Build IndexSetParams
@@ -412,6 +414,40 @@ func deriveCrawlPrefixesForPlan(m *manifest.IndexManifest) ([]string, error) {
 	return matcher.Prefixes(), nil
 }
 
+func compileScopePlan(ctx context.Context, m *manifest.IndexManifest) (*scope.Plan, error) {
+	if m == nil || m.Build == nil || m.Build.Scope == nil {
+		return nil, nil
+	}
+	if m.Connection.Provider != "s3" {
+		return nil, fmt.Errorf("scope plan not supported for provider %q", m.Connection.Provider)
+	}
+
+	_, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	if err != nil {
+		return nil, err
+	}
+
+	var lister provider.PrefixLister
+	if scope.RequiresPrefixLister(m.Build.Scope) {
+		cfg := s3.Config{
+			Bucket:         m.Connection.Bucket,
+			Region:         m.Connection.Region,
+			Endpoint:       m.Connection.Endpoint,
+			Profile:        m.Connection.Profile,
+			ForcePathStyle: m.Connection.Endpoint != "",
+		}
+		prov, err := s3.New(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("create provider: %w", err)
+		}
+		defer func() { _ = prov.Close() }()
+
+		lister = prov
+	}
+
+	return scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
+}
+
 func prefixPatterns(basePrefix string, patterns []string) []string {
 	if basePrefix == "" {
 		return patterns
@@ -523,7 +559,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 }
 
 // showIndexBuildPlan displays the build plan without executing.
-func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters) error {
+func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters) error {
 	_, _ = fmt.Fprintln(os.Stdout, "Index Build Plan (dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "==========================")
 	_, _ = fmt.Fprintln(os.Stdout)
@@ -565,7 +601,31 @@ func showIndexBuildPlan(cmd *cobra.Command, m *manifest.IndexManifest, ident eff
 		}
 	}
 
-	// Derived crawl prefixes (what will be listed).
+	if m.Build != nil && m.Build.Scope != nil {
+		_, _ = fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintln(os.Stdout, "Scope Plan (build.scope):")
+		plan, err := compileScopePlan(ctx, m)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stdout, "  error: %v\n", err)
+		} else if plan == nil || len(plan.Prefixes) == 0 {
+			_, _ = fmt.Fprintln(os.Stdout, "  count: 0")
+		} else {
+			_, _ = fmt.Fprintf(os.Stdout, "  count: %d\n", len(plan.Prefixes))
+			maxShow := 10
+			if len(plan.Prefixes) < maxShow {
+				maxShow = len(plan.Prefixes)
+			}
+			for i := 0; i < maxShow; i++ {
+				_, _ = fmt.Fprintf(os.Stdout, "  - %s\n", plan.Prefixes[i])
+			}
+			if len(plan.Prefixes) > maxShow {
+				_, _ = fmt.Fprintf(os.Stdout, "  ... (%d more)\n", len(plan.Prefixes)-maxShow)
+			}
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "  note: scope plan overrides derived match prefixes")
+	}
+
+	// Derived crawl prefixes (used when build.scope is absent).
 	// This is the most important “cost shape” signal for large buckets.
 	_, _ = fmt.Fprintln(os.Stdout)
 	_, _ = fmt.Fprintln(os.Stdout, "Derived Crawl Prefixes:")
