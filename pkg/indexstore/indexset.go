@@ -54,6 +54,7 @@ type IndexSetIdentityBuild struct {
 	Excludes        []string `json:"excludes,omitempty"`
 	IncludeHidden   bool     `json:"include_hidden"`
 	FiltersHash     string   `json:"filters_hash,omitempty"`
+	ScopeHash       string   `json:"scope_hash,omitempty"`
 }
 
 // IndexSetIdentityPathDate captures path date extraction identity fields.
@@ -99,6 +100,7 @@ type BuildParams struct {
 	Excludes      []string
 	IncludeHidden bool
 	FiltersHash   string // Hash of filters (size, modified, key_regex)
+	ScopeHash     string // Hash of build.scope config
 }
 
 // PathDateExtraction configures extracting dates from object key paths.
@@ -403,6 +405,7 @@ func buildIndexSetIdentityPayload(params IndexSetParams) IndexSetIdentityPayload
 		Excludes:        normalizePatternList(params.BuildParams.Excludes),
 		IncludeHidden:   params.BuildParams.IncludeHidden,
 		FiltersHash:     strings.TrimSpace(params.BuildParams.FiltersHash),
+		ScopeHash:       strings.TrimSpace(params.BuildParams.ScopeHash),
 	}
 
 	payload := IndexSetIdentityPayload{
