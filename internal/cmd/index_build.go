@@ -122,13 +122,18 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	scopeHash, err := computeScopeHash(m)
+	if err != nil {
+		return err
+	}
+
 	// Show plan in dry-run mode
 	if indexBuildDryRun {
 		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters)
 	}
 
 	// Build IndexSetParams
-	params := buildIndexSetParams(m, identity, buildFilters.FiltersHash)
+	params := buildIndexSetParams(m, identity, buildFilters.FiltersHash, scopeHash)
 
 	identityResult, err := indexstore.ComputeIndexSetID(params)
 	if err != nil {
@@ -281,6 +286,18 @@ func parseS3BaseURI(baseURI string) (bucket string, prefix string, err error) {
 type indexBuildFilters struct {
 	Filter      *match.CompositeFilter
 	FiltersHash string
+}
+
+func computeScopeHash(m *manifest.IndexManifest) (string, error) {
+	if m == nil || m.Build == nil || m.Build.Scope == nil {
+		return "", nil
+	}
+
+	hash, err := scope.HashConfig(m.Build.Scope)
+	if err != nil {
+		return "", fmt.Errorf("build.scope: %w", err)
+	}
+	return hash, nil
 }
 
 func computeIndexBuildFilters(m *manifest.IndexManifest) (*indexBuildFilters, error) {
@@ -524,7 +541,7 @@ func buildEffectiveIdentity(m *manifest.IndexManifest) effectiveIdentity {
 }
 
 // buildIndexSetParams constructs IndexSetParams from manifest and effective identity.
-func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, filtersHash string) indexstore.IndexSetParams {
+func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, filtersHash string, scopeHash string) indexstore.IndexSetParams {
 	// Build params for hash
 	bp := indexstore.BuildParams{
 		SourceType:      m.Build.Source,
@@ -539,6 +556,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 		bp.IncludeHidden = m.Build.Match.IncludeHidden
 		bp.FiltersHash = strings.TrimSpace(filtersHash)
 	}
+	bp.ScopeHash = strings.TrimSpace(scopeHash)
 
 	// Path date extraction
 	if m.PathDate != nil {
