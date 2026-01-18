@@ -56,14 +56,16 @@ Example:
 
 // Index build flags.
 var (
-	indexBuildJobPath      string
-	indexBuildDBPath       string
-	indexBuildDryRun       bool
-	indexBuildStorageProv  string
-	indexBuildCloudProv    string
-	indexBuildRegionKind   string
-	indexBuildRegion       string
-	indexBuildEndpointHost string
+	indexBuildJobPath         string
+	indexBuildDBPath          string
+	indexBuildDryRun          bool
+	indexBuildStorageProv     string
+	indexBuildCloudProv       string
+	indexBuildRegionKind      string
+	indexBuildRegion          string
+	indexBuildEndpointHost    string
+	indexBuildScopeWarnPrefix int
+	indexBuildScopeMaxPrefix  int
 )
 
 func init() {
@@ -76,6 +78,8 @@ func init() {
 	// Optional
 	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
+	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
+	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
 	indexBuildCmd.Flags().StringVar(&indexBuildStorageProv, "storage-provider", "", "Storage provider (aws_s3, cloudflare_r2, wasabi, gcs, azure_blob, generic_s3)")
@@ -298,6 +302,26 @@ func computeScopeHash(m *manifest.IndexManifest) (string, error) {
 		return "", fmt.Errorf("build.scope: %w", err)
 	}
 	return hash, nil
+}
+
+func scopePlanWarning(prefixes []string, warnLimit int) string {
+	if warnLimit <= 0 {
+		return ""
+	}
+	if len(prefixes) <= warnLimit {
+		return ""
+	}
+	return fmt.Sprintf("build.scope expands to %d prefixes (warn %d)", len(prefixes), warnLimit)
+}
+
+func validateScopePlan(prefixes []string, maxLimit int) error {
+	if maxLimit <= 0 {
+		return nil
+	}
+	if len(prefixes) <= maxLimit {
+		return nil
+	}
+	return fmt.Errorf("build.scope expands to %d prefixes (max %d); rerun with --scope-max-prefixes to override", len(prefixes), maxLimit)
 }
 
 func computeIndexBuildFilters(m *manifest.IndexManifest) (*indexBuildFilters, error) {
@@ -632,7 +656,13 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 		} else if plan == nil || len(plan.Prefixes) == 0 {
 			_, _ = fmt.Fprintln(os.Stdout, "  count: 0")
 		} else {
+			if err := validateScopePlan(plan.Prefixes, indexBuildScopeMaxPrefix); err != nil {
+				return err
+			}
 			_, _ = fmt.Fprintf(os.Stdout, "  count: %d\n", len(plan.Prefixes))
+			if warning := scopePlanWarning(plan.Prefixes, indexBuildScopeWarnPrefix); warning != "" {
+				_, _ = fmt.Fprintf(os.Stdout, "  warning: %s\n", warning)
+			}
 			maxShow := 10
 			if len(plan.Prefixes) < maxShow {
 				maxShow = len(plan.Prefixes)
@@ -835,6 +865,12 @@ func runCrawlForIndex(
 		}
 		if plan == nil || len(plan.Prefixes) == 0 {
 			return nil, fmt.Errorf("build.scope produced no crawl prefixes")
+		}
+		if err := validateScopePlan(plan.Prefixes, indexBuildScopeMaxPrefix); err != nil {
+			return nil, err
+		}
+		if warning := scopePlanWarning(plan.Prefixes, indexBuildScopeWarnPrefix); warning != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 		}
 		scopePlan = plan
 	}
