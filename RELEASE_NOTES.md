@@ -48,11 +48,11 @@ build:
 
 #### Scope Types
 
-| Type              | Use Case                                      |
-| ----------------- | --------------------------------------------- |
-| `prefix_list`     | Explicit prefixes when you know what to list  |
+| Type              | Use Case                                       |
+| ----------------- | ---------------------------------------------- |
+| `prefix_list`     | Explicit prefixes when you know what to list   |
 | `date_partitions` | Dynamic expansion from date ranges + discovery |
-| `union`           | Combine multiple scopes                       |
+| `union`           | Combine multiple scopes                        |
 
 #### Performance
 
@@ -217,4 +217,3 @@ Build throughput scales linearly at approximately 3,000 objects/sec.
 
 - Index commands: `gonimbus index --help`
 - See [docs/releases/v0.1.3.md](docs/releases/v0.1.3.md) for complete release notes
-

@@ -13,42 +13,35 @@
 #   gonimbus index build --job examples/index/index-scoped-dates.yaml
 #   gonimbus index build --job examples/index/index-scoped-dates.yaml --background
 version: "1.0"
-
 connection:
   provider: s3
   bucket: my-data-bucket
   base_uri: "s3://my-data-bucket/data/"
   region: us-east-1
-
 identity:
   storage_provider: aws_s3
   cloud_provider: aws
   region_kind: aws
   region: us-east-1
-
 build:
   source: crawl
-
   # SCOPE: Controls what prefixes are listed (provider-cost lever)
   # This is the key to avoiding full-bucket enumeration on date-partitioned data.
   scope:
     type: date_partitions
-
     # Discover variable segments before the date segment
     # Each segment is discovered via delimiter listing
     discover:
       segments:
-        - index: 0  # Segment 0: discover store IDs (e.g., "store-001/", "store-002/")
-        - index: 1  # Segment 1: discover device IDs under each store
-
+        - index: 0 # Segment 0: discover store IDs (e.g., "store-001/", "store-002/")
+        - index: 1 # Segment 1: discover device IDs under each store
     # Date segment configuration
     date:
-      segment_index: 2           # Date is at segment index 2 (after store and device)
-      format: "2006-01-02"       # Go date format matching folder names (YYYY-MM-DD)
+      segment_index: 2 # Date is at segment index 2 (after store and device)
+      format: "2006-01-02" # Go date format matching folder names (YYYY-MM-DD)
       range:
-        after: "2025-12-01"      # Inclusive start date
-        before: "2026-01-01"     # Exclusive end date (standard interval notation)
-
+        after: "2025-12-01" # Inclusive start date
+        before: "2026-01-01" # Exclusive end date (standard interval notation)
   # MATCH: Controls what objects are ingested (index size lever)
   # Applied AFTER listing - does not reduce provider API calls
   match:
@@ -58,7 +51,6 @@ build:
     excludes:
       - "**/_temporary/**"
     include_hidden: false
-
   crawl:
     concurrency: 8
     progress_every: 1000

@@ -11,22 +11,18 @@
 #   gonimbus index build --job examples/index/index-scoped-prefixes.yaml
 #   gonimbus index build --job examples/index/index-scoped-prefixes.yaml --background
 version: "1.0"
-
 connection:
   provider: s3
   bucket: my-data-bucket
   base_uri: "s3://my-data-bucket/data/"
   region: us-east-1
-
 identity:
   storage_provider: aws_s3
   cloud_provider: aws
   region_kind: aws
   region: us-east-1
-
 build:
   source: crawl
-
   # SCOPE: Explicit prefix list
   # Only these prefixes will be listed - nothing else.
   scope:
@@ -37,7 +33,6 @@ build:
       - "store-002/device-X/"
       # Add more prefixes as needed
       # Each prefix is listed independently
-
   # MATCH: Further filter what gets indexed
   match:
     includes:
@@ -45,7 +40,6 @@ build:
     excludes:
       - "**/_temporary/**"
       - "**/.trash/**"
-
   crawl:
     concurrency: 4
     progress_every: 1000

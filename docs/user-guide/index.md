@@ -290,15 +290,15 @@ gonimbus index jobs gc --max-age 168h --dry-run
 
 ### Job States
 
-| State      | Meaning                              |
-| ---------- | ------------------------------------ |
-| `queued`   | Job created, not yet started         |
-| `running`  | Build in progress                    |
-| `stopping` | Graceful shutdown in progress        |
-| `stopped`  | Cancelled by user                    |
-| `success`  | Build completed successfully         |
+| State      | Meaning                               |
+| ---------- | ------------------------------------- |
+| `queued`   | Job created, not yet started          |
+| `running`  | Build in progress                     |
+| `stopping` | Graceful shutdown in progress         |
+| `stopped`  | Cancelled by user                     |
+| `success`  | Build completed successfully          |
 | `partial`  | Build completed with skipped prefixes |
-| `failed`   | Build failed with error              |
+| `failed`   | Build failed with error               |
 
 ### On-Disk Layout
 
