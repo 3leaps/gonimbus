@@ -55,12 +55,19 @@ var indexJobsLogsCmd = &cobra.Command{
 	RunE:  runIndexJobsLogs,
 }
 
+var indexJobsGCCmd = &cobra.Command{
+	Use:   "gc",
+	Short: "Garbage collect old job records",
+	RunE:  runIndexJobsGC,
+}
+
 func init() {
 	indexCmd.AddCommand(indexJobsCmd)
 	indexJobsCmd.AddCommand(indexJobsListCmd)
 	indexJobsCmd.AddCommand(indexJobsStatusCmd)
 	indexJobsCmd.AddCommand(indexJobsStopCmd)
 	indexJobsCmd.AddCommand(indexJobsLogsCmd)
+	indexJobsCmd.AddCommand(indexJobsGCCmd)
 
 	indexJobsListCmd.Flags().Bool("json", false, "Output as JSON")
 	indexJobsStatusCmd.Flags().Bool("json", false, "Output as JSON")
@@ -68,6 +75,7 @@ func init() {
 	indexJobsLogsCmd.Flags().String("stream", "stdout", "Log stream: stdout, stderr, or both")
 	indexJobsLogsCmd.Flags().Int("tail", 200, "Show last N lines (0 = no tail)")
 	indexJobsLogsCmd.Flags().Bool("follow", false, "Follow log output")
+	indexJobsGCCmd.Flags().String("max-age", "168h", "Delete completed jobs older than this duration")
 }
 
 func indexJobsRootDir() (string, error) {

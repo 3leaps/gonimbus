@@ -63,6 +63,7 @@ var (
 	indexBuildDBPath          string
 	indexBuildDryRun          bool
 	indexBuildBackground      bool
+	indexBuildDedupe          bool
 	indexBuildManagedJobID    string
 	indexBuildStorageProv     string
 	indexBuildCloudProv       string
@@ -85,6 +86,7 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
 	indexBuildCmd.Flags().BoolVar(&indexBuildBackground, "background", false, "Run index build as a managed background job")
+	indexBuildCmd.Flags().BoolVar(&indexBuildDedupe, "dedupe", false, "Refuse to start if an identical job is already running")
 	indexBuildCmd.Flags().StringVar(&indexBuildManagedJobID, "_managed-job-id", "", "(internal) Managed job id")
 	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
@@ -122,7 +124,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		exec := jobregistry.NewExecutor(execRoot)
-		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName))
+		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName), jobregistry.BackgroundOptions{Dedupe: indexBuildDedupe})
 		if err != nil {
 			return err
 		}

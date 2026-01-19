@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -111,6 +112,17 @@ func (s *Store) Get(jobID string) (*JobRecord, error) {
 	if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
 		return nil, fmt.Errorf("parse job.json: %w", err)
 	}
+
+	// Zombie detection: if a job claims running but its pid is gone, mark unknown.
+	if record.State == JobStateRunning && record.PID > 0 {
+		if !isProcessAlive(record.PID) {
+			record.State = JobStateUnknown
+			now := time.Now().UTC()
+			record.LastHeartbeat = &now
+			_ = s.Write(&record)
+		}
+	}
+
 	return &record, nil
 }
 
@@ -151,4 +163,19 @@ func jobSortTime(r JobRecord) time.Time {
 		return r.StartedAt.UTC()
 	}
 	return r.CreatedAt.UTC()
+}
+
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// signal 0 is supported on unix; it checks for existence without sending a signal.
+	if err := p.Signal(os.Signal(syscall.Signal(0))); err != nil {
+		return false
+	}
+	return true
 }

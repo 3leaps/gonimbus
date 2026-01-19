@@ -400,11 +400,12 @@ func traversePrefixes(
 		}
 
 		var (
-			next     []string
-			nextMu   sync.Mutex
-			wg       sync.WaitGroup
-			errMu    sync.Mutex
-			firstErr error
+			next       []string
+			nextMu     sync.Mutex
+			onPrefixMu sync.Mutex
+			wg         sync.WaitGroup
+			errMu      sync.Mutex
+			firstErr   error
 		)
 
 		sem := make(chan struct{}, parallel)
@@ -428,7 +429,9 @@ func traversePrefixes(
 				}
 				rec.Depth = depth
 
+				onPrefixMu.Lock()
 				if err := onPrefix(rec); err != nil {
+					onPrefixMu.Unlock()
 					errMu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -436,6 +439,7 @@ func traversePrefixes(
 					errMu.Unlock()
 					return
 				}
+				onPrefixMu.Unlock()
 
 				if depth >= maxDepth {
 					return
