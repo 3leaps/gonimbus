@@ -36,6 +36,8 @@ func runIndexJobsGC(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
 	now := time.Now().UTC()
 	deleted := 0
 	for _, j := range jobs {
@@ -55,12 +57,18 @@ func runIndexJobsGC(cmd *cobra.Command, _ []string) error {
 			continue
 		}
 
-		if err := os.RemoveAll(store.JobDir(j.JobID)); err != nil {
-			return fmt.Errorf("remove job dir: %w", err)
+		if !dryRun {
+			if err := os.RemoveAll(store.JobDir(j.JobID)); err != nil {
+				return fmt.Errorf("remove job dir: %w", err)
+			}
 		}
 		deleted++
 	}
 
+	if dryRun {
+		_, _ = fmt.Fprintf(os.Stdout, "would_delete=%d\n", deleted)
+		return nil
+	}
 	_, _ = fmt.Fprintf(os.Stdout, "deleted=%d\n", deleted)
 	return nil
 }

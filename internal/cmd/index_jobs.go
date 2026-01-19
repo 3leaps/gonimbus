@@ -76,6 +76,7 @@ func init() {
 	indexJobsLogsCmd.Flags().Int("tail", 200, "Show last N lines (0 = no tail)")
 	indexJobsLogsCmd.Flags().Bool("follow", false, "Follow log output")
 	indexJobsGCCmd.Flags().String("max-age", "168h", "Delete completed jobs older than this duration")
+	indexJobsGCCmd.Flags().Bool("dry-run", false, "Show how many jobs would be deleted")
 }
 
 func indexJobsRootDir() (string, error) {
