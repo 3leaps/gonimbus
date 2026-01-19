@@ -20,6 +20,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -66,6 +67,7 @@ var (
 	indexBuildEndpointHost    string
 	indexBuildScopeWarnPrefix int
 	indexBuildScopeMaxPrefix  int
+	indexBuildName            string
 )
 
 func init() {
@@ -78,6 +80,7 @@ func init() {
 	// Optional
 	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
+	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
 
@@ -95,10 +98,47 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
+	var store *jobregistry.Store
+	var job *jobregistry.JobRecord
+
+	if !indexBuildDryRun {
+		jobsRoot, err := indexJobsRootDir()
+		if err != nil {
+			return err
+		}
+		store = jobregistry.NewStore(jobsRoot)
+
+		absManifestPath, err := filepath.Abs(indexBuildJobPath)
+		if err != nil {
+			return fmt.Errorf("resolve manifest path: %w", err)
+		}
+
+		now := time.Now().UTC()
+		jobID := uuid.New().String()
+		job = &jobregistry.JobRecord{
+			JobID:        jobID,
+			Name:         strings.TrimSpace(indexBuildName),
+			State:        jobregistry.JobStateRunning,
+			ManifestPath: absManifestPath,
+			CreatedAt:    now,
+			StartedAt:    &now,
+		}
+		if err := store.Write(job); err != nil {
+			return fmt.Errorf("write job record: %w", err)
+		}
+	}
+
 	// Load and validate manifest
 	m, err := manifest.LoadIndexManifest(indexBuildJobPath)
 	if err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
 		return fmt.Errorf("load index manifest: %w", err)
+
 	}
 
 	// Validate base_uri ends with /
@@ -115,6 +155,16 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	// Build effective identity (manifest + CLI overrides)
 	identity := buildEffectiveIdentity(m)
+	if store != nil && job != nil {
+		job.Identity = &jobregistry.EffectiveIdentity{
+			StorageProvider: identity.StorageProvider,
+			CloudProvider:   identity.CloudProvider,
+			RegionKind:      identity.RegionKind,
+			Region:          identity.Region,
+			EndpointHost:    identity.EndpointHost,
+		}
+		_ = store.Write(job)
+	}
 
 	// Validate explicit identity requirements (ENTARCH: no inference)
 	if err := validateIdentity(m, identity); err != nil {
@@ -147,7 +197,20 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	// Open index database
 	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
 	if err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
 		return err
+
+	}
+
+	if store != nil && job != nil {
+		job.IndexDir = resolvedDB.IdentityDir
+		job.IndexSetID = identityResult.IndexSetID
+		_ = store.Write(job)
 	}
 
 	cfg := indexstore.Config{}
@@ -197,7 +260,18 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, sourceType)
 	if err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
 		return fmt.Errorf("create index run: %w", err)
+	}
+
+	if store != nil && job != nil {
+		job.RunID = run.RunID
+		_ = store.Write(job)
 	}
 
 	_, _ = fmt.Fprintf(os.Stderr, "Started IndexRun: %s\n", run.RunID)
@@ -219,16 +293,36 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
 			_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
 			_, _ = fmt.Fprintf(os.Stderr, "  note: run cancelled, data flushed but incomplete\n")
+
+			if store != nil && job != nil {
+				job.State = jobregistry.JobStatePartial
+				ended := time.Now().UTC()
+				job.EndedAt = &ended
+				_ = store.Write(job)
+			}
 			return fmt.Errorf("index build cancelled: %w", crawlErr)
 		}
 		// Fatal error - mark as failed
 		_ = indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailed, nil)
+
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
 		return fmt.Errorf("index build failed: %w", crawlErr)
 	}
 
 	// Finalize run status based on collected errors (soft-delete only on success)
 	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
 	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
 		return fmt.Errorf("finalize index run: %w", err)
 	}
 
@@ -239,6 +333,21 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", result.FinalStatus)
 	_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
 	_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
+
+	// Persist job completion.
+	if store != nil && job != nil {
+		switch result.FinalStatus {
+		case indexstore.RunStatusSuccess:
+			job.State = jobregistry.JobStateSuccess
+		case indexstore.RunStatusPartial:
+			job.State = jobregistry.JobStatePartial
+		default:
+			job.State = jobregistry.JobStateFailed
+		}
+		ended := time.Now().UTC()
+		job.EndedAt = &ended
+		_ = store.Write(job)
+	}
 	if result.ObjectsDeleted > 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_soft_deleted: %d\n", result.ObjectsDeleted)
 	}
