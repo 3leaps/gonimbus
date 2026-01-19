@@ -4,6 +4,67 @@ This file contains release notes for the three most recent releases in reverse c
 
 ---
 
+## v0.1.4 (2026-01-19)
+
+**Path-Scoped Index Builds for Enterprise Scale**
+
+This release introduces `build.scope`, the primary lever for reducing provider listing costs on huge date-partitioned buckets. Scoped builds eliminate 99%+ of wasted enumeration and cut build times by 10x.
+
+### The Problem
+
+Large enterprise buckets contain years of date-partitioned data. When operators only need the last 30 days, traditional crawl approaches still enumerate the entire history:
+
+- **Without scope**: List 32M objects, match 350K (99% wasted)
+- **With scope**: List 185K objects, match 185K (0% wasted)
+
+### The Solution
+
+Add a `build.scope` block to generate an explicit prefix plan:
+
+```yaml
+build:
+  scope:
+    type: date_partitions
+    discover:
+      segments:
+        - index: 0 # discover store IDs
+        - index: 1 # discover device IDs
+    date:
+      segment_index: 2
+      format: "2006-01-02"
+      range:
+        after: "2025-12-15" # inclusive
+        before: "2026-01-01" # exclusive
+```
+
+### Scope Types
+
+- `prefix_list`: Explicit prefixes when you know exactly what to list
+- `date_partitions`: Dynamic prefix generation from date ranges with segment discovery
+- `union`: Combine multiple scopes
+
+### Performance
+
+| Configuration       | Objects Found | Build Time | Improvement     |
+| ------------------- | ------------- | ---------- | --------------- |
+| 15-store full month | 32M           | ~3 min     | baseline        |
+| 15-store scoped 17d | 185K          | ~30 sec    | **99.5% / 10x** |
+
+### Key Features
+
+- **Dry-run preview**: `gonimbus index build --dry-run` shows prefix plan before execution
+- **Guardrails**: Warnings for large prefix expansions
+- **Identity isolation**: Scope config hashed into IndexSet identity
+- **Soft-delete safety**: Skipped by default for scoped builds (partial coverage)
+
+### Documentation
+
+- User guide: [docs/user-guide/index.md](docs/user-guide/index.md)
+- Architecture: [docs/architecture/indexing.md](docs/architecture/indexing.md)
+- See [docs/releases/v0.1.4.md](docs/releases/v0.1.4.md) for complete release notes
+
+---
+
 ## v0.1.3 (2026-01-15)
 
 **Local Index for Large-Scale Bucket Inventory**
@@ -200,59 +261,3 @@ Multi-level prefix trees (4K prefixes, scales to millions):
 - Fixed table output serialization for timeout/partial results; timeout now emits clean `error.v1` + `summary.v1` (was FATAL)
 
 See [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md) for complete release notes.
-
----
-
-## v0.1.1 (2026-01-05)
-
-**Enterprise Authentication & Test Infrastructure**
-
-This release adds enterprise AWS SSO support with improved diagnostics, plus comprehensive cloud integration tests that bring S3 provider coverage from 49% to 97%.
-
-### Highlights
-
-- **AWS Profile & SSO Support**: `doctor --profile` flag for enterprise SSO diagnostics
-- **Credential Expiry Warnings**: Proactive alerts when SSO tokens expire within 1 hour
-- **Cloud Integration Tests**: S3 provider and CLI tests using moto (AWS mock server)
-- **Faster Doctor**: IMDS timeout eliminated when profile/env credentials available
-
-### New Commands
-
-```bash
-# Check SSO profile credentials
-gonimbus doctor --provider s3 --profile my-sso-profile
-
-# Run cloud integration tests (for contributors)
-make moto-start && make test-cloud
-```
-
-### For Enterprise Users
-
-AWS SSO (Identity Center) users can now validate their configuration:
-
-```bash
-# Login to SSO
-aws sso login --profile my-sso-profile
-
-# Verify credentials work with gonimbus
-gonimbus doctor --provider s3 --profile my-sso-profile
-
-# Run inspection
-gonimbus inspect s3://bucket/ --profile my-sso-profile
-```
-
-See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for multi-account SSO patterns.
-
-### For Contributors
-
-Cloud integration tests now run in CI using moto as a service container. To run locally:
-
-```bash
-make moto-start    # Start moto on port 5555
-make test-cloud    # Run cloud integration tests
-make moto-stop     # Clean up
-```
-
-See [docs/development/testing.md](docs/development/testing.md) for testing philosophy and coverage approach.
-
-See [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md) for full release notes.

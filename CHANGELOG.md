@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-01-19
+
+### Added
+
+#### Path-Scoped Index Builds (`build.scope`)
+
+- **Scope Types** (`pkg/manifest/`, `internal/assets/schemas/`)
+  - `prefix_list`: Explicit prefixes for deterministic crawl scope
+  - `date_partitions`: Dynamic prefix generation from date ranges with segment discovery
+  - `union`: Combine multiple scope definitions
+
+- **Scope Compiler** (`pkg/scope/`)
+  - Compiles `build.scope` configuration into explicit prefix plans
+  - Delimiter listing for segment discovery (e.g., device IDs under store prefixes)
+  - Date range expansion to concrete `YYYY-MM-DD/` prefixes
+  - `--dry-run` flag previews scope plan before execution
+
+- **Scope Guardrails** (`pkg/scope/`)
+  - Warning threshold for large prefix expansions
+  - Soft-delete skipped by default for scoped builds (partial coverage)
+  - Scope config included in IndexSet identity hash
+
+- **Provider Capability Contract** (`docs/architecture/adr/ADR-0003-*.md`)
+  - ADR-0003: Defines prefix listing and delimiter listing requirements
+  - Error classification for partial run handling
+  - Provider-agnostic scope compilation contract
+
+#### Documentation
+
+- Enterprise indexing workflow guide with three-tier model (`docs/user-guide/index.md`)
+- Indexing architecture with scope concepts (`docs/architecture/indexing.md`)
+- ADR-0003: Index build provider capabilities (`docs/architecture/adr/`)
+
+### Changed
+
+- `--after` filter is now inclusive (was exclusive) for consistency with date range semantics
+- Soft-delete skipped by default for scoped builds (partial coverage assumption)
+- Index identity now includes scope configuration hash for isolation
+
+### Performance
+
+- **99.5% reduction** in objects listed with `build.scope.date_partitions` on date-partitioned data
+- **~10x faster** build times (3 min → 30 sec for 15-store scoped builds)
+- Zero wasted enumeration: `objects_found ≈ objects_matched` with scope
+
 ## [0.1.3] - 2026-01-15
 
 ### Added
@@ -240,7 +285,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/3leaps/gonimbus/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/3leaps/gonimbus/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/3leaps/gonimbus/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/3leaps/gonimbus/compare/v0.1.0...v0.1.1

@@ -2,7 +2,9 @@
 
 > High-scale cloud object storage inspection and crawl engine
 
-Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and crawl of cloud object storage (100K-1M+ objects). It produces machine-friendly outputs (JSONL baseline) and favors **prefix-first listing** with doublestar matching to stay fast and predictable.
+Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and crawl of cloud object storage. It produces machine-friendly outputs (JSONL baseline) and favors **prefix-first listing** with doublestar matching to stay fast and predictable.
+
+**Scale**: Tested with 32M+ object buckets. Path-scoped index builds reduce listing costs by 99%+ on date-partitioned data.
 
 ## Modes
 
@@ -75,6 +77,7 @@ See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for enterprise authen
 - Doublestar semantics over normalized keys
 - Derives strongest possible list prefix per pattern (critical for scale)
 - Include/exclude pattern support
+- Path-scoped index builds for date-partitioned data (see [docs/user-guide/index.md](docs/user-guide/index.md))
 
 ### Outputs
 
