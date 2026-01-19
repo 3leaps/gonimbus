@@ -72,11 +72,14 @@ func init() {
 	indexJobsListCmd.Flags().Bool("json", false, "Output as JSON")
 	indexJobsStatusCmd.Flags().Bool("json", false, "Output as JSON")
 	indexJobsStopCmd.Flags().String("signal", "term", "Signal to send: term or kill")
+	indexJobsStopCmd.Flags().Bool("json", false, "Output as JSON")
 	indexJobsLogsCmd.Flags().String("stream", "stdout", "Log stream: stdout, stderr, or both")
 	indexJobsLogsCmd.Flags().Int("tail", 200, "Show last N lines (0 = no tail)")
 	indexJobsLogsCmd.Flags().Bool("follow", false, "Follow log output")
+	indexJobsLogsCmd.Flags().Bool("json", false, "Output log lines as JSONL")
 	indexJobsGCCmd.Flags().String("max-age", "168h", "Delete completed jobs older than this duration")
 	indexJobsGCCmd.Flags().Bool("dry-run", false, "Show how many jobs would be deleted")
+	indexJobsGCCmd.Flags().Bool("json", false, "Output as JSON")
 }
 
 func indexJobsRootDir() (string, error) {

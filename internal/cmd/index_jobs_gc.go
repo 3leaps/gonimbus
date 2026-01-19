@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,13 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
+
+type jobsGCResult struct {
+	Deleted      int    `json:"deleted"`
+	WouldDelete  int    `json:"would_delete"`
+	DryRun       bool   `json:"dry_run"`
+	MaxAgeString string `json:"max_age"`
+}
 
 func runIndexJobsGC(cmd *cobra.Command, _ []string) error {
 	maxAgeStr, _ := cmd.Flags().GetString("max-age")
@@ -21,6 +29,8 @@ func runIndexJobsGC(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --max-age: %w", err)
 	}
+
+	jsonOutput, _ := cmd.Flags().GetBool("json")
 	if maxAge <= 0 {
 		return fmt.Errorf("--max-age must be > 0")
 	}
@@ -63,6 +73,18 @@ func runIndexJobsGC(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		deleted++
+	}
+
+	if jsonOutput {
+		res := jobsGCResult{DryRun: dryRun, MaxAgeString: maxAgeStr}
+		if dryRun {
+			res.WouldDelete = deleted
+		} else {
+			res.Deleted = deleted
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
 	}
 
 	if dryRun {
