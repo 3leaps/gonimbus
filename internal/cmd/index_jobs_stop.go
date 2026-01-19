@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -26,11 +27,21 @@ func isProcessAlive(pid int) bool {
 	return true
 }
 
+type jobsStopResult struct {
+	JobID         string `json:"job_id"`
+	ResolvedJobID string `json:"resolved_job_id"`
+	Signal        string `json:"signal"`
+	ForcedKill    bool   `json:"forced_kill"`
+	State         string `json:"state"`
+}
+
 func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 	jobID := strings.TrimSpace(args[0])
 	if jobID == "" {
 		return fmt.Errorf("job_id is required")
 	}
+
+	jsonOutput, _ := cmd.Flags().GetBool("json")
 
 	sigStr, _ := cmd.Flags().GetString("signal")
 	sigStr = strings.TrimSpace(strings.ToLower(sigStr))
@@ -89,6 +100,11 @@ func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 				rec.EndedAt = &now
 				rec.LastHeartbeat = &now
 				_ = store.Write(rec)
+				if jsonOutput {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "term", ForcedKill: false, State: string(rec.State)})
+				}
 				_, _ = fmt.Fprintf(os.Stdout, "sent=term\n")
 				return nil
 			}
@@ -101,6 +117,11 @@ func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 		rec.EndedAt = &now
 		rec.LastHeartbeat = &now
 		_ = store.Write(rec)
+		if jsonOutput {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "term", ForcedKill: true, State: string(rec.State)})
+		}
 		_, _ = fmt.Fprintf(os.Stdout, "sent=term;forced=kill\n")
 		return nil
 	}
@@ -111,6 +132,11 @@ func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 	rec.EndedAt = &now
 	rec.LastHeartbeat = &now
 	_ = store.Write(rec)
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "kill", ForcedKill: true, State: string(rec.State)})
+	}
 	_, _ = fmt.Fprintf(os.Stdout, "sent=kill\n")
 	return nil
 }
