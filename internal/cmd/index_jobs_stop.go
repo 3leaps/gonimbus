@@ -12,6 +12,20 @@ import (
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
 
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	return true
+}
+
 func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 	jobID := strings.TrimSpace(args[0])
 	if jobID == "" {
@@ -65,7 +79,38 @@ func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("signal %s: %w", sigStr, err)
 	}
 
-	// Optimistic; child should mark terminal state on exit.
-	_, _ = fmt.Fprintf(os.Stdout, "sent=%s\n", sigStr)
+	// If SIGTERM, wait a bit to see if it exits; then SIGKILL.
+	if sig == syscall.SIGTERM {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if !isProcessAlive(rec.PID) {
+				now := time.Now().UTC()
+				rec.State = jobregistry.JobStateStopped
+				rec.EndedAt = &now
+				rec.LastHeartbeat = &now
+				_ = store.Write(rec)
+				_, _ = fmt.Fprintf(os.Stdout, "sent=term\n")
+				return nil
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+
+		_ = proc.Signal(syscall.SIGKILL)
+		now := time.Now().UTC()
+		rec.State = jobregistry.JobStateStopped
+		rec.EndedAt = &now
+		rec.LastHeartbeat = &now
+		_ = store.Write(rec)
+		_, _ = fmt.Fprintf(os.Stdout, "sent=term;forced=kill\n")
+		return nil
+	}
+
+	// SIGKILL path.
+	now = time.Now().UTC()
+	rec.State = jobregistry.JobStateStopped
+	rec.EndedAt = &now
+	rec.LastHeartbeat = &now
+	_ = store.Write(rec)
+	_, _ = fmt.Fprintf(os.Stdout, "sent=kill\n")
 	return nil
 }

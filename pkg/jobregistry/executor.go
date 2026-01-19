@@ -35,12 +35,16 @@ func (e *Executor) StderrPath(jobID string) string {
 	return filepath.Join(e.store.JobDir(jobID), "stderr.log")
 }
 
+type BackgroundOptions struct {
+	Dedupe bool
+}
+
 // StartIndexBuildBackground spawns a managed child process running:
 //
 //	gonimbus index build --job <manifest> --_managed-job-id <job_id>
 //
 // It returns after the child successfully starts.
-func (e *Executor) StartIndexBuildBackground(manifestPath string, name string) (*JobRecord, error) {
+func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, opts BackgroundOptions) (*JobRecord, error) {
 	if e == nil || e.store == nil {
 		return nil, fmt.Errorf("executor is not initialized")
 	}
@@ -73,6 +77,28 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string) (
 		_ = stdoutFile.Close()
 		_ = stderrFile.Close()
 		return nil, fmt.Errorf("resolve manifest path: %w", err)
+	}
+	if absManifest == "" {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		return nil, fmt.Errorf("manifest path is required")
+	}
+	if _, err := os.Stat(absManifest); err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		return nil, fmt.Errorf("manifest not found: %s", absManifest)
+	}
+
+	if opts.Dedupe {
+		if existing, _ := e.store.List(); len(existing) > 0 {
+			for _, j := range existing {
+				if strings.TrimSpace(j.ManifestPath) == absManifest && j.State == JobStateRunning {
+					_ = stdoutFile.Close()
+					_ = stderrFile.Close()
+					return nil, fmt.Errorf("duplicate running job exists: %s", j.JobID)
+				}
+			}
+		}
 	}
 
 	cmd := exec.Command(exe, "index", "build", "--job", absManifest, "--_managed-job-id", jobID)
