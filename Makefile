@@ -111,8 +111,10 @@ verify-dependencies:  ## Alias for dependencies (compatibility)
 install: build ## Install binary to user bin directory
 	@$(BINDIR_RESOLVE); \
 	mkdir -p "$$BINDIR"; \
-	cp bin/$(BINARY_NAME) "$$BINDIR/$(BINARY_NAME)"; \
-	chmod 755 "$$BINDIR/$(BINARY_NAME)"; \
+	tmp="$$BINDIR/.${BINARY_NAME}.tmp.$$"; \
+	cp bin/$(BINARY_NAME) "$$tmp"; \
+	chmod 755 "$$tmp"; \
+	mv -f "$$tmp" "$$BINDIR/$(BINARY_NAME)"; \
 	echo "✅ Installed $(BINARY_NAME) to $$BINDIR/$(BINARY_NAME)"
 
 run:  ## Run server in development mode
