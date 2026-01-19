@@ -104,10 +104,18 @@ gonimbus crawl --job <path>    # Full crawl to JSONL
 # Index workflow (for large buckets)
 gonimbus index init            # Initialize local index database
 gonimbus index build --job <path>  # Build index from crawl
+gonimbus index build --background --job <path>  # Background build with job tracking
 gonimbus index query <uri>     # Query indexed objects by pattern
 gonimbus index list            # List local indexes
 gonimbus index doctor          # Validate index integrity
 gonimbus index gc              # Clean up old indexes
+
+# Job management (for long-running builds)
+gonimbus index jobs list       # List running and recent jobs
+gonimbus index jobs status <id>  # Check job state and progress
+gonimbus index jobs logs <id>  # Stream job logs
+gonimbus index jobs stop <id>  # Safe cancellation
+gonimbus index jobs gc         # Clean up old job records
 
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets

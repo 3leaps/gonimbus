@@ -1,25 +1,34 @@
 # Release Notes
 
-This file contains release notes for the three most recent releases in reverse chronological order. For the complete release history, see the [CHANGELOG](CHANGELOG.md) or the [docs/releases/](docs/releases/) directory.
+This file contains release notes for up to the three most recent releases in reverse chronological order. For the complete release history, see the [CHANGELOG](CHANGELOG.md) or the [docs/releases/](docs/releases/) directory.
 
 ---
 
 ## v0.1.4 (2026-01-19)
 
-**Path-Scoped Index Builds for Enterprise Scale**
+**Path-Scoped Index Builds + Managed Jobs for Enterprise Scale**
 
-This release introduces `build.scope`, the primary lever for reducing provider listing costs on huge date-partitioned buckets. Scoped builds eliminate 99%+ of wasted enumeration and cut build times by 10x.
+This release delivers two major capabilities for enterprise-scale index operations:
 
-### The Problem
+1. **Path-Scoped Index Builds** (`build.scope`) - the primary lever for reducing provider listing costs on date-partitioned buckets
+2. **Managed Index Build Jobs** - durable job tracking and background execution for long-running builds
+
+Together, these features make Gonimbus practical for multi-hour index builds on huge buckets, with 99%+ reduction in wasted enumeration and full operational visibility.
+
+---
+
+### Path-Scoped Index Builds
+
+#### The Problem
 
 Large enterprise buckets contain years of date-partitioned data. When operators only need the last 30 days, traditional crawl approaches still enumerate the entire history:
 
 - **Without scope**: List 32M objects, match 350K (99% wasted)
 - **With scope**: List 185K objects, match 185K (0% wasted)
 
-### The Solution
+#### The Solution
 
-Add a `build.scope` block to generate an explicit prefix plan:
+Add a `build.scope` block to generate an explicit prefix plan before listing:
 
 ```yaml
 build:
@@ -37,25 +46,80 @@ build:
         before: "2026-01-01" # exclusive
 ```
 
-### Scope Types
+#### Scope Types
 
-- `prefix_list`: Explicit prefixes when you know exactly what to list
-- `date_partitions`: Dynamic prefix generation from date ranges with segment discovery
-- `union`: Combine multiple scopes
+| Type              | Use Case                                      |
+| ----------------- | --------------------------------------------- |
+| `prefix_list`     | Explicit prefixes when you know what to list  |
+| `date_partitions` | Dynamic expansion from date ranges + discovery |
+| `union`           | Combine multiple scopes                       |
 
-### Performance
+#### Performance
 
 | Configuration       | Objects Found | Build Time | Improvement     |
 | ------------------- | ------------- | ---------- | --------------- |
 | 15-store full month | 32M           | ~3 min     | baseline        |
 | 15-store scoped 17d | 185K          | ~30 sec    | **99.5% / 10x** |
 
-### Key Features
+Key insight: with scope, `objects_found ≈ objects_matched` because you only list what you need.
+
+#### Key Features
 
 - **Dry-run preview**: `gonimbus index build --dry-run` shows prefix plan before execution
 - **Guardrails**: Warnings for large prefix expansions
 - **Identity isolation**: Scope config hashed into IndexSet identity
 - **Soft-delete safety**: Skipped by default for scoped builds (partial coverage)
+
+---
+
+### Managed Index Build Jobs
+
+#### The Problem
+
+Index builds on enterprise buckets can run for hours. Managing them with shell primitives (`&`, `nohup`, `screen`) is brittle for:
+
+- Multi-hour or multi-day jobs
+- Multiple concurrent builds (multi-store fanout)
+- AI agents that need deterministic state and cancellation
+
+#### The Solution
+
+First-class job management with durable state and background execution:
+
+```bash
+# Start a managed background build (returns job id immediately)
+gonimbus index build --background --job index.yaml --name nightly-sweep
+
+# Monitor running and recent jobs
+gonimbus index jobs list
+gonimbus index jobs status <job_id>
+
+# Stream logs from a running job
+gonimbus index jobs logs <job_id> --follow
+
+# Safe cancellation
+gonimbus index jobs stop <job_id>
+
+# Clean up old job records
+gonimbus index jobs gc --max-age 168h
+```
+
+#### Key Features
+
+- **Durable job registry**: Jobs persist under app data dir (`jobs/index-build/<job_id>/`)
+- **Background execution**: `--background` spawns a managed child process
+- **Safe cancellation**: SIGTERM triggers graceful context cancellation; SIGKILL fallback
+- **Log capture**: stdout/stderr streamed to per-job files
+- **Deduplication**: `--dedupe` prevents duplicate running jobs for the same manifest
+- **JSON output**: All job commands support `--json` for machine-friendly output
+
+#### Job States
+
+`queued` → `running` → `success` | `partial` | `failed`
+
+Jobs can also be `stopping` (graceful shutdown in progress) or `stopped` (cancelled).
+
+---
 
 ### Documentation
 
@@ -154,110 +218,3 @@ Build throughput scales linearly at approximately 3,000 objects/sec.
 - Index commands: `gonimbus index --help`
 - See [docs/releases/v0.1.3.md](docs/releases/v0.1.3.md) for complete release notes
 
----
-
-## v0.1.2 (2026-01-11)
-
-**Transfer Engine, Tree Command, and Advanced Filtering**
-
-This release adds comprehensive transfer operations with preflight probing, parallel prefix discovery (14x speedup), a new tree command for prefix summaries, advanced metadata filtering, and a global readonly safety latch.
-
-### Transfer Workflow
-
-```bash
-# Validate manifest and check permissions
-gonimbus preflight --job transfer.yaml --dry-run
-
-# Execute transfer (copy or move)
-gonimbus transfer --job transfer.yaml
-```
-
-Features:
-
-- Copy/move objects between buckets with path transformation
-- Same-bucket, cross-account, and cross-provider (AWS → R2/Wasabi) transfers
-- Preflight permission probing: verify read/write/delete before enumeration
-- Parallel prefix discovery with 14x speedup for large buckets
-- Deduplication: skip by ETag, key, or always transfer
-
-### Tree Workflow
-
-```bash
-# Direct prefix summary (non-recursive)
-gonimbus tree s3://my-bucket/data/
-
-# Depth-limited traversal with safety limits
-gonimbus tree s3://my-bucket/production/ --depth 2 --timeout 5m
-
-# Include/exclude patterns for traversal scope
-gonimbus tree s3://my-bucket/ --depth 4 --include 'production/**' --exclude '**/_temporary/**'
-```
-
-Features:
-
-- Directory-like summaries with table or JSONL output
-- Depth-limited traversal with bounded safety limits
-- Partial results on timeout/max limits (streamed JSONL)
-- Include/exclude patterns for pathfinder-style scope control
-
-### Inspect Workflow (Advanced Filtering)
-
-```bash
-# Size range filtering (supports KB/KiB, MB/MiB, GB/GiB)
-gonimbus inspect s3://my-bucket/data/ --min-size 1KB --max-size 100MB
-
-# Date range filtering (ISO 8601)
-gonimbus inspect s3://my-bucket/data/ --after 2024-01-01 --before 2024-06-30
-
-# Key regex filtering
-gonimbus inspect s3://my-bucket/data/ --key-regex '\.json$'
-```
-
-### Safety Features
-
-**Global Readonly Safety Latch:**
-
-```bash
-export GONIMBUS_READONLY=1
-```
-
-Blocks provider-side mutations:
-
-- Refuses transfer jobs
-- Refuses write-probe preflight
-- Intended for dogfooding and lower-trust automation
-
-### Performance Benchmarks
-
-**Parallel Prefix Discovery (Sharding):**
-
-Multi-level prefix trees (4K prefixes, scales to millions):
-
-| Configuration         | Time  | Speedup |
-| --------------------- | ----- | ------- |
-| Sequential            | 21.2s | 1.0x    |
-| Parallel (8 workers)  | 3.2s  | 6.6x    |
-| Parallel (16 workers) | 2.2s  | 9.5x    |
-| Parallel (32 workers) | 1.5s  | **14x** |
-
-**Tree Parallel Sweep (Depth Traversal):**
-
-| Configuration | Result              |
-| ------------- | ------------------- |
-| `parallel=1`  | Timeout (10m limit) |
-| `parallel=32` | 25s completion      |
-
-### Documentation
-
-- [Transfer Operations](docs/user-guide/transfer.md) - Full transfer guide with examples
-- [Preflight Probing](docs/appnotes/preflight.md) - Permission verification contract
-- [Tree Command Examples](docs/user-guide/examples/tree.md) - Prefix summary recipes
-- [Advanced Filtering](docs/user-guide/examples/advanced-filtering.md) - Size/date/regex filtering
-
-### Bug Fixes
-
-- Fixed "failed to rewind transport stream for retry" errors during transfer
-- Fixed missing duration in tree summary records
-- Fixed table output serialization for timeout/partial results; timeout now emits clean `error.v1` + `summary.v1` (was FATAL)
-
-See [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md) for complete release notes.

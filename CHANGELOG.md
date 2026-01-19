@@ -34,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Error classification for partial run handling
   - Provider-agnostic scope compilation contract
 
+#### Index Job Management
+
+- **Job Registry** (`pkg/jobregistry/`)
+  - Durable on-disk job records under the app data dir (`jobs/index-build/<job_id>/job.json`)
+  - Captures identity/run metadata, PID, heartbeat timestamps, and log file paths
+
+- **Managed Background Builds** (`internal/cmd/index_build.go`, `pkg/jobregistry/executor.go`)
+  - `gonimbus index build --background` spawns a managed child process and returns a job id
+  - Captures stdout/stderr to per-job log files
+  - Safe cancellation via SIGTERM -> context cancellation; SIGKILL fallback
+
+- **Job CLI** (`internal/cmd/index_jobs*.go`)
+  - `gonimbus index jobs list/status` with JSON output support
+  - `jobs status` supports short id prefix resolution when unambiguous
+  - `gonimbus index jobs stop/logs/gc` for operational control
+  - `--dedupe` prevents starting duplicate running jobs for the same manifest
+
 #### Documentation
 
 - Enterprise indexing workflow guide with three-tier model (`docs/user-guide/index.md`)
@@ -45,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--after` filter is now inclusive (was exclusive) for consistency with date range semantics
 - Soft-delete skipped by default for scoped builds (partial coverage assumption)
 - Index identity now includes scope configuration hash for isolation
+
+### Fixed
+
+- Tree traversal callback is now safe under parallel execution (`internal/cmd/tree.go`)
 
 ### Performance
 
