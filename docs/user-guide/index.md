@@ -220,6 +220,97 @@ gonimbus index gc --max-age 30d
 gonimbus index gc --keep-last 1 --dry-run
 ```
 
+## Job Management
+
+For long-running builds (hours on large buckets), gonimbus provides managed job execution with durable state and background operation.
+
+### Starting Background Builds
+
+```bash
+# Start a managed background build (returns job id immediately)
+gonimbus index build --background --job index-manifest.yaml
+
+# With a human-friendly name
+gonimbus index build --background --job index-manifest.yaml --name nightly-sweep
+
+# Prevent duplicate running jobs for the same manifest
+gonimbus index build --background --job index-manifest.yaml --dedupe
+```
+
+The `--background` flag spawns a managed child process and returns immediately with a job ID.
+
+### Monitoring Jobs
+
+```bash
+# List all running and recent jobs
+gonimbus index jobs list
+
+# JSON output for scripting
+gonimbus index jobs list --json
+
+# Check status of a specific job (supports short ID prefixes)
+gonimbus index jobs status <job_id>
+gonimbus index jobs status abc1  # short prefix if unambiguous
+```
+
+### Streaming Logs
+
+```bash
+# View job logs
+gonimbus index jobs logs <job_id>
+
+# Follow logs in real-time
+gonimbus index jobs logs <job_id> --follow
+
+# Tail recent lines
+gonimbus index jobs logs <job_id> --tail 100
+```
+
+### Stopping Jobs
+
+```bash
+# Graceful stop (SIGTERM -> context cancellation)
+gonimbus index jobs stop <job_id>
+
+# Force stop (SIGKILL) - use as last resort
+gonimbus index jobs stop <job_id> --signal kill
+```
+
+Graceful cancellation produces a `partial` run status and preserves index integrity.
+
+### Cleaning Up Job Records
+
+```bash
+# Remove job records older than 7 days
+gonimbus index jobs gc --max-age 168h
+
+# Preview what would be removed
+gonimbus index jobs gc --max-age 168h --dry-run
+```
+
+### Job States
+
+| State      | Meaning                              |
+| ---------- | ------------------------------------ |
+| `queued`   | Job created, not yet started         |
+| `running`  | Build in progress                    |
+| `stopping` | Graceful shutdown in progress        |
+| `stopped`  | Cancelled by user                    |
+| `success`  | Build completed successfully         |
+| `partial`  | Build completed with skipped prefixes |
+| `failed`   | Build failed with error              |
+
+### On-Disk Layout
+
+Job records are stored under the app data directory:
+
+```
+<data_dir>/jobs/index-build/<job_id>/
+├── job.json      # Job metadata and state
+├── stdout.log    # Captured stdout
+└── stderr.log    # Captured stderr
+```
+
 ## Query Filters
 
 Index queries support the same filters as `inspect`:

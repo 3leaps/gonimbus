@@ -1,0 +1,73 @@
+# Example: Path-scoped index build with explicit prefix list
+#
+# Use this pattern when you know exactly which prefixes to index.
+# Common scenarios:
+#   - Specific store/tenant prefixes
+#   - Known hot paths that change frequently
+#   - Targeted subset of a large bucket
+#
+# Usage:
+#   gonimbus index build --job examples/index/index-scoped-prefixes.yaml --dry-run
+#   gonimbus index build --job examples/index/index-scoped-prefixes.yaml
+#   gonimbus index build --job examples/index/index-scoped-prefixes.yaml --background
+version: "1.0"
+
+connection:
+  provider: s3
+  bucket: my-data-bucket
+  base_uri: "s3://my-data-bucket/data/"
+  region: us-east-1
+
+identity:
+  storage_provider: aws_s3
+  cloud_provider: aws
+  region_kind: aws
+  region: us-east-1
+
+build:
+  source: crawl
+
+  # SCOPE: Explicit prefix list
+  # Only these prefixes will be listed - nothing else.
+  scope:
+    type: prefix_list
+    prefixes:
+      - "store-001/device-A/"
+      - "store-001/device-B/"
+      - "store-002/device-X/"
+      # Add more prefixes as needed
+      # Each prefix is listed independently
+
+  # MATCH: Further filter what gets indexed
+  match:
+    includes:
+      - "**/*"
+    excludes:
+      - "**/_temporary/**"
+      - "**/.trash/**"
+
+  crawl:
+    concurrency: 4
+    progress_every: 1000
+
+# Variant: Union of multiple scopes
+#
+# Use 'union' to combine different scope types:
+#
+# build:
+#   scope:
+#     type: union
+#     scopes:
+#       - type: prefix_list
+#         prefixes:
+#           - "hot-data/"
+#       - type: date_partitions
+#         discover:
+#           segments:
+#             - index: 0
+#         date:
+#           segment_index: 1
+#           format: "2006-01-02"
+#           range:
+#             after: "2025-12-01"
+#             before: "2026-01-01"

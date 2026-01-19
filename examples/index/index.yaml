@@ -35,6 +35,26 @@ identity:
 build:
   # Source type: crawl (v0.1.3), inventory (future)
   source: crawl
+
+  # SCOPE (optional): Controls which prefixes are listed
+  # Use scope to reduce provider API costs on large date-partitioned buckets.
+  # Without scope, the crawler lists everything under base_uri.
+  #
+  # See examples/index/index-scoped-dates.yaml for date_partitions
+  # See examples/index/index-scoped-prefixes.yaml for prefix_list
+  #
+  # scope:
+  #   type: date_partitions
+  #   discover:
+  #     segments:
+  #       - index: 0  # discover first segment
+  #   date:
+  #     segment_index: 1
+  #     format: "2006-01-02"
+  #     range:
+  #       after: "2025-12-01"
+  #       before: "2026-01-01"
+
   # Match configures object filtering during build
   # NOTE: Only includes/excludes/include_hidden are supported at build time.
   # Metadata filters (size, modified, key_regex) must be applied at query time.
