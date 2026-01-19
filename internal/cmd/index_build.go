@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	gfconfig "github.com/fulmenhq/gofulmen/config"
@@ -60,6 +62,8 @@ var (
 	indexBuildJobPath         string
 	indexBuildDBPath          string
 	indexBuildDryRun          bool
+	indexBuildBackground      bool
+	indexBuildManagedJobID    string
 	indexBuildStorageProv     string
 	indexBuildCloudProv       string
 	indexBuildRegionKind      string
@@ -80,6 +84,9 @@ func init() {
 	// Optional
 	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
+	indexBuildCmd.Flags().BoolVar(&indexBuildBackground, "background", false, "Run index build as a managed background job")
+	indexBuildCmd.Flags().StringVar(&indexBuildManagedJobID, "_managed-job-id", "", "(internal) Managed job id")
+	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
@@ -96,6 +103,31 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// Managed mode: translate SIGTERM into context cancellation.
+	if strings.TrimSpace(indexBuildManagedJobID) != "" {
+		managedCtx, cancel := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
+		defer cancel()
+		ctx = managedCtx
+	}
+
+	// Background mode: start a managed child process and return.
+	if indexBuildBackground {
+		if indexBuildDryRun {
+			return fmt.Errorf("--background is not compatible with --dry-run")
+		}
+		execRoot, err := indexJobsRootDir()
+		if err != nil {
+			return err
+		}
+		exec := jobregistry.NewExecutor(execRoot)
+		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName))
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "%s\n", job.JobID)
+		return nil
 	}
 
 	var store *jobregistry.Store
@@ -115,14 +147,33 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 		now := time.Now().UTC()
 		jobID := uuid.New().String()
+		if strings.TrimSpace(indexBuildManagedJobID) != "" {
+			jobID = strings.TrimSpace(indexBuildManagedJobID)
+		}
 		job = &jobregistry.JobRecord{
 			JobID:        jobID,
 			Name:         strings.TrimSpace(indexBuildName),
 			State:        jobregistry.JobStateRunning,
 			ManifestPath: absManifestPath,
+			StdoutPath:   filepath.Join(store.JobDir(jobID), "stdout.log"),
+			StderrPath:   filepath.Join(store.JobDir(jobID), "stderr.log"),
 			CreatedAt:    now,
 			StartedAt:    &now,
 		}
+
+		// In managed mode, stdout/stderr are redirected by the parent.
+		// In foreground mode, we don't capture logs yet, but we still expose
+		// the expected paths for consistency.
+		if strings.TrimSpace(indexBuildManagedJobID) == "" {
+			_ = os.MkdirAll(store.JobDir(jobID), 0755)
+			if f, err := os.OpenFile(job.StdoutPath, os.O_CREATE, 0644); err == nil {
+				_ = f.Close()
+			}
+			if f, err := os.OpenFile(job.StderrPath, os.O_CREATE, 0644); err == nil {
+				_ = f.Close()
+			}
+		}
+
 		if err := store.Write(job); err != nil {
 			return fmt.Errorf("write job record: %w", err)
 		}
@@ -269,10 +320,20 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create index run: %w", err)
 	}
 
+	var stopHeartbeat func()
 	if store != nil && job != nil {
 		job.RunID = run.RunID
+		job.PID = os.Getpid()
 		_ = store.Write(job)
+		if strings.TrimSpace(indexBuildManagedJobID) != "" {
+			stopHeartbeat = startManagedHeartbeat(ctx, store, job)
+		}
 	}
+	defer func() {
+		if stopHeartbeat != nil {
+			stopHeartbeat()
+		}
+	}()
 
 	_, _ = fmt.Fprintf(os.Stderr, "Started IndexRun: %s\n", run.RunID)
 	_, _ = fmt.Fprintf(os.Stderr, "  base_uri: %s\n", indexSet.BaseURI)

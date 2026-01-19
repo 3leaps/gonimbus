@@ -49,4 +49,6 @@ type JobRecord struct {
 	EndedAt       *time.Time         `json:"ended_at,omitempty"`
 	LastHeartbeat *time.Time         `json:"last_heartbeat,omitempty"`
 	Identity      *EffectiveIdentity `json:"effective_identity,omitempty"`
+	StdoutPath    string             `json:"stdout_path,omitempty"`
+	StderrPath    string             `json:"stderr_path,omitempty"`
 }

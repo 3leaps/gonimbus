@@ -25,7 +25,7 @@ This command group is designed to be agent-friendly:
 - predictable on-disk locations
 - optional JSON output for machine parsing
 
-Note: v0.1.4 starts with foreground job records (no background execution).`,
+Note: v0.1.4 supports managed background jobs via 'index build --background'.`,
 }
 
 var indexJobsListCmd = &cobra.Command{
@@ -41,13 +41,33 @@ var indexJobsStatusCmd = &cobra.Command{
 	RunE:  runIndexJobsStatus,
 }
 
+var indexJobsStopCmd = &cobra.Command{
+	Use:   "stop <job_id>",
+	Short: "Stop a running job",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runIndexJobsStop,
+}
+
+var indexJobsLogsCmd = &cobra.Command{
+	Use:   "logs <job_id>",
+	Short: "Show logs for a job",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runIndexJobsLogs,
+}
+
 func init() {
 	indexCmd.AddCommand(indexJobsCmd)
 	indexJobsCmd.AddCommand(indexJobsListCmd)
 	indexJobsCmd.AddCommand(indexJobsStatusCmd)
+	indexJobsCmd.AddCommand(indexJobsStopCmd)
+	indexJobsCmd.AddCommand(indexJobsLogsCmd)
 
 	indexJobsListCmd.Flags().Bool("json", false, "Output as JSON")
 	indexJobsStatusCmd.Flags().Bool("json", false, "Output as JSON")
+	indexJobsStopCmd.Flags().String("signal", "term", "Signal to send: term or kill")
+	indexJobsLogsCmd.Flags().String("stream", "stdout", "Log stream: stdout, stderr, or both")
+	indexJobsLogsCmd.Flags().Int("tail", 200, "Show last N lines (0 = no tail)")
+	indexJobsLogsCmd.Flags().Bool("follow", false, "Follow log output")
 }
 
 func indexJobsRootDir() (string, error) {
