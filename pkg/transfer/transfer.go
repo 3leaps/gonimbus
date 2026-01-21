@@ -192,7 +192,7 @@ func (t *Transfer) Run(ctx context.Context) (*Summary, error) {
 			for it := range workCh {
 				if err := t.transferOne(ctx, it.summary); err != nil {
 					t.errors.Add(1)
-					_ = t.writer.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInternal, Message: err.Error(), Key: it.summary.Key})
+					_ = t.writer.WriteError(ctx, &output.ErrorRecord{Code: classifyErrCode(err), Message: err.Error(), Key: it.summary.Key})
 				}
 			}
 		}()
@@ -301,26 +301,34 @@ func (t *Transfer) transferOne(ctx context.Context, obj provider.ObjectSummary) 
 		return errors.New("target provider does not support PutObject")
 	}
 
-	body, size, err := getter.GetObject(ctx, srcKey)
+	body, gotSize, err := getter.GetObject(ctx, srcKey)
 	if err != nil {
 		return err
 	}
 
-	retryBody, err := newRetryableBody(ctx, body, size, t.cfg.RetryBufferMaxMemoryBytes)
+	// validate=size (default): compare the enumerated size vs GetObject content length.
+	// This catches common stale-index/stale-list cases early, without paying an extra HEAD request.
+	// NOTE: This does not eliminate TOCTOU races; it just avoids avoidable deeper pipeline errors.
+	if obj.Size > 0 && gotSize >= 0 && obj.Size != gotSize {
+		_ = body.Close()
+		return &SizeMismatchError{Key: srcKey, Expected: obj.Size, Got: gotSize}
+	}
+
+	retryBody, err := newRetryableBody(ctx, body, gotSize, t.cfg.RetryBufferMaxMemoryBytes)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = retryBody.Close() }()
 
-	if err := putter.PutObject(ctx, dstKey, retryBody.Reader(), size); err != nil {
+	if err := putter.PutObject(ctx, dstKey, retryBody.Reader(), gotSize); err != nil {
 		return err
 	}
 
-	if err := t.writer.WriteTransfer(ctx, &output.TransferRecord{SourceKey: srcKey, TargetKey: dstKey, Bytes: size}); err != nil {
+	if err := t.writer.WriteTransfer(ctx, &output.TransferRecord{SourceKey: srcKey, TargetKey: dstKey, Bytes: gotSize}); err != nil {
 		return err
 	}
-	if size > 0 {
-		t.bytes.Add(size)
+	if gotSize > 0 {
+		t.bytes.Add(gotSize)
 	}
 	t.transferred.Add(1)
 
