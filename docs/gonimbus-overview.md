@@ -21,12 +21,8 @@ Gonimbus is a Go-first **library + CLI + optional server** for large-scale inspe
 
 ## Non-Goals
 
-- No mounts, sync engines, FUSE/desktop UX, or pinning/offline queues (those belong to NimbusNest).
-- No “list everything by default” for broad patterns; scale requires explicit sharding or inventory ingestion.
-
-## Relationship to NimbusNest
-
-- NimbusNest is the mount/sync/UX client (3leaps). Gonimbus provides the crawl/match/auth/backends that NimbusNest can reuse, but scopes stay separate.
+- No mounts, sync engines, FUSE/desktop UX, or pinning/offline queues.
+- No "list everything by default" for broad patterns; scale requires explicit sharding or inventory ingestion.
 
 ## Near-Term Roadmap (v0.1.x)
 

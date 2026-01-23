@@ -20,6 +20,7 @@ When dogfooding against real buckets, consider running with the global safety la
 ## Guides
 
 - Local index (large buckets): `docs/user-guide/index.md`
+- Content streaming (metadata/content access): `docs/user-guide/streaming.md`
 - Tree (prefix summary): `docs/user-guide/examples/tree.md`
 - Advanced filtering (size/date/regex): `docs/user-guide/examples/advanced-filtering.md`
 - Transfer operations (copy/move): `docs/user-guide/transfer.md`

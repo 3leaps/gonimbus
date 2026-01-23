@@ -16,8 +16,7 @@ Anything that turns it into a filesystem client, sync tool, or desktop product i
 
 ## Where Those Concerns Belong
 
-- **NimbusNest** (3leaps ecosystem): the Mountain Duck-like app for Linux/macOS
-- **Other apps/tools**: purpose-built UX layers, orchestration systems, or client-specific products
+Purpose-built UX layers, orchestration systems, or client-specific mount/sync products.
 
 ## Allowed Adjacent Functionality
 
@@ -29,13 +28,4 @@ These are permitted because they directly support inspection/crawl:
 - Job manifests and validation (schemas-first)
 - Server mode for long-running crawls and streaming results
 
-## Relationship to NimbusNest
-
-NimbusNest can consume gonimbus backends/matcher/crawl outputs. The integration points are:
-
-- **Backends**: S3/GCS backends expose an interface NimbusNest can reuse
-- **Matcher**: Doublestar/prefix derivation is reusable for pinning/path filters
-- **Outputs**: JSONL/streaming results could feed a NimbusNest indexer
-- **Server**: Remote runner could act as a discovery service NimbusNest queries
-
-The scopes stay separate: gonimbus does not implement mount/sync/FUSE/desktop concerns.
+The scopes stay clear: gonimbus does not implement mount/sync/FUSE/desktop concerns.

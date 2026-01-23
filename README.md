@@ -164,13 +164,9 @@ When running in server mode:
 
 ## Non-Goals
 
-- Mounts, sync engines, FUSE/desktop UX (see [NimbusNest](https://github.com/3leaps/nimbusnest))
+- Mounts, sync engines, FUSE/desktop UX
 - "List everything by default" for broad patterns (scale requires explicit sharding)
 - Pinning/offline queues
-
-## Relationship to NimbusNest
-
-NimbusNest is the mount/sync/UX client. Gonimbus provides the crawl/match/auth/backends that NimbusNest can reuse, but scopes stay separate.
 
 ## Development
 
