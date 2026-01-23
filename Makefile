@@ -109,13 +109,7 @@ verify-dependencies:  ## Alias for dependencies (compatibility)
 	@$(MAKE) dependencies
 
 install: build ## Install binary to user bin directory
-	@$(BINDIR_RESOLVE); \
-	mkdir -p "$$BINDIR"; \
-	tmp="$$BINDIR/.${BINARY_NAME}.tmp.$$"; \
-	cp bin/$(BINARY_NAME) "$$tmp"; \
-	chmod 755 "$$tmp"; \
-	mv -f "$$tmp" "$$BINDIR/$(BINARY_NAME)"; \
-	echo "✅ Installed $(BINARY_NAME) to $$BINDIR/$(BINARY_NAME)"
+	@$(BINDIR_RESOLVE); mkdir -p "$$BINDIR"; tmp="$$BINDIR/.${BINARY_NAME}.tmp.$$"; cp bin/$(BINARY_NAME) "$$tmp"; chmod 755 "$$tmp"; mv -f "$$tmp" "$$BINDIR/$(BINARY_NAME)"; echo "✅ Installed $(BINARY_NAME) to $$BINDIR/$(BINARY_NAME)"
 
 run:  ## Run server in development mode
 	@go run ./cmd/$(BINARY_NAME) serve --verbose
@@ -393,7 +387,10 @@ precommit:  ## Run pre-commit hooks
 	@echo "Running pre-commit validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint --fail-on critical
 	@echo "✅ Pre-commit checks passed"
 
-prepush: license-audit check-all ## Run pre-push hooks
+prepush: ## Run pre-push hooks
+	@echo "Running pre-push validation..."; \
+	$(GONEAT_RESOLVE); \
+	$$GONEAT assess --check --categories format,lint,security,dependencies --fail-on high --package-mode
 	@echo "✅ Pre-push checks passed"
 
 # License compliance
