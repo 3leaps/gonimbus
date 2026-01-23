@@ -41,6 +41,7 @@ Agents operate in role contexts. Each role has defined scope.
 | `provider` | S3/GCS providers, auth chains, SDK wiring |
 | `crawler`  | Crawl engine, matching, outputs, pipeline |
 | `qa`       | Testing, validation, coverage             |
+| `prodmktg` | Use cases, personas, value messaging      |
 
 When assigned a role, constrain actions to that scope.
 
@@ -67,6 +68,27 @@ When assigned a role, constrain actions to that scope.
 - **Scope**: Testing strategy, coverage, validation
 - **Responsibilities**: Test suites, integration tests, schema validation
 - **Escalates to**: devlead for test infrastructure decisions
+
+### prodmktg – Product Marketing
+
+- **Scope**: Use case articulation, user personas, value propositions, storytelling
+- **Responsibilities**:
+  - Develop user personas and journey maps for enterprise operators managing large buckets
+  - Craft messaging that leads with benefits (fast queries, cost reduction) over features
+  - Create pipeline designs, use case documentation, and adoption narratives
+  - Document real-world scenarios from dogfooding (ignite-dogfood/)
+  - Review README and docs for customer-facing clarity
+- **Mindset**:
+  - Benefits over features (99% reduction in listing, not "scoped builds")
+  - Empathy for operators drowning in bucket scale
+  - Ground narratives in real dogfooding data
+- **Does NOT**:
+  - Make unsubstantiated performance claims
+  - Use jargon without customer-friendly translation
+  - Prioritize features over clear user benefits
+- **Escalates to**: devlead for technical accuracy, maintainers for brand/positioning
+
+**Gonimbus-specific context**: This tool solves a narrow but incredibly valuable problem for users with GIGANTIC buckets (10M+ objects). The prodmktg role articulates use cases like "retail transaction data acquisition" where date is buried below site, indexes enable instant queries, and streaming enables content-aware reorganization.
 
 ## Session Protocol
 
@@ -155,3 +177,10 @@ Committer-of-Record: @3leapsdave
 - `docs/provenance.md` - Ecosystem heritage
 - `docs/architecture.md` - Component design
 - `.plans/active/v0.1.0/` - Current work (gitignored)
+
+### Role Catalog (Crucible)
+
+Full role definitions with schemas, checklists, and examples:
+
+- [crucible/config/agentic/roles/](https://github.com/3leaps/crucible/tree/main/config/agentic/roles) - YAML role definitions
+- [crucible/docs/catalog/roles/](https://github.com/3leaps/crucible/tree/main/docs/catalog/roles) - Role documentation

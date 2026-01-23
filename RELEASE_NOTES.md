@@ -4,6 +4,60 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.1.5 (2026-01-23)
+
+**Content Streaming + validate=size for Consumer Integration**
+
+This release introduces content streaming commands and validation, enabling Gonimbus to serve as a data plane for downstream consumers (Go, Python, Node) that need to process object content without managing provider SDKs directly.
+
+### Content Streaming Commands
+
+New `stream` subcommands provide structured access to object metadata and content:
+
+```bash
+# Get object metadata (JSONL output)
+gonimbus stream head s3://bucket/key --profile my-profile
+
+# Stream object content (mixed JSONL + raw bytes)
+gonimbus stream get s3://bucket/key --profile my-profile
+```
+
+#### Stream Contract
+
+The streaming output uses a mixed-framing format (ADR-0004):
+
+| Record Type                | Purpose                                               |
+| -------------------------- | ----------------------------------------------------- |
+| `gonimbus.stream.open.v1`  | Stream metadata (uri, size, etag, last_modified)      |
+| `gonimbus.stream.chunk.v1` | Chunk header (seq, nbytes) + raw bytes                |
+| `gonimbus.stream.close.v1` | Completion status (success/error, total chunks/bytes) |
+
+Errors are emitted to **stdout** as `gonimbus.error.v1` records (streaming mode contract), enabling consumers to rely on structured output without scraping stderr.
+
+#### Decoder Package
+
+The `pkg/stream` package provides Go helpers for producing and consuming streams:
+
+- `Writer`: Produces mixed-framing output
+- `Decoder`: Parses streams with truncation detection (`io.ErrUnexpectedEOF`)
+- Byte-exact reconstruction verified via MD5/SHA256 round-trip
+
+### validate=size (Stale Index Mitigation)
+
+Both `stream get` and transfer operations now validate that enumerated size matches GetObject content-length:
+
+- Catches stale index/list metadata before deep pipeline processing
+- Size mismatch mapped to `NOT_FOUND` error code (stale key semantics)
+- Fails early, avoiding wasted buffering and retries
+
+### Documentation
+
+- ADR-0004: Language-neutral content stream contract
+- Streaming contract spec and helper guidance (`docs/development/streaming/`)
+- See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md) for complete release notes
+
+---
+
 ## v0.1.4 (2026-01-19)
 
 **Path-Scoped Index Builds + Managed Jobs for Enterprise Scale**
