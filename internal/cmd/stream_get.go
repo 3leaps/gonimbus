@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -135,7 +136,7 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 		n, rerr := body.Read(buf)
 		if n > 0 {
 			hdr := &stream.Chunk{StreamID: streamID, Seq: seq, NBytes: int64(n)}
-			if err := streamWriter.WriteChunk(ctx, hdr, bytesReader(buf[:n])); err != nil {
+			if err := streamWriter.WriteChunk(ctx, hdr, bytes.NewReader(buf[:n])); err != nil {
 				_ = emitStreamError(ctx, recordWriter, parsed.Key, err)
 				_ = streamWriter.WriteClose(ctx, &stream.Close{StreamID: streamID, Status: "error", Chunks: seq, Bytes: total})
 				return exitError(foundry.ExitFileWriteError, "Failed to write stream chunk", err)
@@ -159,17 +160,6 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-type bytesReader []byte
-
-func (b bytesReader) Read(p []byte) (int, error) {
-	if len(b) == 0 {
-		return 0, io.EOF
-	}
-	n := copy(p, b)
-	b = b[n:]
-	return n, nil
 }
 
 type streamSizeMismatchError struct {
