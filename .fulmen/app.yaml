@@ -7,7 +7,7 @@ app:
   env_prefix: GONIMBUS_
   config_name: gonimbus
   description: Gonimbus - cloud object storage crawl/inspect engine (library + CLI + server)
-  version: 0.1.4
+  version: 0.1.5
 metadata:
   repository_category: workhorse
   project_url: https://github.com/3leaps/gonimbus

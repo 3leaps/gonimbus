@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-01-23
+
+### Added
+
+#### Content Streaming Commands (`stream get`, `stream head`)
+
+- **Stream Get Command** (`internal/cmd/stream_get.go`)
+  - `gonimbus stream get <uri>` streams object content with JSONL framing
+  - Mixed-framing output: JSONL headers + raw bytes for efficient large payload handling
+  - `gonimbus.stream.open.v1` with uri, size, etag, last_modified, content_type
+  - `gonimbus.stream.chunk.v1` with seq, nbytes followed by raw bytes
+  - `gonimbus.stream.close.v1` with status, chunks, bytes
+  - Size validation: HEAD size vs GetObject size mismatch detection (stale key semantics)
+  - Errors emitted to stdout as `gonimbus.error.v1` (streaming mode contract)
+
+- **Stream Head Command** (`internal/cmd/stream_head.go`)
+  - `gonimbus stream head <uri>` retrieves object metadata without content
+  - Returns `gonimbus.object.v1` with full metadata including custom S3 user metadata
+  - Errors emitted to stdout as `gonimbus.error.v1` (consistent with streaming mode)
+
+- **Stream Package** (`pkg/stream/`)
+  - `Writer` for producing mixed-framing streams (JSONL + raw bytes)
+  - `Decoder` for consuming streams with truncation detection (`io.ErrUnexpectedEOF`)
+  - Exact byte reconstruction verified via SHA256/MD5 round-trip testing
+
+#### Transfer Size Validation
+
+- **validate=size** (`pkg/transfer/`)
+  - Compares enumerated size (from list/index) vs GetObject content-length
+  - Catches stale index/list metadata before deep pipeline processing
+  - Size mismatch mapped to `NOT_FOUND` error code (stale key semantics)
+  - `SizeMismatchError` type with key, expected, and got fields
+
+#### Documentation
+
+- ADR-0004: Language-neutral content stream contract (`docs/architecture/adr/`)
+- Streaming contract specification (`docs/development/streaming/`)
+- QA checklist and helper replication guidance
+
+### Fixed
+
+- Cloud integration test credentials for stream writer tests (`pkg/stream/writer_cloudintegration_test.go`)
+
 ## [0.1.4] - 2026-01-19
 
 ### Added
@@ -306,7 +349,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/3leaps/gonimbus/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/3leaps/gonimbus/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/3leaps/gonimbus/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/3leaps/gonimbus/compare/v0.1.1...v0.1.2
