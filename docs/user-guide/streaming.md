@@ -1,15 +1,30 @@
-# Content Streaming
+# Content Access
 
-The `stream` commands provide structured access to object metadata and content, enabling gonimbus to serve as a data plane for downstream consumers.
+Gonimbus provides two command families for accessing object content:
 
-## When to Use Streaming
+- **`stream`** commands - for **delivery** (getting full content to processors)
+- **`content`** commands - for **inspection** (examining headers without full download)
 
-| Use Case                       | Command       | Notes                            |
-| ------------------------------ | ------------- | -------------------------------- |
-| Check metadata before download | `stream head` | Size, type, custom metadata      |
-| Route based on content type    | `stream head` | Read content_type field          |
-| Process content in pipelines   | `stream get`  | Pipe to decoders/processors      |
-| Verify content integrity       | `stream get`  | Compute hash on streamed content |
+## Command Taxonomy
+
+| Command        | Output Format               | Bytes Delivered      | Use Case                        |
+| -------------- | --------------------------- | -------------------- | ------------------------------- |
+| `stream head`  | JSONL only                  | None (metadata only) | Routing decisions, size checks  |
+| `stream get`   | Mixed framing (JSONL + raw) | Full object          | Content download for processing |
+| `content head` | JSONL only (base64)         | First N bytes        | Header inspection, magic bytes  |
+
+**Key insight**: Use `stream` when you need the actual bytes delivered to a processor. Use `content` when you need to inspect headers to make a decision.
+
+## When to Use Each Command
+
+| Use Case                       | Command        | Notes                            |
+| ------------------------------ | -------------- | -------------------------------- |
+| Check metadata before download | `stream head`  | Size, type, custom metadata      |
+| Route based on content type    | `stream head`  | Read content_type field          |
+| Inspect magic bytes            | `content head` | First 4-16 bytes for file type   |
+| Check XML declaration          | `content head` | First 256 bytes for encoding     |
+| Process content in pipelines   | `stream get`   | Pipe to decoders/processors      |
+| Verify content integrity       | `stream get`   | Compute hash on streamed content |
 
 ## Commands
 
@@ -195,6 +210,83 @@ Tested throughput:
 | 466 B     | 1      | instant    |
 | 3.3 MB    | 403    | ~1.5 MB/s  |
 | 3.7 MB    | ~58    | ~2 MB/s    |
+
+## Content Inspection Commands
+
+The `content` commands provide JSONL-only output for inspection operations, making them easier to integrate with tools like `jq`.
+
+### `content head`
+
+Reads the first N bytes of an object using HTTP Range requests:
+
+```bash
+# Read first 4KB (default)
+gonimbus content head s3://bucket/path/to/file.xml --profile my-profile
+
+# Read first 256 bytes (magic bytes, headers)
+gonimbus content head s3://bucket/path/to/file.xml --bytes 256 --profile my-profile
+```
+
+Output is a single `gonimbus.content.head.v1` JSONL record:
+
+```json
+{
+  "type": "gonimbus.content.head.v1",
+  "ts": "2026-01-25T12:00:00Z",
+  "job_id": "...",
+  "provider": "s3",
+  "data": {
+    "uri": "s3://bucket/path/to/file.xml",
+    "key": "path/to/file.xml",
+    "bytes_requested": 4096,
+    "bytes_returned": 4096,
+    "content_b64": "PD94bWwgdmVyc2lvbj0iMS4wIi4uLg==",
+    "etag": "60eda68512f8238bd2ba9abac0de63d7",
+    "size": 3729736,
+    "last_modified": "2025-12-15T20:53:44Z",
+    "content_type": "application/xml"
+  }
+}
+```
+
+### Content Inspection Use Cases
+
+**File type detection** (magic bytes):
+
+```bash
+gonimbus content head s3://bucket/data/file --bytes 16 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d | xxd
+```
+
+**XML declaration extraction**:
+
+```bash
+gonimbus content head s3://bucket/data/doc.xml --bytes 256 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d | head -1
+```
+
+**Content-aware routing**:
+
+```bash
+header=$(gonimbus content head s3://bucket/file --bytes 64 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d)
+
+case "$header" in
+  *"<?xml"*) echo "XML document" ;;
+  *"PK"*) echo "ZIP archive" ;;
+  *) echo "Unknown format" ;;
+esac
+```
+
+### Why Base64?
+
+`content head` encodes bytes as base64 in JSONL for:
+
+- **JSONL-only output**: No mixed framing, easy to parse with standard tools
+- **Binary safety**: Works for any content type
+- **Small payloads**: First N bytes are typically small (4KB default)
+
+For full content delivery, use `stream get` to avoid base64 overhead.
 
 ## Writing a Decoder (Other Languages)
 

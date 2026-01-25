@@ -4,6 +4,107 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.1.6 (2026-01-25)
+
+**Content Inspection with Range Requests**
+
+This release introduces content inspection commands that read object headers without downloading entire files, using HTTP Range requests for efficiency.
+
+### Content Inspection Commands
+
+New `content` subcommands provide JSONL-only inspection operations:
+
+```bash
+# Read the first 4KB of an object (default)
+gonimbus content head s3://bucket/path/to/file.xml --profile my-profile
+
+# Read the first 256 bytes (magic bytes, file headers)
+gonimbus content head s3://bucket/path/to/file.xml --bytes 256 --profile my-profile
+```
+
+#### Output Format
+
+Output is a single `gonimbus.content.head.v1` JSONL record:
+
+```json
+{
+  "type": "gonimbus.content.head.v1",
+  "ts": "2026-01-25T12:00:00Z",
+  "job_id": "...",
+  "provider": "s3",
+  "data": {
+    "uri": "s3://bucket/path/to/file.xml",
+    "key": "path/to/file.xml",
+    "bytes_requested": 4096,
+    "bytes_returned": 4096,
+    "content_b64": "PD94bWwgdmVyc2lvbj0iMS4wIi4uLg==",
+    "etag": "60eda68512f8238bd2ba9abac0de63d7",
+    "size": 3729736,
+    "last_modified": "2025-12-15T20:53:44Z",
+    "content_type": "application/xml"
+  }
+}
+```
+
+### stream vs content Commands
+
+| Command        | Output                            | Use Case                       |
+| -------------- | --------------------------------- | ------------------------------ |
+| `stream head`  | JSONL (metadata only)             | Routing decisions, size checks |
+| `stream get`   | Mixed framing (JSONL + raw bytes) | Full content download          |
+| `content head` | JSONL (base64 content)            | Header inspection, magic bytes |
+
+**Key difference**: `content` commands are JSONL-only with no mixed framing, making them easier to integrate with tools like `jq`.
+
+### Provider Range Requests
+
+The S3 provider now supports HTTP Range requests via the `ObjectRanger` interface:
+
+- **Efficient partial reads**: Only downloads requested bytes
+- **Automatic fallback**: Falls back to GetObject if provider doesn't support ranges
+- **Standard semantics**: Uses HTTP Range header with inclusive byte offsets
+
+### Use Cases
+
+#### File Type Detection
+
+Inspect magic bytes without downloading entire files:
+
+```bash
+# Read first 16 bytes for magic number detection
+gonimbus content head s3://bucket/data/file --bytes 16 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d | xxd
+```
+
+#### XML Declaration Extraction
+
+Extract XML version and encoding from document headers:
+
+```bash
+# Read first 256 bytes for XML declaration
+gonimbus content head s3://bucket/data/doc.xml --bytes 256 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d | head -1
+```
+
+#### Content-Aware Routing
+
+Make routing decisions based on file headers without full download:
+
+```bash
+# Check if file starts with expected header
+header=$(gonimbus content head s3://bucket/file --bytes 64 --profile prod | \
+  jq -r '.data.content_b64' | base64 -d)
+if [[ "$header" == *"expected-pattern"* ]]; then
+  # Route to processor A
+fi
+```
+
+### Documentation
+
+- See [docs/releases/v0.1.6.md](docs/releases/v0.1.6.md) for complete release notes
+
+---
+
 ## v0.1.5 (2026-01-23)
 
 **Content Streaming + validate=size for Consumer Integration**
@@ -180,94 +281,3 @@ Jobs can also be `stopping` (graceful shutdown in progress) or `stopped` (cancel
 - User guide: [docs/user-guide/index.md](docs/user-guide/index.md)
 - Architecture: [docs/architecture/indexing.md](docs/architecture/indexing.md)
 - See [docs/releases/v0.1.4.md](docs/releases/v0.1.4.md) for complete release notes
-
----
-
-## v0.1.3 (2026-01-15)
-
-**Local Index for Large-Scale Bucket Inventory**
-
-This release adds a local index store for offline bucket inventory. For buckets with millions of objects, the index enables fast repeated queries without re-enumerating via the provider API.
-
-### When to Use the Index
-
-Gonimbus supports two workflows:
-
-| Workflow      | Scale       | Commands                     | Index? |
-| ------------- | ----------- | ---------------------------- | ------ |
-| **Explore**   | <1M objects | `tree`, `inspect`, `crawl`   | No     |
-| **Inventory** | 1M+ objects | `index build`, `index query` | Yes    |
-
-For smaller buckets, `tree` and `inspect` work well for exploration. For larger buckets where live enumeration takes minutes or hours, build an index once and query it repeatedly.
-
-### Index Commands
-
-```bash
-# Initialize local index database
-gonimbus index init
-
-# Build index from a crawl manifest
-gonimbus index build --job index-manifest.yaml
-
-# List local indexes
-gonimbus index list
-
-# Query indexed objects by pattern
-gonimbus index query 's3://bucket/prefix/' --pattern '**/data/*.parquet'
-
-# Query with filters
-gonimbus index query 's3://bucket/prefix/' --after 2025-12-01 --min-size 1KB --count
-
-# View index statistics
-gonimbus index stats 's3://bucket/prefix/'
-
-# Validate index integrity
-gonimbus index doctor
-
-# Clean up old indexes
-gonimbus index gc --keep-last 3
-```
-
-### Index Manifest Example
-
-```yaml
-version: "1.0"
-
-connection:
-  provider: s3
-  bucket: my-bucket
-  region: us-east-1
-  base_uri: s3://my-bucket/data/
-
-identity:
-  storage_provider: aws_s3
-  cloud_provider: aws
-  region_kind: aws
-  region: us-east-1
-
-build:
-  match:
-    includes:
-      - "**/*"
-  crawl:
-    concurrency: 16
-
-output:
-  destination: stdout
-```
-
-### Performance
-
-Index queries are significantly faster than live crawl for repeated access:
-
-| Operation        | Live Crawl | Index Query |
-| ---------------- | ---------- | ----------- |
-| Count objects    | ~30s       | <1s         |
-| Pattern + filter | minutes    | <1s         |
-
-Build throughput scales linearly at approximately 3,000 objects/sec.
-
-### Documentation
-
-- Index commands: `gonimbus index --help`
-- See [docs/releases/v0.1.3.md](docs/releases/v0.1.3.md) for complete release notes
