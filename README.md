@@ -87,7 +87,10 @@ Stream-friendly JSONL records:
 {"type":"gonimbus.object.v1","ts":"2025-01-15T10:30:00.000Z","job_id":"abc123","provider":"s3","data":{...}}
 ```
 
-Content streaming with mixed framing (JSONL headers + raw bytes) for pipeline integration. See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md) for the streaming contract.
+Two output modes for content access:
+
+- **Content inspection** (JSONL-only): `content head` reads first N bytes with base64 encoding. See [docs/releases/v0.1.6.md](docs/releases/v0.1.6.md).
+- **Content streaming** (mixed framing): `stream get` delivers full content with JSONL headers + raw bytes. See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md).
 
 Optional DuckDB sink for local indexing.
 
@@ -119,9 +122,12 @@ gonimbus index jobs logs <id>  # Stream job logs
 gonimbus index jobs stop <id>  # Safe cancellation
 gonimbus index jobs gc         # Clean up old job records
 
+# Content inspection (JSONL-only, for routing decisions)
+gonimbus content head <uri>    # Read first N bytes (base64 in JSONL)
+
 # Content streaming (for pipeline integration)
 gonimbus stream head <uri>     # Object metadata (JSONL)
-gonimbus stream get <uri>      # Stream content (JSONL + raw bytes)
+gonimbus stream get <uri>      # Stream full content (JSONL + raw bytes)
 
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets

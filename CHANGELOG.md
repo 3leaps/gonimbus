@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-01-25
+
+### Added
+
+#### Content Inspection Commands (`content head`)
+
+- **Content Head Command** (`internal/cmd/content_head.go`)
+  - `gonimbus content head <uri>` reads the first N bytes of an object
+  - Uses HTTP Range requests when provider supports them (falls back to GetObject)
+  - Output is JSONL-only (`gonimbus.content.head.v1`) with base64-encoded content
+  - No mixed framing - suitable for simple inspection pipelines
+  - Includes full metadata (etag, size, last_modified, content_type)
+
+- **Content Package** (`pkg/content/`)
+  - `HeadBytes(ctx, provider, key, n)` - read first N bytes with metadata
+  - `HeadBytesMulti` - parallel multi-key content head operations
+  - Automatic fallback: GetRange → GetObject (provider capability detection)
+
+#### Provider Range Requests
+
+- **ObjectRanger Interface** (`pkg/provider/capabilities.go`)
+  - `GetRange(ctx, key, start, endInclusive)` for byte-range reads
+  - HTTP Range semantics (inclusive start/end offsets)
+  - S3 provider implementation with range header support
+
+- **S3 Range Support** (`pkg/provider/s3/provider.go`)
+  - Implements `ObjectRanger` interface for S3 and S3-compatible stores
+  - Cloud integration tests for range request behavior
+
+#### Documentation
+
+- User guide: streaming vs content command mental model
+- Content inspection examples
+
+### Changed
+
+- Provider capability detection uses interface type assertions for optional features
+- Content commands emit errors to stdout as `gonimbus.error.v1` (consistent with stream commands)
+
 ## [0.1.5] - 2026-01-23
 
 ### Added
@@ -349,7 +388,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/3leaps/gonimbus/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/3leaps/gonimbus/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/3leaps/gonimbus/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/3leaps/gonimbus/compare/v0.1.2...v0.1.3
