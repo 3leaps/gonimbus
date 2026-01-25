@@ -34,9 +34,19 @@ type MultipartUploader interface {
 
 // ObjectGetter can download objects as a stream.
 //
-// For v0.1.x this is used for streaming transfer operations.
+// For v0.1.x this is used for streaming transfer operations and stream helpers.
 type ObjectGetter interface {
 	GetObject(ctx context.Context, key string) (body io.ReadCloser, contentLength int64, err error)
+}
+
+// ObjectRanger can download a specific byte range of an object.
+//
+// This is the foundational primitive for content inspection operations.
+//
+// start and endInclusive are inclusive offsets following HTTP Range semantics.
+// Implementations SHOULD return the content length of the returned range.
+type ObjectRanger interface {
+	GetRange(ctx context.Context, key string, start, endInclusive int64) (body io.ReadCloser, contentLength int64, err error)
 }
 
 // PrefixLister supports delimiter-based prefix discovery.

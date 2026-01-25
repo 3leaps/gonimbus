@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -282,6 +283,18 @@ func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, in
 	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
 	if err != nil {
 		return nil, 0, p.wrapError("GetObject", key, err)
+	}
+	return out.Body, aws.ToInt64(out.ContentLength), nil
+}
+
+// GetRange downloads an object byte range as a stream.
+//
+// Caller must close the returned body.
+func (p *Provider) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, int64, error) {
+	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, endInclusive)
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key), Range: aws.String(rangeHeader)})
+	if err != nil {
+		return nil, 0, p.wrapError("GetRange", key, err)
 	}
 	return out.Body, aws.ToInt64(out.ContentLength), nil
 }
