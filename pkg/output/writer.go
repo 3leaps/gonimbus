@@ -70,6 +70,14 @@ func NewJSONLWriter(w io.Writer, jobID, provider string) *JSONLWriter {
 	}
 }
 
+// WriteAny emits a JSONL record with a custom type.
+//
+// This is intended for CLI commands that emit typed records not covered by the
+// Writer interface (e.g. probing/inspection records).
+func (jw *JSONLWriter) WriteAny(ctx context.Context, recordType string, data any) error {
+	return jw.writeRecord(ctx, recordType, data)
+}
+
 // WriteObject emits an object record.
 func (jw *JSONLWriter) WriteObject(ctx context.Context, obj *ObjectRecord) error {
 	return jw.writeRecord(ctx, TypeObject, obj)
