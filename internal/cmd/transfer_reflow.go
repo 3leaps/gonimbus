@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
@@ -72,7 +74,7 @@ func init() {
 	transferCmd.AddCommand(transferReflowCmd)
 
 	transferReflowCmd.Flags().BoolVar(&reflowStdin, "stdin", false, "Read selection from stdin")
-	transferReflowCmd.Flags().StringVar(&reflowDest, "dest", "", "Destination base URI (prefix), e.g. s3://bucket/base/")
+	transferReflowCmd.Flags().StringVar(&reflowDest, "dest", "", "Destination base URI (prefix), e.g. s3://bucket/base/ or file:///tmp/out/")
 	transferReflowCmd.Flags().StringVar(&reflowRewriteFrom, "rewrite-from", "", "Rewrite source template (segment captures)")
 	transferReflowCmd.Flags().StringVar(&reflowRewriteTo, "rewrite-to", "", "Rewrite destination template (segment renders)")
 	transferReflowCmd.Flags().IntVar(&reflowParallel, "parallel", 16, "Concurrent copy workers")
@@ -142,6 +144,121 @@ type reflowRunRecord struct {
 	Parallel       int    `json:"parallel"`
 }
 
+type reflowDestSpec struct {
+	Provider string
+	BaseURI  string
+
+	// S3 destination
+	Bucket         string
+	Prefix         string
+	Region         string
+	Profile        string
+	Endpoint       string
+	ForcePathStyle bool
+
+	// File destination
+	BaseDir string
+}
+
+func parseReflowDest(raw string) (*reflowDestSpec, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("destination is required")
+	}
+
+	if strings.HasPrefix(strings.ToLower(raw), "file://") {
+		path := strings.TrimPrefix(raw, "file://")
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return nil, fmt.Errorf("file destination path is empty")
+		}
+		baseDir := filepath.Clean(path)
+		baseURI := fileURI(baseDir)
+		if !strings.HasSuffix(baseURI, "/") {
+			baseURI += "/"
+		}
+		return &reflowDestSpec{Provider: string(provider.ProviderFile), BaseURI: baseURI, BaseDir: baseDir}, nil
+	}
+
+	parsed, err := ParseURI(raw)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Provider != string(provider.ProviderS3) {
+		return nil, fmt.Errorf("provider %q is not supported", parsed.Provider)
+	}
+	if parsed.IsPattern() {
+		return nil, fmt.Errorf("destination must be a prefix URI")
+	}
+	if !parsed.IsPrefix() {
+		parsed.Key = strings.TrimSuffix(parsed.Key, "/") + "/"
+	}
+
+	baseURI := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, parsed.Key)
+	return &reflowDestSpec{Provider: parsed.Provider, BaseURI: baseURI, Bucket: parsed.Bucket, Prefix: parsed.Key}, nil
+}
+
+func fileURI(path string) string {
+	path = filepath.ToSlash(path)
+	// For unix absolute paths, this produces file:///...
+	return "file://" + path
+}
+
+func buildReflowDestKey(dest *reflowDestSpec, destRel string) string {
+	destRel = strings.Trim(destRel, "/")
+	if dest == nil {
+		return destRel
+	}
+	switch dest.Provider {
+	case string(provider.ProviderS3):
+		key := strings.TrimPrefix(dest.Prefix+destRel, "/")
+		key = strings.ReplaceAll(key, "//", "/")
+		return key
+	case string(provider.ProviderFile):
+		return destRel
+	default:
+		return destRel
+	}
+}
+
+func buildReflowDestURI(dest *reflowDestSpec, destKey string) string {
+	if dest == nil {
+		return ""
+	}
+	switch dest.Provider {
+	case string(provider.ProviderS3):
+		return fmt.Sprintf("%s://%s/%s", dest.Provider, dest.Bucket, destKey)
+	case string(provider.ProviderFile):
+		full := filepath.Join(dest.BaseDir, filepath.FromSlash(destKey))
+		return fileURI(full)
+	default:
+		return ""
+	}
+}
+
+func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provider, error) {
+	if dest == nil {
+		return nil, fmt.Errorf("destination is nil")
+	}
+	switch dest.Provider {
+	case string(provider.ProviderS3):
+		return s3.New(ctx, s3.Config{
+			Bucket:         dest.Bucket,
+			Region:         dest.Region,
+			Endpoint:       dest.Endpoint,
+			Profile:        dest.Profile,
+			ForcePathStyle: dest.ForcePathStyle,
+		})
+	case string(provider.ProviderFile):
+		if err := os.MkdirAll(dest.BaseDir, 0o755); err != nil {
+			return nil, err
+		}
+		return providerfile.New(providerfile.Config{BaseDir: dest.BaseDir})
+	default:
+		return nil, fmt.Errorf("unsupported destination provider %q", dest.Provider)
+	}
+}
+
 func runTransferReflow(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if reflowParallel < 1 {
@@ -160,23 +277,17 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Overwrite not enabled", fmt.Errorf("--on-collision=overwrite requires --overwrite"))
 	}
 
-	destParsed, err := ParseURI(reflowDest)
+	destSpec, err := parseReflowDest(reflowDest)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --dest URI", err)
 	}
-	if destParsed.Provider != string(provider.ProviderS3) {
-		return exitError(foundry.ExitInvalidArgument, "Unsupported destination provider", fmt.Errorf("provider %q is not supported", destParsed.Provider))
+	if destSpec.Provider == string(provider.ProviderS3) {
+		destSpec.Region = reflowDstRegion
+		destSpec.Endpoint = reflowDstEndpoint
+		destSpec.Profile = reflowDstProfile
+		destSpec.ForcePathStyle = reflowDstEndpoint != ""
 	}
-	if destParsed.IsPattern() {
-		return exitError(foundry.ExitInvalidArgument, "Invalid --dest", fmt.Errorf("destination must be a prefix URI"))
-	}
-	if !destParsed.IsPrefix() {
-		// Treat bucket/key without trailing slash as prefix base.
-		destParsed.Key = strings.TrimSuffix(destParsed.Key, "/") + "/"
-	}
-	destBucket := destParsed.Bucket
-	destPrefix := destParsed.Key
-	destURI := fmt.Sprintf("%s://%s/%s", destParsed.Provider, destBucket, destPrefix)
+	destURI := destSpec.BaseURI
 
 	rewrite, err := transfer.CompileReflowRewrite(reflowRewriteFrom, reflowRewriteTo)
 	if err != nil {
@@ -184,7 +295,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	}
 
 	jobID := uuid.New().String()
-	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, destParsed.Provider)
+	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, destSpec.Provider)
 	defer func() { _ = w.Close() }()
 
 	checkpointPath, err := resolveReflowCheckpointPath(jobID)
@@ -211,23 +322,17 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 
 	// Providers are created after we discover the source bucket.
 	var (
-		srcProv   *s3.Provider
-		dstProv   *s3.Provider
+		srcProv   provider.Provider
+		dstProv   provider.Provider
 		srcBucket string
 		provMu    sync.Mutex
 	)
-	getProviders := func(bucket string) (*s3.Provider, *s3.Provider, error) {
+	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
 		provMu.Lock()
 		defer provMu.Unlock()
 
 		if dstProv == nil {
-			pNew, err := s3.New(ctx, s3.Config{
-				Bucket:         destBucket,
-				Region:         reflowDstRegion,
-				Endpoint:       reflowDstEndpoint,
-				Profile:        reflowDstProfile,
-				ForcePathStyle: reflowDstEndpoint != "",
-			})
+			pNew, err := newDestProvider(ctx, destSpec)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -303,9 +408,8 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					destRel = mapped
 				}
 
-				dstKey := strings.TrimPrefix(destPrefix+destRel, "/")
-				dstKey = strings.ReplaceAll(dstKey, "//", "/")
-				dstURI := fmt.Sprintf("%s://%s/%s", destParsed.Provider, destBucket, dstKey)
+				dstKey := buildReflowDestKey(destSpec, destRel)
+				dstURI := buildReflowDestURI(destSpec, dstKey)
 
 				if reflowResume {
 					done, status, err := state.ItemDone(ctx, task.SourceURI, dstURI)
@@ -465,7 +569,7 @@ func resolveReflowCheckpointPath(jobID string) (string, error) {
 	return filepath.Join(root, "reflow", "runs", jobID, "state.db"), nil
 }
 
-func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getProviders func(bucket string) (*s3.Provider, *s3.Provider, error), out chan<- reflowTask) (string, error) {
+func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getProviders func(bucket string) (provider.Provider, provider.Provider, error), out chan<- reflowTask) (string, error) {
 	// JSONL: index object record.
 	if strings.HasPrefix(line, "{") {
 		var env struct {

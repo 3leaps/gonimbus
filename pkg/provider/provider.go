@@ -93,6 +93,9 @@ const (
 
 	// ProviderGCS represents Google Cloud Storage (future).
 	ProviderGCS ProviderType = "gcs"
+
+	// ProviderFile represents local filesystem storage.
+	ProviderFile ProviderType = "file"
 )
 
 // String returns the string representation of the provider type.
