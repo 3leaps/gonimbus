@@ -276,7 +276,151 @@ transfer:
 4. **Monitor with JSONL output**: Pipe output to analysis tools for large transfers
 5. **Use dedup for reruns**: `on_exists: skip` with `strategy: etag` prevents redundant copies
 
+## Transfer Reflow
+
+The `transfer reflow` command reorganizes objects by rewriting keys based on templates. Unlike manifest-based transfers, reflow operates directly from URIs or probe output, making it ideal for:
+
+- **Reorganizing misfiled data** - files placed by arrival date but need organization by business date
+- **Structural migrations** - flattening hierarchies or adding prefix layers
+- **Content-aware routing** - using fields extracted from file content to determine destination paths
+
+### Quick Start
+
+```bash
+# Path-based reflow (extract variables from path segments)
+gonimbus transfer reflow 's3://source/data/' \
+  --dest 's3://dest/reorganized/' \
+  --rewrite-from '{region}/{store}/{date}/{file}' \
+  --rewrite-to '{date}/{region}/{store}/{file}' \
+  --dry-run
+
+# Content-aware reflow (using probe-derived variables)
+gonimbus content probe --stdin --config probe.yaml < uris.txt | \
+  gonimbus transfer reflow --stdin \
+    --dest 's3://dest/by-business-date/' \
+    --rewrite-from '{_}/{store}/{device}/{folder_date}/{file}' \
+    --rewrite-to '{business_date}/{store}/{file}'
+```
+
+### Template Variables
+
+Templates use `{variable}` placeholders that are extracted from source paths or probe output:
+
+| Variable    | Source                     | Example                           |
+| ----------- | -------------------------- | --------------------------------- |
+| `{segment}` | Path segment by name       | `{store}`, `{date}`, `{file}`     |
+| `{_}`       | Ignored segment (wildcard) | Matches any segment, not captured |
+| Probe vars  | From `content probe`       | `{business_date}`, `{version}`    |
+
+### Path-Based Reflow
+
+Extract variables directly from source path structure:
+
+```bash
+# Source: data/us-east/store-123/2024-01-15/receipt.xml
+# Template: data/{region}/{store}/{date}/{file}
+# Variables: region=us-east, store=store-123, date=2024-01-15, file=receipt.xml
+
+gonimbus transfer reflow 's3://bucket/data/' \
+  --dest 's3://bucket/reorganized/' \
+  --rewrite-from 'data/{region}/{store}/{date}/{file}' \
+  --rewrite-to '{date}/{region}/{store}/{file}' \
+  --dry-run
+```
+
+### Content-Aware Reflow
+
+When the destination path depends on content inside files (not just the path), use `content probe` to extract variables first:
+
+```bash
+# 1. Create probe config
+cat > probe.yaml << 'EOF'
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+EOF
+
+# 2. List and probe objects
+gonimbus inspect 's3://source/prefix/' --json | \
+  jq -r '"s3://source/" + .key' | \
+  gonimbus content probe --stdin --config probe.yaml --emit reflow-input \
+  > probe-output.jsonl
+
+# 3. Reflow using extracted business_date
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/by-date/' \
+  --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \
+  --rewrite-to '{business_date}/{store}/{file}' \
+  < probe-output.jsonl
+```
+
+### Destination Providers
+
+Reflow supports multiple destination types:
+
+| Destination | Example                            | Use Case                 |
+| ----------- | ---------------------------------- | ------------------------ |
+| S3          | `s3://bucket/prefix/`              | Cloud-to-cloud migration |
+| S3-compat   | `s3://bucket/` + `--dest-endpoint` | Wasabi, R2, MinIO        |
+| Local       | `file:///tmp/output/`              | Download and reorganize  |
+
+### Collision Handling
+
+Control behavior when destination objects already exist:
+
+| Option                         | Behavior                              |
+| ------------------------------ | ------------------------------------- |
+| `--on-collision log` (default) | Log conflict, fail operation          |
+| `--on-collision fail`          | Fail immediately on first conflict    |
+| `--on-collision overwrite`     | Replace (requires `--overwrite` flag) |
+
+### Checkpoint and Resume
+
+For large reflow jobs, use checkpointing to enable resume after interruption:
+
+```bash
+# Start with checkpoint
+gonimbus transfer reflow 's3://source/' \
+  --dest 's3://dest/' \
+  --rewrite-from '...' \
+  --rewrite-to '...' \
+  --checkpoint /tmp/reflow-state.db
+
+# Resume after interruption
+gonimbus transfer reflow 's3://source/' \
+  --dest 's3://dest/' \
+  --checkpoint /tmp/reflow-state.db \
+  --resume
+```
+
+### Dry Run
+
+Always preview before executing:
+
+```bash
+gonimbus transfer reflow 's3://source/' \
+  --dest 's3://dest/' \
+  --rewrite-from '{region}/{date}/{file}' \
+  --rewrite-to '{date}/{region}/{file}' \
+  --dry-run
+```
+
+Dry run output shows planned mappings without writing:
+
+```json
+{
+  "type": "gonimbus.reflow.v1",
+  "data": {
+    "source_uri": "s3://source/us-east/2024-01-15/file.xml",
+    "dest_uri": "s3://dest/2024-01-15/us-east/file.xml",
+    "status": "planned"
+  }
+}
+```
+
 ## See Also
 
+- [Content Access (streaming.md)](streaming.md) - `content probe` for derived field extraction
 - [Storage Provider Configuration](../appnotes/storage-providers.md)
 - [Preflight Permission Probes](../appnotes/storage-providers.md#preflight-permission-probes)

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-01-28
+
+### Added
+
+#### Transfer Reflow (`transfer reflow`)
+
+- **Transfer Reflow Command** (`internal/cmd/transfer_reflow.go`)
+  - `gonimbus transfer reflow <source-uri>` copies objects while rewriting keys
+  - Template-based path variable extraction and substitution
+  - Supports probe-derived variables (e.g., `{business_date}` from content)
+  - Parallel copy with configurable workers (`--parallel`, default 16)
+  - Checkpoint/resume with SQLite state (`--checkpoint`, `--resume`)
+  - Dry-run mode for planning (`--dry-run`)
+  - Collision detection and handling (`--on-collision log|fail|overwrite`)
+
+- **Reflow Package** (`pkg/transfer/`)
+  - `ReflowRewrite` for template parsing and key transformation
+  - Path segment variable extraction (`{program}`, `{site}`, `{date}`, etc.)
+  - Support for probe-derived variables via `ApplyWithVars`
+  - Wildcard segments (`{_}`) for ignored path components
+
+#### Content Probe (`content probe`)
+
+- **Content Probe Command** (`internal/cmd/content_probe.go`)
+  - `gonimbus content probe <uri>` extracts derived fields from content
+  - Config-driven extraction rules (`--config probe.yaml`)
+  - Bulk processing via `--stdin`
+  - Output modes: `--emit probe|reflow-input|both`
+  - Parallel probing with `--concurrency` (default 16)
+
+- **Probe Package** (`pkg/probe/`)
+  - XPath extractor for XML content (`//TagName`, `/a/b/c`)
+  - Regex extractor with named/numbered capture groups
+  - JSON path extractor (`$.a.b[0].id`)
+  - Configurable byte window (`--bytes`, default 4096)
+
+#### file:// Provider
+
+- **Local Filesystem Support** (`pkg/provider/file/`)
+  - `file://` URIs as transfer reflow destinations
+  - Automatic directory creation
+  - Collision detection for existing files
+  - Overwrite support (`--overwrite --on-collision overwrite`)
+
+#### Bulk Input Support
+
+- **Bulk Content Head** (`internal/cmd/content_head.go`)
+  - `gonimbus content head --stdin` for parallel multi-object inspection
+  - JSONL input from inspect or index query output
+  - Configurable concurrency (`--concurrency`)
+
+### Changed
+
+- Content commands consistently emit `gonimbus.error.v1` for errors
+- Transfer reflow accepts `gonimbus.reflow.input.v1` records from probe
+
 ## [0.1.6] - 2026-01-25
 
 ### Added
@@ -388,7 +444,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/3leaps/gonimbus/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/3leaps/gonimbus/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/3leaps/gonimbus/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/3leaps/gonimbus/compare/v0.1.3...v0.1.4
