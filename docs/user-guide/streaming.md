@@ -7,13 +7,14 @@ Gonimbus provides two command families for accessing object content:
 
 ## Command Taxonomy
 
-| Command        | Output Format               | Bytes Delivered      | Use Case                        |
-| -------------- | --------------------------- | -------------------- | ------------------------------- |
-| `stream head`  | JSONL only                  | None (metadata only) | Routing decisions, size checks  |
-| `stream get`   | Mixed framing (JSONL + raw) | Full object          | Content download for processing |
-| `content head` | JSONL only (base64)         | First N bytes        | Header inspection, magic bytes  |
+| Command         | Output Format               | Bytes Delivered      | Use Case                           |
+| --------------- | --------------------------- | -------------------- | ---------------------------------- |
+| `stream head`   | JSONL only                  | None (metadata only) | Routing decisions, size checks     |
+| `stream get`    | Mixed framing (JSONL + raw) | Full object          | Content download for processing    |
+| `content head`  | JSONL only (base64)         | First N bytes        | Header inspection, magic bytes     |
+| `content probe` | JSONL only                  | First N bytes        | Extract derived fields for routing |
 
-**Key insight**: Use `stream` when you need the actual bytes delivered to a processor. Use `content` when you need to inspect headers to make a decision.
+**Key insight**: Use `stream` when you need the actual bytes delivered to a processor. Use `content` when you need to inspect headers to make a decision. Use `content probe` when you need to extract structured fields (dates, IDs, versions) from content for downstream routing.
 
 ## When to Use Each Command
 
@@ -287,6 +288,94 @@ esac
 - **Small payloads**: First N bytes are typically small (4KB default)
 
 For full content delivery, use `stream get` to avoid base64 overhead.
+
+### `content probe`
+
+Extracts derived fields from object content using configurable extractors. This is the key command for content-aware routing - extracting business dates, schema versions, or other fields embedded in file content.
+
+```bash
+# Probe single object
+gonimbus content probe s3://bucket/path/to/file.xml \
+  --config probe.yaml --profile my-profile
+
+# Bulk probe via stdin
+gonimbus content probe --stdin --config probe.yaml --profile my-profile < uris.txt
+
+# Output ready for transfer reflow
+gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt
+```
+
+#### Probe Configuration
+
+Create a `probe.yaml` file defining extraction rules:
+
+```yaml
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+
+  - name: schema_version
+    type: json_path
+    path: $.metadata.version
+
+  - name: record_id
+    type: regex
+    pattern: "ID=([A-Z0-9]+)"
+    group: 1
+```
+
+#### Extractor Types
+
+| Type        | Use Case               | Example                    |
+| ----------- | ---------------------- | -------------------------- |
+| `xml_xpath` | XML element extraction | `//BusinessDate`           |
+| `json_path` | JSON field extraction  | `$.data.timestamp`         |
+| `regex`     | Pattern matching       | `date=(\d{4}-\d{2}-\d{2})` |
+
+#### Output Modes
+
+| Mode           | Description                         | Use Case           |
+| -------------- | ----------------------------------- | ------------------ |
+| `reflow-input` | Ready for `transfer reflow --stdin` | Pipeline to reflow |
+| `probe`        | Raw probe results                   | Analysis/debugging |
+| `both`         | Both formats (one record each)      | Auditing           |
+
+#### Probe Output
+
+```json
+{
+  "type": "gonimbus.content.probe.v1",
+  "data": {
+    "uri": "s3://bucket/path/to/file.xml",
+    "key": "path/to/file.xml",
+    "bytes_requested": 4096,
+    "bytes_returned": 2069,
+    "vars": {
+      "business_date": "2025-12-25",
+      "schema_version": "2.1"
+    },
+    "etag": "...",
+    "size": 2069
+  }
+}
+```
+
+### Bulk Input (`--stdin`)
+
+Both `content head` and `content probe` support bulk processing via stdin:
+
+```bash
+# List objects, then probe in parallel
+gonimbus inspect 's3://bucket/prefix/' --json --profile prod | \
+  jq -r '"s3://bucket/" + .key' | \
+  gonimbus content probe --stdin --config probe.yaml --profile prod
+
+# Or from a file of URIs
+gonimbus content probe --stdin --config probe.yaml --profile prod < uris.txt
+```
+
+**Performance**: Bulk operations run with configurable parallelism (`--concurrency`, default 16), making them efficient for large-scale inspection.
 
 ## Writing a Decoder (Other Languages)
 

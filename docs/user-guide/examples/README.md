@@ -23,7 +23,40 @@ When dogfooding against real buckets, consider running with the global safety la
 - Content streaming (metadata/content access): `docs/user-guide/streaming.md`
 - Tree (prefix summary): `docs/user-guide/examples/tree.md`
 - Advanced filtering (size/date/regex): `docs/user-guide/examples/advanced-filtering.md`
-- Transfer operations (copy/move): `docs/user-guide/transfer.md`
+- Transfer operations (copy/move/reflow): `docs/user-guide/transfer.md`
+
+## Common Workflows
+
+### Reorganize by Content Date
+
+Files often arrive organized by processing date but need reorganization by business date embedded in content:
+
+```bash
+# 1. List objects
+gonimbus inspect 's3://bucket/arrivals/' --json > objects.jsonl
+
+# 2. Extract business date from XML content
+jq -r '"s3://bucket/" + .key' objects.jsonl | \
+  gonimbus content probe --stdin --config probe.yaml --emit reflow-input \
+  > probe.jsonl
+
+# 3. Reorganize by extracted date
+gonimbus transfer reflow --stdin \
+  --dest 's3://bucket/by-business-date/' \
+  --rewrite-from 'arrivals/{store}/{arrival_date}/{file}' \
+  --rewrite-to '{business_date}/{store}/{file}' \
+  --dry-run < probe.jsonl
+```
+
+### Download and Reorganize Locally
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 'file:///data/reorganized/' \
+  --src-profile prod-readonly \
+  --rewrite-from '...' \
+  --rewrite-to '...' < probe.jsonl
+```
 
 ## Design Notes
 

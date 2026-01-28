@@ -1,5 +1,10 @@
 # Gonimbus
 
+[![CI](https://github.com/3leaps/gonimbus/actions/workflows/ci.yml/badge.svg)](https://github.com/3leaps/gonimbus/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/3leaps/gonimbus)](https://goreportcard.com/report/github.com/3leaps/gonimbus)
+[![Go Reference](https://pkg.go.dev/badge/github.com/3leaps/gonimbus.svg)](https://pkg.go.dev/github.com/3leaps/gonimbus)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 > High-scale cloud object storage inspection and crawl engine
 
 Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and crawl of cloud object storage. It produces machine-friendly outputs (JSONL baseline) and favors **prefix-first listing** with doublestar matching to stay fast and predictable.
@@ -97,6 +102,8 @@ Optional DuckDB sink for local indexing.
 ## Examples
 
 See `docs/user-guide/examples/README.md` for copy/paste recipes (advanced filtering, s3-compatible endpoints, and more as this project grows).
+
+For automated workflow testing and validation, see [fulseed](https://github.com/fulmenhq/fulseed) - a companion tool for building reproducible test scenarios.
 
 ## CLI Commands
 

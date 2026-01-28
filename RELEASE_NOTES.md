@@ -4,6 +4,102 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.1.7 (2026-01-28)
+
+**Transfer Reflow with Content-Aware Routing**
+
+This release delivers the complete transfer reflow pipeline, enabling content-aware data reorganization across cloud storage providers and local filesystems.
+
+### Transfer Reflow Command
+
+Copy objects while rewriting keys based on templates:
+
+```bash
+# Path-based reflow
+gonimbus transfer reflow 's3://source/prefix/' \
+  --dest 's3://dest/base/' \
+  --rewrite-from '{program}/{site}/{date}/{file}' \
+  --rewrite-to '{date}/{program}/{site}/{file}'
+
+# Content-aware reflow (with probe-derived variables)
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/base/' \
+  --rewrite-from '{_}/{store}/{device}/{date}/{file}' \
+  --rewrite-to '{business_date}/{store}/{file}' < probe.jsonl
+
+# Bucket to local filesystem
+gonimbus transfer reflow --stdin \
+  --dest 'file:///tmp/output/' \
+  --rewrite-from '...' \
+  --rewrite-to '...' < probe.jsonl
+```
+
+#### Features
+
+- Template variables from path segments or probe-derived fields
+- Parallel copy with configurable workers (`--parallel`)
+- Checkpoint/resume for large jobs (`--checkpoint`, `--resume`)
+- Collision handling (`--on-collision log|fail|overwrite`)
+- Dry-run mode (`--dry-run`)
+
+### Content Probe Command
+
+Extract derived fields from object content:
+
+```bash
+# Probe single object
+gonimbus content probe 's3://bucket/file.xml' --config probe.yaml
+
+# Bulk probe via stdin
+gonimbus content probe --stdin --config probe.yaml < uris.txt
+```
+
+#### probe.yaml Example
+
+```yaml
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+  - name: schema_version
+    type: json_path
+    path: $.metadata.version
+```
+
+#### Extractor Types
+
+| Type        | Use Case               | Example                    |
+| ----------- | ---------------------- | -------------------------- |
+| `xml_xpath` | XML element extraction | `//BusinessDate`           |
+| `regex`     | Pattern matching       | `date=(\d{4}-\d{2}-\d{2})` |
+| `json_path` | JSON field extraction  | `$.data.timestamp`         |
+
+### file:// Provider
+
+Transfer reflow now supports local filesystem destinations:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 'file:///tmp/reflow-out/' \
+  --src-profile my-aws-profile \
+  --rewrite-from '...' \
+  --rewrite-to '...' < probe.jsonl
+```
+
+### Collision Handling
+
+| Mode                           | Behavior                                  |
+| ------------------------------ | ----------------------------------------- |
+| `--on-collision log` (default) | Log conflict, fail operation              |
+| `--on-collision fail`          | Fail immediately on first conflict        |
+| `--on-collision overwrite`     | Replace existing (requires `--overwrite`) |
+
+### Documentation
+
+- See [docs/releases/v0.1.7.md](docs/releases/v0.1.7.md) for complete release notes
+
+---
+
 ## v0.1.6 (2026-01-25)
 
 **Content Inspection with Range Requests**
@@ -156,128 +252,3 @@ Both `stream get` and transfer operations now validate that enumerated size matc
 - ADR-0004: Language-neutral content stream contract
 - Streaming contract spec and helper guidance (`docs/development/streaming/`)
 - See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md) for complete release notes
-
----
-
-## v0.1.4 (2026-01-19)
-
-**Path-Scoped Index Builds + Managed Jobs for Enterprise Scale**
-
-This release delivers two major capabilities for enterprise-scale index operations:
-
-1. **Path-Scoped Index Builds** (`build.scope`) - the primary lever for reducing provider listing costs on date-partitioned buckets
-2. **Managed Index Build Jobs** - durable job tracking and background execution for long-running builds
-
-Together, these features make Gonimbus practical for multi-hour index builds on huge buckets, with 99%+ reduction in wasted enumeration and full operational visibility.
-
----
-
-### Path-Scoped Index Builds
-
-#### The Problem
-
-Large enterprise buckets contain years of date-partitioned data. When operators only need the last 30 days, traditional crawl approaches still enumerate the entire history:
-
-- **Without scope**: List 32M objects, match 350K (99% wasted)
-- **With scope**: List 185K objects, match 185K (0% wasted)
-
-#### The Solution
-
-Add a `build.scope` block to generate an explicit prefix plan before listing:
-
-```yaml
-build:
-  scope:
-    type: date_partitions
-    discover:
-      segments:
-        - index: 0 # discover store IDs
-        - index: 1 # discover device IDs
-    date:
-      segment_index: 2
-      format: "2006-01-02"
-      range:
-        after: "2025-12-15" # inclusive
-        before: "2026-01-01" # exclusive
-```
-
-#### Scope Types
-
-| Type              | Use Case                                       |
-| ----------------- | ---------------------------------------------- |
-| `prefix_list`     | Explicit prefixes when you know what to list   |
-| `date_partitions` | Dynamic expansion from date ranges + discovery |
-| `union`           | Combine multiple scopes                        |
-
-#### Performance
-
-| Configuration       | Objects Found | Build Time | Improvement     |
-| ------------------- | ------------- | ---------- | --------------- |
-| 15-store full month | 32M           | ~3 min     | baseline        |
-| 15-store scoped 17d | 185K          | ~30 sec    | **99.5% / 10x** |
-
-Key insight: with scope, `objects_found ≈ objects_matched` because you only list what you need.
-
-#### Key Features
-
-- **Dry-run preview**: `gonimbus index build --dry-run` shows prefix plan before execution
-- **Guardrails**: Warnings for large prefix expansions
-- **Identity isolation**: Scope config hashed into IndexSet identity
-- **Soft-delete safety**: Skipped by default for scoped builds (partial coverage)
-
----
-
-### Managed Index Build Jobs
-
-#### The Problem
-
-Index builds on enterprise buckets can run for hours. Managing them with shell primitives (`&`, `nohup`, `screen`) is brittle for:
-
-- Multi-hour or multi-day jobs
-- Multiple concurrent builds (multi-store fanout)
-- AI agents that need deterministic state and cancellation
-
-#### The Solution
-
-First-class job management with durable state and background execution:
-
-```bash
-# Start a managed background build (returns job id immediately)
-gonimbus index build --background --job index.yaml --name nightly-sweep
-
-# Monitor running and recent jobs
-gonimbus index jobs list
-gonimbus index jobs status <job_id>
-
-# Stream logs from a running job
-gonimbus index jobs logs <job_id> --follow
-
-# Safe cancellation
-gonimbus index jobs stop <job_id>
-
-# Clean up old job records
-gonimbus index jobs gc --max-age 168h
-```
-
-#### Key Features
-
-- **Durable job registry**: Jobs persist under app data dir (`jobs/index-build/<job_id>/`)
-- **Background execution**: `--background` spawns a managed child process
-- **Safe cancellation**: SIGTERM triggers graceful context cancellation; SIGKILL fallback
-- **Log capture**: stdout/stderr streamed to per-job files
-- **Deduplication**: `--dedupe` prevents duplicate running jobs for the same manifest
-- **JSON output**: All job commands support `--json` for machine-friendly output
-
-#### Job States
-
-`queued` → `running` → `success` | `partial` | `failed`
-
-Jobs can also be `stopping` (graceful shutdown in progress) or `stopped` (cancelled).
-
----
-
-### Documentation
-
-- User guide: [docs/user-guide/index.md](docs/user-guide/index.md)
-- Architecture: [docs/architecture/indexing.md](docs/architecture/indexing.md)
-- See [docs/releases/v0.1.4.md](docs/releases/v0.1.4.md) for complete release notes
