@@ -99,9 +99,6 @@ func init() {
 func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
 	stdin, _ := cmd.Flags().GetBool("stdin")
 	if stdin {
-		if len(args) != 0 {
-			return fmt.Errorf("when using --stdin, do not provide positional source-uri")
-		}
 		return nil
 	}
 	if len(args) != 1 {
