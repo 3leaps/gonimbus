@@ -35,13 +35,14 @@ See [3leaps-crucible agent-identity standard](https://crucible.3leaps.dev/reposi
 
 Agents operate in role contexts. Each role has defined scope.
 
-| Role       | Focus                                     |
-| ---------- | ----------------------------------------- |
-| `devlead`  | Core implementation, CLI, integration     |
-| `provider` | S3/GCS providers, auth chains, SDK wiring |
-| `crawler`  | Crawl engine, matching, outputs, pipeline |
-| `qa`       | Testing, validation, coverage             |
-| `prodmktg` | Use cases, personas, value messaging      |
+| Role       | Focus                                               |
+| ---------- | --------------------------------------------------- |
+| `devlead`  | Core implementation, CLI, integration               |
+| `provider` | S3/GCS providers, auth chains, SDK wiring           |
+| `crawler`  | Crawl engine, matching, outputs, pipeline           |
+| `dataeng`  | Pipeline operations, manifests, integration testing |
+| `qa`       | Testing, validation, coverage                       |
+| `prodmktg` | Use cases, personas, value messaging                |
 
 When assigned a role, constrain actions to that scope.
 
@@ -62,6 +63,14 @@ When assigned a role, constrain actions to that scope.
 - **Scope**: Crawl engine, pattern matching, prefix derivation, outputs
 - **Responsibilities**: Pipeline implementation, JSONL writer, backpressure, rate limiting
 - **Escalates to**: devlead for architecture decisions
+
+### dataeng – Data Engineer
+
+- **Scope**: Pipeline operations, manifest authoring, probe configs, integration testing, production runs
+- **Responsibilities**: Author manifests, create extraction configs, run integration tests with real data, execute and validate production pipelines, maintain index inventory
+- **Mindset**: Always dry-run first, checkpoint everything over 10K objects, validate with spot-checks not just counts, credentials as profile names only
+- **Does NOT**: Modify gonimbus source code (escalate to devlead), commit credentials, run production without dry-run, skip checkpoint on large jobs
+- **Escalates to**: devlead for tool changes, maintainers for credential/access issues
 
 ### qa – Quality Assurance
 
