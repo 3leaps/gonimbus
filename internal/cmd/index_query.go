@@ -24,7 +24,7 @@ var indexQueryCmd = &cobra.Command{
 
 The query searches the objects_current table for objects matching
 the specified patterns and filters. Results are emitted as JSONL
-records to stdout.
+records to stdout (default) or written to a destination via --output.
 
 Pattern matching uses doublestar semantics (same as crawl):
   **      matches any path segments
@@ -43,7 +43,15 @@ Examples:
   gonimbus index query s3://bucket/ --key-regex "2025-01.*\.json$"
 
   # Find files larger than 1MB modified in last 30 days
-  gonimbus index query s3://bucket/ --min-size 1MB --after 2025-01-01`,
+  gonimbus index query s3://bucket/ --min-size 1MB --after 2025-01-01
+
+  # Write results to a local file
+  gonimbus index query s3://bucket/prefix/ --pattern "**/*.xml" \
+    --output file:///tmp/results.jsonl
+
+  # Write results to S3
+  gonimbus index query s3://bucket/prefix/ --pattern "**/*.xml" \
+    --output s3://output-bucket/queries/results.jsonl`,
 	Args: cobra.ExactArgs(1),
 	RunE: runIndexQuery,
 }
@@ -67,6 +75,12 @@ func init() {
 	indexQueryCmd.Flags().Int("limit", 0, "Maximum number of results (0 = no limit)")
 	indexQueryCmd.Flags().Bool("include-deleted", false, "Include soft-deleted objects")
 	indexQueryCmd.Flags().Bool("count", false, "Only output count of matching objects")
+
+	// Output destination
+	indexQueryCmd.Flags().String("output", "", "Output destination URI (s3://bucket/key.jsonl or file:///path/file.jsonl)")
+	indexQueryCmd.Flags().String("output-profile", "", "AWS profile for output destination")
+	indexQueryCmd.Flags().String("output-region", "", "AWS region for output destination")
+	indexQueryCmd.Flags().String("output-endpoint", "", "Custom endpoint for output destination")
 }
 
 // indexQueryRecord is the JSONL output format for query results.
@@ -103,6 +117,10 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	includeDeleted, _ := cmd.Flags().GetBool("include-deleted")
 	countOnly, _ := cmd.Flags().GetBool("count")
+	outputURI, _ := cmd.Flags().GetString("output")
+	outputProfile, _ := cmd.Flags().GetString("output-profile")
+	outputRegion, _ := cmd.Flags().GetString("output-region")
+	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
 
 	// Open index database for the base URI
 	db, indexSet, err := openIndexDBForBaseURI(ctx, baseURI)
@@ -175,9 +193,26 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("query failed: %w", err)
 	}
 
+	// Set up output writer: temp file when --output is set, stdout otherwise.
+	var (
+		writer   *os.File
+		tempPath string
+	)
+	if outputURI != "" {
+		tmpFile, err := os.CreateTemp("", "gonimbus-query-*.jsonl")
+		if err != nil {
+			return fmt.Errorf("create temp file: %w", err)
+		}
+		tempPath = tmpFile.Name()
+		writer = tmpFile
+		defer func() { _ = os.Remove(tempPath) }()
+	} else {
+		writer = os.Stdout
+	}
+
 	// Emit JSONL records
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(writer)
 
 	for _, r := range results {
 		// Reconstruct full key from base URI + rel_key
@@ -208,6 +243,38 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		if err := enc.Encode(record); err != nil {
 			return fmt.Errorf("encode record: %w", err)
 		}
+	}
+
+	// Upload to output destination if --output is set.
+	if outputURI != "" {
+		if err := writer.Close(); err != nil {
+			return fmt.Errorf("close temp file: %w", err)
+		}
+
+		spec, err := parseOutputDest(outputURI)
+		if err != nil {
+			return fmt.Errorf("invalid --output: %w", err)
+		}
+		spec.Profile = outputProfile
+		spec.Region = outputRegion
+		spec.Endpoint = outputEndpoint
+		if spec.Endpoint != "" {
+			spec.ForcePathStyle = true
+		}
+
+		putter, err := newOutputProvider(ctx, spec)
+		if err != nil {
+			return fmt.Errorf("output provider: %w", err)
+		}
+		if closer, ok := putter.(interface{ Close() error }); ok {
+			defer func() { _ = closer.Close() }()
+		}
+
+		if err := uploadToOutputDest(ctx, putter, spec.Key, tempPath); err != nil {
+			return err
+		}
+
+		_, _ = fmt.Fprintf(os.Stderr, "Wrote %d records to %s\n", len(results), outputURI)
 	}
 
 	// Summary to stderr

@@ -175,7 +175,22 @@ gonimbus index query 's3://bucket/prefix/' \
 
 # Count only (no output records)
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
+
+# Write results to a local file
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output file:///tmp/results.jsonl
+
+# Write results to S3
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output s3://output-bucket/queries/results.jsonl
+
+# Write results to S3 with cross-account credentials
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output s3://other-account-bucket/results.jsonl \
+  --output-profile other-account
 ```
+
+When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
 
 ### `index stats`
 
@@ -323,6 +338,13 @@ Index queries support the same filters as `inspect`:
 | After date  | `--after`    | `2025-12-01`                     |
 | Before date | `--before`   | `2026-01-01`                     |
 | Count only  | `--count`    | Returns count instead of records |
+
+| Output Option   | Flag                | Example                                         |
+| --------------- | ------------------- | ----------------------------------------------- |
+| Output dest     | `--output`          | `s3://bucket/key.jsonl`, `file:///path/f.jsonl` |
+| Output profile  | `--output-profile`  | AWS profile for output destination              |
+| Output region   | `--output-region`   | AWS region for output destination               |
+| Output endpoint | `--output-endpoint` | Custom S3 endpoint for output destination       |
 
 ## Index Identity
 
