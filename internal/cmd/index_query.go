@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 )
 
 var indexQueryCmd = &cobra.Command{
-	Use:   "query <base-uri>",
+	Use:   "query [base-uri]",
 	Short: "Query indexed objects by pattern",
 	Long: `Query objects from a local index using glob patterns and filters.
 
@@ -51,8 +52,14 @@ Examples:
 
   # Write results to S3
   gonimbus index query s3://bucket/prefix/ --pattern "**/*.xml" \
-    --output s3://output-bucket/queries/results.jsonl`,
-	Args: cobra.ExactArgs(1),
+    --output s3://output-bucket/queries/results.jsonl
+
+  # Query a specific index (skip auto-selection; base-uri is optional)
+  gonimbus index query --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"
+
+  # Query a specific index with explicit base-uri override
+  gonimbus index query s3://bucket/prefix/ --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runIndexQuery,
 }
 
@@ -75,6 +82,9 @@ func init() {
 	indexQueryCmd.Flags().Int("limit", 0, "Maximum number of results (0 = no limit)")
 	indexQueryCmd.Flags().Bool("include-deleted", false, "Include soft-deleted objects")
 	indexQueryCmd.Flags().Bool("count", false, "Only output count of matching objects")
+
+	// Index selection
+	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
 
 	// Output destination
 	indexQueryCmd.Flags().String("output", "", "Output destination URI (s3://bucket/key.jsonl or file:///path/file.jsonl)")
@@ -102,10 +112,15 @@ type indexQueryRecordData struct {
 
 func runIndexQuery(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	baseURI := args[0]
+	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 
-	// Normalize base URI (ensure trailing slash for prefix URIs)
-	baseURI = normalizeQueryBaseURI(baseURI)
+	// Resolve base URI: required unless --index-set is provided.
+	var baseURI string
+	if len(args) > 0 {
+		baseURI = normalizeQueryBaseURI(args[0])
+	} else if indexSetFlag == "" {
+		return fmt.Errorf("<base-uri> is required unless --index-set is provided")
+	}
 
 	// Get flags
 	pattern, _ := cmd.Flags().GetString("pattern")
@@ -122,12 +137,30 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	outputRegion, _ := cmd.Flags().GetString("output-region")
 	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
 
-	// Open index database for the base URI
-	db, indexSet, err := openIndexDBForBaseURI(ctx, baseURI)
+	// Open index database: explicit --index-set or auto-select by base URI
+	var (
+		db       *sql.DB
+		indexSet *indexstore.IndexSet
+		err      error
+	)
+	if indexSetFlag != "" {
+		db, indexSet, err = openIndexDBByID(ctx, indexSetFlag)
+	} else {
+		db, indexSet, err = openIndexDBForBaseURI(ctx, baseURI)
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+
+	// When --index-set is provided, use the DB's authoritative base_uri.
+	// A positional base-uri arg is accepted but ignored with a warning if it differs.
+	if indexSetFlag != "" {
+		if baseURI != "" && baseURI != indexSet.BaseURI {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: positional base-uri %s differs from index base_uri %s; using index value\n", baseURI, indexSet.BaseURI)
+		}
+		baseURI = indexSet.BaseURI
+	}
 
 	// Build query params
 	params := indexstore.QueryParams{
@@ -390,6 +423,96 @@ type indexDBCandidate struct {
 	IndexSet      *indexstore.IndexSet
 	LatestRun     *indexstore.IndexRun
 	LatestSuccess *indexstore.IndexRun
+}
+
+// openIndexDBByID opens a local index database by its index set ID or directory name.
+// Accepts either a full index_set_id (idx_<64hex>) or directory name (idx_<16hex>).
+func openIndexDBByID(ctx context.Context, id string) (*sql.DB, *indexstore.IndexSet, error) {
+	rootDir, err := indexRootDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	return openIndexDBByIDInRoot(ctx, rootDir, id)
+}
+
+// validHexPattern matches lowercase hex strings (1-64 chars).
+var validHexPattern = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
+
+// openIndexDBByIDInRoot is the testable core of openIndexDBByID.
+func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *indexstore.IndexSet, error) {
+	cleanID := strings.TrimPrefix(id, "idx_")
+	if cleanID == "" {
+		return nil, nil, fmt.Errorf("invalid index set ID: %s", id)
+	}
+	if !validHexPattern.MatchString(cleanID) {
+		return nil, nil, fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", id)
+	}
+
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, fmt.Errorf("no indexes found (index root does not exist)")
+		}
+		return nil, nil, fmt.Errorf("read index directory: %w", err)
+	}
+
+	type dirMatch struct {
+		dbPath  string
+		dirName string
+	}
+	var matches []dirMatch
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dirHex := strings.TrimPrefix(entry.Name(), "idx_")
+		// Match when the stored dir hex starts with the user input (short prefix lookup),
+		// or when the user provided a full 64-char hash and the dir is a truncated prefix of it.
+		// Only allow reverse matching for exact full-length hashes to prevent partial-suffix matches.
+		if strings.HasPrefix(dirHex, cleanID) || (len(cleanID) == 64 && strings.HasPrefix(cleanID, dirHex)) {
+			dbPath := filepath.Join(rootDir, entry.Name(), "index.db")
+			if _, statErr := os.Stat(dbPath); statErr == nil {
+				matches = append(matches, dirMatch{dbPath: dbPath, dirName: entry.Name()})
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, nil, fmt.Errorf("no index found matching ID: %s", id)
+	}
+	if len(matches) > 1 {
+		names := make([]string, len(matches))
+		for i, m := range matches {
+			names[i] = m.dirName
+		}
+		return nil, nil, fmt.Errorf("ambiguous index ID %s matches %d directories: %s", id, len(matches), strings.Join(names, ", "))
+	}
+
+	db, err := openIndexDB(ctx, matches[0].dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open index database: %w", err)
+	}
+
+	sets, err := indexstore.ListIndexSets(ctx, db, "")
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("list index sets: %w", err)
+	}
+	if len(sets) == 0 {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("no index sets in database: %s", matches[0].dbPath)
+	}
+
+	// Match the user-provided prefix against the full index_set_id in the DB.
+	for i := range sets {
+		setHex := strings.TrimPrefix(sets[i].IndexSetID, "idx_")
+		if strings.HasPrefix(setHex, cleanID) {
+			return db, &sets[i], nil
+		}
+	}
+
+	// Fallback: single-set-per-DB convention.
+	return db, &sets[0], nil
 }
 
 func openIndexDBForBaseURI(ctx context.Context, baseURI string) (*sql.DB, *indexstore.IndexSet, error) {
