@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/index-hub",
+  "title": "Gonimbus Index Hub Marker",
+  "description": "Optional marker file at the root of an index hub. Identifies the hub version and provides human-readable metadata.",
+  "type": "object",
+  "required": [
+    "version",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference for editor support"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Hub layout version"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the hub was initialized (RFC 3339)"
+    },
+    "created_by": {
+      "type": "string",
+      "description": "Tool and version that created the hub (e.g., gonimbus/0.1.8)"
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional human-readable description of the hub's purpose"
+    },
+    "provider_meta": {
+      "type": "object",
+      "description": "Provider-opaque hints (e.g., GCS generation). Values are strings; keys are provider-specific.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
