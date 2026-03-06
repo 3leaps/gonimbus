@@ -438,29 +438,32 @@ func openIndexDBByID(ctx context.Context, id string) (*sql.DB, *indexstore.Index
 // validHexPattern matches lowercase hex strings (1-64 chars).
 var validHexPattern = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
 
-// openIndexDBByIDInRoot is the testable core of openIndexDBByID.
-func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *indexstore.IndexSet, error) {
+// indexDirMatch holds the resolved directory path and name for an index set.
+type indexDirMatch struct {
+	DBPath  string
+	DirName string
+}
+
+// resolveIndexDirInRoot finds the index directory matching the given ID in the root.
+// This is the shared directory-matching logic used by both index query and index export.
+func resolveIndexDirInRoot(rootDir, id string) (*indexDirMatch, error) {
 	cleanID := strings.TrimPrefix(id, "idx_")
 	if cleanID == "" {
-		return nil, nil, fmt.Errorf("invalid index set ID: %s", id)
+		return nil, fmt.Errorf("invalid index set ID: %s", id)
 	}
 	if !validHexPattern.MatchString(cleanID) {
-		return nil, nil, fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", id)
+		return nil, fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", id)
 	}
 
 	entries, err := os.ReadDir(rootDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("no indexes found (index root does not exist)")
+			return nil, fmt.Errorf("no indexes found (index root does not exist)")
 		}
-		return nil, nil, fmt.Errorf("read index directory: %w", err)
+		return nil, fmt.Errorf("read index directory: %w", err)
 	}
 
-	type dirMatch struct {
-		dbPath  string
-		dirName string
-	}
-	var matches []dirMatch
+	var matches []indexDirMatch
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -472,27 +475,38 @@ func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *i
 		if strings.HasPrefix(dirHex, cleanID) || (len(cleanID) == 64 && strings.HasPrefix(cleanID, dirHex)) {
 			dbPath := filepath.Join(rootDir, entry.Name(), "index.db")
 			if _, statErr := os.Stat(dbPath); statErr == nil {
-				matches = append(matches, dirMatch{dbPath: dbPath, dirName: entry.Name()})
+				matches = append(matches, indexDirMatch{DBPath: dbPath, DirName: entry.Name()})
 			}
 		}
 	}
 
 	if len(matches) == 0 {
-		return nil, nil, fmt.Errorf("no index found matching ID: %s", id)
+		return nil, fmt.Errorf("no index found matching ID: %s", id)
 	}
 	if len(matches) > 1 {
 		names := make([]string, len(matches))
 		for i, m := range matches {
-			names[i] = m.dirName
+			names[i] = m.DirName
 		}
-		return nil, nil, fmt.Errorf("ambiguous index ID %s matches %d directories: %s", id, len(matches), strings.Join(names, ", "))
+		return nil, fmt.Errorf("ambiguous index ID %s matches %d directories: %s", id, len(matches), strings.Join(names, ", "))
 	}
 
-	db, err := openIndexDB(ctx, matches[0].dbPath)
+	return &matches[0], nil
+}
+
+// openIndexDBByIDInRoot is the testable core of openIndexDBByID.
+func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *indexstore.IndexSet, error) {
+	match, err := resolveIndexDirInRoot(rootDir, id)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	db, err := openIndexDB(ctx, match.DBPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open index database: %w", err)
 	}
 
+	cleanID := strings.TrimPrefix(id, "idx_")
 	sets, err := indexstore.ListIndexSets(ctx, db, "")
 	if err != nil {
 		_ = db.Close()
@@ -500,7 +514,7 @@ func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *i
 	}
 	if len(sets) == 0 {
 		_ = db.Close()
-		return nil, nil, fmt.Errorf("no index sets in database: %s", matches[0].dbPath)
+		return nil, nil, fmt.Errorf("no index sets in database: %s", match.DBPath)
 	}
 
 	// Match the user-provided prefix against the full index_set_id in the DB.
