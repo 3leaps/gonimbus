@@ -583,3 +583,27 @@ Rebuild to capture recent changes:
 ```bash
 gonimbus index build --job index-manifest.yaml
 ```
+
+## Index Hub
+
+For team and production use, indexes can be published to a shared hub (S3 or local filesystem) and hydrated on demand.
+
+```bash
+# Export to hub
+gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_da038d...
+
+# Hydrate from hub
+gonimbus index hydrate --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d8171b4a9ba... --dest /tmp/hydrated/
+
+# Browse hub contents
+gonimbus index hub ls --hub s3://bucket/index-hub/
+gonimbus index hub show --hub s3://bucket/index-hub/ --index-set idx_da038d...
+
+# Maintenance
+gonimbus index hub gc --hub s3://bucket/index-hub/ --keep 3
+gonimbus index hub set-latest --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d... --run-id run_1709654400000000000
+```
+
+See [Workspace Pattern](workspace.md) for production workspace layout, shard strategies, and operational flows.
