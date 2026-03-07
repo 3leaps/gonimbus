@@ -4,12 +4,12 @@ A gonimbus workspace is a git repository that tracks the configuration, manifest
 
 ## When to Use a Workspace
 
-| Scenario | Workspace? | Why |
-|----------|-----------|-----|
-| One-off inspection | No | Use `inspect` or `tree` directly |
-| Recurring index builds | Yes | Track manifests, automate builds |
-| Cross-account reflow | Yes | Track rewrite templates, hub config |
-| Multi-shard production pipeline | Yes | Track shard strategy, retention, runbooks |
+| Scenario                        | Workspace? | Why                                       |
+| ------------------------------- | ---------- | ----------------------------------------- |
+| One-off inspection              | No         | Use `inspect` or `tree` directly          |
+| Recurring index builds          | Yes        | Track manifests, automate builds          |
+| Cross-account reflow            | Yes        | Track rewrite templates, hub config       |
+| Multi-shard production pipeline | Yes        | Track shard strategy, retention, runbooks |
 
 ## Layout
 
@@ -61,11 +61,11 @@ destination:
   region: us-west-2
 
 paths:
-  data: data/                   # Reflowed objects (clean, query-friendly)
-  ops: ops/                     # Operational artifacts
-  index_hub: ops/index-hub/     # Hub root for index export/hydrate
-  selections: ops/selections/   # Query result staging (input to reflow)
-  logs: ops/logs/               # Run logs
+  data: data/ # Reflowed objects (clean, query-friendly)
+  ops: ops/ # Operational artifacts
+  index_hub: ops/index-hub/ # Hub root for index export/hydrate
+  selections: ops/selections/ # Query result staging (input to reflow)
+  logs: ops/logs/ # Run logs
 
 hub:
   uri: s3://dest-landing-zone/project-data/ops/index-hub/
@@ -73,9 +73,9 @@ hub:
   region: us-west-2
 
 shard_strategy:
-  type: per-site-month           # See "Shard Strategies" below
-  site_segment_index: 0          # Position of site ID in path
-  date_segment_index: 2          # Position of date in path
+  type: per-site-month # See "Shard Strategies" below
+  site_segment_index: 0 # Position of site ID in path
+  date_segment_index: 2 # Position of date in path
 ```
 
 ## Destination Path Convention
@@ -106,22 +106,22 @@ Design principles:
 - Each shard must be independently rebuildable and publishable
 - Queries should target the smallest shard set possible
 
-| Strategy | Shard Key | Use Case |
-|----------|----------|----------|
-| Per-site x month | `{site}-{YYYY-MM}` | Site-partitioned data with monthly cycles |
-| Per-site x ISO-week | `{site}-{YYYY-Www}` | Weekly operational cycles |
-| Per-collection x month | `{collection}-{YYYY-MM}` | Grouped path fragments |
-| Rolling window | `latest-{N}d` | Operational dashboards, recent data |
+| Strategy               | Shard Key                | Use Case                                  |
+| ---------------------- | ------------------------ | ----------------------------------------- |
+| Per-site x month       | `{site}-{YYYY-MM}`       | Site-partitioned data with monthly cycles |
+| Per-site x ISO-week    | `{site}-{YYYY-Www}`      | Weekly operational cycles                 |
+| Per-collection x month | `{collection}-{YYYY-MM}` | Grouped path fragments                    |
+| Rolling window         | `latest-{N}d`            | Operational dashboards, recent data       |
 
 ### Blast Radius
 
 Shard granularity controls the blast radius of failures:
 
-| Granularity | Lock Blast Radius | Recovery Scope |
-|-------------|-------------------|----------------|
-| One index per bucket | Entire bucket unusable | Full rebuild |
-| One index per site | Single site affected | Site rebuild only |
-| One index per site-month | One month of one site | Minimal rebuild |
+| Granularity              | Lock Blast Radius      | Recovery Scope    |
+| ------------------------ | ---------------------- | ----------------- |
+| One index per bucket     | Entire bucket unusable | Full rebuild      |
+| One index per site       | Single site affected   | Site rebuild only |
+| One index per site-month | One month of one site  | Minimal rebuild   |
 
 ## Operational Flows
 
@@ -216,11 +216,11 @@ Document rewrite templates alongside index build manifests in the workspace so t
 
 Gonimbus does not include a scheduler. Use native scheduling tools:
 
-| Environment | Tool | Example |
-|-------------|------|---------|
-| Linux/macOS | cron | `0 2 * * * /workspace/scripts/build-and-publish.sh` |
-| Kubernetes | CronJob | Standard k8s CronJob spec |
-| AWS | EventBridge + ECS/Lambda | Scheduled rule triggering container task |
+| Environment | Tool                     | Example                                             |
+| ----------- | ------------------------ | --------------------------------------------------- |
+| Linux/macOS | cron                     | `0 2 * * * /workspace/scripts/build-and-publish.sh` |
+| Kubernetes  | CronJob                  | Standard k8s CronJob spec                           |
+| AWS         | EventBridge + ECS/Lambda | Scheduled rule triggering container task            |
 
 A typical scheduled script:
 
