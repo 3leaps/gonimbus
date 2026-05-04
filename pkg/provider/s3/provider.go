@@ -127,7 +127,7 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 
 	input := &s3.ListObjectsV2Input{
 		Bucket:  aws.String(p.bucket),
-		MaxKeys: aws.Int32(int32(maxKeys)),
+		MaxKeys: aws.Int32(int32(maxKeys)), // #nosec G115 -- maxKeys clamped to MaxAllowedKeys (1000) by clampMaxKeys
 	}
 
 	if opts.Prefix != "" {
@@ -171,7 +171,7 @@ func (p *Provider) ListWithDelimiter(ctx context.Context, opts provider.ListWith
 	input := &s3.ListObjectsV2Input{
 		Bucket:    aws.String(p.bucket),
 		Delimiter: aws.String(opts.Delimiter),
-		MaxKeys:   aws.Int32(int32(maxKeys)),
+		MaxKeys:   aws.Int32(int32(maxKeys)), // #nosec G115 -- maxKeys clamped to MaxAllowedKeys (1000) by clampMaxKeys
 	}
 
 	if opts.Prefix != "" {
@@ -219,7 +219,7 @@ func (p *Provider) ListCommonPrefixes(ctx context.Context, opts provider.ListCom
 	input := &s3.ListObjectsV2Input{
 		Bucket:    aws.String(p.bucket),
 		Delimiter: aws.String(opts.Delimiter),
-		MaxKeys:   aws.Int32(int32(maxKeys)),
+		MaxKeys:   aws.Int32(int32(maxKeys)), // #nosec G115 -- maxKeys clamped to MaxAllowedKeys (1000) by clampMaxKeys
 	}
 
 	if opts.Prefix != "" {
