@@ -164,7 +164,7 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 - Push without maintainer approval
 - Skip quality gates
 - Commit secrets or credentials
-- Commit `.plans/` contents (gitignored)
+- Reference client data, paths, or identifiers in repo content
 - Create unnecessary files
 - Touch code outside your task scope
 
@@ -176,7 +176,12 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 - `docs/provenance.md` - Ecosystem heritage
 - `docs/architecture.md` - Component design
 - `config/agentic/roles/` - Role catalog (YAML definitions with schemas, checklists, examples)
-- `.plans/active/` - Current work plans (gitignored)
+
+### Planning artifacts (no longer in this repo)
+
+- **Feature briefs / stream board**: `~/dev/3leaps/3leaps-productbook-internal/content/projmgmt/gonimbus/` (private; GON-NNN board + briefs)
+- **Client-touching dogfood narrative**: see Lead Maintainer for path (never referenced from this repo)
+- The previous `.plans/` convention has been retired
 
 ### Upstream
 
