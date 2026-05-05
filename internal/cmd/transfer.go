@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -231,8 +232,9 @@ func createTransferWriter(m *manifest.TransferManifest, jobID string) (output.Wr
 	if strings.HasPrefix(dest, "file:") {
 		path = strings.TrimPrefix(dest, "file:")
 	}
+	path = filepath.Clean(path)
 
-	f, err := os.Create(path)
+	f, err := os.Create(path) // #nosec G304 G703 -- destination is a user-supplied CLI flag; user controls write target
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create output file %s: %w", path, err)
 	}

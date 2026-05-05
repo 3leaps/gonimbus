@@ -2,12 +2,28 @@ version: "1.0.0"
 hooks:
   pre-commit:
     - command: "assess"
-      args: ["--categories", "format,lint,security", "--fail-on", "critical", "--package-mode"]
+      args:
+        - "--categories"
+        - "format,lint,security"
+        - "--fail-on"
+        - "critical"
+        - "--package-mode"
       priority: 10
       timeout: "90s"
   pre-push:
+    # Scope to issues introduced on this branch (relative to origin/main).
+    # Pre-existing high-severity findings on main do not block unrelated docs/feature pushes;
+    # they are tracked separately via `goneat assess --fail-on high` on main itself.
     - command: "assess"
-      args: ["--categories", "format,lint,security,dependencies", "--fail-on", "high", "--package-mode"]
+      args:
+        - "--categories"
+        - "format,lint,security,dependencies"
+        - "--fail-on"
+        - "high"
+        - "--package-mode"
+        - "--new-issues-only"
+        - "--new-issues-base"
+        - "origin/main"
       priority: 10
       timeout: "2m"
 optimization:

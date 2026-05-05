@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/index-hub-latest",
+  "title": "Gonimbus Index Hub Latest Pointer",
+  "description": "Points to the preferred run for a given index set. Written at index-sets/<index_set_id>/latest.json. v0.1.x writes are best-effort: plain PutObject with last-writer-wins semantics. Conditional-update / fail-closed semantics (CAS via If-Match / If-None-Match) are tracked for v0.2.x.",
+  "type": "object",
+  "required": [
+    "version",
+    "index_set_id",
+    "run_id",
+    "updated_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference for editor support"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Pointer schema version"
+    },
+    "index_set_id": {
+      "type": "string",
+      "pattern": "^idx_[0-9a-f]{64}$",
+      "description": "Full index set identity hash (idx_<sha256hex>)"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_([0-9]{1,32}|[0-9A-HJKMNP-TV-Z]{26})$",
+      "description": "Run identifier (run_<unixnano> or run_<ulid>)"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this pointer was last updated (RFC 3339)"
+    },
+    "updated_by": {
+      "type": "string",
+      "description": "Tool and version that updated the pointer (e.g., gonimbus/0.1.8)"
+    },
+    "etag": {
+      "type": "string",
+      "description": "ETag of the run's complete.json at the time of pointer update. Enables consumers to detect stale caches without downloading the full artifact. Provider-opaque; best-effort."
+    },
+    "provider_meta": {
+      "type": "object",
+      "description": "Provider-opaque hints (e.g., GCS generation). Values are strings; keys are provider-specific.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
