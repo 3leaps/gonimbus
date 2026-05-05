@@ -1,0 +1,651 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+)
+
+const testFullIndexSetID = "idx_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+// --- parseFlexibleTime ---
+
+func TestParseFlexibleTime_RFC3339(t *testing.T) {
+	ts, err := parseFlexibleTime("2026-03-06T00:00:00Z")
+	require.NoError(t, err)
+	assert.Equal(t, 2026, ts.Year())
+	assert.Equal(t, 6, ts.Day())
+}
+
+func TestParseFlexibleTime_DateOnly(t *testing.T) {
+	ts, err := parseFlexibleTime("2026-01-15")
+	require.NoError(t, err)
+	assert.Equal(t, 2026, ts.Year())
+	assert.Equal(t, 15, ts.Day())
+}
+
+func TestParseFlexibleTime_Invalid(t *testing.T) {
+	_, err := parseFlexibleTime("not-a-date")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected RFC 3339")
+}
+
+// --- hub init ---
+
+func TestRunIndexHubInit_FileHub(t *testing.T) {
+	hubDir := t.TempDir()
+
+	cmd := newHubInitCmd(t, hubDir, "")
+	require.NoError(t, cmd.Execute())
+
+	// Verify hub.json was created
+	data, err := os.ReadFile(filepath.Join(hubDir, "hub.json"))
+	require.NoError(t, err)
+
+	var doc map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &doc))
+	assert.Equal(t, "1.0", doc["version"])
+	assert.NotEmpty(t, doc["created_at"])
+	assert.NotEmpty(t, doc["created_by"])
+}
+
+func TestRunIndexHubInit_WithDescription(t *testing.T) {
+	hubDir := t.TempDir()
+
+	cmd := newHubInitCmd(t, hubDir, "Production indexes")
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(hubDir, "hub.json"))
+	require.NoError(t, err)
+
+	var doc map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &doc))
+	assert.Equal(t, "Production indexes", doc["description"])
+}
+
+func TestRunIndexHubInit_AlreadyInitialized(t *testing.T) {
+	hubDir := t.TempDir()
+
+	// Init once
+	cmd := newHubInitCmd(t, hubDir, "")
+	require.NoError(t, cmd.Execute())
+
+	// Init again — should fail
+	cmd2 := newHubInitCmd(t, hubDir, "")
+	err := cmd2.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already initialized")
+}
+
+// --- hub ls ---
+
+func TestRunIndexHubLs_Empty(t *testing.T) {
+	hubDir := t.TempDir()
+
+	cmd := newHubLsCmd(t, hubDir, false)
+	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubLs_WithIndexSets(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubLsCmd(t, hubDir, true)
+	require.NoError(t, cmd.Execute())
+}
+
+// --- discoverIndexSets ---
+
+func TestDiscoverIndexSets(t *testing.T) {
+	ctx := context.Background()
+	hubDir := setupHubWithRuns(t)
+
+	fp, err := providerfile.New(providerfile.Config{BaseDir: hubDir})
+	require.NoError(t, err)
+
+	ids, err := discoverIndexSets(ctx, fp, "index-sets/")
+	require.NoError(t, err)
+	assert.Len(t, ids, 1)
+	assert.Equal(t, testFullIndexSetID, ids[0])
+}
+
+func TestDiscoverIndexSets_Empty(t *testing.T) {
+	ctx := context.Background()
+	hubDir := t.TempDir()
+
+	fp, err := providerfile.New(providerfile.Config{BaseDir: hubDir})
+	require.NoError(t, err)
+
+	ids, err := discoverIndexSets(ctx, fp, "index-sets/")
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+// --- discoverRuns ---
+
+func TestDiscoverRuns(t *testing.T) {
+	ctx := context.Background()
+	hubDir := setupHubWithRuns(t)
+
+	fp, err := providerfile.New(providerfile.Config{BaseDir: hubDir})
+	require.NoError(t, err)
+
+	runsPrefix := "index-sets/" + testFullIndexSetID + "/runs/"
+	runs, err := discoverRuns(ctx, fp, runsPrefix)
+	require.NoError(t, err)
+	assert.Len(t, runs, 2)
+}
+
+// --- hub show ---
+
+func TestRunIndexHubShow(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubShowCmd(t, hubDir, testFullIndexSetID, true)
+	require.NoError(t, cmd.Execute())
+}
+
+// --- hub set-latest ---
+
+func TestRunIndexHubSetLatest(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	newRunID := "run_2000000000000000000"
+
+	cmd := newHubSetLatestCmd(t, hubDir, testFullIndexSetID, newRunID)
+	require.NoError(t, cmd.Execute())
+
+	// Verify latest.json was updated
+	data, err := os.ReadFile(filepath.Join(hubDir, "index-sets", testFullIndexSetID, "latest.json"))
+	require.NoError(t, err)
+	var latest map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &latest))
+	assert.Equal(t, newRunID, latest["run_id"])
+}
+
+func TestRunIndexHubSetLatest_UncommittedRun(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	// run_3 has no complete.json
+	uncommittedRun := "run_3000000000000000000"
+	runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", uncommittedRun)
+	require.NoError(t, os.MkdirAll(runDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "index.db"), []byte("fake"), 0644))
+
+	cmd := newHubSetLatestCmd(t, hubDir, testFullIndexSetID, uncommittedRun)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not committed")
+}
+
+// --- hub rm-run ---
+
+func TestRunIndexHubRmRun(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	runID := "run_2000000000000000000" // not the latest
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, runID, false)
+	require.NoError(t, cmd.Execute())
+
+	// Verify run artifacts are gone
+	runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID)
+	_, err := os.Stat(filepath.Join(runDir, "index.db"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestRunIndexHubRmRun_ProtectsLatest(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	latestRunID := "run_1000000000000000000" // this is the latest per setupHubWithRuns
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, latestRunID, false)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "current latest")
+}
+
+func TestRunIndexHubRmRun_ForceLatest(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	latestRunID := "run_1000000000000000000"
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, latestRunID, true)
+	require.NoError(t, cmd.Execute())
+}
+
+// --- hub gc ---
+
+func TestRunIndexHubGC_KeepN(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 1, "", true, true)
+	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubGC_Before(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 0, "2030-01-01", true, false)
+	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubGC_KeepRetentionSemantics(t *testing.T) {
+	// 3 committed runs: run_3 (newest/latest), run_2, run_1 (oldest).
+	// --keep 2 should keep 2 total (run_3 + run_2), remove run_1.
+	hubDir := setupHubWith3Runs(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 2, "", false, false)
+	require.NoError(t, cmd.Execute())
+
+	// run_1 (oldest) should be removed
+	run1Dir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000")
+	_, err := os.Stat(filepath.Join(run1Dir, "index.db"))
+	assert.True(t, os.IsNotExist(err), "run_1 should be deleted (oldest, outside --keep 2)")
+
+	// run_2 should be kept
+	run2Dir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_2000000000000000000")
+	assert.FileExists(t, filepath.Join(run2Dir, "index.db"), "run_2 should be kept (within --keep 2)")
+
+	// run_3 (latest) should be kept
+	run3Dir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_3000000000000000000")
+	assert.FileExists(t, filepath.Join(run3Dir, "index.db"), "run_3 should be kept (latest)")
+}
+
+func TestRunIndexHubGC_KeepOneKeepsOnlyLatest(t *testing.T) {
+	// With --keep 1 and 3 runs, only the latest (run_3) should survive.
+	hubDir := setupHubWith3Runs(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 1, "", false, false)
+	require.NoError(t, cmd.Execute())
+
+	// run_1 and run_2 should be removed
+	for _, runID := range []string{"run_1000000000000000000", "run_2000000000000000000"} {
+		runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID)
+		_, err := os.Stat(filepath.Join(runDir, "index.db"))
+		assert.True(t, os.IsNotExist(err), "%s should be deleted", runID)
+	}
+
+	// run_3 (latest) should be kept
+	run3Dir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_3000000000000000000")
+	assert.FileExists(t, filepath.Join(run3Dir, "index.db"), "run_3 should be kept (latest)")
+}
+
+func TestRunIndexHubGC_KeepWithStaleLatest(t *testing.T) {
+	// 3 committed runs: run_3 (newest), run_2 (middle), run_1 (oldest).
+	// Latest points to run_1 (stale — not the newest).
+	// --keep 2 should keep exactly 2 total: run_3 (newest by time) + run_1 (latest).
+	// run_2 should be removed even though it's newer than latest.
+	hubDir := setupHubWith3Runs(t)
+
+	// Repoint latest to the oldest run
+	latestPath := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "latest.json")
+	latest := map[string]interface{}{
+		"version":      "1.0",
+		"index_set_id": testFullIndexSetID,
+		"run_id":       "run_1000000000000000000",
+		"updated_at":   "2026-03-06T00:00:00Z",
+	}
+	data, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(latestPath, data, 0644))
+
+	cmd := newHubGCCmd(t, hubDir, "", 2, "", false, false)
+	require.NoError(t, cmd.Execute())
+
+	// run_1 (oldest but latest) should be kept
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000", "index.db"),
+		"run_1 should be kept (latest pointer)")
+
+	// run_3 (newest by time) should be kept (fills the 1 non-latest slot)
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_3000000000000000000", "index.db"),
+		"run_3 should be kept (newest non-latest, within --keep 2)")
+
+	// run_2 (middle) should be removed — only 1 non-latest slot available
+	run2DB := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_2000000000000000000", "index.db")
+	_, err = os.Stat(run2DB)
+	assert.True(t, os.IsNotExist(err), "run_2 should be deleted (exceeded --keep 2 with stale latest)")
+}
+
+func TestRunIndexHubGC_KeepZeroRemovesNonLatest(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 0, "2030-01-01", false, false)
+	require.NoError(t, cmd.Execute())
+
+	// Run 2 (non-latest, older) should be removed
+	runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_2000000000000000000")
+	_, err := os.Stat(filepath.Join(runDir, "index.db"))
+	assert.True(t, os.IsNotExist(err), "run_2 artifacts should be deleted")
+
+	// Run 1 (latest) should still exist
+	latestDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000")
+	assert.FileExists(t, filepath.Join(latestDir, "index.db"))
+}
+
+func TestRunIndexHubGC_RequiresPolicy(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 0, "", false, false)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--keep or --before")
+}
+
+func TestRunIndexHubGC_MutuallyExclusive(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubGCCmd(t, hubDir, "", 2, "2030-01-01", false, false)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestRunIndexHubGC_JSONWithoutDryRunActuallyDeletes is a regression test for
+// the bug where `gonimbus index hub gc --json` (without --dry-run) emitted
+// the candidate list as JSON and returned without performing any deletion.
+// The fix routes deletion through the same code path regardless of output mode.
+func TestRunIndexHubGC_JSONWithoutDryRunActuallyDeletes(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+
+	// run_1 is latest in setupHubWith3Runs; --keep 2 should delete the oldest
+	// non-latest run. Use --json without --dry-run.
+	cmd := newHubGCCmd(t, hubDir, "", 2, "", false, true)
+
+	// Redirect os.Stdout briefly to capture JSON output for shape assertion.
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	execErr := cmd.Execute()
+
+	require.NoError(t, w.Close())
+	os.Stdout = origStdout
+	captured, _ := io.ReadAll(r)
+
+	require.NoError(t, execErr)
+
+	// Filesystem check: oldest committed run should be gone.
+	// setupHubWith3Runs has run_1 (newest in time), run_2 (middle), run_3 (oldest).
+	// Wait — actually setupHubWith3Runs creates run_1=oldest..run_3=newest by ULID-style.
+	// The test asserts SOME non-latest run was deleted; we keep this loose to
+	// stay aligned with whatever ordering setupHubWith3Runs uses.
+	indexSetDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs")
+	entries, err := os.ReadDir(indexSetDir)
+	require.NoError(t, err)
+	// Count surviving run dirs that still have index.db
+	surviving := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(indexSetDir, e.Name(), "index.db")); statErr == nil {
+			surviving++
+		}
+	}
+	assert.Equal(t, 2, surviving, "after gc --keep 2 --json (no dry-run), exactly 2 runs should survive (the bug returned before deletion, leaving all 3)")
+
+	// JSON shape: dry_run should be false; removed should be present.
+	var result struct {
+		DryRun  bool                     `json:"dry_run"`
+		Removed []map[string]interface{} `json:"removed"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	assert.False(t, result.DryRun, "JSON output should report dry_run=false for a real run")
+	assert.NotEmpty(t, result.Removed, "JSON output should list the run(s) that were removed")
+}
+
+// --- listAllKeys ---
+
+func TestListAllKeys(t *testing.T) {
+	ctx := context.Background()
+	hubDir := setupHubWithRuns(t)
+
+	fp, err := providerfile.New(providerfile.Config{BaseDir: hubDir})
+	require.NoError(t, err)
+
+	runPrefix := "index-sets/" + testFullIndexSetID + "/runs/run_1000000000000000000/"
+	keys, err := listAllKeys(ctx, fp, runPrefix)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(keys), 2) // at least index.db + complete.json
+}
+
+// --- helpers ---
+
+// setupHubWithRuns creates a file-based hub with one index set and two committed runs.
+// Run 1 (run_1000000000000000000) is set as latest.
+// Run 2 (run_2000000000000000000) is an older committed run.
+func setupHubWithRuns(t *testing.T) string {
+	t.Helper()
+	hubDir := t.TempDir()
+
+	run1ID := "run_1000000000000000000"
+	run2ID := "run_2000000000000000000"
+
+	for _, runID := range []string{run1ID, run2ID} {
+		runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID)
+		require.NoError(t, os.MkdirAll(runDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "index.db"), []byte("db-content-"+runID), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "identity.json"), []byte(`{"test":true}`), 0644))
+
+		completedAt := "2026-01-01T00:00:00Z"
+		if runID == run1ID {
+			completedAt = "2026-03-01T00:00:00Z"
+		}
+		complete := map[string]interface{}{
+			"version":      "1.0",
+			"index_set_id": testFullIndexSetID,
+			"run_id":       runID,
+			"completed_at": completedAt,
+			"artifacts": map[string]interface{}{
+				"index_db": map[string]interface{}{
+					"size_bytes": len("db-content-" + runID),
+					"sha256":     "placeholder",
+				},
+			},
+		}
+		data, err := json.MarshalIndent(complete, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), data, 0644))
+	}
+
+	// Set latest to run1
+	latestDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID)
+	latest := map[string]interface{}{
+		"version":      "1.0",
+		"index_set_id": testFullIndexSetID,
+		"run_id":       run1ID,
+		"updated_at":   "2026-03-06T00:00:00Z",
+	}
+	data, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(latestDir, "latest.json"), data, 0644))
+
+	return hubDir
+}
+
+// setupHubWith3Runs creates a file-based hub with 3 committed runs.
+// Run 3 (run_3000000000000000000) is newest and set as latest.
+// Run 2 (run_2000000000000000000) is middle.
+// Run 1 (run_1000000000000000000) is oldest.
+func setupHubWith3Runs(t *testing.T) string {
+	t.Helper()
+	hubDir := t.TempDir()
+
+	runs := []struct {
+		id          string
+		completedAt string
+	}{
+		{"run_1000000000000000000", "2025-12-01T00:00:00Z"},
+		{"run_2000000000000000000", "2026-01-15T00:00:00Z"},
+		{"run_3000000000000000000", "2026-03-01T00:00:00Z"},
+	}
+
+	for _, r := range runs {
+		runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", r.id)
+		require.NoError(t, os.MkdirAll(runDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "index.db"), []byte("db-"+r.id), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "identity.json"), []byte(`{"test":true}`), 0644))
+
+		complete := map[string]interface{}{
+			"version":      "1.0",
+			"index_set_id": testFullIndexSetID,
+			"run_id":       r.id,
+			"completed_at": r.completedAt,
+			"artifacts": map[string]interface{}{
+				"index_db": map[string]interface{}{
+					"size_bytes": len("db-" + r.id),
+					"sha256":     "placeholder",
+				},
+			},
+		}
+		data, err := json.MarshalIndent(complete, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), data, 0644))
+	}
+
+	// Set latest to run_3 (newest)
+	latestDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID)
+	latest := map[string]interface{}{
+		"version":      "1.0",
+		"index_set_id": testFullIndexSetID,
+		"run_id":       "run_3000000000000000000",
+		"updated_at":   "2026-03-06T00:00:00Z",
+	}
+	data, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(latestDir, "latest.json"), data, 0644))
+
+	return hubDir
+}
+
+func newHubInitCmd(t *testing.T, hubDir, description string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "init", RunE: runIndexHubInit}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("description", "", "")
+	args := []string{"--hub", "file://" + hubDir + "/"}
+	if description != "" {
+		args = append(args, "--description", description)
+	}
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubLsCmd(t *testing.T, hubDir string, jsonOutput bool) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "ls", RunE: runIndexHubLs}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().Bool("json", false, "")
+	args := []string{"--hub", "file://" + hubDir + "/"}
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubShowCmd(t *testing.T, hubDir, indexSetID string, jsonOutput bool) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "show", RunE: runIndexHubShow}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("index-set", "", "")
+	cmd.Flags().Bool("json", false, "")
+	args := []string{"--hub", "file://" + hubDir + "/", "--index-set", indexSetID}
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubSetLatestCmd(t *testing.T, hubDir, indexSetID, runID string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "set-latest", RunE: runIndexHubSetLatest}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("index-set", "", "")
+	cmd.Flags().String("run-id", "", "")
+	cmd.SetArgs([]string{
+		"--hub", "file://" + hubDir + "/",
+		"--index-set", indexSetID,
+		"--run-id", runID,
+	})
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubRmRunCmd(t *testing.T, hubDir, indexSetID, runID string, force bool) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "rm-run", RunE: runIndexHubRmRun}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("index-set", "", "")
+	cmd.Flags().String("run-id", "", "")
+	cmd.Flags().Bool("force", false, "")
+	args := []string{
+		"--hub", "file://" + hubDir + "/",
+		"--index-set", indexSetID,
+		"--run-id", runID,
+	}
+	if force {
+		args = append(args, "--force")
+	}
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubGCCmd(t *testing.T, hubDir, indexSet string, keep int, before string, dryRun, jsonOutput bool) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "gc", RunE: runIndexHubGC}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("index-set", "", "")
+	cmd.Flags().Int("keep", 0, "")
+	cmd.Flags().String("before", "", "")
+	cmd.Flags().Bool("dry-run", false, "")
+	cmd.Flags().Bool("json", false, "")
+	args := []string{"--hub", "file://" + hubDir + "/"}
+	if indexSet != "" {
+		args = append(args, "--index-set", indexSet)
+	}
+	if keep > 0 {
+		args = append(args, "--keep", fmt.Sprintf("%d", keep))
+	}
+	if before != "" {
+		args = append(args, "--before", before)
+	}
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}

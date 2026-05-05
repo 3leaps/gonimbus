@@ -61,7 +61,7 @@ func (e ValidationErrors) Error() string {
 
 	var b strings.Builder
 	b.WriteString("manifest validation failed with ")
-	b.WriteString(fmt.Sprintf("%d errors:\n", len(e)))
+	fmt.Fprintf(&b, "%d errors:\n", len(e))
 	for i, err := range e {
 		if i > 0 {
 			b.WriteString("\n")

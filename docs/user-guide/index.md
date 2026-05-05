@@ -175,7 +175,22 @@ gonimbus index query 's3://bucket/prefix/' \
 
 # Count only (no output records)
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
+
+# Write results to a local file
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output file:///tmp/results.jsonl
+
+# Write results to S3
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output s3://output-bucket/queries/results.jsonl
+
+# Write results to S3 with cross-account credentials
+gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
+  --output s3://other-account-bucket/results.jsonl \
+  --output-profile other-account
 ```
+
+When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
 
 ### `index stats`
 
@@ -323,6 +338,13 @@ Index queries support the same filters as `inspect`:
 | After date  | `--after`    | `2025-12-01`                     |
 | Before date | `--before`   | `2026-01-01`                     |
 | Count only  | `--count`    | Returns count instead of records |
+
+| Output Option   | Flag                | Example                                         |
+| --------------- | ------------------- | ----------------------------------------------- |
+| Output dest     | `--output`          | `s3://bucket/key.jsonl`, `file:///path/f.jsonl` |
+| Output profile  | `--output-profile`  | AWS profile for output destination              |
+| Output region   | `--output-region`   | AWS region for output destination               |
+| Output endpoint | `--output-endpoint` | Custom S3 endpoint for output destination       |
 
 ## Index Identity
 
@@ -561,3 +583,27 @@ Rebuild to capture recent changes:
 ```bash
 gonimbus index build --job index-manifest.yaml
 ```
+
+## Index Hub
+
+For team and production use, indexes can be published to a shared hub (S3 or local filesystem) and hydrated on demand.
+
+```bash
+# Export to hub
+gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_da038d...
+
+# Hydrate from hub
+gonimbus index hydrate --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d8171b4a9ba... --dest /tmp/hydrated/
+
+# Browse hub contents
+gonimbus index hub ls --hub s3://bucket/index-hub/
+gonimbus index hub show --hub s3://bucket/index-hub/ --index-set idx_da038d...
+
+# Maintenance
+gonimbus index hub gc --hub s3://bucket/index-hub/ --keep 3
+gonimbus index hub set-latest --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d... --run-id run_1709654400000000000
+```
+
+See [Workspace Pattern](workspace.md) for production workspace layout, shard strategies, and operational flows.

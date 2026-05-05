@@ -461,7 +461,7 @@ func ParseSize(s string) (int64, error) {
 		return 0, fmt.Errorf("%w: size overflows int64", ErrInvalidSize)
 	}
 
-	return int64(n * mult), nil
+	return int64(n * mult), nil // #nosec G115 -- overflow check above guarantees n*mult <= maxInt64
 }
 
 // FormatSize formats bytes as human-readable string using base-2 units.

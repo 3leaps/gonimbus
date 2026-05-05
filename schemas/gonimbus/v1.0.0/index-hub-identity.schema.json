@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/index-hub-identity",
+  "title": "Gonimbus Index Identity",
+  "description": "Canonical identity payload for an index set. The SHA-256 of this JSON (with deterministic key ordering) produces the index_set_id. Written alongside the index DB both locally and in hub exports.",
+  "type": "object",
+  "required": [
+    "base_uri",
+    "provider",
+    "build"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "base_uri": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Normalized base URI with trailing slash (e.g., s3://bucket/prefix/)"
+    },
+    "provider": {
+      "type": "string",
+      "description": "Provider type (e.g., s3)"
+    },
+    "storage_provider": {
+      "type": "string",
+      "description": "Storage provider identifier (e.g., aws_s3)"
+    },
+    "cloud_provider": {
+      "type": "string",
+      "description": "Cloud provider identifier (e.g., aws)"
+    },
+    "region_kind": {
+      "type": "string",
+      "description": "Region type (e.g., aws)"
+    },
+    "region": {
+      "type": "string",
+      "description": "Region identifier (e.g., us-east-1)"
+    },
+    "endpoint_host": {
+      "type": "string",
+      "description": "Custom endpoint host (lowercase, for S3-compatible stores)"
+    },
+    "build": {
+      "type": "object",
+      "description": "Build parameters that affect index contents. Any change produces a different index_set_id.",
+      "required": [
+        "source_type",
+        "schema_version",
+        "includes",
+        "include_hidden"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "description": "Index source type (e.g., crawl)"
+        },
+        "schema_version": {
+          "type": "integer",
+          "description": "Index DB schema version"
+        },
+        "gonimbus_version": {
+          "type": "string",
+          "description": "Gonimbus version that built the index"
+        },
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Normalized glob include patterns (sorted, deduplicated)"
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Normalized glob exclude patterns (sorted, deduplicated)"
+        },
+        "include_hidden": {
+          "type": "boolean",
+          "description": "Whether hidden files (dot-prefixed) are included"
+        },
+        "filters_hash": {
+          "type": "string",
+          "description": "Hash of size/date/regex filters affecting index scope"
+        },
+        "scope_hash": {
+          "type": "string",
+          "description": "Hash of build.scope configuration"
+        }
+      }
+    },
+    "path_date": {
+      "type": "object",
+      "description": "Path date extraction configuration (affects identity when present)",
+      "required": [
+        "method"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "regex",
+            "segment"
+          ],
+          "description": "Extraction method"
+        },
+        "regex": {
+          "type": "string",
+          "description": "Regex pattern for date extraction (regex method)"
+        },
+        "segment_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Path segment index for date extraction (segment method)"
+        }
+      }
+    }
+  }
+}
