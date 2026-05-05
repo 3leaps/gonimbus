@@ -6,7 +6,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 
 ### Version Planning
 
-- [ ] Feature briefs completed in `.plans/active/<version>/`
+- [ ] Feature briefs in productbook gonimbus stream (`3leaps-productbook-internal/content/projmgmt/gonimbus/`) marked done
 - [ ] All planned features implemented and tested
 - [ ] Breaking changes documented
 - [ ] Migration guide written (if applicable)
@@ -121,13 +121,13 @@ Follow the Fulmen "manifest-only" provenance pattern:
 
 ### Communication
 
-- [ ] Announce release in Mattermost `#gonimbus`
+- [ ] Announce release in Mattermost `#repo-gonimbus`
 - [ ] Notify gofulmen team if integration patterns changed
 
 ### Housekeeping
 
-- [ ] Clean up `.plans/active/<old-version>/` (move to `.plans/archive/` if needed)
-- [ ] Plan next version features
+- [ ] Update productbook gonimbus stream (`content/projmgmt/gonimbus/index.md`) — mark shipped GON-NNN briefs as ✅ done
+- [ ] Plan next version features in productbook
 
 ### Monitoring
 

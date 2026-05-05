@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-05-05
+
+### Added
+
+#### Index Hub (`index hub` + `index export` + `index hydrate`)
+
+- **Index Hub CRUD** (`internal/cmd/index_hub.go`)
+  - `gonimbus index hub init` — create a new hub root with marker file
+  - `gonimbus index hub ls` — list index sets and their runs at a hub
+  - `gonimbus index hub show` — show details for a specific index set or run
+  - `gonimbus index hub set-latest` — advance the `latest.json` pointer for an index set (requires committed run)
+  - `gonimbus index hub rm-run` — remove a specific run; protects `latest` unless `--force`
+  - `gonimbus index hub gc` — garbage-collect runs by `--keep N` or `--before DATE`; supports `--dry-run` and `--json`
+
+- **Index Export** (`internal/cmd/index_export.go`)
+  - `gonimbus index export` publishes an index run to a file or S3 hub
+  - Atomic publish sequence: `index.db` → `identity.json` → `complete.json` (commit marker) → `latest.json`
+  - SHA-256 + size integrity manifest in `complete.json`
+  - `latest.json` is best-effort last-writer-wins for v0.1.x; CAS / fail-closed semantics tracked for v0.2.x
+
+- **Index Hydrate** (`internal/cmd/index_hydrate.go`)
+  - `gonimbus index hydrate` downloads a published index run from a hub
+  - Resolves run via `latest.json` pointer or explicit `--run-id`
+  - SHA-256 + size verification for `index.db` and `identity.json`
+  - Rejects uncommitted runs (no `complete.json`)
+  - Saves `complete.json` to destination for provenance
+
+- **Hub JSON Schemas** (`schemas/gonimbus/v1.0.0/`)
+  - `index-hub.schema.json` — hub marker
+  - `index-hub-complete.schema.json` — run commit marker with integrity manifest
+  - `index-hub-latest.schema.json` — index-set latest pointer
+  - `index-hub-identity.schema.json` — index set identity descriptor
+
+#### Index Query Flags
+
+- **`--index-set <id>`** (`internal/cmd/index_query.go`) — explicit index-set selection when multiple sets share a base URI; resolves prefix or full `idx_<64hex>` form
+- **`--output <uri>`** — stream query results to S3 or `file://` destinations (in addition to stdout)
+
+#### Workspace Pattern
+
+- **Workspace convention** (`docs/user-guide/workspace.md`)
+  - `workspace.yaml` schema and layout convention
+  - Documented shard strategies for date-partitioned data
+  - Operational flows: build+publish, hydrate+query, extract+reflow, hub maintenance
+  - Rewrite template guidance and scheduling patterns
+
+#### Role Catalog
+
+- **Dataeng role** (`config/agentic/roles/dataeng.yaml`) — pipeline operations, manifests, integration testing; updated for v0.1.8 hub/workspace operations
+- **Attribution policy** (`AGENTS.md`) — strengthened to mandate `noreply@3leaps.net` and reject model-provider domains
+
+### Changed
+
+- **Pre-push hook** (`.goneat/hooks.yaml`) — assess gate scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
+- **AGENTS.md** — `.plans/` references retired; planning artifacts now live in the productbook (private) and the OOB workspace (client-confidential, private)
+- **AGENTS.md DO NOT list** — replaced narrow `.plans/` rule with broader prohibition on referencing client data, paths, or identifiers in repo content
+
+### Fixed
+
+- **`gonimbus index hub gc --json`** silently no-oped deletions (`internal/cmd/index_hub.go`) — fixed to honor `--dry-run` correctly and emit per-run outcomes (artifacts deleted, errors) in the JSON envelope; regression test added
+- Five gosec G115 / G703 findings annotated with rationale (provably bounded conversions; user-supplied CLI paths)
+- One golangci-lint QF1012 (`fmt.Sprintf` → `fmt.Fprintf`) in `pkg/manifest/validate.go`
+
+### Removed
+
+- **Guardian browser-intercept hooks** (`.goneat/hooks/pre-commit`, `.goneat/hooks/pre-push`) — regenerated without `--with-guardian` for the larger team feature-branch workflow
+
 ## [0.1.7] - 2026-01-28
 
 ### Added

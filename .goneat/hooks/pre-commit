@@ -4,8 +4,12 @@
 
 set -euo pipefail
 
+# Disable glob expansion to prevent accidental arg explosion
+# when hooks.yaml contains patterns like .cache/**.
+set -f
+
 # Establish repository root for reliable relative paths
-REPO_ROOT=$(git rev-parse --show-toplevel 2> /dev/null || pwd)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
 # Resolve goneat home for ephemeral artifacts (reports/cache/tmp)
 # Repo .goneat/ is static-only; do not write reports here.
@@ -15,96 +19,59 @@ export GONEAT_HOME
 # Detect dev mode: enabled if $REPO_ROOT/.goneat/dev-mode exists or env is set
 DEV_MODE=0
 if [ -f "$REPO_ROOT/.goneat/dev-mode" ] || [ "${GONEAT_DEV_MODE:-0}" = "1" ]; then
-    DEV_MODE=1
+  DEV_MODE=1
 fi
 
 echo "🔍 Running goneat pre-commit validation..."
 
 # Robust binary discovery (prefer repo build first, then PATH/common locations)
 find_goneat_bin() {
-    if [ -x "$REPO_ROOT/dist/goneat" ]; then
-        echo "$REPO_ROOT/dist/goneat"
-        return 0
+  if [ -x "$REPO_ROOT/dist/goneat" ]; then
+    echo "$REPO_ROOT/dist/goneat"
+    return 0
+  fi
+  local candidates=(
+    "$HOME/go/bin/goneat"
+    "/opt/homebrew/bin/goneat"
+    "/usr/local/bin/goneat"
+    "$HOME/.local/bin/goneat"
+    "$HOME/.goneat/bin/goneat"
+    "goneat"
+  )
+  for c in "${candidates[@]}"; do
+    if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
+      echo "$c"
+      return 0
     fi
-    local candidates=(
-        "$HOME/go/bin/goneat"
-        "/opt/homebrew/bin/goneat"
-        "/usr/local/bin/goneat"
-        "$HOME/.local/bin/goneat"
-        "$HOME/.goneat/bin/goneat"
-        "goneat"
-    )
-    for c in "${candidates[@]}"; do
-        if [ -x "$c" ] || command -v "$c" > /dev/null 2>&1; then
-            echo "$c"
-            return 0
-        fi
-    done
-    return 1
+  done
+  return 1
 }
 
 GONEAT_BIN=""
 if BIN=$(find_goneat_bin); then
-    GONEAT_BIN="$BIN"
+  GONEAT_BIN="$BIN"
 fi
 
 if [ -z "$GONEAT_BIN" ]; then
-    if [ "$DEV_MODE" = "1" ]; then
-        echo "⚠️  goneat not found (dev mode). Using fallback validation"
-        if command -v gofmt > /dev/null 2>&1; then gofmt -l "$REPO_ROOT" || {
-            echo "❌ go fmt failed"
-            exit 1
-        }; fi
-        if command -v go > /dev/null 2>&1; then (cd "$REPO_ROOT" && go vet ./...) || {
-            echo "❌ go vet failed"
-            exit 1
-        }; fi
-        echo "✅ Basic validation passed"
-        exit 0
-    else
-        echo "❌ goneat CLI not found. Pre-commit validation requires goneat."
-        echo "👉 Install options:"
-        echo "   - Go:   go install github.com/fulmenhq/goneat@latest   (ensure \$GOPATH/bin in \$PATH)"
-        echo "   - Brew: brew install 3leaps/tap/goneat                (macOS, if tap available)"
-        echo "   - Releases: https://github.com/fulmenhq/goneat/releases"
-        echo "🔎 Searched: $REPO_ROOT/dist, $HOME/go/bin, /opt/homebrew/bin, /usr/local/bin, $HOME/.local/bin, $HOME/.goneat/bin"
-        echo "💡 Tip: export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\""
-        exit 1
-    fi
+  if [ "$DEV_MODE" = "1" ]; then
+    echo "⚠️  goneat not found (dev mode). Using fallback validation"
+    if command -v gofmt >/dev/null 2>&1; then gofmt -l "$REPO_ROOT" || { echo "❌ go fmt failed"; exit 1; }; fi
+    if command -v go >/dev/null 2>&1; then (cd "$REPO_ROOT" && go vet ./...) || { echo "❌ go vet failed"; exit 1; }; fi
+    echo "✅ Basic validation passed"
+    exit 0
+  else
+    echo "❌ goneat CLI not found. Pre-commit validation requires goneat."
+    echo "👉 Install options:"
+    echo "   - Go:   go install github.com/fulmenhq/goneat@latest   (ensure \$GOPATH/bin in \$PATH)"
+    echo "   - Brew: brew install 3leaps/tap/goneat                (macOS, if tap available)"
+    echo "   - Releases: https://github.com/fulmenhq/goneat/releases"
+    echo "🔎 Searched: $REPO_ROOT/dist, $HOME/go/bin, /opt/homebrew/bin, /usr/local/bin, $HOME/.local/bin, $HOME/.goneat/bin"
+    echo "💡 Tip: export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\""
+    exit 1
+  fi
 fi
 
 # Guardian enforcement for protected git commit operations
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2> /dev/null || echo "")
-GUARDIAN_SCOPE="git"
-GUARDIAN_OPERATION="commit"
-
-GUARDIAN_ARGS=("$GONEAT_BIN" guardian check "$GUARDIAN_SCOPE" "$GUARDIAN_OPERATION")
-if [ -n "$CURRENT_BRANCH" ]; then
-    GUARDIAN_ARGS+=("--branch" "$CURRENT_BRANCH")
-fi
-
-# Note: pre-commit hook runs before commit message is available
-# Just pass generic commit indicator since message doesn't exist yet
-GUARDIAN_ARGS+=("--" "-m" "<pending commit message>")
-
-if ! "${GUARDIAN_ARGS[@]}"; then
-    echo ""
-    echo "❌ Operation blocked by guardian"
-    echo "🔐 Approval required for: ${GUARDIAN_SCOPE} ${GUARDIAN_OPERATION}"
-    if [ -n "$CURRENT_BRANCH" ]; then
-        echo "   • Branch: $CURRENT_BRANCH"
-    fi
-    echo "   • Risk level: high"
-    echo "   • Method: browser"
-    echo "   • Approval expires in: 10m0s"
-    echo ""
-    echo "Wrap your git commit with guardian approval to continue:"
-    echo "  $GONEAT_BIN guardian approve $GUARDIAN_SCOPE $GUARDIAN_OPERATION -- git commit"
-    echo "  # add your usual commit arguments after git commit"
-    exit 1
-fi
-
-echo "✅ Guardian approval satisfied"
 
 # Use goneat's orchestrated assessment (manifest-driven)
 "$GONEAT_BIN" assess --hook pre-commit --hook-manifest "$REPO_ROOT/.goneat/hooks.yaml" --staged-only --package-mode

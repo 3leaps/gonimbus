@@ -4,6 +4,91 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.1.8 (2026-05-05)
+
+**Index Hub + Workspace Pattern + DX Hardening — Final v0.1.x Release**
+
+This release closes out the v0.1.x line by delivering the publishable / consumable index lifecycle: build an index locally, **publish** it to a hub, **consume** it on another host, and manage hub contents over time. Paired with a documented workspace convention and DX hardening, this is the operational toolchain that production data-acquisition pipelines need.
+
+### Index Hub
+
+Publish (`export`) and consume (`hydrate`) index runs against `file://` and `s3://` hubs, with full CRUD:
+
+```bash
+# Initialize a hub root
+gonimbus index hub init --hub s3://my-hub/
+
+# Publish a run
+gonimbus index hub init --hub s3://my-hub/
+gonimbus index export --index-set idx_<sha256> --hub s3://my-hub/
+
+# Consume on another host
+gonimbus index hydrate --index-set idx_<sha256> --hub s3://my-hub/
+
+# Manage hub contents
+gonimbus index hub ls --hub s3://my-hub/
+gonimbus index hub show --hub s3://my-hub/ --index-set idx_<sha256>
+gonimbus index hub set-latest --hub s3://my-hub/ --index-set idx_<sha256> --run-id run_<id>
+gonimbus index hub rm-run --hub s3://my-hub/ --index-set idx_<sha256> --run-id run_<id>
+gonimbus index hub gc --hub s3://my-hub/ --keep 5 --json
+```
+
+#### Publish Sequence (atomic-ish)
+
+`index.db` → `identity.json` → `complete.json` (commit marker) → `latest.json`. Hydrate verifies SHA-256 + size against the integrity manifest in `complete.json` and rejects uncommitted runs.
+
+#### latest.json Pointer
+
+`latest.json` updates use plain `PutObject` — best-effort, last-writer-wins. CAS / fail-closed semantics (If-Match / If-None-Match, etag plumbing) are tracked for v0.2.x.
+
+### Index Query Flags
+
+```bash
+# Explicit index-set selection (resolves prefix or full idx_<64hex>)
+gonimbus index query 's3://bucket/prefix/' --index-set idx_da038d8
+
+# Stream results to S3 / file destinations
+gonimbus index query 's3://bucket/prefix/' --output 's3://results/query.jsonl'
+gonimbus index query 's3://bucket/prefix/' --output 'file:///tmp/query.jsonl'
+```
+
+### Workspace Pattern
+
+`workspace.yaml` convention with documented layout, shard strategies, and operational flows:
+
+- Build + publish (crawl → index → export)
+- Hydrate + query (consume on remote host)
+- Extract + reflow (probe → transfer reflow with content-aware routing)
+- Hub maintenance (set-latest, rm-run, gc)
+
+See [`docs/user-guide/workspace.md`](docs/user-guide/workspace.md) for the full pattern.
+
+### DX Hardening
+
+- Pre-push hook scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
+- Pre-existing high-severity gosec / golangci-lint findings annotated with rationale or fixed
+- Guardian browser-intercept hooks removed; the team is on a feature-branch workflow
+
+### Bug Fixes
+
+- `gonimbus index hub gc --json` (without `--dry-run`) silently no-oped deletions; fixed to honor `--dry-run` correctly and emit per-run outcomes in the JSON envelope
+
+### Upgrade Notes
+
+No breaking changes from v0.1.7. Upgrade with:
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.1.8
+```
+
+### What's Next
+
+v0.1.x is complete. v0.2.x will introduce control-plane capabilities: managed runner, queue consumer, job lifecycle, and conditional-update (CAS / fail-closed) semantics for `latest.json`. GCS provider also lands in v0.2.x.
+
+See [docs/releases/v0.1.8.md](docs/releases/v0.1.8.md) for complete release notes.
+
+---
+
 ## v0.1.7 (2026-01-28)
 
 **Transfer Reflow with Content-Aware Routing**
@@ -198,57 +283,3 @@ fi
 ### Documentation
 
 - See [docs/releases/v0.1.6.md](docs/releases/v0.1.6.md) for complete release notes
-
----
-
-## v0.1.5 (2026-01-23)
-
-**Content Streaming + validate=size for Consumer Integration**
-
-This release introduces content streaming commands and validation, enabling Gonimbus to serve as a data plane for downstream consumers (Go, Python, Node) that need to process object content without managing provider SDKs directly.
-
-### Content Streaming Commands
-
-New `stream` subcommands provide structured access to object metadata and content:
-
-```bash
-# Get object metadata (JSONL output)
-gonimbus stream head s3://bucket/key --profile my-profile
-
-# Stream object content (mixed JSONL + raw bytes)
-gonimbus stream get s3://bucket/key --profile my-profile
-```
-
-#### Stream Contract
-
-The streaming output uses a mixed-framing format (ADR-0004):
-
-| Record Type                | Purpose                                               |
-| -------------------------- | ----------------------------------------------------- |
-| `gonimbus.stream.open.v1`  | Stream metadata (uri, size, etag, last_modified)      |
-| `gonimbus.stream.chunk.v1` | Chunk header (seq, nbytes) + raw bytes                |
-| `gonimbus.stream.close.v1` | Completion status (success/error, total chunks/bytes) |
-
-Errors are emitted to **stdout** as `gonimbus.error.v1` records (streaming mode contract), enabling consumers to rely on structured output without scraping stderr.
-
-#### Decoder Package
-
-The `pkg/stream` package provides Go helpers for producing and consuming streams:
-
-- `Writer`: Produces mixed-framing output
-- `Decoder`: Parses streams with truncation detection (`io.ErrUnexpectedEOF`)
-- Byte-exact reconstruction verified via MD5/SHA256 round-trip
-
-### validate=size (Stale Index Mitigation)
-
-Both `stream get` and transfer operations now validate that enumerated size matches GetObject content-length:
-
-- Catches stale index/list metadata before deep pipeline processing
-- Size mismatch mapped to `NOT_FOUND` error code (stale key semantics)
-- Fails early, avoiding wasted buffering and retries
-
-### Documentation
-
-- ADR-0004: Language-neutral content stream contract
-- Streaming contract spec and helper guidance (`docs/development/streaming/`)
-- See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md) for complete release notes
