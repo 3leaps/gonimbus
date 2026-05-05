@@ -588,6 +588,8 @@ func runIndexHubSetLatest(cmd *cobra.Command, _ []string) error {
 		defer func() { _ = closer.Close() }()
 	}
 
+	// Best-effort pointer advance: plain PutObject, last-writer-wins.
+	// CAS / fail-closed semantics are tracked for v0.2.x.
 	latestKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "latest.json")
 	if err := uploadBytes(ctx, putter, latestKey, data); err != nil {
 		return fmt.Errorf("write latest.json: %w", err)
@@ -710,11 +712,27 @@ func listAllKeys(ctx context.Context, lister provider.Provider, prefix string) (
 // --- gc implementation ---
 
 // gcRunCandidate represents a run being evaluated for garbage collection.
+// In dry-run output, only the IndexSetID/RunID/IsLatest/CompletedAt fields are
+// populated. In real-run output, Artifacts and Error are also populated to
+// reflect the per-run deletion outcome.
 type gcRunCandidate struct {
 	IndexSetID  string `json:"index_set_id"`
 	RunID       string `json:"run_id"`
 	IsLatest    bool   `json:"is_latest"`
 	CompletedAt string `json:"completed_at,omitempty"`
+	Artifacts   int    `json:"artifacts,omitempty"` // count of objects deleted (real-run)
+	Error       string `json:"error,omitempty"`     // populated if list/delete failed (real-run)
+}
+
+// gcResult is the JSON envelope emitted by `gonimbus index hub gc --json`.
+// In dry-run mode, Removed lists candidates that *would* be removed.
+// In real-run mode, Removed lists candidates that were *attempted*; each
+// entry carries an Error if its deletion failed, and Errors is the count of
+// such failures.
+type gcResult struct {
+	DryRun  bool             `json:"dry_run"`
+	Removed []gcRunCandidate `json:"removed"`
+	Errors  int              `json:"errors,omitempty"`
 }
 
 func runIndexHubGC(cmd *cobra.Command, _ []string) error {
@@ -902,22 +920,23 @@ func runIndexHubGC(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+
+	// Empty case
 	if len(toRemove) == 0 {
+		if jsonOutput {
+			return enc.Encode(gcResult{DryRun: dryRun, Removed: []gcRunCandidate{}})
+		}
 		_, _ = fmt.Fprintln(os.Stderr, "Nothing to remove")
 		return nil
 	}
 
-	if jsonOutput {
-		type gcResult struct {
-			DryRun  bool             `json:"dry_run"`
-			Removed []gcRunCandidate `json:"removed"`
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(gcResult{DryRun: dryRun, Removed: toRemove})
-	}
-
+	// Dry-run case: report candidates and stop. No deletion.
 	if dryRun {
+		if jsonOutput {
+			return enc.Encode(gcResult{DryRun: true, Removed: toRemove})
+		}
 		_, _ = fmt.Fprintf(os.Stderr, "Would remove %d run(s):\n", len(toRemove))
 		for _, r := range toRemove {
 			_, _ = fmt.Fprintf(os.Stderr, "  %s / %s\n", r.IndexSetID, r.RunID)
@@ -925,7 +944,7 @@ func runIndexHubGC(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Actually delete
+	// Real run: resolve a deleter and execute deletions.
 	var deleter provider.ObjectDeleter
 	if d, dok := getter.(provider.ObjectDeleter); dok {
 		deleter = d
@@ -944,24 +963,50 @@ func runIndexHubGC(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	removed := 0
-	for _, r := range toRemove {
+	errors := 0
+	successCount := 0
+	for i, r := range toRemove {
 		runPrefix := hubArtifactKey(hub, "index-sets", r.IndexSetID, "runs", r.RunID) + "/"
 		keys, listErr := listAllKeys(ctx, lister, runPrefix)
 		if listErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "warning: could not list artifacts for %s/%s: %v\n", r.IndexSetID, r.RunID, listErr)
+			toRemove[i].Error = fmt.Sprintf("list artifacts: %v", listErr)
+			errors++
+			if !jsonOutput {
+				_, _ = fmt.Fprintf(os.Stderr, "warning: could not list artifacts for %s/%s: %v\n", r.IndexSetID, r.RunID, listErr)
+			}
 			continue
 		}
+
+		var firstDelErr error
 		for _, key := range keys {
 			if delErr := deleter.DeleteObject(ctx, key); delErr != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "warning: failed to delete %s: %v\n", key, delErr)
+				if firstDelErr == nil {
+					firstDelErr = delErr
+				}
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(os.Stderr, "warning: failed to delete %s: %v\n", key, delErr)
+				}
 			}
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "  removed %s / %s (%d artifacts)\n", r.IndexSetID, r.RunID, len(keys))
-		removed++
+		toRemove[i].Artifacts = len(keys)
+		if firstDelErr != nil {
+			toRemove[i].Error = fmt.Sprintf("delete: %v", firstDelErr)
+			errors++
+			continue
+		}
+		successCount++
+		if !jsonOutput {
+			_, _ = fmt.Fprintf(os.Stderr, "  removed %s / %s (%d artifacts)\n", r.IndexSetID, r.RunID, len(keys))
+		}
 	}
 
-	_, _ = fmt.Fprintf(os.Stderr, "GC complete: removed %d run(s)\n", removed)
+	if jsonOutput {
+		return enc.Encode(gcResult{DryRun: false, Removed: toRemove, Errors: errors})
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "GC complete: removed %d run(s)\n", successCount)
+	if errors > 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "  with %d error(s)\n", errors)
+	}
 	return nil
 }
 

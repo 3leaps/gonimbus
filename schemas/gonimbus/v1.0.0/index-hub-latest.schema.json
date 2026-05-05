@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gonimbus/v1.0.0/index-hub-latest",
   "title": "Gonimbus Index Hub Latest Pointer",
-  "description": "Points to the preferred run for a given index set. Written at index-sets/<index_set_id>/latest.json. Updated via CAS when supported; fails closed otherwise.",
+  "description": "Points to the preferred run for a given index set. Written at index-sets/<index_set_id>/latest.json. v0.1.x writes are best-effort: plain PutObject with last-writer-wins semantics. Conditional-update / fail-closed semantics (CAS via If-Match / If-None-Match) are tracked for v0.2.x.",
   "type": "object",
   "required": [
     "version",

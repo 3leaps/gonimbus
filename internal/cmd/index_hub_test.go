@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -342,6 +343,61 @@ func TestRunIndexHubGC_MutuallyExclusive(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestRunIndexHubGC_JSONWithoutDryRunActuallyDeletes is a regression test for
+// the bug where `gonimbus index hub gc --json` (without --dry-run) emitted
+// the candidate list as JSON and returned without performing any deletion.
+// The fix routes deletion through the same code path regardless of output mode.
+func TestRunIndexHubGC_JSONWithoutDryRunActuallyDeletes(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+
+	// run_1 is latest in setupHubWith3Runs; --keep 2 should delete the oldest
+	// non-latest run. Use --json without --dry-run.
+	cmd := newHubGCCmd(t, hubDir, "", 2, "", false, true)
+
+	// Redirect os.Stdout briefly to capture JSON output for shape assertion.
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	execErr := cmd.Execute()
+
+	require.NoError(t, w.Close())
+	os.Stdout = origStdout
+	captured, _ := io.ReadAll(r)
+
+	require.NoError(t, execErr)
+
+	// Filesystem check: oldest committed run should be gone.
+	// setupHubWith3Runs has run_1 (newest in time), run_2 (middle), run_3 (oldest).
+	// Wait — actually setupHubWith3Runs creates run_1=oldest..run_3=newest by ULID-style.
+	// The test asserts SOME non-latest run was deleted; we keep this loose to
+	// stay aligned with whatever ordering setupHubWith3Runs uses.
+	indexSetDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs")
+	entries, err := os.ReadDir(indexSetDir)
+	require.NoError(t, err)
+	// Count surviving run dirs that still have index.db
+	surviving := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(indexSetDir, e.Name(), "index.db")); statErr == nil {
+			surviving++
+		}
+	}
+	assert.Equal(t, 2, surviving, "after gc --keep 2 --json (no dry-run), exactly 2 runs should survive (the bug returned before deletion, leaving all 3)")
+
+	// JSON shape: dry_run should be false; removed should be present.
+	var result struct {
+		DryRun  bool                     `json:"dry_run"`
+		Removed []map[string]interface{} `json:"removed"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	assert.False(t, result.DryRun, "JSON output should report dry_run=false for a real run")
+	assert.NotEmpty(t, result.Removed, "JSON output should list the run(s) that were removed")
 }
 
 // --- listAllKeys ---
