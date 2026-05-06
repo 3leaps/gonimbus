@@ -1,0 +1,20 @@
+# Pinned yamlfmt config — see gonimbus#3.
+#
+# Without this file, local `make fmt` (via goneat) and CI's `yamlfmt -lint .`
+# disagree on inline-comment padding: goneat deliberately writes two spaces
+# (yamllint-compatible default), while standalone yamlfmt's default is one
+# space. The result was unrelated `make check-all` runs failing CI on files
+# like .goneat/dependencies.yaml or examples/index/index-scoped-dates.yaml.
+#
+# Pinning here means both `make fmt` and `yamlfmt -lint .` (which auto-loads
+# .yamlfmt from the repo root) agree on two spaces, which is also what
+# yamllint's `comments` rule expects by default. See
+# https://github.com/google/yamlfmt/blob/main/docs/config-file.md and the
+# goneat appnote `yaml-format-lint-alignment`.
+
+formatter:
+  type: basic
+  # Two spaces before "#" in inline comments. This matches goneat's pinned
+  # default and yamllint convention; pinning here makes CI's bare
+  # `yamlfmt -lint .` pick up the same setting via the auto-loaded config.
+  pad_line_comments: 2

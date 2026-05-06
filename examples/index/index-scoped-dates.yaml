@@ -33,15 +33,15 @@ build:
     # Each segment is discovered via delimiter listing
     discover:
       segments:
-        - index: 0 # Segment 0: discover store IDs (e.g., "store-001/", "store-002/")
-        - index: 1 # Segment 1: discover device IDs under each store
+        - index: 0  # Segment 0: discover store IDs (e.g., "store-001/", "store-002/")
+        - index: 1  # Segment 1: discover device IDs under each store
     # Date segment configuration
     date:
-      segment_index: 2 # Date is at segment index 2 (after store and device)
-      format: "2006-01-02" # Go date format matching folder names (YYYY-MM-DD)
+      segment_index: 2  # Date is at segment index 2 (after store and device)
+      format: "2006-01-02"  # Go date format matching folder names (YYYY-MM-DD)
       range:
-        after: "2025-12-01" # Inclusive start date
-        before: "2026-01-01" # Exclusive end date (standard interval notation)
+        after: "2025-12-01"  # Inclusive start date
+        before: "2026-01-01"  # Exclusive end date (standard interval notation)
   # MATCH: Controls what objects are ingested (index size lever)
   # Applied AFTER listing - does not reduce provider API calls
   match:

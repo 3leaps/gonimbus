@@ -168,7 +168,7 @@ release-prepare:  ## Prepare for release (tests, version bump)
 RELEASE_TAG ?= v$(shell cat VERSION 2>/dev/null || echo "0.0.0")
 DIST_RELEASE ?= dist/release
 
-sync-app-version: ## Sync .fulmen/app.yaml version from VERSION
+sync-app-version: ## Sync .fulmen/app.yaml + internal/buildinfo/VERSION from VERSION
 	@VERSION_VALUE="$$(cat VERSION)"; \
 	if [ -z "$$VERSION_VALUE" ]; then \
 		echo "❌ VERSION file is empty" >&2; \
@@ -180,6 +180,8 @@ sync-app-version: ## Sync .fulmen/app.yaml version from VERSION
 	fi; \
 	awk -v version="$$VERSION_VALUE" 'BEGIN{updated=0} /^[[:space:]]*version:/ {print "  version: " version; updated=1; next} {print} END{if(updated==0) exit 1}' .fulmen/app.yaml > .fulmen/app.yaml.tmp && mv .fulmen/app.yaml.tmp .fulmen/app.yaml; \
 	echo "✅ App identity version set to $$VERSION_VALUE"
+	@cp VERSION internal/buildinfo/VERSION
+	@echo "✅ Embedded buildinfo VERSION synced to $$(cat internal/buildinfo/VERSION)"
 
 sync-embedded-identity: ## Sync embedded identity mirror from .fulmen/app.yaml
 	@./scripts/sync-embedded-identity.sh
