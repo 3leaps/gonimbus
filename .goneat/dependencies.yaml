@@ -26,13 +26,13 @@ version: v1
 licenses:
   # Forbidden licenses (build fails if detected)
   forbidden:
-    - GPL-3.0 # Strong copyleft - requires derivative works to be GPL
-    - GPL-2.0 # Strong copyleft
-    - AGPL-3.0 # Network copyleft - triggers on network use
-    - MPL-2.0 # Mozilla Public License - weak copyleft with patent concerns
-    - LGPL-3.0 # Lesser GPL - linking concerns
-    - LGPL-2.1 # Lesser GPL
-    - CDDL-1.0 # Common Development and Distribution License
+    - GPL-3.0  # Strong copyleft - requires derivative works to be GPL
+    - GPL-2.0  # Strong copyleft
+    - AGPL-3.0  # Network copyleft - triggers on network use
+    - MPL-2.0  # Mozilla Public License - weak copyleft with patent concerns
+    - LGPL-3.0  # Lesser GPL - linking concerns
+    - LGPL-2.1  # Lesser GPL
+    - CDDL-1.0  # Common Development and Distribution License
   # Explicitly allow only safe, permissive licenses
   allowed:
     - MIT

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped version to `0.2.0-dev`** to open the v0.2.x development line.
+  No release artifacts produced from this state; v0.2.x feature work follows
+  in subsequent PRs (see `3leaps-productbook-internal/projmgmt/gonimbus/`).
+
+### Fixed
+
+- **`go install`-built binaries now report the correct version** ([#6](https://github.com/3leaps/gonimbus/issues/6)).
+  The Makefile's `-ldflags -X main.version=…` injection is no longer the only
+  source of the version string — a new `internal/buildinfo` package resolves
+  the version from a three-tier chain: ldflags overrides → `runtime/debug.ReadBuildInfo`
+  (covers `go install module@vX.Y.Z`) → embedded `VERSION` file
+  (covers `go install ./cmd/...` from a working tree). The repo-root `VERSION`
+  is mirrored into `internal/buildinfo/VERSION` by `make sync-app-version`.
+  Regression guard in `test/integration/standalone_binary_test.go` builds the
+  binary with no ldflags and asserts the reported version matches `VERSION`.
+- **Pinned yamlfmt config** ([#3](https://github.com/3leaps/gonimbus/issues/3)).
+  Added `.yamlfmt` at repo root with `pad_line_comments: 2` so that local
+  `make fmt` (via goneat) and CI's `yamlfmt -lint .` agree on inline-comment
+  spacing. Without this pin, `make check-all` could rewrite YAML files to a
+  different convention than CI expected, producing unrelated format-check
+  failures (notably on `.goneat/dependencies.yaml` and
+  `examples/index/index-scoped-dates.yaml`).
+
 ## [0.1.8] - 2026-05-05
 
 ### Added
