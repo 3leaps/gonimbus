@@ -3,12 +3,19 @@ package main
 import (
 	"github.com/fulmenhq/gofulmen/foundry"
 
+	"github.com/3leaps/gonimbus/internal/buildinfo"
 	"github.com/3leaps/gonimbus/internal/cmd"
 	"github.com/3leaps/gonimbus/internal/server/handlers"
 )
 
-// Version information set via ldflags during build
-// Example: go build -ldflags="-X main.version=1.0.0 -X main.commit=abc123 -X main.buildDate=2025-10-28"
+// Build-time identification.
+//
+// `make build` injects values into these symbols via -ldflags. When the binary
+// is produced by a path that does not run the Makefile (e.g. `go install
+// github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.0` or `go install ./cmd/...`),
+// these stay at their defaults and buildinfo.Resolve falls back to
+// runtime/debug.ReadBuildInfo and the embedded VERSION file. See
+// internal/buildinfo and gonimbus#6.
 var (
 	version   = "dev"
 	commit    = "unknown"
@@ -16,11 +23,13 @@ var (
 )
 
 func main() {
+	v, c, b := buildinfo.Resolve(version, commit, buildDate)
+
 	// Set version info for commands to access
-	cmd.SetVersionInfo(version, commit, buildDate)
+	cmd.SetVersionInfo(v, c, b)
 
 	// Set version info for HTTP handlers
-	handlers.SetVersionInfo(version, commit, buildDate)
+	handlers.SetVersionInfo(v, c, b)
 
 	// Execute root command
 	if err := cmd.Execute(); err != nil {

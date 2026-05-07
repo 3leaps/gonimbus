@@ -47,8 +47,33 @@ func TestStandaloneBinaryVersionAndHelpWorkOutsideRepo(t *testing.T) {
 
 	version := exec.Command(copiedBinary, "version")
 	version.Dir = outside
-	if out, err := version.CombinedOutput(); err != nil {
-		t.Fatalf("version failed: %v\n%s", err, string(out))
+	versionOut, err := version.CombinedOutput()
+	if err != nil {
+		t.Fatalf("version failed: %v\n%s", err, string(versionOut))
+	}
+
+	// Regression guard for gonimbus#6: a binary built without ldflags (the
+	// `go install` code path) must report a real version, not the
+	// placeholder "dev". buildinfo.Resolve falls back to the embedded
+	// VERSION file when ldflags are absent, so the reported version must
+	// match the repo's VERSION file.
+	versionLine := strings.TrimSpace(string(versionOut))
+	fields := strings.Fields(versionLine)
+	if len(fields) < 2 {
+		t.Fatalf("unexpected `gonimbus version` output %q from %s; expected `<name> <version>`", versionLine, outside)
+	}
+	reportedVersion := fields[len(fields)-1]
+	if reportedVersion == "dev" {
+		t.Fatalf("binary reported placeholder %q from %s; gonimbus#6 has regressed (no ldflags fallback)", reportedVersion, outside)
+	}
+
+	versionFileBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
+	if err != nil {
+		t.Fatalf("read repo VERSION file: %v", err)
+	}
+	wantVersion := strings.TrimSpace(string(versionFileBytes))
+	if reportedVersion != wantVersion {
+		t.Fatalf("binary reported %q from %s; expected %q (from repo-root VERSION)", reportedVersion, outside, wantVersion)
 	}
 
 	help := exec.Command(copiedBinary, "--help")
