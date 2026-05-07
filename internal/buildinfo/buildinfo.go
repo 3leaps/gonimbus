@@ -2,22 +2,27 @@
 // binary. It is intentionally tiny and dependency-free so that the resolution
 // logic remains predictable across build paths.
 //
-// Resolution priority (highest first):
+// Resolution priority for the version string (highest first):
 //
-//  1. Linker ldflags overrides — passed in via main as `version`, `commit`,
-//     `buildDate` symbols. `make build` sets these from the VERSION file,
-//     git rev-parse, and current UTC. This is the historical mechanism and
-//     remains authoritative when present.
-//  2. runtime/debug.ReadBuildInfo — populated automatically by the Go
-//     toolchain. Covers `go install module@vX.Y.Z`, where `Main.Version`
-//     and the `vcs.revision`/`vcs.time` build settings encode the module
-//     version and commit metadata.
-//  3. Embedded VERSION file — kept in sync with the repo-root VERSION via
-//     the Makefile's sync-app-version target. Covers `go install ./cmd/...`
-//     from a working tree (where Main.Version reports "(devel)") and any
-//     other path where neither ldflags nor BuildInfo carries a real version.
-//  4. The string "dev" / "unknown" fallbacks — only reached when none of the
-//     above produces a value, which should be rare.
+//  1. Linker ldflags overrides — passed in via main as the `version` symbol.
+//     `make build` sets this from the VERSION file. Authoritative when set
+//     to anything other than the placeholder "dev".
+//  2. Embedded VERSION file — read at build time via `//go:embed VERSION`,
+//     kept in sync with the repo-root VERSION via `make sync-app-version`.
+//     This is the *repo's* statement of what version it is, which is what
+//     we want to report regardless of how the binary was produced. Notably:
+//     `go install ./cmd/...` from a working tree, `go build` from a clean
+//     checkout (which would otherwise return a Go pseudo-version derived
+//     from the latest tag), and any other build path without ldflags.
+//  3. runtime/debug.ReadBuildInfo Main.Version — only used as a final
+//     fallback if the embed is somehow empty. Generally not reached because
+//     the embed is bundled with the package.
+//  4. The literal "dev" — only if every source above is empty.
+//
+// For commit and buildDate (which are NOT in the VERSION file), the order
+// is ldflags → BuildInfo (vcs.revision, vcs.time) → "unknown". BuildInfo
+// is the right fallback there because `go install module@vX.Y.Z` populates
+// these settings from the module source even without ldflags.
 //
 // See docs/architecture.md and gonimbus#6 for context.
 package buildinfo
@@ -35,20 +40,21 @@ var embeddedVersion string
 // running binary. ldVersion/ldCommit/ldBuildDate are the ldflags-injected
 // values from the main package; pass them through unchanged.
 func Resolve(ldVersion, ldCommit, ldBuildDate string) (version, commit, buildDate string) {
-	// Tier 3: embedded VERSION as the baseline default.
+	// Version: embedded VERSION is the baseline (the repo's authoritative
+	// statement of its own version). ldflags override it when explicitly
+	// set; BuildInfo only fills in if the embed is somehow empty.
 	version = strings.TrimSpace(embeddedVersion)
-	if version == "" {
-		version = "dev"
-	}
 	commit = "unknown"
 	buildDate = "unknown"
 
-	// Tier 2: runtime/debug.ReadBuildInfo overlays version/commit/buildDate
-	// when the toolchain has captured them. This is what makes
-	// `go install ...@vX.Y.Z` report the correct version.
+	// BuildInfo overlay for commit/buildDate (and version-as-last-resort).
+	// `go install module@vX.Y.Z` populates vcs.revision/vcs.time from the
+	// module source even without ldflags, which is what we want.
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if v := normalizeModuleVersion(info.Main.Version); v != "" {
-			version = v
+		if version == "" {
+			if v := normalizeModuleVersion(info.Main.Version); v != "" {
+				version = v
+			}
 		}
 		for _, s := range info.Settings {
 			switch s.Key {
@@ -64,10 +70,14 @@ func Resolve(ldVersion, ldCommit, ldBuildDate string) (version, commit, buildDat
 		}
 	}
 
-	// Tier 1: ldflags-injected values take final precedence when explicitly
-	// set. We treat the placeholder defaults ("dev"/"unknown") as
-	// "unspecified" so we don't clobber better information from BuildInfo or
-	// the embed when the binary was built without ldflags.
+	if version == "" {
+		version = "dev"
+	}
+
+	// ldflags-injected values take final precedence when explicitly set.
+	// We treat the placeholder defaults ("dev"/"unknown") as "unspecified"
+	// so we don't clobber better information from the embed or BuildInfo
+	// when the binary was built without ldflags.
 	if ldVersion != "" && ldVersion != "dev" {
 		version = ldVersion
 	}

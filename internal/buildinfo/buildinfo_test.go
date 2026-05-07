@@ -63,6 +63,37 @@ func TestResolve_EmbeddedVersionMatchesRepo(t *testing.T) {
 	}
 }
 
+// TestResolve_EmbedWinsOverBuildInfoModuleVersion is the regression test
+// for the CI failure on PR #7: under `go build` from a clean checkout (no
+// ldflags, no dirty working tree), runtime/debug.ReadBuildInfo's
+// Main.Version returns a Go pseudo-version derived from the latest tag
+// (e.g. "0.1.9-0.20260506150031-<sha>" when the latest tag is v0.1.8).
+// That pseudo-version is *not* what the repo says it is. The embedded
+// VERSION file is — and must win.
+//
+// We can't easily fabricate a fake BuildInfo from inside the running test
+// process (debug.ReadBuildInfo reads the executable's own metadata), so
+// this test asserts the contract directly: when ldVersion is the
+// placeholder "dev", Resolve must return strings.TrimSpace(embeddedVersion)
+// — never a string that looks like a Go pseudo-version (which always
+// contains a dash followed by a 14-digit timestamp).
+func TestResolve_EmbedWinsOverBuildInfoModuleVersion(t *testing.T) {
+	v, _, _ := Resolve("dev", "unknown", "unknown")
+	embedded := strings.TrimSpace(embeddedVersion)
+	if v != embedded {
+		t.Fatalf("Resolve returned %q; expected the embedded VERSION %q. "+
+			"BuildInfo must NEVER override the embed for the version string "+
+			"(gonimbus#6 / PR #7 CI regression).", v, embedded)
+	}
+	// Belt-and-suspenders: pseudo-versions always contain a 14-digit
+	// timestamp segment like "-0.20260506150031-". If we ever see that,
+	// the embed-wins invariant has broken even if the assertion above
+	// somehow passed.
+	if strings.Contains(v, "-0.2026") || strings.Contains(v, "-0.2027") {
+		t.Fatalf("Resolve returned what looks like a Go pseudo-version: %q", v)
+	}
+}
+
 // TestNormalizeModuleVersion exercises the v-prefix stripping logic.
 func TestNormalizeModuleVersion(t *testing.T) {
 	tests := []struct {
