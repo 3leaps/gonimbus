@@ -98,7 +98,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	// List objects
-	objects, err := listObjects(ctx, prov, parsed, filter)
+	result, err := listObjectsDetailed(ctx, prov, parsed, filter)
 	if err != nil {
 		observability.CLILogger.Error("Failed to list objects", zap.Error(err))
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to list objects", err)
@@ -106,9 +106,9 @@ func runInspect(cmd *cobra.Command, args []string) error {
 
 	// Output results
 	if inspectJSON {
-		return outputJSON(objects)
+		return outputJSONWithSummary(result.Objects, result.Summary)
 	}
-	return outputTable(objects)
+	return outputTableWithSummary(result.Objects, result.Summary)
 }
 
 // buildInspectFilter creates a composite filter from CLI flags.
@@ -161,8 +161,37 @@ func createInspectProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, e
 	return s3.New(ctx, cfg)
 }
 
+type inspectListResult struct {
+	Objects []provider.ObjectSummary
+	Summary *inspectSummary
+}
+
+type inspectSummary struct {
+	Type string             `json:"type"`
+	Data inspectSummaryData `json:"data"`
+}
+
+type inspectSummaryData struct {
+	ObjectsEmitted int    `json:"objects_emitted"`
+	Limit          int    `json:"limit"`
+	Truncated      bool   `json:"truncated"`
+	Reason         string `json:"reason,omitempty"`
+	MayHaveMore    bool   `json:"may_have_more"`
+}
+
+const inspectSummaryType = "gonimbus.inspect.summary.v1"
+
 // listObjects lists objects matching the URI and optional filter.
 func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, filter *match.CompositeFilter) ([]provider.ObjectSummary, error) {
+	result, err := listObjectsDetailed(ctx, prov, uri, filter)
+	if err != nil {
+		return nil, err
+	}
+	return result.Objects, nil
+}
+
+// listObjectsDetailed lists objects and reports whether output was capped by --limit.
+func listObjectsDetailed(ctx context.Context, prov provider.Provider, uri *ObjectURI, filter *match.CompositeFilter) (*inspectListResult, error) {
 	// If URI is an exact object key (not a pattern, not a prefix), use Head
 	// for precise lookup. This avoids prefix-based listing which could return
 	// unrelated objects (e.g., "object.txt" vs "object.txt.bak").
@@ -173,9 +202,9 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, fi
 		}
 		// Apply filter to single object
 		if filter != nil && !filter.Match(&meta.ObjectSummary) {
-			return []provider.ObjectSummary{}, nil
+			return &inspectListResult{}, nil
 		}
-		return []provider.ObjectSummary{meta.ObjectSummary}, nil
+		return &inspectListResult{Objects: []provider.ObjectSummary{meta.ObjectSummary}}, nil
 	}
 
 	var objects []provider.ObjectSummary
@@ -215,10 +244,23 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, fi
 				continue
 			}
 
-			objects = append(objects, obj)
 			if len(objects) >= inspectLimit {
-				break
+				return &inspectListResult{
+					Objects: objects,
+					Summary: newInspectLimitSummary(len(objects)),
+				}, nil
 			}
+			objects = append(objects, obj)
+		}
+
+		if len(objects) >= inspectLimit {
+			if result.IsTruncated && result.ContinuationToken != "" {
+				return &inspectListResult{
+					Objects: objects,
+					Summary: newInspectLimitSummary(len(objects)),
+				}, nil
+			}
+			break
 		}
 
 		if !result.IsTruncated || result.ContinuationToken == "" {
@@ -227,7 +269,20 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, fi
 		continuationToken = result.ContinuationToken
 	}
 
-	return objects, nil
+	return &inspectListResult{Objects: objects}, nil
+}
+
+func newInspectLimitSummary(objectsEmitted int) *inspectSummary {
+	return &inspectSummary{
+		Type: inspectSummaryType,
+		Data: inspectSummaryData{
+			ObjectsEmitted: objectsEmitted,
+			Limit:          inspectLimit,
+			Truncated:      true,
+			Reason:         "limit_reached",
+			MayHaveMore:    true,
+		},
+	}
 }
 
 // objectOutput is the JSON output structure for inspect.
@@ -240,6 +295,12 @@ type objectOutput struct {
 
 // outputJSON writes objects as JSONL to stdout.
 func outputJSON(objects []provider.ObjectSummary) error {
+	return outputJSONWithSummary(objects, nil)
+}
+
+// outputJSONWithSummary writes objects as JSONL to stdout, followed by a
+// stream-level summary record when inspect output was capped.
+func outputJSONWithSummary(objects []provider.ObjectSummary, summary *inspectSummary) error {
 	enc := json.NewEncoder(os.Stdout)
 	for _, obj := range objects {
 		out := objectOutput{
@@ -252,11 +313,21 @@ func outputJSON(objects []provider.ObjectSummary) error {
 			return fmt.Errorf("failed to encode object: %w", err)
 		}
 	}
+	if summary != nil {
+		if err := enc.Encode(summary); err != nil {
+			return fmt.Errorf("failed to encode summary: %w", err)
+		}
+	}
 	return nil
 }
 
 // outputTable writes objects as a formatted table to stdout.
 func outputTable(objects []provider.ObjectSummary) error {
+	return outputTableWithSummary(objects, nil)
+}
+
+// outputTableWithSummary writes objects as a formatted table to stdout.
+func outputTableWithSummary(objects []provider.ObjectSummary, summary *inspectSummary) error {
 	if len(objects) == 0 {
 		fmt.Println("No objects found.")
 		return nil
@@ -286,6 +357,9 @@ func outputTable(objects []provider.ObjectSummary) error {
 
 	fmt.Println()
 	fmt.Printf("Found %d object(s) (%s total)\n", len(objects), formatSize(totalSize))
+	if summary != nil && summary.Data.Truncated {
+		fmt.Printf("Warning: output limited to %d object(s); more matching objects may exist. Increase --limit to inspect more.\n", summary.Data.Limit)
+	}
 
 	return nil
 }

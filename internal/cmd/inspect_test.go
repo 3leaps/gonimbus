@@ -275,6 +275,89 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 	}
 }
 
+func TestListObjectsDetailed_LimitSummary(t *testing.T) {
+	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		listResult  *provider.ListResult
+		limit       int
+		wantObjects int
+		wantSummary bool
+	}{
+		{
+			name: "no summary when provider exhausted at exact limit",
+			listResult: &provider.ListResult{
+				Objects: []provider.ObjectSummary{
+					{Key: "file1.txt", Size: 100, LastModified: now},
+					{Key: "file2.txt", Size: 200, LastModified: now},
+				},
+				IsTruncated: false,
+			},
+			limit:       2,
+			wantObjects: 2,
+			wantSummary: false,
+		},
+		{
+			name: "summary when current page has additional matching objects",
+			listResult: &provider.ListResult{
+				Objects: []provider.ObjectSummary{
+					{Key: "file1.txt", Size: 100, LastModified: now},
+					{Key: "file2.txt", Size: 200, LastModified: now},
+					{Key: "file3.txt", Size: 300, LastModified: now},
+				},
+				IsTruncated: false,
+			},
+			limit:       2,
+			wantObjects: 2,
+			wantSummary: true,
+		},
+		{
+			name: "summary when provider has another page",
+			listResult: &provider.ListResult{
+				Objects: []provider.ObjectSummary{
+					{Key: "file1.txt", Size: 100, LastModified: now},
+					{Key: "file2.txt", Size: 200, LastModified: now},
+				},
+				IsTruncated:       true,
+				ContinuationToken: "next-page",
+			},
+			limit:       2,
+			wantObjects: 2,
+			wantSummary: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldLimit := inspectLimit
+			inspectLimit = tt.limit
+			defer func() { inspectLimit = oldLimit }()
+
+			mock := &mockProvider{listResult: tt.listResult}
+			result, err := listObjectsDetailed(context.Background(), mock, &ObjectURI{
+				Provider: "s3",
+				Bucket:   "bucket",
+				Key:      "prefix/",
+			}, nil)
+			require.NoError(t, err)
+			require.Len(t, result.Objects, tt.wantObjects)
+
+			if tt.wantSummary {
+				require.NotNil(t, result.Summary)
+				assert.Equal(t, inspectSummaryType, result.Summary.Type)
+				assert.Equal(t, tt.limit, result.Summary.Data.Limit)
+				assert.Equal(t, tt.wantObjects, result.Summary.Data.ObjectsEmitted)
+				assert.True(t, result.Summary.Data.Truncated)
+				assert.True(t, result.Summary.Data.MayHaveMore)
+				assert.Equal(t, "limit_reached", result.Summary.Data.Reason)
+			} else {
+				assert.Nil(t, result.Summary)
+			}
+		})
+	}
+}
+
 func TestOutputJSON(t *testing.T) {
 	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 
@@ -346,6 +429,48 @@ func TestOutputJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOutputJSONWithSummary(t *testing.T) {
+	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	objects := []provider.ObjectSummary{
+		{Key: "file1.txt", Size: 100, LastModified: now},
+	}
+	summary := &inspectSummary{
+		Type: inspectSummaryType,
+		Data: inspectSummaryData{
+			ObjectsEmitted: 1,
+			Limit:          1,
+			Truncated:      true,
+			Reason:         "limit_reached",
+			MayHaveMore:    true,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := outputJSONWithSummary(objects, summary)
+	require.NoError(t, err)
+
+	require.NoError(t, w.Close())
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.Len(t, lines, 2)
+
+	var object objectOutput
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &object))
+	assert.Equal(t, "file1.txt", object.Key)
+
+	var gotSummary inspectSummary
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &gotSummary))
+	assert.Equal(t, inspectSummaryType, gotSummary.Type)
+	assert.True(t, gotSummary.Data.Truncated)
+	assert.Equal(t, 1, gotSummary.Data.Limit)
 }
 
 func TestOutputTable(t *testing.T) {
@@ -421,6 +546,41 @@ func TestOutputTable(t *testing.T) {
 			for _, want := range tt.contains {
 				assert.Contains(t, output, want, "output should contain %q", want)
 			}
+			assert.NotContains(t, output, "Warning: output limited")
 		})
 	}
+}
+
+func TestOutputTableWithSummary(t *testing.T) {
+	now := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	objects := []provider.ObjectSummary{
+		{Key: "file1.txt", Size: 1024, LastModified: now},
+	}
+	summary := &inspectSummary{
+		Type: inspectSummaryType,
+		Data: inspectSummaryData{
+			ObjectsEmitted: 1,
+			Limit:          1,
+			Truncated:      true,
+			Reason:         "limit_reached",
+			MayHaveMore:    true,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := outputTableWithSummary(objects, summary)
+	require.NoError(t, err)
+
+	require.NoError(t, w.Close())
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	output := buf.String()
+
+	assert.Contains(t, output, "Found 1 object(s)")
+	assert.Contains(t, output, "Warning: output limited to 1 object(s); more matching objects may exist.")
 }

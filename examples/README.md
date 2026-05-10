@@ -8,12 +8,12 @@ This directory contains example manifests, sample outputs, and CLI usage pattern
 
 Example job manifests for common use cases. These are templates - replace placeholder values with your actual configuration.
 
-| File                  | Description                                  |
-| --------------------- | -------------------------------------------- |
-| `basic-crawl.yaml`    | Minimal crawl configuration                  |
-| `parquet-filter.yaml` | Filter by file extension                     |
-| `multi-pattern.yaml`  | Multiple include/exclude patterns            |
-| `s3-compatible.yaml`  | S3-compatible providers (Wasabi, R2, Spaces) |
+| File                  | Description                                       |
+| --------------------- | ------------------------------------------------- |
+| `basic-crawl.yaml`    | Minimal crawl configuration                       |
+| `parquet-filter.yaml` | Filter by file extension                          |
+| `multi-pattern.yaml`  | Multiple include/exclude patterns with skip rules |
+| `s3-compatible.yaml`  | S3-compatible providers (Wasabi, R2, Spaces)      |
 
 ### output-samples/
 

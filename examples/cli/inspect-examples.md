@@ -76,20 +76,26 @@ Found 2 object(s) (3 MB total)
 
 ### JSON (--json)
 
+Object rows are emitted as JSONL. If output is capped by `--limit`, inspect
+appends a stream-level summary record with type
+`gonimbus.inspect.summary.v1`; filter on `.key?` when a pipeline expects only
+object rows.
+
 ```jsonl
 {"key":"data/2024/01/sales.parquet","size":1048576,"last_modified":"2025-01-14T08:00:00Z","etag":"..."}
 {"key":"data/2024/01/inventory.parquet","size":2097152,"last_modified":"2025-01-14T09:30:00Z","etag":"..."}
+{"type":"gonimbus.inspect.summary.v1","data":{"objects_emitted":2,"limit":2,"truncated":true,"reason":"limit_reached","may_have_more":true}}
 ```
 
 ## Common Patterns
 
 ```bash
 # Count objects matching pattern
-gonimbus inspect 's3://bucket/**/*.parquet' --json | wc -l
+gonimbus inspect 's3://bucket/**/*.parquet' --json | jq -r 'select(.key?) | .key' | wc -l
 
 # Find largest files
-gonimbus inspect s3://bucket/ --json | jq -s 'sort_by(.size) | reverse | .[0:10]'
+gonimbus inspect s3://bucket/ --json | jq -s 'map(select(.key?)) | sort_by(.size) | reverse | .[0:10]'
 
 # List all file extensions
-gonimbus inspect s3://bucket/ --json | jq -r '.key | split(".") | .[-1]' | sort | uniq -c
+gonimbus inspect s3://bucket/ --json | jq -r 'select(.key?) | .key | split(".") | .[-1]' | sort | uniq -c
 ```
