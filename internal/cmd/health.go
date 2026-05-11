@@ -9,39 +9,50 @@ import (
 	"github.com/3leaps/gonimbus/internal/observability"
 )
 
+var healthLogFormat string
+
 var healthCmd = &cobra.Command{
 	Use:   "health",
 	Short: "Run self-health check",
 	Long:  "Run a self-health check to verify the application can start successfully.",
 	Run: func(cmd *cobra.Command, args []string) {
-		observability.CLILogger.Info("Running health check...")
+		out, err := newDiagnosticPrinter(cmd, healthLogFormat)
+		if err != nil {
+			exitDiagnosticWithCode(cmd, nil, healthLogFormat, foundry.ExitInvalidArgument, "Invalid flags", err)
+			return
+		}
+
+		out.Info("Running health check...")
 
 		// Check 1: Version info available
 		if versionInfo.Version == "" {
-			observability.CLILogger.Error("❌ FAIL: Version information missing")
-			ExitWithCode(observability.CLILogger, foundry.ExitConfigInvalid, "Version information missing", errwrap.NewConfigInvalidError("Version information missing"))
+			out.Error("❌ FAIL: Version information missing")
+			exitDiagnosticWithCode(cmd, observability.CLILogger, healthLogFormat, foundry.ExitConfigInvalid, "Version information missing", errwrap.NewConfigInvalidError("Version information missing"))
 			return
 		}
-		observability.CLILogger.Debug("Version check passed", zap.String("version", versionInfo.Version))
-		observability.CLILogger.Info("✅ Version information available")
+		if out.structured {
+			observability.CLILogger.Debug("Version check passed", zap.String("version", versionInfo.Version))
+		}
+		out.Info("✅ Version information available")
 
 		// Check 2: Logger initialized
 		if observability.CLILogger == nil {
-			// Can't log if logger is nil, so use stderr
-			ExitWithCodeStderr(foundry.ExitConfigInvalid, "Logger not initialized", errwrap.NewConfigInvalidError("Logger not initialized"))
+			out.Error("❌ FAIL: Logger not initialized")
+			exitDiagnosticWithCode(cmd, nil, healthLogFormat, foundry.ExitConfigInvalid, "Logger not initialized", errwrap.NewConfigInvalidError("Logger not initialized"))
 			return
 		}
-		observability.CLILogger.Info("✅ Logger initialized")
+		out.Info("✅ Logger initialized")
 
 		// Check 3: Configuration loaded
-		observability.CLILogger.Info("✅ Configuration system ready")
+		out.Info("✅ Configuration system ready")
 
 		// Overall status
-		observability.CLILogger.Info("")
-		observability.CLILogger.Info("✅ All health checks passed")
+		out.Info("")
+		out.Info("✅ All health checks passed")
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(healthCmd)
+	healthCmd.Flags().StringVar(&healthLogFormat, "log-format", diagnosticLogFormatPlain, "diagnostic output format (plain or structured)")
 }

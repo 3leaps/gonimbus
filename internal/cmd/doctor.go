@@ -19,8 +19,9 @@ import (
 )
 
 var (
-	doctorProvider string
-	doctorProfile  string
+	doctorProvider  string
+	doctorProfile   string
+	doctorLogFormat string
 )
 
 var doctorCmd = &cobra.Command{
@@ -39,18 +40,37 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "", "Run provider-specific checks (s3)")
 	doctorCmd.Flags().StringVar(&doctorProfile, "profile", "", "AWS profile to check (requires --provider s3)")
+	doctorCmd.Flags().StringVar(&doctorLogFormat, "log-format", diagnosticLogFormatPlain, "diagnostic output format (plain or structured)")
 }
 
 func runDoctor(cmd *cobra.Command, args []string) {
+	out, err := newDiagnosticPrinter(cmd, doctorLogFormat)
+	if err != nil {
+		exitDiagnosticWithCode(cmd, nil, doctorLogFormat, foundry.ExitInvalidArgument, "Invalid flags", err)
+		return
+	}
+
+	if doctorProfile != "" && doctorProvider != "s3" {
+		exitDiagnosticWithCode(
+			cmd,
+			observability.CLILogger,
+			doctorLogFormat,
+			foundry.ExitInvalidArgument,
+			"Invalid flags",
+			errwrap.NewInvalidInputError("--profile requires --provider s3"),
+		)
+		return
+	}
+
 	identity := GetAppIdentity()
 	bannerName := "doctor"
 	if identity != nil && identity.BinaryName != "" {
 		bannerName = identity.BinaryName + " doctor"
 	}
-	observability.CLILogger.Info("=== " + bannerName + " ===")
-	observability.CLILogger.Info("")
-	observability.CLILogger.Info("Running diagnostic checks...")
-	observability.CLILogger.Info("")
+	out.Info("=== " + bannerName + " ===")
+	out.Info("")
+	out.Info("Running diagnostic checks...")
+	out.Info("")
 
 	allChecks := true
 	checkNum := 1
@@ -61,24 +81,13 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		totalChecks = 8 // credentials, source, expiry
 	}
 
-	if doctorProfile != "" && doctorProvider != "s3" {
-		observability.CLILogger.Error("--profile requires --provider s3")
-		ExitWithCode(
-			observability.CLILogger,
-			foundry.ExitInvalidArgument,
-			"Invalid flags",
-			errwrap.NewInvalidInputError("--profile requires --provider s3"),
-		)
-		return
-	}
-
 	// Check 1: Go version
 	goVersion := runtime.Version()
 	if goVersion >= "go1.23" {
-		observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking Go version... ✅ %s", checkNum, totalChecks, goVersion),
+		out.Info(fmt.Sprintf("[%d/%d] Checking Go version... ✅ %s", checkNum, totalChecks, goVersion),
 			zap.String("go_version", goVersion))
 	} else {
-		observability.CLILogger.Warn(fmt.Sprintf("[%d/%d] Checking Go version... ⚠️  %s (recommended: go1.23+)", checkNum, totalChecks, goVersion),
+		out.Warn(fmt.Sprintf("[%d/%d] Checking Go version... ⚠️  %s (recommended: go1.23+)", checkNum, totalChecks, goVersion),
 			zap.String("go_version", goVersion))
 		allChecks = false
 	}
@@ -87,11 +96,11 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	// Check 2: Crucible access
 	version := crucible.GetVersion()
 	if version.Crucible != "" {
-		observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking Crucible access... ✅ v%s", checkNum, totalChecks, version.Crucible),
+		out.Info(fmt.Sprintf("[%d/%d] Checking Crucible access... ✅ v%s", checkNum, totalChecks, version.Crucible),
 			zap.String("crucible_version", version.Crucible))
 	} else {
-		observability.CLILogger.Error(fmt.Sprintf("[%d/%d] Checking Crucible access... ❌ Cannot access Crucible", checkNum, totalChecks))
-		ExitWithCode(observability.CLILogger, foundry.ExitExternalServiceUnavailable, "Cannot access Crucible",
+		out.Error(fmt.Sprintf("[%d/%d] Checking Crucible access... ❌ Cannot access Crucible", checkNum, totalChecks))
+		exitDiagnosticWithCode(cmd, observability.CLILogger, doctorLogFormat, foundry.ExitExternalServiceUnavailable, "Cannot access Crucible",
 			errwrap.NewExternalServiceError("Crucible service unavailable"))
 		allChecks = false
 	}
@@ -99,10 +108,10 @@ func runDoctor(cmd *cobra.Command, args []string) {
 
 	// Check 3: Gofulmen access
 	if version.Gofulmen != "" {
-		observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking Gofulmen access... ✅ v%s", checkNum, totalChecks, version.Gofulmen),
+		out.Info(fmt.Sprintf("[%d/%d] Checking Gofulmen access... ✅ v%s", checkNum, totalChecks, version.Gofulmen),
 			zap.String("gofulmen_version", version.Gofulmen))
 	} else {
-		observability.CLILogger.Error(fmt.Sprintf("[%d/%d] Checking Gofulmen access... ❌ Cannot access Gofulmen", checkNum, totalChecks))
+		out.Error(fmt.Sprintf("[%d/%d] Checking Gofulmen access... ❌ Cannot access Gofulmen", checkNum, totalChecks))
 		allChecks = false
 	}
 	checkNum++
@@ -110,45 +119,45 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	// Check 4: Config directory
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		observability.CLILogger.Error(fmt.Sprintf("[%d/%d] Checking config directory... ❌ Cannot find config directory", checkNum, totalChecks),
+		out.Error(fmt.Sprintf("[%d/%d] Checking config directory... ❌ Cannot find config directory", checkNum, totalChecks),
 			zap.Error(err))
-		ExitWithCode(observability.CLILogger, foundry.ExitFileNotFound, "Cannot find config directory",
+		exitDiagnosticWithCode(cmd, observability.CLILogger, doctorLogFormat, foundry.ExitFileNotFound, "Cannot find config directory",
 			errwrap.WrapInternal(cmd.Context(), err, "Cannot find config directory"))
 		allChecks = false
 	} else {
-		observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking config directory... ✅ %s", checkNum, totalChecks, configDir),
+		out.Info(fmt.Sprintf("[%d/%d] Checking config directory... ✅ %s", checkNum, totalChecks, configDir),
 			zap.String("config_dir", configDir))
 	}
 	checkNum++
 
 	// Check 5: Environment
-	observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking environment... ✅ %s/%s", checkNum, totalChecks, runtime.GOOS, runtime.GOARCH),
+	out.Info(fmt.Sprintf("[%d/%d] Checking environment... ✅ %s/%s", checkNum, totalChecks, runtime.GOOS, runtime.GOARCH),
 		zap.String("os", runtime.GOOS),
 		zap.String("arch", runtime.GOARCH))
 	checkNum++
 
 	// S3-specific checks
 	if doctorProvider == "s3" {
-		allChecks = runS3Checks(cmd.Context(), checkNum, totalChecks, allChecks)
+		allChecks = runS3Checks(cmd.Context(), out, checkNum, totalChecks, allChecks)
 	}
 
-	observability.CLILogger.Info("")
+	out.Info("")
 	if allChecks {
-		observability.CLILogger.Info(fmt.Sprintf("✅ All checks passed! Your %s installation is healthy.", bannerName))
+		out.Info(fmt.Sprintf("✅ All checks passed! Your %s installation is healthy.", bannerName))
 	} else {
-		observability.CLILogger.Warn("⚠️  Some checks failed. Review the output above for details.")
+		out.Warn("⚠️  Some checks failed. Review the output above for details.")
 	}
-	observability.CLILogger.Info("")
-	observability.CLILogger.Info("=== End Diagnostics ===")
+	out.Info("")
+	out.Info("=== End Diagnostics ===")
 }
 
 // runS3Checks runs S3-specific diagnostic checks.
-func runS3Checks(ctx context.Context, checkNum, totalChecks int, allChecks bool) bool {
-	observability.CLILogger.Info("")
+func runS3Checks(ctx context.Context, out *diagnosticPrinter, checkNum, totalChecks int, allChecks bool) bool {
+	out.Info("")
 	if doctorProfile != "" {
-		observability.CLILogger.Info(fmt.Sprintf("S3 Provider Checks (profile: %s):", doctorProfile))
+		out.Info(fmt.Sprintf("S3 Provider Checks (profile: %s):", doctorProfile))
 	} else {
-		observability.CLILogger.Info("S3 Provider Checks:")
+		out.Info("S3 Provider Checks:")
 	}
 
 	// Build config options
@@ -167,23 +176,23 @@ func runS3Checks(ctx context.Context, checkNum, totalChecks int, allChecks bool)
 	// Check 6: AWS credentials
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		observability.CLILogger.Error(fmt.Sprintf("[%d/%d] Checking AWS credentials... ❌ Cannot load AWS config", checkNum, totalChecks),
+		out.Error(fmt.Sprintf("[%d/%d] Checking AWS credentials... ❌ Cannot load AWS config", checkNum, totalChecks),
 			zap.Error(err))
-		printAWSCredentialsHelp(doctorProfile)
+		printAWSCredentialsHelp(out, doctorProfile)
 		return false
 	}
 
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		observability.CLILogger.Error(fmt.Sprintf("[%d/%d] Checking AWS credentials... ❌ Cannot retrieve credentials", checkNum, totalChecks),
+		out.Error(fmt.Sprintf("[%d/%d] Checking AWS credentials... ❌ Cannot retrieve credentials", checkNum, totalChecks),
 			zap.Error(err))
-		printAWSCredentialsHelp(doctorProfile)
+		printAWSCredentialsHelp(out, doctorProfile)
 		return false
 	}
 
 	// Mask the access key for display
 	maskedKey := maskAccessKey(creds.AccessKeyID)
-	observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking AWS credentials... ✅ Found credentials", checkNum, totalChecks),
+	out.Info(fmt.Sprintf("[%d/%d] Checking AWS credentials... ✅ Found credentials", checkNum, totalChecks),
 		zap.String("access_key", maskedKey),
 		zap.String("source", creds.Source))
 	checkNum++
@@ -193,7 +202,7 @@ func runS3Checks(ctx context.Context, checkNum, totalChecks int, allChecks bool)
 	if source == "" {
 		source = "unknown"
 	}
-	observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking credential source... ✅ %s", checkNum, totalChecks, source),
+	out.Info(fmt.Sprintf("[%d/%d] Checking credential source... ✅ %s", checkNum, totalChecks, source),
 		zap.String("credential_source", source))
 	checkNum++
 
@@ -202,22 +211,22 @@ func runS3Checks(ctx context.Context, checkNum, totalChecks int, allChecks bool)
 		remaining := time.Until(creds.Expires)
 		expiresAt := creds.Expires.Format(time.RFC3339)
 		if remaining < time.Hour {
-			observability.CLILogger.Warn(fmt.Sprintf("[%d/%d] Checking credential expiry... ⚠️  Expires in %s", checkNum, totalChecks, formatDuration(remaining)),
+			out.Warn(fmt.Sprintf("[%d/%d] Checking credential expiry... ⚠️  Expires in %s", checkNum, totalChecks, formatDuration(remaining)),
 				zap.String("expires_at", expiresAt),
 				zap.Duration("remaining", remaining))
-			observability.CLILogger.Info("  Consider re-authenticating soon:")
+			out.Info("  Consider re-authenticating soon:")
 			if doctorProfile != "" {
-				observability.CLILogger.Info(fmt.Sprintf("    aws sso login --profile %s", doctorProfile))
+				out.Info(fmt.Sprintf("    aws sso login --profile %s", doctorProfile))
 			} else {
-				observability.CLILogger.Info("    aws sso login --profile <your-profile>")
+				out.Info("    aws sso login --profile <your-profile>")
 			}
 		} else {
-			observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking credential expiry... ✅ Valid for %s", checkNum, totalChecks, formatDuration(remaining)),
+			out.Info(fmt.Sprintf("[%d/%d] Checking credential expiry... ✅ Valid for %s", checkNum, totalChecks, formatDuration(remaining)),
 				zap.String("expires_at", expiresAt),
 				zap.Duration("remaining", remaining))
 		}
 	} else {
-		observability.CLILogger.Info(fmt.Sprintf("[%d/%d] Checking credential expiry... ✅ Non-expiring credentials", checkNum, totalChecks))
+		out.Info(fmt.Sprintf("[%d/%d] Checking credential expiry... ✅ Non-expiring credentials", checkNum, totalChecks))
 	}
 
 	return allChecks
@@ -245,22 +254,22 @@ func maskAccessKey(key string) string {
 }
 
 // printAWSCredentialsHelp prints help for configuring AWS credentials.
-func printAWSCredentialsHelp(profile string) {
-	observability.CLILogger.Info("")
-	observability.CLILogger.Info("To configure AWS credentials:")
-	observability.CLILogger.Info("")
+func printAWSCredentialsHelp(out *diagnosticPrinter, profile string) {
+	out.Info("")
+	out.Info("To configure AWS credentials:")
+	out.Info("")
 	if profile != "" {
-		observability.CLILogger.Info(fmt.Sprintf("  For profile '%s':", profile))
-		observability.CLILogger.Info(fmt.Sprintf("    aws sso login --profile %s", profile))
-		observability.CLILogger.Info("")
+		out.Info(fmt.Sprintf("  For profile '%s':", profile))
+		out.Info(fmt.Sprintf("    aws sso login --profile %s", profile))
+		out.Info("")
 	}
-	observability.CLILogger.Info("  Options:")
-	observability.CLILogger.Info("    1. For SSO profiles: aws sso login --profile <name>")
-	observability.CLILogger.Info("    2. For access keys: aws configure --profile <name>")
-	observability.CLILogger.Info("    3. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars")
-	observability.CLILogger.Info("    4. Use IAM role when running on AWS infrastructure")
-	observability.CLILogger.Info("")
-	observability.CLILogger.Info("For S3-compatible storage (MinIO, Wasabi, etc.), also set:")
-	observability.CLILogger.Info("  - AWS_ENDPOINT_URL or use --endpoint flag")
-	observability.CLILogger.Info("")
+	out.Info("  Options:")
+	out.Info("    1. For SSO profiles: aws sso login --profile <name>")
+	out.Info("    2. For access keys: aws configure --profile <name>")
+	out.Info("    3. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars")
+	out.Info("    4. Use IAM role when running on AWS infrastructure")
+	out.Info("")
+	out.Info("For S3-compatible storage (MinIO, Wasabi, etc.), also set:")
+	out.Info("  - AWS_ENDPOINT_URL or use --endpoint flag")
+	out.Info("")
 }
