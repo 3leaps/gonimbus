@@ -368,7 +368,7 @@ Both `content head` and `content probe` support bulk processing via stdin:
 ```bash
 # List objects, then probe in parallel
 gonimbus inspect 's3://bucket/prefix/' --json --profile prod | \
-  jq -r '"s3://bucket/" + .key' | \
+  jq -r 'select(.key?) | "s3://bucket/" + .key' | \
   gonimbus content probe --stdin --config probe.yaml --profile prod
 
 # Or from a file of URIs

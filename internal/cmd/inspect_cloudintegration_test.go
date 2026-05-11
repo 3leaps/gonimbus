@@ -41,6 +41,29 @@ func findBinary(t *testing.T) string {
 	return ""
 }
 
+func parseInspectJSONLines(t *testing.T, output string) ([]map[string]interface{}, *map[string]interface{}) {
+	t.Helper()
+
+	var objects []map[string]interface{}
+	var summary *map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		if record["type"] == "gonimbus.inspect.summary.v1" {
+			recordCopy := record
+			summary = &recordCopy
+			continue
+		}
+		objects = append(objects, record)
+	}
+
+	return objects, summary
+}
+
 func TestInspectCommand_CloudIntegration(t *testing.T) {
 	cloudtest.SkipIfUnavailable(t)
 	ctx := context.Background()
@@ -72,13 +95,11 @@ func TestInspectCommand_CloudIntegration(t *testing.T) {
 		err := cmd.Run()
 		require.NoError(t, err, "stderr: %s", stderr.String())
 
-		// Parse JSONL output
-		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-		assert.Len(t, lines, 3, "expected 3 objects")
+		objects, summary := parseInspectJSONLines(t, stdout.String())
+		assert.Len(t, objects, 3, "expected 3 objects")
+		assert.Nil(t, summary, "did not expect inspect summary when output is not capped")
 
-		for _, line := range lines {
-			var obj map[string]interface{}
-			require.NoError(t, json.Unmarshal([]byte(line), &obj))
+		for _, obj := range objects {
 			assert.Contains(t, obj, "key")
 			assert.Contains(t, obj, "size")
 		}
@@ -110,8 +131,9 @@ func TestInspectCommand_CloudIntegration(t *testing.T) {
 		err := cmd.Run()
 		require.NoError(t, err, "stderr: %s", stderr.String())
 
-		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-		assert.Len(t, lines, 2, "expected 2 objects with data/ prefix")
+		objects, summary := parseInspectJSONLines(t, stdout.String())
+		assert.Len(t, objects, 2, "expected 2 objects with data/ prefix")
+		assert.Nil(t, summary, "did not expect inspect summary when output is not capped")
 	})
 
 	t.Run("respects limit flag", func(t *testing.T) {
@@ -143,8 +165,18 @@ func TestInspectCommand_CloudIntegration(t *testing.T) {
 		err := cmd.Run()
 		require.NoError(t, err, "stderr: %s", stderr.String())
 
-		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-		assert.Len(t, lines, 2, "expected 2 objects due to limit")
+		objects, summary := parseInspectJSONLines(t, stdout.String())
+		assert.Len(t, objects, 2, "expected 2 objects due to limit")
+		require.NotNil(t, summary, "expected inspect summary when output is capped")
+		assert.Equal(t, "gonimbus.inspect.summary.v1", (*summary)["type"])
+
+		data, ok := (*summary)["data"].(map[string]interface{})
+		require.True(t, ok, "summary data should be an object")
+		assert.Equal(t, float64(2), data["objects_emitted"])
+		assert.Equal(t, float64(2), data["limit"])
+		assert.Equal(t, true, data["truncated"])
+		assert.Equal(t, "limit_reached", data["reason"])
+		assert.Equal(t, true, data["may_have_more"])
 	})
 
 	t.Run("returns error for non-existent bucket", func(t *testing.T) {

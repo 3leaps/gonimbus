@@ -343,7 +343,7 @@ EOF
 
 # 2. List and probe objects
 gonimbus inspect 's3://source/prefix/' --json | \
-  jq -r '"s3://source/" + .key' | \
+  jq -r 'select(.key?) | "s3://source/" + .key' | \
   gonimbus content probe --stdin --config probe.yaml --emit reflow-input \
   > probe-output.jsonl
 
