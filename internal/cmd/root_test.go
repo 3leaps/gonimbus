@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetVersionInfo(t *testing.T) {
@@ -74,6 +76,27 @@ func TestGetAppIdentity(t *testing.T) {
 			assert.Equal(t, appIdentity, result)
 		}
 	})
+}
+
+func TestRootHelpUsesGonimbusCopy(t *testing.T) {
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"--help"})
+	defer func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	}()
+
+	require.NoError(t, rootCmd.Execute())
+
+	help := out.String()
+	assert.Contains(t, help, "Cloud object storage crawl/inspect/transfer engine")
+	assert.Contains(t, help, "Build localized indexes")
+	assert.Contains(t, help, "$XDG_CONFIG_HOME/gonimbus/config.yaml")
+	assert.NotContains(t, help, "Fulmen workhorse")
+	assert.NotContains(t, help, "workhorse service template")
 }
 
 func TestSetDefaults(t *testing.T) {
