@@ -18,11 +18,14 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
 
-var indexDoctorCmd = &cobra.Command{
-	Use:     "doctor",
-	Aliases: []string{"show"},
-	Short:   "Show and validate local index stores",
-	Long: `Inspect local index database files and their identity metadata.
+var indexDoctorCmd = newIndexDoctorCommand()
+
+func newIndexDoctorCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "doctor [idx_<id-prefix>|path]",
+		Aliases: []string{"show"},
+		Short:   "Show and validate local index stores",
+		Long: `Inspect local index database files and their identity metadata.
 
 This is a read-only introspection command (it does not repair or modify indexes).
 
@@ -40,6 +43,9 @@ Examples:
   # Diagnose all local indexes
   gonimbus index doctor
 
+  # Diagnose a specific local index by ID or prefix
+  gonimbus index doctor idx_1234abcd
+
   # Diagnose a specific index directory
   gonimbus index doctor --db ~/.local/share/gonimbus/indexes/idx_1234abcd5678ef90/
 
@@ -47,11 +53,22 @@ Examples:
   gonimbus index doctor --stats
 
   # Show detailed JSON for a single index
-  gonimbus index doctor --db ~/.local/share/gonimbus/indexes/idx_1234abcd5678ef90/ --detail
+  gonimbus index doctor idx_1234abcd --detail
 
   # Machine-readable output
   gonimbus index doctor --json`,
-	RunE: runIndexDoctor,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runIndexDoctor,
+	}
+
+	cmd.Flags().StringVar(&indexDoctorRootDir, "root", "", "Override index root directory (defaults to app data dir indexes)")
+	cmd.Flags().StringVar(&indexDoctorDB, "db", "", "Inspect a specific index db path or index directory (optional)")
+	cmd.Flags().Bool("json", false, "Output as JSON")
+	cmd.Flags().Bool("verbose", false, "Include identity payload details")
+	cmd.Flags().Bool("stats", false, "Include object counts from the index DB (may be expensive on very large indexes)")
+	cmd.Flags().Bool("detail", false, "Show detailed JSON report for a single index (includes identity and manifest when present)")
+
+	return cmd
 }
 
 var (
@@ -61,12 +78,6 @@ var (
 
 func init() {
 	indexCmd.AddCommand(indexDoctorCmd)
-	indexDoctorCmd.Flags().StringVar(&indexDoctorRootDir, "root", "", "Override index root directory (defaults to app data dir indexes)")
-	indexDoctorCmd.Flags().StringVar(&indexDoctorDB, "db", "", "Inspect a specific index db path or index directory (optional)")
-	indexDoctorCmd.Flags().Bool("json", false, "Output as JSON")
-	indexDoctorCmd.Flags().Bool("verbose", false, "Include identity payload details")
-	indexDoctorCmd.Flags().Bool("stats", false, "Include object counts from the index DB (may be expensive on very large indexes)")
-	indexDoctorCmd.Flags().Bool("detail", false, "Show detailed JSON report for a single index (includes identity and manifest when present)")
 }
 
 type indexDoctorEntry struct {
@@ -126,14 +137,19 @@ type indexDoctorOptions struct {
 	IncludeManifest        bool
 }
 
-func runIndexDoctor(cmd *cobra.Command, _ []string) error {
+func runIndexDoctor(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	includeStats, _ := cmd.Flags().GetBool("stats")
 	detail, _ := cmd.Flags().GetBool("detail")
 
-	dbPaths, err := resolveIndexDoctorTargets()
+	target := ""
+	if len(args) > 0 {
+		target = args[0]
+	}
+
+	dbPaths, err := resolveIndexDoctorTargets(target)
 	if err != nil {
 		return err
 	}
@@ -150,7 +166,7 @@ func runIndexDoctor(cmd *cobra.Command, _ []string) error {
 
 	if detail {
 		if len(dbPaths) != 1 {
-			return fmt.Errorf("--detail requires exactly one target; use --db to select a specific index")
+			return fmt.Errorf("--detail requires exactly one target; use a positional target or --db to select a specific index")
 		}
 		entry, err := inspectIndexDBForDoctor(ctx, dbPaths[0], opts)
 		if err != nil {
@@ -185,47 +201,118 @@ func runIndexDoctor(cmd *cobra.Command, _ []string) error {
 	return printIndexDoctorTable(entries)
 }
 
-func resolveIndexDoctorTargets() ([]string, error) {
+func resolveIndexDoctorTargets(target string) ([]string, error) {
+	target = strings.TrimSpace(target)
+	explicitDB := strings.TrimSpace(indexDoctorDB)
+	if target != "" && explicitDB != "" {
+		return nil, fmt.Errorf("cannot use positional target with --db")
+	}
+
 	// Explicit db/dir path wins.
-	if strings.TrimSpace(indexDoctorDB) != "" {
-		path := strings.TrimSpace(indexDoctorDB)
-		// Allow specifying a directory containing index.db.
-		info, err := os.Stat(path)
-		if err == nil && info.IsDir() {
-			path = filepath.Join(path, "index.db")
+	if explicitDB != "" {
+		path, err := resolveIndexDoctorDBPath(explicitDB)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := os.Stat(path); err != nil {
-			return nil, fmt.Errorf("index db not found: %s", path)
+		return []string{path}, nil
+	}
+
+	if target != "" {
+		path, err := resolveIndexDoctorTarget(target)
+		if err != nil {
+			return nil, err
 		}
 		return []string{path}, nil
 	}
 
 	// Override root dir.
 	if strings.TrimSpace(indexDoctorRootDir) != "" {
-		root := strings.TrimSpace(indexDoctorRootDir)
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("read index root: %w", err)
-		}
-		var paths []string
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			dbPath := filepath.Join(root, entry.Name(), "index.db")
-			if _, err := os.Stat(dbPath); err != nil {
-				continue
-			}
-			paths = append(paths, dbPath)
-		}
-		return paths, nil
+		return listIndexDBPathsInRoot(strings.TrimSpace(indexDoctorRootDir))
 	}
 
 	// Default discovery.
 	return listIndexDBPaths()
+}
+
+func resolveIndexDoctorTarget(target string) (string, error) {
+	if path, ok, err := resolveExistingIndexDoctorPath(target); ok || err != nil {
+		return path, err
+	}
+	if hasPathSeparator(target) {
+		return "", fmt.Errorf("index db not found: %s", target)
+	}
+
+	root, err := indexDoctorSearchRoot()
+	if err != nil {
+		return "", err
+	}
+	match, err := resolveIndexDirInRoot(root, target)
+	if err != nil {
+		return "", err
+	}
+	return match.DBPath, nil
+}
+
+func resolveExistingIndexDoctorPath(path string) (string, bool, error) {
+	path = strings.TrimSpace(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", true, fmt.Errorf("stat index target: %w", err)
+	}
+	if info.IsDir() {
+		path = filepath.Join(path, "index.db")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", true, fmt.Errorf("index db not found: %s", path)
+	}
+	return path, true, nil
+}
+
+func resolveIndexDoctorDBPath(path string) (string, error) {
+	resolved, ok, err := resolveExistingIndexDoctorPath(path)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("index db not found: %s", path)
+	}
+	return resolved, nil
+}
+
+func indexDoctorSearchRoot() (string, error) {
+	if strings.TrimSpace(indexDoctorRootDir) != "" {
+		return strings.TrimSpace(indexDoctorRootDir), nil
+	}
+	return indexRootDir()
+}
+
+func listIndexDBPathsInRoot(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read index root: %w", err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dbPath := filepath.Join(root, entry.Name(), "index.db")
+		if _, err := os.Stat(dbPath); err != nil {
+			continue
+		}
+		paths = append(paths, dbPath)
+	}
+	return paths, nil
+}
+
+func hasPathSeparator(value string) bool {
+	return strings.Contains(value, string(os.PathSeparator)) || strings.Contains(value, "/")
 }
 
 func inspectIndexDBForDoctor(ctx context.Context, dbPath string, opts indexDoctorOptions) (*indexDoctorEntry, error) {
