@@ -28,7 +28,8 @@ Supported hub roots: s3://bucket/prefix/ and file:///path/`,
 // --- init ---
 
 var indexHubInitCmd = &cobra.Command{
-	Use:   "init",
+	Use:   "init [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "Initialize a new index hub",
 	Long: `Create hub.json marker at the hub root.
 
@@ -36,21 +37,22 @@ The marker identifies the hub layout version and records creation metadata.
 This is optional — export works without it — but provides clear provenance.
 
 Examples:
-  gonimbus index hub init --hub file:///data/index-hub/
+  gonimbus index hub init file:///tmp/gonimbus-hub/
   gonimbus index hub init --hub s3://my-bucket/ops/index-hub/ --hub-profile my-profile
-  gonimbus index hub init --hub s3://my-bucket/ops/index-hub/ --description "Production indexes"`,
+  gonimbus index hub init file:///tmp/gonimbus-hub/ --description "Production indexes"`,
 	RunE: runIndexHubInit,
 }
 
 // --- ls ---
 
 var indexHubLsCmd = &cobra.Command{
-	Use:   "ls",
+	Use:   "ls [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "List index sets in a hub",
 	Long: `List index sets available in the hub, showing latest run info when available.
 
 Examples:
-  gonimbus index hub ls --hub file:///data/index-hub/
+  gonimbus index hub ls file:///tmp/gonimbus-hub/
   gonimbus index hub ls --hub s3://my-bucket/ops/index-hub/ --hub-profile my-profile`,
 	RunE: runIndexHubLs,
 }
@@ -58,12 +60,13 @@ Examples:
 // --- show ---
 
 var indexHubShowCmd = &cobra.Command{
-	Use:   "show",
+	Use:   "show [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "Show details for an index set in a hub",
 	Long: `Show details for an index set including available runs and the latest pointer.
 
 Examples:
-  gonimbus index hub show --hub file:///data/index-hub/ --index-set idx_da038d8171b4a9ba...
+  gonimbus index hub show file:///tmp/gonimbus-hub/ --index-set idx_da038d8171b4a9ba...
   gonimbus index hub show --hub s3://my-bucket/ops/index-hub/ --index-set idx_da038d8171b4a9ba... --hub-profile my-profile`,
 	RunE: runIndexHubShow,
 }
@@ -71,14 +74,15 @@ Examples:
 // --- set-latest ---
 
 var indexHubSetLatestCmd = &cobra.Command{
-	Use:   "set-latest",
+	Use:   "set-latest [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "Repoint latest.json to a specific run",
 	Long: `Update the latest.json pointer for an index set to a specific run.
 
 The target run must have a valid complete.json commit marker.
 
 Examples:
-  gonimbus index hub set-latest --hub file:///data/index-hub/ \
+  gonimbus index hub set-latest file:///tmp/gonimbus-hub/ \
     --index-set idx_da038d8171b4a9ba... --run-id run_1709654400000000000`,
 	RunE: runIndexHubSetLatest,
 }
@@ -86,14 +90,15 @@ Examples:
 // --- rm-run ---
 
 var indexHubRmRunCmd = &cobra.Command{
-	Use:   "rm-run",
+	Use:   "rm-run [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "Remove a run from the hub",
 	Long: `Remove a run's artifacts (index.db, identity.json, complete.json) from the hub.
 
 Refuses to remove the current latest run unless --force is specified.
 
 Examples:
-  gonimbus index hub rm-run --hub file:///data/index-hub/ \
+  gonimbus index hub rm-run file:///tmp/gonimbus-hub/ \
     --index-set idx_da038d8171b4a9ba... --run-id run_1709654400000000000`,
 	RunE: runIndexHubRmRun,
 }
@@ -101,7 +106,8 @@ Examples:
 // --- gc ---
 
 var indexHubGCCmd = &cobra.Command{
-	Use:   "gc",
+	Use:   "gc [hub-uri]",
+	Args:  validateHubURIArgs,
 	Short: "Garbage collect old runs from the hub",
 	Long: `Prune old runs from the hub. Keeps the latest-pointed run and applies
 the specified retention policy.
@@ -111,9 +117,9 @@ Retention modes (one required):
   --before DATE  Remove committed runs older than DATE (RFC 3339 or YYYY-MM-DD)
 
 Examples:
-  gonimbus index hub gc --hub file:///data/index-hub/ --keep 3
+  gonimbus index hub gc file:///tmp/gonimbus-hub/ --keep 3
   gonimbus index hub gc --hub s3://my-bucket/ops/index-hub/ --index-set idx_da038d... --before 2026-01-01
-  gonimbus index hub gc --hub file:///data/index-hub/ --keep 2 --dry-run`,
+  gonimbus index hub gc file:///tmp/gonimbus-hub/ --keep 2 --dry-run`,
 	RunE: runIndexHubGC,
 }
 
@@ -128,11 +134,10 @@ func init() {
 
 	// Common hub flags on all subcommands
 	for _, cmd := range []*cobra.Command{indexHubInitCmd, indexHubLsCmd, indexHubShowCmd, indexHubSetLatestCmd, indexHubRmRunCmd, indexHubGCCmd} {
-		cmd.Flags().String("hub", "", "Hub root URI (s3://bucket/prefix/ or file:///path/)")
+		cmd.Flags().String("hub", "", "Hub root URI (alternative to positional hub-uri)")
 		cmd.Flags().String("hub-profile", "", "AWS profile for hub")
 		cmd.Flags().String("hub-region", "", "AWS region for hub")
 		cmd.Flags().String("hub-endpoint", "", "Custom endpoint for hub")
-		_ = cmd.MarkFlagRequired("hub")
 	}
 
 	// init
@@ -167,9 +172,41 @@ func init() {
 	indexHubGCCmd.Flags().Bool("json", false, "Output as JSON")
 }
 
-// parseHubFlags extracts common hub flags and returns a configured hubDestSpec.
-func parseHubFlags(cmd *cobra.Command) (*hubDestSpec, error) {
+// validateHubURIArgs enforces the shared hub URI positional argument policy.
+func validateHubURIArgs(_ *cobra.Command, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("at most one positional hub-uri is allowed")
+	}
+	return nil
+}
+
+func resolveHubURI(cmd *cobra.Command, args []string) (string, error) {
 	hubURI, _ := cmd.Flags().GetString("hub")
+	if len(args) > 1 {
+		return "", fmt.Errorf("at most one positional hub-uri is allowed")
+	}
+	positionalHubURI := ""
+	if len(args) == 1 {
+		positionalHubURI = strings.TrimSpace(args[0])
+	}
+	if hubURI != "" && positionalHubURI != "" {
+		return "", fmt.Errorf("--hub and positional hub-uri are mutually exclusive")
+	}
+	if hubURI != "" {
+		return hubURI, nil
+	}
+	if positionalHubURI != "" {
+		return positionalHubURI, nil
+	}
+	return "", fmt.Errorf("hub URI is required; provide positional hub-uri or --hub")
+}
+
+// parseHubFlags extracts common hub flags and returns a configured hubDestSpec.
+func parseHubFlags(cmd *cobra.Command, args []string) (*hubDestSpec, error) {
+	hubURI, err := resolveHubURI(cmd, args)
+	if err != nil {
+		return nil, err
+	}
 	hub, err := parseHubURI(hubURI)
 	if err != nil {
 		return nil, err
@@ -185,11 +222,11 @@ func parseHubFlags(cmd *cobra.Command) (*hubDestSpec, error) {
 
 // --- init implementation ---
 
-func runIndexHubInit(cmd *cobra.Command, _ []string) error {
+func runIndexHubInit(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	description, _ := cmd.Flags().GetString("description")
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -254,11 +291,11 @@ type hubIndexSetInfo struct {
 	RunCount   int    `json:"run_count"`
 }
 
-func runIndexHubLs(cmd *cobra.Command, _ []string) error {
+func runIndexHubLs(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -417,7 +454,7 @@ type hubRunInfo struct {
 	Complete    json.RawMessage `json:"complete,omitempty"`
 }
 
-func runIndexHubShow(cmd *cobra.Command, _ []string) error {
+func runIndexHubShow(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -426,7 +463,7 @@ func runIndexHubShow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -526,7 +563,7 @@ func runIndexHubShow(cmd *cobra.Command, _ []string) error {
 
 // --- set-latest implementation ---
 
-func runIndexHubSetLatest(cmd *cobra.Command, _ []string) error {
+func runIndexHubSetLatest(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
@@ -538,7 +575,7 @@ func runIndexHubSetLatest(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -601,7 +638,7 @@ func runIndexHubSetLatest(cmd *cobra.Command, _ []string) error {
 
 // --- rm-run implementation ---
 
-func runIndexHubRmRun(cmd *cobra.Command, _ []string) error {
+func runIndexHubRmRun(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
@@ -614,7 +651,7 @@ func runIndexHubRmRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -735,7 +772,7 @@ type gcResult struct {
 	Errors  int              `json:"errors,omitempty"`
 }
 
-func runIndexHubGC(cmd *cobra.Command, _ []string) error {
+func runIndexHubGC(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	keep, _ := cmd.Flags().GetInt("keep")
@@ -768,7 +805,7 @@ func runIndexHubGC(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	hub, err := parseHubFlags(cmd)
+	hub, err := parseHubFlags(cmd, args)
 	if err != nil {
 		return err
 	}
