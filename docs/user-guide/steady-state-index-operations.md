@@ -95,10 +95,10 @@ Inspect one index set and its identity:
 gonimbus index doctor idx_1234abcd --detail
 ```
 
-Review run history, prefix stats, and object counts:
+Review object counts, run history, and prefix stats:
 
 ```bash
-gonimbus index stats s3://bucket/data/
+gonimbus index stats s3://bucket/data/ --runs --prefixes
 ```
 
 Publish a validated run to a hub:
@@ -115,7 +115,7 @@ Hydrate the latest published run:
 ```bash
 gonimbus index hydrate \
   --hub s3://ops-bucket/index-hub/ \
-  --index-set idx_1234abcd5678ef90 \
+  --index-set idx_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \
   --dest /tmp/gonimbus-indexes/
 ```
 
