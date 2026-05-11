@@ -208,16 +208,16 @@ Validate index integrity and identity.
 # Summary view
 gonimbus index doctor
 
-# Detailed diagnostics
-gonimbus index doctor --detail
+# Detailed diagnostics for one local index
+gonimbus index doctor idx_1234abcd --detail
 ```
 
 ### `index show`
 
-Display manifest provenance for an index.
+Alias for `index doctor`.
 
 ```bash
-gonimbus index show 's3://bucket/prefix/'
+gonimbus index show idx_1234abcd
 ```
 
 ### `index gc`
@@ -499,8 +499,11 @@ This displays:
 # Summary of all local indexes
 gonimbus index doctor
 
-# Detailed JSON for a specific index
-gonimbus index doctor --db ~/.local/share/gonimbus/indexes/idx_1234abcd/ --detail
+# Summary for a specific local index by ID or prefix
+gonimbus index doctor idx_1234abcd
+
+# Detailed JSON for a specific index directory
+gonimbus index doctor /path/to/indexes/idx_1234abcd/ --detail
 
 # Include object counts (expensive on large indexes)
 gonimbus index doctor --stats
