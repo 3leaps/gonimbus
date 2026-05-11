@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -665,6 +666,45 @@ func compileScopePlan(ctx context.Context, m *manifest.IndexManifest) (*scope.Pl
 	return scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
 }
 
+func scopePlanAuthHint(err error, profile string) string {
+	if !isAWSSSOExpiredError(err) {
+		return ""
+	}
+	return awsSSOLoginHint(profile)
+}
+
+func isAWSSSOExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "invalidgrantexception"):
+		return true
+	case strings.Contains(msg, "token has expired"):
+		return true
+	case strings.Contains(msg, "sso") && strings.Contains(msg, "session") && (strings.Contains(msg, "expired") || strings.Contains(msg, "invalid")):
+		return true
+	default:
+		return false
+	}
+}
+
+func awsSSOLoginHint(profile string) string {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return "hint: AWS SSO token appears expired; run `aws sso login` to refresh."
+	}
+	return fmt.Sprintf("hint: AWS SSO token appears expired; run `aws sso login --profile %s` to refresh.", profile)
+}
+
+func writeScopePlanError(w io.Writer, err error, profile string) {
+	if hint := scopePlanAuthHint(err, profile); hint != "" {
+		_, _ = fmt.Fprintf(w, "  %s\n", hint)
+	}
+	_, _ = fmt.Fprintf(w, "  error: %v\n", err)
+}
+
 func prefixPatterns(basePrefix string, patterns []string) []string {
 	if basePrefix == "" {
 		return patterns
@@ -824,7 +864,7 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 		_, _ = fmt.Fprintln(os.Stdout, "Scope Plan (build.scope):")
 		plan, err := compileScopePlan(ctx, m)
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stdout, "  error: %v\n", err)
+			writeScopePlanError(os.Stdout, err, m.Connection.Profile)
 		} else if plan == nil || len(plan.Prefixes) == 0 {
 			_, _ = fmt.Fprintln(os.Stdout, "  count: 0")
 		} else {
