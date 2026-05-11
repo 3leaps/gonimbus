@@ -244,6 +244,10 @@ gonimbus index hub gc \
   --hub-profile hub-admin
 ```
 
+For recurring index operations, see
+[Steady-State Index Operations](steady-state-index-operations.md) for cadence,
+run-history, and soft-delete guidance.
+
 ## Getting Started
 
 1. Create a workspace repository

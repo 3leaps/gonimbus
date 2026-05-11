@@ -2,6 +2,10 @@
 
 The local index enables fast repeated queries against large buckets without re-enumerating via the provider API.
 
+For recurring production builds, see
+[Steady-State Index Operations](steady-state-index-operations.md) for cadence,
+run-history, and soft-delete guidance.
+
 ## When to Use the Index
 
 Gonimbus supports two workflows based on bucket scale:
@@ -391,6 +395,9 @@ gonimbus index query 's3://bucket/prod/' --pattern '**/*.json' --count
 # Clean up old builds
 gonimbus index gc --keep-last 7
 ```
+
+For repeated builds of long-lived shards, see
+[Steady-State Index Operations](steady-state-index-operations.md).
 
 ### Multi-Bucket Inventory
 
