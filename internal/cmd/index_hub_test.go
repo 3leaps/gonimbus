@@ -40,6 +40,66 @@ func TestParseFlexibleTime_Invalid(t *testing.T) {
 	assert.Contains(t, err.Error(), "expected RFC 3339")
 }
 
+// --- hub URI argument policy ---
+
+func TestResolveHubURI_Positional(t *testing.T) {
+	cmd := newHubPolicyCmd(t)
+	hubURI, err := resolveHubURI(cmd, []string{"file:///tmp/gonimbus-hub/"})
+	require.NoError(t, err)
+	assert.Equal(t, "file:///tmp/gonimbus-hub/", hubURI)
+}
+
+func TestResolveHubURI_Flag(t *testing.T) {
+	cmd := newHubPolicyCmd(t)
+	require.NoError(t, cmd.Flags().Parse([]string{"--hub", "file:///tmp/gonimbus-hub/"}))
+
+	hubURI, err := resolveHubURI(cmd, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "file:///tmp/gonimbus-hub/", hubURI)
+}
+
+func TestResolveHubURI_RequiresExactlyOneSource(t *testing.T) {
+	cmd := newHubPolicyCmd(t)
+	_, err := resolveHubURI(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub URI is required")
+}
+
+func TestResolveHubURI_RejectsFlagAndPositional(t *testing.T) {
+	cmd := newHubPolicyCmd(t)
+	require.NoError(t, cmd.Flags().Parse([]string{"--hub", "file:///tmp/a/"}))
+
+	_, err := resolveHubURI(cmd, []string{"file:///tmp/a/"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestValidateHubURIArgs_RejectsTooManyPositionals(t *testing.T) {
+	err := validateHubURIArgs(newHubPolicyCmd(t), []string{"file:///tmp/a/", "file:///tmp/b/"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most one positional hub-uri")
+}
+
+func TestIndexHubSubcommandsDeclareHubURIArgPolicy(t *testing.T) {
+	commands := []*cobra.Command{
+		indexHubInitCmd,
+		indexHubLsCmd,
+		indexHubShowCmd,
+		indexHubSetLatestCmd,
+		indexHubRmRunCmd,
+		indexHubGCCmd,
+	}
+	for _, cmd := range commands {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			assert.Contains(t, cmd.Use, "[hub-uri]")
+			require.NotNil(t, cmd.Args)
+			err := cmd.Args(cmd, []string{"file:///tmp/a/", "file:///tmp/b/"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "at most one positional hub-uri")
+		})
+	}
+}
+
 // --- hub init ---
 
 func TestRunIndexHubInit_FileHub(t *testing.T) {
@@ -73,6 +133,15 @@ func TestRunIndexHubInit_WithDescription(t *testing.T) {
 	assert.Equal(t, "Production indexes", doc["description"])
 }
 
+func TestRunIndexHubInit_PositionalHubURI(t *testing.T) {
+	hubDir := t.TempDir()
+
+	cmd := newHubInitCmdWithArgs(t, []string{"file://" + hubDir + "/"})
+	require.NoError(t, cmd.Execute())
+
+	assert.FileExists(t, filepath.Join(hubDir, "hub.json"))
+}
+
 func TestRunIndexHubInit_AlreadyInitialized(t *testing.T) {
 	hubDir := t.TempDir()
 
@@ -101,6 +170,39 @@ func TestRunIndexHubLs_WithIndexSets(t *testing.T) {
 
 	cmd := newHubLsCmd(t, hubDir, true)
 	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubLs_PositionalHubURI(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubLsCmdWithArgs(t, []string{"file://" + hubDir + "/", "--json"})
+	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubLs_MissingHubURI(t *testing.T) {
+	cmd := newHubLsCmdWithArgs(t, nil)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub URI is required")
+}
+
+func TestRunIndexHubLs_RejectsFlagAndPositionalHubURI(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+
+	cmd := newHubLsCmdWithArgs(t, []string{
+		"--hub", "file://" + hubDir + "/",
+		"file://" + hubDir + "/",
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestRunIndexHubLs_RejectsTooManyPositionalHubURIs(t *testing.T) {
+	cmd := newHubLsCmdWithArgs(t, []string{"file:///tmp/a/", "file:///tmp/b/"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most one positional hub-uri")
 }
 
 // --- discoverIndexSets ---
@@ -526,12 +628,7 @@ func setupHubWith3Runs(t *testing.T) string {
 
 func newHubInitCmd(t *testing.T, hubDir, description string) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "init", RunE: runIndexHubInit}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
-	cmd.Flags().String("description", "", "")
+	cmd := newHubInitBaseCmd(t)
 	args := []string{"--hub", "file://" + hubDir + "/"}
 	if description != "" {
 		args = append(args, "--description", description)
@@ -541,13 +638,25 @@ func newHubInitCmd(t *testing.T, hubDir, description string) *cobra.Command {
 	return cmd
 }
 
+func newHubInitCmdWithArgs(t *testing.T, args []string) *cobra.Command {
+	t.Helper()
+	cmd := newHubInitBaseCmd(t)
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubInitBaseCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "init [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubInit}
+	addHubTestFlags(cmd)
+	cmd.Flags().String("description", "", "")
+	return cmd
+}
+
 func newHubLsCmd(t *testing.T, hubDir string, jsonOutput bool) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "ls", RunE: runIndexHubLs}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
+	cmd := newHubLsBaseCmd(t)
 	cmd.Flags().Bool("json", false, "")
 	args := []string{"--hub", "file://" + hubDir + "/"}
 	if jsonOutput {
@@ -558,13 +667,26 @@ func newHubLsCmd(t *testing.T, hubDir string, jsonOutput bool) *cobra.Command {
 	return cmd
 }
 
+func newHubLsCmdWithArgs(t *testing.T, args []string) *cobra.Command {
+	t.Helper()
+	cmd := newHubLsBaseCmd(t)
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func newHubLsBaseCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "ls [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubLs}
+	addHubTestFlags(cmd)
+	return cmd
+}
+
 func newHubShowCmd(t *testing.T, hubDir, indexSetID string, jsonOutput bool) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "show", RunE: runIndexHubShow}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
+	cmd := &cobra.Command{Use: "show [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubShow}
+	addHubTestFlags(cmd)
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().Bool("json", false, "")
 	args := []string{"--hub", "file://" + hubDir + "/", "--index-set", indexSetID}
@@ -578,11 +700,8 @@ func newHubShowCmd(t *testing.T, hubDir, indexSetID string, jsonOutput bool) *co
 
 func newHubSetLatestCmd(t *testing.T, hubDir, indexSetID, runID string) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "set-latest", RunE: runIndexHubSetLatest}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
+	cmd := &cobra.Command{Use: "set-latest [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubSetLatest}
+	addHubTestFlags(cmd)
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().String("run-id", "", "")
 	cmd.SetArgs([]string{
@@ -596,11 +715,8 @@ func newHubSetLatestCmd(t *testing.T, hubDir, indexSetID, runID string) *cobra.C
 
 func newHubRmRunCmd(t *testing.T, hubDir, indexSetID, runID string, force bool) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "rm-run", RunE: runIndexHubRmRun}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
+	cmd := &cobra.Command{Use: "rm-run [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubRmRun}
+	addHubTestFlags(cmd)
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().String("run-id", "", "")
 	cmd.Flags().Bool("force", false, "")
@@ -619,11 +735,8 @@ func newHubRmRunCmd(t *testing.T, hubDir, indexSetID, runID string, force bool) 
 
 func newHubGCCmd(t *testing.T, hubDir, indexSet string, keep int, before string, dryRun, jsonOutput bool) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "gc", RunE: runIndexHubGC}
-	cmd.Flags().String("hub", "", "")
-	cmd.Flags().String("hub-profile", "", "")
-	cmd.Flags().String("hub-region", "", "")
-	cmd.Flags().String("hub-endpoint", "", "")
+	cmd := &cobra.Command{Use: "gc [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubGC}
+	addHubTestFlags(cmd)
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().Int("keep", 0, "")
 	cmd.Flags().String("before", "", "")
@@ -648,4 +761,18 @@ func newHubGCCmd(t *testing.T, hubDir, indexSet string, keep int, before string,
 	cmd.SetArgs(args)
 	cmd.SetContext(context.Background())
 	return cmd
+}
+
+func newHubPolicyCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "hub-policy [hub-uri]", Args: validateHubURIArgs}
+	addHubTestFlags(cmd)
+	return cmd
+}
+
+func addHubTestFlags(cmd *cobra.Command) {
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
 }
