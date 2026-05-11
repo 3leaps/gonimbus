@@ -35,6 +35,15 @@ var (
 	}
 )
 
+const rootHelpShort = "Cloud object storage crawl/inspect/transfer engine"
+
+const rootHelpLong = `Cloud object storage crawl/inspect/transfer engine.
+
+Build localized indexes, query large object stores, and transfer objects with
+content-aware routing.
+
+Use the subcommands to perform specific operations.`
+
 // SetVersionInfo is called by main package to set version information
 func SetVersionInfo(version, commit, buildDate string) {
 	versionInfo.Version = version
@@ -75,10 +84,8 @@ func IsReadOnly() bool {
 var rootCmd = &cobra.Command{
 	// NOTE: initConfig() overwrites these from app identity.
 	Use:   filepath.Base(os.Args[0]),
-	Short: "A Fulmen workhorse application template",
-	Long: `A production-ready Fulmen workhorse service template.
-
-Use the subcommands to perform specific operations.`,
+	Short: rootHelpShort,
+	Long:  rootHelpLong,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -91,7 +98,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (optional; defaults to app identity config path)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $XDG_CONFIG_HOME/gonimbus/config.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output (sets log level to debug)")
 	rootCmd.PersistentFlags().BoolVar(&readOnly, "readonly", false, "Disable provider-side mutations (blocks transfers and write-probe preflight)")
 
@@ -115,10 +122,8 @@ func initConfig() {
 		if identity.BinaryName != "" {
 			rootCmd.Use = identity.BinaryName
 		}
-		if identity.Description != "" {
-			rootCmd.Short = identity.Description
-			rootCmd.Long = fmt.Sprintf("%s - %s\n\nUse the subcommands to perform specific operations.", identity.BinaryName, identity.Description)
-		}
+		rootCmd.Short = rootHelpShort
+		rootCmd.Long = rootHelpLong
 		if f := rootCmd.PersistentFlags().Lookup("config"); f != nil && identity.ConfigName != "" {
 			f.Usage = fmt.Sprintf("config file (default is $XDG_CONFIG_HOME/%s/config.yaml)", identity.ConfigName)
 		}
