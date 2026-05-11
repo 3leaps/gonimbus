@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/3leaps/gonimbus/internal/observability"
@@ -58,18 +60,23 @@ func TestMaskAccessKey(t *testing.T) {
 func TestPrintAWSCredentialsHelp(t *testing.T) {
 	// Initialize CLI logger to avoid nil pointer
 	observability.InitCLILogger("test", false)
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetOut(&stdout)
+	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
+	assert.NoError(t, err)
 
 	// This test verifies the function doesn't panic
 	// It logs help text for configuring AWS credentials
 	t.Run("does not panic without profile", func(t *testing.T) {
 		assert.NotPanics(t, func() {
-			printAWSCredentialsHelp("")
+			printAWSCredentialsHelp(out, "")
 		})
 	})
 
 	t.Run("does not panic with profile", func(t *testing.T) {
 		assert.NotPanics(t, func() {
-			printAWSCredentialsHelp("my-profile")
+			printAWSCredentialsHelp(out, "my-profile")
 		})
 	})
 }
