@@ -36,7 +36,7 @@ Files often arrive organized by processing date but need reorganization by busin
 gonimbus inspect 's3://bucket/arrivals/' --json > objects.jsonl
 
 # 2. Extract business date from XML content
-jq -r '"s3://bucket/" + .key' objects.jsonl | \
+jq -r 'select(.key?) | "s3://bucket/" + .key' objects.jsonl | \
   gonimbus content probe --stdin --config probe.yaml --emit reflow-input \
   > probe.jsonl
 

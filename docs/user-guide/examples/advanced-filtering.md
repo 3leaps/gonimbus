@@ -10,6 +10,13 @@ Filters are applied with **AND semantics**:
 
 ## Semantics
 
+- **Include/exclude patterns**
+  - `match.includes` defines the candidate object keys to inspect or crawl.
+  - `match.excludes` removes matching keys after include matching.
+  - Excludes use the same doublestar glob semantics as includes.
+  - Use excludes for common skip rules such as temporary folders, archive
+    folders, marker files, or generated staging output.
+
 - **Size**
   - Raw bytes: `1024`
   - Base-10 (SI): `1KB`, `100MB`, `1GB` (1KB = 1000 bytes)
@@ -101,6 +108,9 @@ connection:
 match:
   includes:
     - "fixtures/v0.1.2/tier-b/**"
+  excludes:
+    - "**/_temporary/**"
+    - "**/*.tmp"
   filters:
     size:
       min: 1KB

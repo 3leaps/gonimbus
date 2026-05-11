@@ -16,10 +16,8 @@ var indexCmd = &cobra.Command{
 	Short: "Manage local index stores",
 	Long: `Manage local index stores used for index-backed search and tree operations.
 
-This command group is the foundation for v0.1.3 indexing.
-
-Note: index build/query/list/gc are implemented in follow-on checkpoints; this
-command currently supports initializing the local index database.`,
+Build local object indexes, query indexed objects, manage index sets and
+background jobs, and export or hydrate index hubs.`,
 }
 
 var indexInitCmd = &cobra.Command{
