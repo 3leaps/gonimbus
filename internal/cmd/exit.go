@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -79,6 +80,43 @@ func ExitWithCode(logger *logging.Logger, exitCode foundry.ExitCode, msg string,
 	}
 
 	// Exit with semantic code
+	os.Exit(info.Code)
+}
+
+// ExitWithCodeWriter exits with a semantic foundry exit code, writing plain
+// diagnostic output to the supplied writer instead of using the CLI logger.
+func ExitWithCodeWriter(w io.Writer, exitCode foundry.ExitCode, msg string, err error) {
+	if w == nil {
+		w = io.Discard
+	}
+
+	info, ok := foundry.GetExitCodeInfo(exitCode)
+	if !ok {
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "FATAL: %s: %v (exit code: %d)\n", msg, err, exitCode)
+		} else {
+			_, _ = fmt.Fprintf(w, "FATAL: %s (exit code: %d)\n", msg, exitCode)
+		}
+		os.Exit(int(exitCode))
+	}
+
+	if err != nil {
+		if envelope, ok := err.(*errors.ErrorEnvelope); ok {
+			_, _ = fmt.Fprintf(w, "FATAL: %s [%s]: %v (correlation: %s, trace: %s)\n",
+				msg, envelope.Code, envelope.Message, envelope.CorrelationID, envelope.TraceID)
+			if envelope.Original != nil {
+				if originalErr, ok := envelope.Original.(error); ok {
+					_, _ = fmt.Fprintf(w, "Underlying error: %v\n", originalErr)
+				}
+			}
+		} else {
+			_, _ = fmt.Fprintf(w, "FATAL: %s: %v\n", msg, err)
+		}
+	} else {
+		_, _ = fmt.Fprintf(w, "FATAL: %s\n", msg)
+	}
+	_, _ = fmt.Fprintf(w, "Exit Code: %d (%s) - %s\n", info.Code, info.Name, info.Description)
+
 	os.Exit(info.Code)
 }
 
