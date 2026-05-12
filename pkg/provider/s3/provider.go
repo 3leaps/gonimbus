@@ -55,20 +55,10 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		}
 	}
 
-	// Build S3 client options
 	s3Opts := []func(*s3.Options){
 		func(o *s3.Options) {
-			if cfg.ForcePathStyle {
-				o.UsePathStyle = true
-			}
+			applyS3ClientOptions(o, cfg)
 		},
-	}
-
-	// Custom endpoint for S3-compatible stores
-	if cfg.Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		})
 	}
 
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
@@ -83,6 +73,19 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		bucket:  cfg.Bucket,
 		maxKeys: maxKeys,
 	}, nil
+}
+
+func applyS3ClientOptions(o *s3.Options, cfg Config) {
+	if cfg.ForcePathStyle {
+		o.UsePathStyle = true
+	}
+
+	if cfg.Endpoint != "" {
+		o.BaseEndpoint = aws.String(cfg.Endpoint)
+		// S3-compatible providers can omit response checksums for supported
+		// operations; the SDK warning is expected noise for those endpoints.
+		o.DisableLogOutputChecksumValidationSkipped = true
+	}
 }
 
 // loadAWSConfig builds the AWS configuration with appropriate credentials.
