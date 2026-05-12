@@ -86,11 +86,19 @@ Example output structure:
 
 ### `stream put`
 
-Writes raw stdin to one exact destination object.
+Writes stdin to one exact destination object.
 
 ```bash
 cat output.xml | gonimbus stream put file:///tmp/output.xml
 cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --profile my-profile
+```
+
+It can also consume one framed `stream get` object and write it to an explicit
+destination:
+
+```bash
+gonimbus stream get s3://bucket/path/to/input.xml --profile my-profile \
+  | gonimbus stream put --framing jsonl file:///tmp/input.xml
 ```
 
 `stream put` refuses to replace an existing object by default. Use `--overwrite`

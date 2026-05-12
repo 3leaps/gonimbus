@@ -186,6 +186,9 @@ const (
 
 	// ErrCodeAlreadyExists indicates a write was refused because the target exists.
 	ErrCodeAlreadyExists = "ALREADY_EXISTS"
+
+	// ErrCodeInvalidInput indicates malformed or unsupported input data.
+	ErrCodeInvalidInput = "INVALID_INPUT"
 )
 
 // ProgressRecord is the data payload for progress updates.
