@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	gfconfig "github.com/fulmenhq/gofulmen/config"
@@ -74,6 +75,7 @@ var (
 	indexBuildScopeWarnPrefix int
 	indexBuildScopeMaxPrefix  int
 	indexBuildName            string
+	indexBuildSummary         bool
 )
 
 func init() {
@@ -88,6 +90,7 @@ func init() {
 	indexBuildCmd.Flags().BoolVar(&indexBuildDryRun, "dry-run", false, "Validate manifest and show plan without building")
 	indexBuildCmd.Flags().BoolVar(&indexBuildBackground, "background", false, "Run index build as a managed background job")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDedupe, "dedupe", false, "Refuse to start if an identical job is already running")
+	indexBuildCmd.Flags().BoolVar(&indexBuildSummary, "summary", false, "Print top-level object distribution after a completed build")
 	indexBuildCmd.Flags().StringVar(&indexBuildManagedJobID, "_managed-job-id", "", "(internal) Managed job id")
 	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
@@ -117,8 +120,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	// Background mode: start a managed child process and return.
 	if indexBuildBackground {
-		if indexBuildDryRun {
-			return fmt.Errorf("--background is not compatible with --dry-run")
+		if err := validateIndexBuildBackgroundFlags(); err != nil {
+			return err
 		}
 		execRoot, err := indexJobsRootDir()
 		if err != nil {
@@ -421,8 +424,48 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	if result.FinalStatus == indexstore.RunStatusPartial {
 		_, _ = fmt.Fprintf(os.Stderr, "  note: partial run (some errors encountered)\n")
 	}
+	if indexBuildSummary {
+		if err := printIndexBuildSummary(ctx, db, indexSet.IndexSetID, run.RunID, os.Stderr); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+func validateIndexBuildBackgroundFlags() error {
+	if indexBuildDryRun {
+		return fmt.Errorf("--background is not compatible with --dry-run")
+	}
+	if indexBuildSummary {
+		return fmt.Errorf("--background is not compatible with --summary")
+	}
+	return nil
+}
+
+func printIndexBuildSummary(ctx context.Context, db *sql.DB, indexSetID, runID string, w io.Writer) error {
+	rows, err := indexstore.GetTopLevelObjectSummaryForRun(ctx, db, indexSetID, runID)
+	if err != nil {
+		return fmt.Errorf("get build summary: %w", err)
+	}
+
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Top-level object summary:")
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintln(w, "  (no objects seen in this run)")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "  PREFIX\tOBJECTS\tSIZE")
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(tw, "  %s\t%d\t%s\n",
+			displayPrefix(row.Prefix),
+			row.ObjectCount,
+			formatBytes(row.TotalSizeBytes),
+		)
+	}
+	return tw.Flush()
 }
 
 // validateEndpointURL validates that the endpoint is a parseable URL.
