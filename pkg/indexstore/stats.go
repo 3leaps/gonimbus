@@ -29,6 +29,55 @@ type IndexSetSummary struct {
 	LatestRun      *IndexRun
 }
 
+// TopLevelObjectSummary provides object distribution for a single run.
+type TopLevelObjectSummary struct {
+	Prefix         string
+	ObjectCount    int64
+	TotalSizeBytes int64
+}
+
+// GetTopLevelObjectSummaryForRun returns active objects seen by a specific run,
+// grouped by the first relative-key segment. Root-level objects use an empty prefix.
+func GetTopLevelObjectSummaryForRun(ctx context.Context, db *sql.DB, indexSetID, runID string) ([]TopLevelObjectSummary, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT
+			CASE
+				WHEN instr(rel_key, '/') = 0 THEN ''
+				ELSE substr(rel_key, 1, instr(rel_key, '/'))
+			END AS top_prefix,
+			COUNT(*) AS object_count,
+			COALESCE(SUM(size_bytes), 0) AS total_size_bytes
+		 FROM objects_current
+		 WHERE index_set_id = ?
+		   AND last_seen_run_id = ?
+		   AND deleted_at IS NULL
+		 GROUP BY top_prefix
+		 ORDER BY COUNT(*) DESC, COALESCE(SUM(size_bytes), 0) DESC, top_prefix ASC`,
+		indexSetID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("query top-level object summary: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var summary []TopLevelObjectSummary
+	for rows.Next() {
+		var row TopLevelObjectSummary
+		if err := rows.Scan(&row.Prefix, &row.ObjectCount, &row.TotalSizeBytes); err != nil {
+			return nil, fmt.Errorf("scan top-level object summary: %w", err)
+		}
+		summary = append(summary, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate top-level object summary: %w", err)
+	}
+
+	return summary, nil
+}
+
 // GetIndexSetSummary retrieves aggregate statistics for an IndexSet.
 func GetIndexSetSummary(ctx context.Context, db *sql.DB, indexSetID string) (*IndexSetSummary, error) {
 	if ctx == nil {
