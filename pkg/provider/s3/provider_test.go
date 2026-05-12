@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
@@ -398,6 +399,30 @@ func TestNew_ValidationError(t *testing.T) {
 
 	var configErr *ConfigError
 	assert.True(t, errors.As(err, &configErr))
+}
+
+func TestApplyS3ClientOptions_S3CompatibleEndpoint(t *testing.T) {
+	opts := &awss3.Options{}
+
+	applyS3ClientOptions(opts, Config{
+		Endpoint:       "https://s3.wasabisys.com",
+		ForcePathStyle: true,
+	})
+
+	assert.True(t, opts.UsePathStyle)
+	require.NotNil(t, opts.BaseEndpoint)
+	assert.Equal(t, "https://s3.wasabisys.com", *opts.BaseEndpoint)
+	assert.True(t, opts.DisableLogOutputChecksumValidationSkipped)
+}
+
+func TestApplyS3ClientOptions_NativeAWS(t *testing.T) {
+	opts := &awss3.Options{}
+
+	applyS3ClientOptions(opts, Config{})
+
+	assert.False(t, opts.UsePathStyle)
+	assert.Nil(t, opts.BaseEndpoint)
+	assert.False(t, opts.DisableLogOutputChecksumValidationSkipped)
 }
 
 func TestDefaultMaxKeys(t *testing.T) {
