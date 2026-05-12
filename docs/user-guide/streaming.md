@@ -11,6 +11,7 @@ Gonimbus provides two command families for accessing object content:
 | --------------- | --------------------------- | -------------------- | ---------------------------------- |
 | `stream head`   | JSONL only                  | None (metadata only) | Routing decisions, size checks     |
 | `stream get`    | Mixed framing (JSONL + raw) | Full object          | Content download for processing    |
+| `stream put`    | JSONL only                  | Raw stdin writes     | Upload pipeline output             |
 | `content head`  | JSONL only (base64)         | First N bytes        | Header inspection, magic bytes     |
 | `content probe` | JSONL only                  | First N bytes        | Extract derived fields for routing |
 
@@ -25,6 +26,7 @@ Gonimbus provides two command families for accessing object content:
 | Inspect magic bytes            | `content head` | First 4-16 bytes for file type   |
 | Check XML declaration          | `content head` | First 256 bytes for encoding     |
 | Process content in pipelines   | `stream get`   | Pipe to decoders/processors      |
+| Write pipeline output          | `stream put`   | Raw stdin to one exact object    |
 | Verify content integrity       | `stream get`   | Compute hash on streamed content |
 
 ## Commands
@@ -80,6 +82,36 @@ Example output structure:
 <65536 raw bytes>
 ...
 {"type":"gonimbus.stream.close.v1",...,"data":{"stream_id":"...","status":"success","chunks":58,"bytes":3729736}}
+```
+
+### `stream put`
+
+Writes raw stdin to one exact destination object.
+
+```bash
+cat output.xml | gonimbus stream put file:///tmp/output.xml
+cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --profile my-profile
+```
+
+`stream put` refuses to replace an existing object by default. Use `--overwrite`
+when replacement is intentional:
+
+```bash
+cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --overwrite
+```
+
+Output is a `gonimbus.stream.put.v1` JSONL record on success:
+
+```json
+{
+  "type": "gonimbus.stream.put.v1",
+  "data": {
+    "dest_uri": "s3://bucket/path/to/output.xml",
+    "dest_key": "path/to/output.xml",
+    "bytes": 3729736,
+    "status": "success"
+  }
+}
 ```
 
 ## Stream Contract
