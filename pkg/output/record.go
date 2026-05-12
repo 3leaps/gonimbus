@@ -183,6 +183,9 @@ const (
 
 	// ErrCodeProviderUnavailable indicates provider or network availability issues.
 	ErrCodeProviderUnavailable = "PROVIDER_UNAVAILABLE"
+
+	// ErrCodeAlreadyExists indicates a write was refused because the target exists.
+	ErrCodeAlreadyExists = "ALREADY_EXISTS"
 )
 
 // ProgressRecord is the data payload for progress updates.
