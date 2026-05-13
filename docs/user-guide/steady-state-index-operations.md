@@ -6,7 +6,7 @@ index set.
 
 This page describes today's operating pattern for recurring builds. It does not
 describe automatic incremental listing: `index build` does not currently have a
-`--since` mode or a built-in delta report.
+`--since` mode, a built-in delta report, or historical query flags.
 
 ## Mental Model
 
@@ -18,12 +18,15 @@ continues to use the same index set when these identity inputs stay unchanged:
 - Match and filter configuration
 - `build.scope` configuration
 
-Each successful repeat build appends a new run to that index set and updates
-`objects_current`. `index query` reads `objects_current`, so results reflect the
-latest indexed state rather than a historical run snapshot.
+Each successful repeat build appends a new run to that index set. The run is a
+record of one traversal, and the index set's current object table is updated to
+the latest indexed state. `index query` reads that current table, so query
+results answer "what is current for this index set?" rather than "what did run
+N see?"
 
 Changing the base URI, provider identity, match filters, or `build.scope` can
-produce a different index set. Use `index list`, `index stats`, or
+produce a different index set. The identity is derived from those inputs; it is
+not a durable human-selected name. Use `index list`, `index stats`, or
 `index doctor` to confirm which `idx_*` identity a manifest is using before
 comparing runs.
 
@@ -32,23 +35,29 @@ comparing runs.
 Choose rebuild cadence based on how likely a partition is to receive new,
 changed, or corrected objects.
 
-| Data window    | Suggested cadence              | Reason                                      |
-| -------------- | ------------------------------ | ------------------------------------------- |
-| Current period | Frequent rebuilds              | New objects and corrections are expected    |
-| Recent periods | Less frequent rebuilds         | Late arrivals still happen                  |
-| Closed periods | Frozen except audit/incident   | Avoid relisting stable data unnecessarily   |
-| Audit pass     | Periodic full-coverage rebuild | Validate deletion state and source coverage |
+| Data window    | Suggested cadence                    | Reason                                      |
+| -------------- | ------------------------------------ | ------------------------------------------- |
+| Current period | Nightly or more often                | New objects and corrections are expected    |
+| Recent periods | Weekly during the close window       | Late arrivals still happen                  |
+| Closed periods | Frozen except audit or incident work | Avoid relisting stable data unnecessarily   |
+| Audit pass     | Monthly or release-gated full build  | Validate deletion state and source coverage |
 
-The close window is an operational decision. A common pattern is to keep the
-current period hot, rebuild the prior period for a fixed grace window after it
-ends, and freeze older periods unless an audit or incident requires another
-pass.
+The close window is an operational decision. A useful default is a rolling
+14-day close window after the end of a period: keep the current period hot,
+continue rebuilding the just-ended period during the grace window, then freeze
+older periods unless an audit or incident requires another pass. Adjust the
+window for sources with longer delivery lag.
+
+When you need a quick operator check, `index list` shows whether repeated
+builds are landing in the same index set and how many runs that set has
+accumulated. A run-count increase after the scheduled build is the first signal
+that the repeat-build path is using the same manifest identity.
 
 ## Scoped Builds and Soft-Delete
 
 Scoped builds reduce provider listing work by limiting the prefix plan. They are
 appropriate for date-partitioned or shard-oriented operations, but they are not
-full-coverage audits.
+full-coverage audits. This distinction matters most for deletion detection.
 
 Soft-delete behavior depends on run coverage:
 
@@ -58,21 +67,22 @@ Soft-delete behavior depends on run coverage:
   prefix plan were not checked.
 - A partial or interrupted run is not authoritative for deletion detection.
 
-This means scoped indexes can become stale for deleted objects until a
-full-coverage audit build is run. That tradeoff is usually correct for recurring
-operational builds because it avoids interpreting "not listed in this scope" as
-"deleted from the source."
+This means a scoped index can remain stale for deleted objects outside the
+latest prefix plan until a full-coverage audit build is run. That tradeoff is
+intentional for recurring operational builds: gonimbus avoids interpreting
+"not listed in this scope" as "deleted from the source."
 
 ## Recommended Pattern
 
 1. Create one manifest per operational shard, such as a prefix, collection, or
    time window.
 2. Keep the manifest identity stable for repeat builds of the same shard.
-3. Run frequent scoped builds for active shards.
-4. Run less frequent builds for recent shards that still receive late arrivals.
+3. Run frequent scoped builds for current or otherwise active shards.
+4. Continue rebuilding recent shards through the close window.
 5. Freeze closed shards unless an audit or incident response requires a rebuild.
 6. Schedule periodic full-coverage audit builds when deletion detection matters.
-7. Export validated runs to an index hub so other operators can hydrate the
+7. Compare run counts and stats after each scheduled build before publishing.
+8. Export validated runs to an index hub so other operators can hydrate the
    current run without rebuilding.
 
 ## Useful Commands
@@ -88,6 +98,10 @@ List index sets and run counts:
 ```bash
 gonimbus index list
 ```
+
+The same manifest should continue to report the same `idx_*` identity with an
+increasing run count. If a scheduled build creates a new index set, compare the
+manifest's base URI, provider identity, match filters, and `build.scope`.
 
 Inspect one index set and its identity:
 
@@ -122,7 +136,8 @@ gonimbus index hydrate \
 ## Current Limits
 
 Today, recurring builds are repeat listings over the manifest's effective
-scope. Gonimbus does not yet provide:
+scope. They are the supported pattern for steady-state operations, but they are
+not automatic delta builds. Gonimbus does not yet provide:
 
 - `index build --since` for provider-side delta listing
 - A native "new since last run" report
