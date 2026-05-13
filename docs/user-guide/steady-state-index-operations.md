@@ -4,9 +4,12 @@ Gonimbus indexes are designed for repeated operational builds. A build records
 one run inside an index set, and queries read the latest object state for that
 index set.
 
-This page describes today's operating pattern for recurring builds. It does not
-describe automatic incremental listing: `index build` does not currently have a
-`--since` mode, a built-in delta report, or historical query flags.
+This page is for operators running recurring `index build` jobs against large
+or growing buckets, where each build should add to an index set's run history
+rather than create a new index set. It describes today's operating pattern for
+recurring builds. It does not describe automatic incremental listing:
+`index build` does not currently have a `--since` mode, a built-in delta
+report, or historical query flags.
 
 ## Mental Model
 
@@ -19,10 +22,10 @@ continues to use the same index set when these identity inputs stay unchanged:
 - `build.scope` configuration
 
 Each successful repeat build appends a new run to that index set. The run is a
-record of one traversal, and the index set's current object table is updated to
-the latest indexed state. `index query` reads that current table, so query
-results answer "what is current for this index set?" rather than "what did run
-N see?"
+record of one traversal, and the index set's current object table
+(`objects_current`) is updated to the latest indexed state. `index query` reads
+that current table, so query results answer "what is current for this index
+set?" rather than "what did run N see?"
 
 Changing the base URI, provider identity, match filters, or `build.scope` can
 produce a different index set. The identity is derived from those inputs; it is
@@ -35,18 +38,19 @@ comparing runs.
 Choose rebuild cadence based on how likely a partition is to receive new,
 changed, or corrected objects.
 
-| Data window    | Suggested cadence                    | Reason                                      |
-| -------------- | ------------------------------------ | ------------------------------------------- |
-| Current period | Nightly or more often                | New objects and corrections are expected    |
-| Recent periods | Weekly during the close window       | Late arrivals still happen                  |
-| Closed periods | Frozen except audit or incident work | Avoid relisting stable data unnecessarily   |
-| Audit pass     | Monthly or release-gated full build  | Validate deletion state and source coverage |
+| Data window    | Suggested cadence                      | Reason                                      |
+| -------------- | -------------------------------------- | ------------------------------------------- |
+| Current period | Nightly or more often                  | New objects and corrections are expected    |
+| Recent periods | Weekly during the close window         | Late arrivals still happen                  |
+| Closed periods | Frozen except audit or incident work   | Avoid relisting stable data unnecessarily   |
+| Audit pass     | Monthly, or after major source changes | Validate deletion state and source coverage |
 
 The close window is an operational decision. A useful default is a rolling
 14-day close window after the end of a period: keep the current period hot,
 continue rebuilding the just-ended period during the grace window, then freeze
 older periods unless an audit or incident requires another pass. Adjust the
-window for sources with longer delivery lag.
+window for sources with longer delivery lag, such as late-arriving objects from
+upstream producers.
 
 When you need a quick operator check, `index list` shows whether repeated
 builds are landing in the same index set and how many runs that set has
@@ -69,7 +73,7 @@ Soft-delete behavior depends on run coverage:
 
 This means a scoped index can remain stale for deleted objects outside the
 latest prefix plan until a full-coverage audit build is run. That tradeoff is
-intentional for recurring operational builds: gonimbus avoids interpreting
+intentional for recurring operational builds: Gonimbus avoids interpreting
 "not listed in this scope" as "deleted from the source."
 
 ## Recommended Pattern
@@ -81,7 +85,8 @@ intentional for recurring operational builds: gonimbus avoids interpreting
 4. Continue rebuilding recent shards through the close window.
 5. Freeze closed shards unless an audit or incident response requires a rebuild.
 6. Schedule periodic full-coverage audit builds when deletion detection matters.
-7. Compare run counts and stats after each scheduled build before publishing.
+7. Compare run counts and stats after each scheduled build before treating the
+   run as ready for downstream queries.
 8. Export validated runs to an index hub so other operators can hydrate the
    current run without rebuilding.
 
@@ -102,6 +107,10 @@ gonimbus index list
 The same manifest should continue to report the same `idx_*` identity with an
 increasing run count. If a scheduled build creates a new index set, compare the
 manifest's base URI, provider identity, match filters, and `build.scope`.
+
+Commands that accept an index set ID also accept an unambiguous short prefix.
+Use the full `idx_*` value in automation, and use short prefixes only for
+interactive inspection.
 
 Inspect one index set and its identity:
 
