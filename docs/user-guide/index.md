@@ -135,6 +135,60 @@ Notes:
 
 ## Commands
 
+### `doctor`
+
+Run local environment diagnostics. S3 provider diagnostics accept explicit
+endpoint and region overrides so you can check S3-compatible targets without
+mutating shell-wide AWS environment variables.
+
+```bash
+# General diagnostics
+gonimbus doctor
+
+# S3 credential/config diagnostics
+gonimbus doctor --provider s3 --profile archive
+
+# S3-compatible endpoint diagnostics
+gonimbus doctor --provider s3 \
+  --profile archive \
+  --endpoint https://s3.us-east-2.wasabisys.com \
+  --region us-east-2
+```
+
+`--endpoint`, `--region`, and `--probe-uri` are valid only with
+`--provider s3`. When both CLI flags and environment variables are present,
+the CLI flag wins.
+
+#### Opt-In S3 Probe
+
+By default, `doctor --provider s3` checks configuration and credentials only.
+It does not make bucket/object calls unless you pass `--probe-uri`.
+
+```bash
+# Bucket-level read probe
+gonimbus doctor --provider s3 --probe-uri s3://bucket
+
+# Prefix-scoped read probe
+gonimbus doctor --provider s3 --probe-uri s3://bucket/some/prefix/
+
+# Exact-key read probe
+gonimbus doctor --provider s3 --probe-uri s3://bucket/path/to/object.xml
+```
+
+| URI shape                 | Probe operation                    |
+| ------------------------- | ---------------------------------- |
+| `s3://bucket`             | `ListObjectsV2(MaxKeys=1)`         |
+| `s3://bucket/prefix/`     | `ListObjectsV2(Prefix, MaxKeys=1)` |
+| `s3://bucket/path/to/key` | `HeadObject`                       |
+
+Probe URIs must be precise targets. Glob patterns such as
+`s3://bucket/prefix/**/*.xml` or `s3://bucket/foo?bar` are rejected; use a
+bucket, trailing-slash prefix, or exact key.
+
+The probe is read-only and never uses `HeadBucket`, `PutObject`, or
+`DeleteObject`. `HeadObject` and `ListObjectsV2(MaxKeys=1)` are low-cost
+interactive checks, but do not run `doctor` inside high-volume loops.
+
 ### `index init`
 
 Initialize the local index database. Run once before building indexes.

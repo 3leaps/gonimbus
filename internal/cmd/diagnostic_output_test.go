@@ -42,6 +42,9 @@ func withDiagnosticTestState(t *testing.T) {
 	oldDoctorProvider := doctorProvider
 	oldDoctorProfile := doctorProfile
 	oldDoctorLogFormat := doctorLogFormat
+	oldDoctorEndpoint := doctorEndpoint
+	oldDoctorRegion := doctorRegion
+	oldDoctorProbeURI := doctorProbeURI
 	oldHealthLogFormat := healthLogFormat
 	oldLogger := observability.CLILogger
 
@@ -54,6 +57,9 @@ func withDiagnosticTestState(t *testing.T) {
 	doctorProvider = ""
 	doctorProfile = ""
 	doctorLogFormat = diagnosticLogFormatPlain
+	doctorEndpoint = ""
+	doctorRegion = ""
+	doctorProbeURI = ""
 	healthLogFormat = diagnosticLogFormatPlain
 	observability.InitCLILogger("gonimbus-test", false)
 	setDefaults()
@@ -65,6 +71,9 @@ func withDiagnosticTestState(t *testing.T) {
 		doctorProvider = oldDoctorProvider
 		doctorProfile = oldDoctorProfile
 		doctorLogFormat = oldDoctorLogFormat
+		doctorEndpoint = oldDoctorEndpoint
+		doctorRegion = oldDoctorRegion
+		doctorProbeURI = oldDoctorProbeURI
 		healthLogFormat = oldHealthLogFormat
 		observability.CLILogger = oldLogger
 	})
@@ -94,6 +103,7 @@ func TestDoctorDefaultOutputIsPlain(t *testing.T) {
 	require.Contains(t, stdout.String(), "Running diagnostic checks...")
 	require.Contains(t, stdout.String(), "Checking Go version")
 	require.Contains(t, stdout.String(), "=== End Diagnostics ===")
+	require.NotContains(t, stdout.String(), "Probing S3 target")
 	requirePlainDiagnosticOutput(t, stdout.String())
 }
 
