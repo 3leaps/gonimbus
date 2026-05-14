@@ -62,6 +62,7 @@ func init() {
 	indexExportCmd.Flags().String("hub-profile", "", "AWS profile for hub destination")
 	indexExportCmd.Flags().String("hub-region", "", "AWS region for hub destination")
 	indexExportCmd.Flags().String("hub-endpoint", "", "Custom endpoint for hub destination")
+	addLatestPointerFlags(indexExportCmd)
 
 	_ = indexExportCmd.MarkFlagRequired("hub")
 	_ = indexExportCmd.MarkFlagRequired("index-set")
@@ -250,6 +251,13 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	if closer, ok := putter.(io.Closer); ok {
 		defer func() { _ = closer.Close() }()
 	}
+	getter, err := newHubGetter(ctx, hub)
+	if err != nil {
+		return fmt.Errorf("hub provider: %w", err)
+	}
+	if closer, ok := getter.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
 
 	// Publish sequence (brief contract): index.db + identity.json first, complete.json last, then latest.json
 	runPrefix := []string{"index-sets", indexSet.IndexSetID, "runs", run.RunID}
@@ -281,18 +289,17 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("upload complete.json: %w", err)
 	}
 
-	// 4. Update latest.json (best-effort pointer advance)
-	latestJSON, err := buildLatestJSON(indexSet, run)
-	if err != nil {
-		return fmt.Errorf("build latest.json: %w", err)
-	}
-	latestKey := hubArtifactKey(hub, "index-sets", indexSet.IndexSetID, "latest.json")
+	// 4. Update latest.json (CAS pointer advance by default)
 	_, _ = fmt.Fprintln(os.Stderr, "  updating latest.json...")
-	if err := uploadBytes(ctx, putter, latestKey, latestJSON); err != nil {
-		// Non-fatal: artifacts are published, just pointer wasn't advanced.
-		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to update latest.json: %v\n", err)
-		_, _ = fmt.Fprintln(os.Stderr, "  run artifacts were uploaded successfully; use 'index hub set-latest' to advance the pointer manually")
+	latestOpts, err := latestPointerOptionsFromCommand(cmd)
+	if err != nil {
+		return err
 	}
+	outcome, err := advanceLatestPointer(ctx, hub, getter, putter, indexSet.IndexSetID, run.RunID, latestOpts)
+	if err != nil {
+		return fmt.Errorf("update latest.json: %w", err)
+	}
+	printLatestPointerOutcome(os.Stderr, outcome, indexSet.IndexSetID, run.RunID)
 
 	_, _ = fmt.Fprintf(os.Stderr, "Export complete: %s/runs/%s/\n", indexSet.IndexSetID, run.RunID)
 	return nil
@@ -516,21 +523,5 @@ func buildCompleteJSON(
 
 // buildLatestJSON constructs the latest.json pointer.
 func buildLatestJSON(indexSet *indexstore.IndexSet, run *indexstore.IndexRun) ([]byte, error) {
-	type latestDoc struct {
-		Version    string `json:"version"`
-		IndexSetID string `json:"index_set_id"`
-		RunID      string `json:"run_id"`
-		UpdatedAt  string `json:"updated_at"`
-		UpdatedBy  string `json:"updated_by"`
-	}
-
-	doc := latestDoc{
-		Version:    "1.0",
-		IndexSetID: indexSet.IndexSetID,
-		RunID:      run.RunID,
-		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
-		UpdatedBy:  exportedByString(),
-	}
-
-	return json.MarshalIndent(doc, "", "  ")
+	return buildLatestJSONForRun(indexSet.IndexSetID, run.RunID)
 }

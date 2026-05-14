@@ -77,6 +77,11 @@ type ObjectSummary struct {
 type ObjectMeta struct {
 	ObjectSummary
 
+	// Version is the provider-specific version handle, when available.
+	// For S3 this is the VersionId. Providers without native object versions
+	// may leave it empty.
+	Version string
+
 	// ContentType is the MIME type of the object.
 	ContentType string
 
