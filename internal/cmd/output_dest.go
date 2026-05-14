@@ -130,7 +130,7 @@ func newOutputProvider(ctx context.Context, spec *outputDestSpec) (provider.Obje
 
 // uploadToOutputDest opens a temp file and uploads it to the output destination.
 func uploadToOutputDest(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string) error {
-	f, err := os.Open(tempFilePath)
+	f, err := os.Open(tempFilePath) // #nosec G304 -- tempFilePath is an internal spool path created by stream put.
 	if err != nil {
 		return fmt.Errorf("open temp file for upload: %w", err)
 	}
@@ -143,6 +143,29 @@ func uploadToOutputDest(ctx context.Context, putter provider.ObjectPutter, key s
 
 	if err := putter.PutObject(ctx, key, io.Reader(f), info.Size()); err != nil {
 		return fmt.Errorf("upload output: %w", err)
+	}
+	return nil
+}
+
+func uploadConditionallyToOutputDest(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string, precond provider.PutPrecondition) error {
+	conditionalPutter, ok := putter.(provider.ConditionalPutter)
+	if !ok {
+		return fmt.Errorf("destination provider does not support conditional writes")
+	}
+
+	f, err := os.Open(tempFilePath) // #nosec G304 -- tempFilePath is an internal spool path created by stream put.
+	if err != nil {
+		return fmt.Errorf("open temp file for upload: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat temp file for upload: %w", err)
+	}
+
+	if _, err := conditionalPutter.PutObjectConditional(ctx, key, io.Reader(f), info.Size(), precond); err != nil {
+		return fmt.Errorf("conditional upload output: %w", err)
 	}
 	return nil
 }
