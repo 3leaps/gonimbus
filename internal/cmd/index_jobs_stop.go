@@ -5,27 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
-
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	return true
-}
 
 type jobsStopResult struct {
 	JobID         string `json:"job_id"`
@@ -60,83 +44,20 @@ func runIndexJobsStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	rec, err := store.Get(resolvedID)
+	result, err := store.Stop(resolvedID, jobregistry.StopOptions{Signal: sigStr})
 	if err != nil {
 		return err
 	}
-	if rec.PID <= 0 {
-		return fmt.Errorf("job has no pid recorded")
-	}
-	if rec.State != jobregistry.JobStateRunning {
-		return fmt.Errorf("job is not running (state=%s)", rec.State)
-	}
 
-	proc, err := os.FindProcess(rec.PID)
-	if err != nil {
-		return fmt.Errorf("find process: %w", err)
-	}
-
-	sig := syscall.SIGTERM
-	if sigStr == "kill" {
-		sig = syscall.SIGKILL
-	}
-
-	now := time.Now().UTC()
-	rec.State = jobregistry.JobStateStopping
-	rec.LastHeartbeat = &now
-	_ = store.Write(rec)
-
-	if err := proc.Signal(sig); err != nil {
-		return fmt.Errorf("signal %s: %w", sigStr, err)
-	}
-
-	// If SIGTERM, wait a bit to see if it exits; then SIGKILL.
-	if sig == syscall.SIGTERM {
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if !isProcessAlive(rec.PID) {
-				now := time.Now().UTC()
-				rec.State = jobregistry.JobStateStopped
-				rec.EndedAt = &now
-				rec.LastHeartbeat = &now
-				_ = store.Write(rec)
-				if jsonOutput {
-					enc := json.NewEncoder(os.Stdout)
-					enc.SetIndent("", "  ")
-					return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "term", ForcedKill: false, State: string(rec.State)})
-				}
-				_, _ = fmt.Fprintf(os.Stdout, "sent=term\n")
-				return nil
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-
-		_ = proc.Signal(syscall.SIGKILL)
-		now := time.Now().UTC()
-		rec.State = jobregistry.JobStateStopped
-		rec.EndedAt = &now
-		rec.LastHeartbeat = &now
-		_ = store.Write(rec)
-		if jsonOutput {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "term", ForcedKill: true, State: string(rec.State)})
-		}
-		_, _ = fmt.Fprintf(os.Stdout, "sent=term;forced=kill\n")
-		return nil
-	}
-
-	// SIGKILL path.
-	now = time.Now().UTC()
-	rec.State = jobregistry.JobStateStopped
-	rec.EndedAt = &now
-	rec.LastHeartbeat = &now
-	_ = store.Write(rec)
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: rec.JobID, Signal: "kill", ForcedKill: true, State: string(rec.State)})
+		return enc.Encode(jobsStopResult{JobID: jobID, ResolvedJobID: result.JobID, Signal: result.Signal, ForcedKill: result.ForcedKill, State: result.State})
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "sent=kill\n")
+	if result.Signal == "term" && result.ForcedKill {
+		_, _ = fmt.Fprintf(os.Stdout, "sent=term;forced=kill\n")
+		return nil
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "sent=%s\n", result.Signal)
 	return nil
 }

@@ -36,7 +36,9 @@ func (e *Executor) StderrPath(jobID string) string {
 }
 
 type BackgroundOptions struct {
-	Dedupe bool
+	Dedupe   bool
+	JobType  string
+	Metadata map[string]string
 }
 
 // StartIndexBuildBackground spawns a managed child process running:
@@ -115,6 +117,7 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 	now := time.Now().UTC()
 	rec := &JobRecord{
 		JobID:         jobID,
+		Type:          normalizeJobType(opts.JobType),
 		Name:          strings.TrimSpace(name),
 		State:         JobStateRunning,
 		ManifestPath:  absManifest,
@@ -124,6 +127,7 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 		LastHeartbeat: func() *time.Time { t := now; return &t }(),
 		StdoutPath:    e.StdoutPath(jobID),
 		StderrPath:    e.StderrPath(jobID),
+		Metadata:      cloneMetadata(opts.Metadata),
 	}
 	if err := e.store.Write(rec); err != nil {
 		return nil, err
@@ -133,4 +137,23 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 	_ = stderrFile.Close()
 
 	return rec, nil
+}
+
+func normalizeJobType(jobType string) string {
+	jobType = strings.TrimSpace(jobType)
+	if jobType == "" {
+		return JobTypeIndexBuild
+	}
+	return jobType
+}
+
+func cloneMetadata(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

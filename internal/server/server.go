@@ -24,8 +24,17 @@ type Server struct {
 	port   int
 }
 
+type Options struct {
+	JobsRoot string
+}
+
 // New creates a new HTTP server instance
 func New(host string, port int) *Server {
+	return NewWithOptions(host, port, Options{})
+}
+
+// NewWithOptions creates a new HTTP server instance with optional subsystems.
+func NewWithOptions(host string, port int, opts Options) *Server {
 	r := chi.NewRouter()
 
 	// Standard chi middleware
@@ -62,7 +71,7 @@ func New(host string, port int) *Server {
 	handlers.SetHTTPErrorResponder(HandleError)
 
 	// Register routes
-	s.registerRoutes()
+	s.registerRoutes(opts)
 
 	return s
 }

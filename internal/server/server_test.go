@@ -107,6 +107,28 @@ func TestServer_RoutesRegistered(t *testing.T) {
 	}
 }
 
+func TestServer_JobRoutesRegisteredWhenConfigured(t *testing.T) {
+	srv := NewWithOptions("127.0.0.1", 0, Options{JobsRoot: t.TempDir()})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestServer_JobRoutesDisabledWithoutJobsRoot(t *testing.T) {
+	srv := New("127.0.0.1", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestServer_AdminEndpointDisabledByDefault(t *testing.T) {
 	// Ensure no admin token is set
 	t.Setenv("GONIMBUS_ADMIN_TOKEN", "")

@@ -258,6 +258,32 @@ gonimbus index build --background --job index-manifest.yaml --dedupe
 
 The `--background` flag spawns a managed child process and returns immediately with a job ID.
 
+### Local Control Plane API
+
+`gonimbus serve` exposes the same managed index job machinery over local HTTP
+routes when running on a loopback bind such as `localhost` or `127.0.0.1`.
+Because this Phase 1 API is unauthenticated, `serve` rejects non-loopback hosts
+while the local job control API is enabled. Phase 1 supports `index.build` jobs
+from local manifest paths only; remote manifest URIs, webhooks, queue
+consumers, and multi-worker scheduling are intentionally deferred.
+
+```bash
+# Start the local control plane
+gonimbus serve
+
+# Submit an index build job
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"index.build","manifest_path":"/absolute/path/index-manifest.yaml","name":"nightly-sweep"}'
+
+# List jobs
+curl 'http://localhost:8080/api/v1/jobs?status=running&type=index.build'
+
+# Check or cancel a job
+curl http://localhost:8080/api/v1/jobs/<job_id>
+curl -X DELETE http://localhost:8080/api/v1/jobs/<job_id>
+```
+
 ### Monitoring Jobs
 
 ```bash
