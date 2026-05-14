@@ -38,7 +38,6 @@ func TestTelemetryHealthChecker(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "telemetry system not initialized")
 	})
-
 }
 
 func TestIdentityHealthChecker(t *testing.T) {
@@ -100,4 +99,38 @@ func TestIdentityHealthChecker(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsLoopbackServeHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "localhost", host: "localhost", want: true},
+		{name: "localhost with port", host: "localhost:8080", want: true},
+		{name: "ipv4 loopback", host: "127.0.0.1", want: true},
+		{name: "ipv4 loopback range", host: "127.1.2.3", want: true},
+		{name: "ipv6 loopback", host: "::1", want: true},
+		{name: "bracketed ipv6 loopback", host: "[::1]", want: true},
+		{name: "bracketed ipv6 loopback with port", host: "[::1]:8080", want: true},
+		{name: "empty host", host: "", want: false},
+		{name: "all ipv4 interfaces", host: "0.0.0.0", want: false},
+		{name: "all ipv6 interfaces", host: "::", want: false},
+		{name: "lan ipv4", host: "192.168.1.20", want: false},
+		{name: "public hostname", host: "gonimbus.example.com", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isLoopbackServeHost(tt.host))
+		})
+	}
+}
+
+func TestServeServerOptionsRejectsNonLoopbackHost(t *testing.T) {
+	_, err := serveServerOptions(t.Context(), "0.0.0.0")
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "local job control API requires a loopback serve host")
 }
