@@ -262,7 +262,7 @@ func TestRunIndexHubSetLatest(t *testing.T) {
 	hubDir := setupHubWithRuns(t)
 	newRunID := "run_2000000000000000000"
 
-	cmd := newHubSetLatestCmd(t, hubDir, testFullIndexSetID, newRunID)
+	cmd := newHubSetLatestCmd(t, hubDir, testFullIndexSetID, newRunID, "--latest-write-mode", "unconditional")
 	require.NoError(t, cmd.Execute())
 
 	// Verify latest.json was updated
@@ -271,6 +271,20 @@ func TestRunIndexHubSetLatest(t *testing.T) {
 	var latest map[string]interface{}
 	require.NoError(t, json.Unmarshal(data, &latest))
 	assert.Equal(t, newRunID, latest["run_id"])
+}
+
+func TestRunIndexHubSetLatestConditionalYieldsToNewerCurrent(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	olderRunID := "run_2000000000000000000"
+
+	cmd := newHubSetLatestCmd(t, hubDir, testFullIndexSetID, olderRunID, "--latest-retry-base", "0s")
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(hubDir, "index-sets", testFullIndexSetID, "latest.json"))
+	require.NoError(t, err)
+	var latest map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &latest))
+	assert.Equal(t, "run_1000000000000000000", latest["run_id"])
 }
 
 func TestRunIndexHubSetLatest_UncommittedRun(t *testing.T) {
@@ -698,17 +712,20 @@ func newHubShowCmd(t *testing.T, hubDir, indexSetID string, jsonOutput bool) *co
 	return cmd
 }
 
-func newHubSetLatestCmd(t *testing.T, hubDir, indexSetID, runID string) *cobra.Command {
+func newHubSetLatestCmd(t *testing.T, hubDir, indexSetID, runID string, extraArgs ...string) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{Use: "set-latest [hub-uri]", Args: validateHubURIArgs, RunE: runIndexHubSetLatest}
 	addHubTestFlags(cmd)
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().String("run-id", "", "")
-	cmd.SetArgs([]string{
+	addLatestPointerFlags(cmd)
+	args := []string{
 		"--hub", "file://" + hubDir + "/",
 		"--index-set", indexSetID,
 		"--run-id", runID,
-	})
+	}
+	args = append(args, extraArgs...)
+	cmd.SetArgs(args)
 	cmd.SetContext(context.Background())
 	return cmd
 }

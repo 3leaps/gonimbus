@@ -197,6 +197,10 @@ gonimbus index hub set-latest --hub s3://dest-bucket/project/ops/index-hub/ \
   --hub-profile dest-admin
 ```
 
+Hub `latest.json` updates are conditional by default. For manual recovery only,
+add `--latest-write-mode unconditional` after reconciling the intended latest
+run.
+
 ## Rewrite Template Guidance
 
 The `--rewrite-from` template must match the **full S3 key**, not the `rel_key` from the index. This means the template includes any bucket-level prefix segments.

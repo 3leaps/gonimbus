@@ -233,6 +233,31 @@ func TestCleanETag(t *testing.T) {
 	}
 }
 
+func TestConditionETag(t *testing.T) {
+	assert.Equal(t, `"abc123"`, conditionETag("abc123"))
+	assert.Equal(t, `"abc123"`, conditionETag(`"abc123"`))
+	assert.Equal(t, `W/"abc123"`, conditionETag(`W/"abc123"`))
+}
+
+func TestWrapConditionalPutErrorMapsIfMatchPrecondition(t *testing.T) {
+	p := &Provider{bucket: "bucket"}
+	etag := "abc123"
+
+	err := p.wrapConditionalPutError("key", provider.PutPrecondition{IfMatchETag: &etag}, &mockAPIError{code: "PreconditionFailed", message: "stale etag"})
+	require.Error(t, err)
+	require.True(t, provider.IsPreconditionFailed(err), "got %v", err)
+	require.False(t, provider.IsAlreadyExists(err))
+}
+
+func TestWrapConditionalPutErrorPreservesIfAbsentAlreadyExists(t *testing.T) {
+	p := &Provider{bucket: "bucket"}
+
+	err := p.wrapConditionalPutError("key", provider.PutPrecondition{IfAbsent: true}, &mockAPIError{code: "PreconditionFailed", message: "exists"})
+	require.Error(t, err)
+	require.True(t, provider.IsAlreadyExists(err), "got %v", err)
+	require.False(t, provider.IsPreconditionFailed(err))
+}
+
 func TestProviderType_String(t *testing.T) {
 	assert.Equal(t, "s3", provider.ProviderS3.String())
 	assert.Equal(t, "gcs", provider.ProviderGCS.String())
@@ -241,6 +266,7 @@ func TestProviderType_String(t *testing.T) {
 func TestProvider_InterfaceCompliance(t *testing.T) {
 	// Verify that *Provider implements provider.Provider
 	var _ provider.Provider = (*Provider)(nil)
+	var _ provider.VersionedGetter = (*Provider)(nil)
 	var _ provider.ConditionalPutter = (*Provider)(nil)
 }
 

@@ -80,6 +80,12 @@ type ObjectGetter interface {
 	GetObject(ctx context.Context, key string) (body io.ReadCloser, contentLength int64, err error)
 }
 
+// VersionedGetter can download an object with a version handle that belongs to
+// the bytes returned by the same read operation.
+type VersionedGetter interface {
+	GetObjectVersioned(ctx context.Context, key string) (body io.ReadCloser, meta ObjectMeta, err error)
+}
+
 // ObjectRanger can download a specific byte range of an object.
 //
 // This is the foundational primitive for content inspection operations.

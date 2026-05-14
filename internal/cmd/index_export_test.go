@@ -515,6 +515,7 @@ func TestRunIndexExport_FileHub(t *testing.T) {
 	cmd.Flags().String("hub-profile", "", "")
 	cmd.Flags().String("hub-region", "", "")
 	cmd.Flags().String("hub-endpoint", "", "")
+	addLatestPointerFlags(cmd)
 
 	cmd.SetArgs([]string{
 		"--hub", hubURI,
