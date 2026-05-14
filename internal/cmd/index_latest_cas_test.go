@@ -94,6 +94,33 @@ func TestAdvanceLatestPointerRetryExhaustedFailsClosed(t *testing.T) {
 	require.Contains(t, events.String(), casFailRecordType)
 }
 
+func TestAdvanceLatestPointerRetriesThenAdvances(t *testing.T) {
+	ctx := context.Background()
+	hub, fp := setupLatestCASTestHub(t, []completeFixture{
+		{runID: "run_100", completedAt: "2026-01-01T00:00:00Z"},
+		{runID: "run_150", completedAt: "2026-01-15T00:00:00Z"},
+		{runID: "run_200", completedAt: "2026-02-01T00:00:00Z"},
+	}, "run_100")
+	putter := conflictOncePutter{
+		provider:   fp,
+		hub:        hub,
+		indexSetID: testFullIndexSetID,
+		conflictID: "run_150",
+	}
+
+	var events bytes.Buffer
+	outcome, err := advanceLatestPointer(ctx, hub, fp, &putter, testFullIndexSetID, "run_200", latestPointerOptions{
+		Mode:      latestWriteModeConditional,
+		RetryMax:  2,
+		RetryBase: 0,
+		Events:    &events,
+	})
+	require.NoError(t, err)
+	require.Equal(t, latestPointerUpdated, outcome)
+	require.Contains(t, events.String(), casRetryRecordType)
+	require.Equal(t, "run_200", readLatestRunForTest(t, hub.BaseDir))
+}
+
 func TestCompareCompleteDocsUsesRunIDTieBreaker(t *testing.T) {
 	a := hubCompleteDoc{RunID: "run_200", CompletedAt: "2026-01-01T00:00:00Z"}
 	b := hubCompleteDoc{RunID: "run_100", CompletedAt: "2026-01-01T00:00:00Z"}
@@ -150,6 +177,34 @@ func (p alwaysConflictPutter) PutObjectConditional(context.Context, string, io.R
 	return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Err: provider.ErrAlreadyExists}
 }
 
+type conflictOncePutter struct {
+	provider   *providerfile.Provider
+	hub        *hubDestSpec
+	indexSetID string
+	conflictID string
+	conflicted bool
+}
+
+func (p *conflictOncePutter) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	return p.provider.PutObject(ctx, key, body, contentLength)
+}
+
+func (p *conflictOncePutter) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if !p.conflicted {
+		p.conflicted = true
+		latestJSON, err := buildLatestJSONForRun(p.indexSetID, p.conflictID)
+		if err != nil {
+			return provider.PutResult{}, err
+		}
+		latestKey := hubArtifactKey(p.hub, "index-sets", p.indexSetID, "latest.json")
+		if err := p.provider.PutObject(ctx, latestKey, bytes.NewReader(latestJSON), int64(len(latestJSON))); err != nil {
+			return provider.PutResult{}, err
+		}
+		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: provider.ErrPreconditionFailed}
+	}
+	return p.provider.PutObjectConditional(ctx, key, body, contentLength, precond)
+}
+
 type ioDiscardForTest struct{}
 
 func (ioDiscardForTest) Write(p []byte) (int, error) {
@@ -157,4 +212,6 @@ func (ioDiscardForTest) Write(p []byte) (int, error) {
 }
 
 var _ provider.ConditionalPutter = alwaysConflictPutter{}
+var _ provider.ConditionalPutter = (*conflictOncePutter)(nil)
+var _ provider.ObjectPutter = (*conflictOncePutter)(nil)
 var _ interface{ Write([]byte) (int, error) } = ioDiscardForTest{}
