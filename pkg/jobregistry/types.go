@@ -2,6 +2,8 @@ package jobregistry
 
 import "time"
 
+const JobTypeIndexBuild = "index.build"
+
 // JobState is the lifecycle state of a managed job.
 //
 // NOTE: These values are persisted in job.json and are part of the stable
@@ -36,6 +38,7 @@ type EffectiveIdentity struct {
 // The schema is designed for backward-compatible extension (additive fields).
 type JobRecord struct {
 	JobID        string    `json:"job_id"`
+	Type         string    `json:"type,omitempty"`
 	Name         string    `json:"name,omitempty"`
 	State        JobState  `json:"state"`
 	ManifestPath string    `json:"manifest_path"`
@@ -51,4 +54,5 @@ type JobRecord struct {
 	Identity      *EffectiveIdentity `json:"effective_identity,omitempty"`
 	StdoutPath    string             `json:"stdout_path,omitempty"`
 	StderrPath    string             `json:"stderr_path,omitempty"`
+	Metadata      map[string]string  `json:"metadata,omitempty"`
 }

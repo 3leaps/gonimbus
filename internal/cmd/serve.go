@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fulmenhq/gofulmen/signals"
@@ -110,8 +112,13 @@ The server will cleanly shut down the HTTP server and flush logs on shutdown.`,
 			configName: identity.ConfigName,
 		})
 
+		serverOpts, err := serveServerOptions(cmd.Context(), serverHost)
+		if err != nil {
+			return err
+		}
+
 		// Create server
-		srv := server.New(serverHost, serverPort)
+		srv := server.NewWithOptions(serverHost, serverPort, serverOpts)
 
 		// Set app identity for handlers
 		handlers.SetAppIdentity(identity)
@@ -220,4 +227,31 @@ func init() {
 
 	_ = viper.BindPFlag("server.host", serveCmd.Flags().Lookup("host"))
 	_ = viper.BindPFlag("server.port", serveCmd.Flags().Lookup("port"))
+}
+
+func serveServerOptions(ctx context.Context, host string) (server.Options, error) {
+	if !isLoopbackServeHost(host) {
+		return server.Options{}, errwrap.NewConfigInvalidError("local job control API requires a loopback serve host; use --host localhost or --host 127.0.0.1")
+	}
+	jobsRoot, err := indexJobsRootDir()
+	if err != nil {
+		return server.Options{}, errwrap.WrapInternal(ctx, err, "resolve jobs root")
+	}
+	return server.Options{JobsRoot: jobsRoot}, nil
+}
+
+func isLoopbackServeHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

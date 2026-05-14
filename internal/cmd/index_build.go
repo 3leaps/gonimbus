@@ -158,6 +158,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		}
 		job = &jobregistry.JobRecord{
 			JobID:        jobID,
+			Type:         jobregistry.JobTypeIndexBuild,
 			Name:         strings.TrimSpace(indexBuildName),
 			State:        jobregistry.JobStateRunning,
 			ManifestPath: absManifestPath,

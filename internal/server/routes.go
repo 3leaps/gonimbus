@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/fulmenhq/gofulmen/signals"
 
@@ -14,7 +15,7 @@ import (
 )
 
 // registerRoutes registers all HTTP routes
-func (s *Server) registerRoutes() {
+func (s *Server) registerRoutes(opts Options) {
 	// Standard health endpoints per Workhorse §9
 	s.router.Get("/health", handlers.HealthHandler)
 	s.router.Get("/health/live", handlers.LivenessHandler)
@@ -29,6 +30,14 @@ func (s *Server) registerRoutes() {
 
 	// Admin signal endpoint (optional, requires GONIMBUS_ADMIN_TOKEN)
 	s.registerAdminEndpoint()
+
+	if strings.TrimSpace(opts.JobsRoot) != "" {
+		jobs := handlers.NewJobsHandler(opts.JobsRoot)
+		s.router.Post("/api/v1/jobs", jobs.Submit)
+		s.router.Get("/api/v1/jobs", jobs.List)
+		s.router.Get("/api/v1/jobs/{job_id}", jobs.Status)
+		s.router.Delete("/api/v1/jobs/{job_id}", jobs.Cancel)
+	}
 }
 
 // registerAdminEndpoint optionally registers the admin signal endpoint
