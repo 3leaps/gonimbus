@@ -24,6 +24,12 @@ var (
 
 	// ErrThrottled indicates the request was rate limited by the provider.
 	ErrThrottled = errors.New("request throttled")
+
+	// ErrAlreadyExists indicates an atomic create was refused because the object exists.
+	ErrAlreadyExists = errors.New("object already exists")
+
+	// ErrPreconditionFailed indicates an atomic write predicate did not hold.
+	ErrPreconditionFailed = errors.New("write precondition failed")
 )
 
 // ProviderError wraps provider-specific errors with context.
@@ -88,4 +94,14 @@ func IsProviderUnavailable(err error) bool {
 // IsThrottled returns true if the error indicates the request was rate limited.
 func IsThrottled(err error) bool {
 	return errors.Is(err, ErrThrottled)
+}
+
+// IsAlreadyExists returns true if the error indicates the target already exists.
+func IsAlreadyExists(err error) bool {
+	return errors.Is(err, ErrAlreadyExists)
+}
+
+// IsPreconditionFailed returns true if the error indicates a write precondition failed.
+func IsPreconditionFailed(err error) bool {
+	return errors.Is(err, ErrPreconditionFailed)
 }

@@ -30,6 +30,7 @@ var (
 	_ provider.Provider          = (*Provider)(nil)
 	_ provider.ObjectGetter      = (*Provider)(nil)
 	_ provider.ObjectPutter      = (*Provider)(nil)
+	_ provider.ConditionalPutter = (*Provider)(nil)
 	_ provider.ObjectDeleter     = (*Provider)(nil)
 	_ provider.MultipartUploader = (*Provider)(nil)
 	_ provider.PrefixLister      = (*Provider)(nil)
@@ -320,6 +321,32 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 	return nil
 }
 
+func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if err := precond.Validate(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if !precond.IfAbsent {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, fmt.Errorf("unsupported put precondition"))
+	}
+
+	input := &s3.PutObjectInput{
+		Bucket:        aws.String(p.bucket),
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: &contentLength,
+		IfNoneMatch:   aws.String("*"),
+	}
+
+	out, err := p.client.PutObject(ctx, input)
+	if err != nil {
+		return provider.PutResult{}, p.wrapConditionalPutError(key, precond, err)
+	}
+	return provider.PutResult{
+		ETag:    cleanETag(aws.ToString(out.ETag)),
+		Version: aws.ToString(out.VersionId),
+	}, nil
+}
+
 // DeleteObject deletes an object.
 //
 // This is used for write-probe preflight and future move operations.
@@ -427,6 +454,29 @@ func (p *Provider) wrapError(op, key string, err error) error {
 	}
 
 	return wrapped
+}
+
+func (p *Provider) wrapConditionalPutError(key string, precond provider.PutPrecondition, err error) error {
+	wrapped := p.wrapError("PutObjectConditional", key, err)
+	if precond.IfAbsent && isPreconditionFailure(err) {
+		if providerErr, ok := wrapped.(*provider.ProviderError); ok {
+			providerErr.Err = provider.ErrAlreadyExists
+			return providerErr
+		}
+	}
+	return wrapped
+}
+
+func isPreconditionFailure(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "PreconditionFailed", "PreconditionFailedException":
+			return true
+		}
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "PreconditionFailed") || strings.Contains(errMsg, "status code: 412") || strings.Contains(errMsg, "StatusCode: 412")
 }
 
 // cleanETag removes surrounding quotes from an ETag value.

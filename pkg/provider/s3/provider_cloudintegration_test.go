@@ -4,6 +4,8 @@ package s3_test
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,6 +59,38 @@ func TestProvider_New_CloudIntegration(t *testing.T) {
 		require.ErrorAs(t, err, &provErr)
 		assert.ErrorIs(t, provErr.Err, provider.ErrBucketNotFound)
 	})
+}
+
+func TestProvider_PutObjectConditionalIfAbsent_CloudIntegration(t *testing.T) {
+	cloudtest.SkipIfUnavailable(t)
+	ctx := context.Background()
+	bucket := cloudtest.CreateBucket(t, ctx)
+
+	p, err := s3.New(ctx, s3.Config{
+		Bucket:          bucket,
+		Endpoint:        cloudtest.Endpoint,
+		Region:          cloudtest.Region,
+		AccessKeyID:     cloudtest.TestAccessKeyID,
+		SecretAccessKey: cloudtest.TestSecretAccessKey,
+		ForcePathStyle:  true,
+	})
+	require.NoError(t, err)
+	defer p.Close()
+
+	result, err := p.PutObjectConditional(ctx, "conditional.txt", strings.NewReader("first"), int64(len("first")), provider.PutPrecondition{IfAbsent: true})
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.ETag)
+
+	_, err = p.PutObjectConditional(ctx, "conditional.txt", strings.NewReader("second"), int64(len("second")), provider.PutPrecondition{IfAbsent: true})
+	require.Error(t, err)
+	require.True(t, provider.IsAlreadyExists(err), "got %v", err)
+
+	body, _, err := p.GetObject(ctx, "conditional.txt")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	assert.Equal(t, "first", string(got))
 }
 
 func TestProvider_List_CloudIntegration(t *testing.T) {

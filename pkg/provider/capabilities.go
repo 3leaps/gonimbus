@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 )
 
@@ -15,6 +17,45 @@ import (
 // For v0.1.x this is primarily used for write-probe preflight operations.
 type ObjectPutter interface {
 	PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error
+}
+
+// ConditionalPutter can create/replace objects only when a write precondition
+// holds atomically at the provider.
+type ConditionalPutter interface {
+	PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond PutPrecondition) (PutResult, error)
+}
+
+// PutPrecondition describes the predicate that must hold for a conditional put.
+//
+// Exactly one predicate must be set. Callers that want unconditional replacement
+// should use ObjectPutter.PutObject instead.
+type PutPrecondition struct {
+	IfAbsent    bool
+	IfMatchETag *string
+}
+
+// Validate checks that exactly one precondition predicate is set.
+func (p PutPrecondition) Validate() error {
+	count := 0
+	if p.IfAbsent {
+		count++
+	}
+	if p.IfMatchETag != nil {
+		if *p.IfMatchETag == "" {
+			return errors.New("IfMatchETag precondition must not be empty")
+		}
+		count++
+	}
+	if count != 1 {
+		return fmt.Errorf("exactly one put precondition must be set, got %d", count)
+	}
+	return nil
+}
+
+// PutResult contains provider version handles returned by a successful put.
+type PutResult struct {
+	ETag    string
+	Version string
 }
 
 // ObjectDeleter can delete objects.

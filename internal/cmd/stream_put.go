@@ -76,11 +76,6 @@ type streamPutRecord struct {
 	SourceStreamID string `json:"source_stream_id,omitempty"`
 }
 
-type streamPutHeadPutter interface {
-	provider.ObjectPutter
-	Head(ctx context.Context, key string) (*provider.ObjectMeta, error)
-}
-
 func runStreamPut(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
@@ -114,24 +109,6 @@ func runStreamPut(cmd *cobra.Command, args []string) error {
 		defer func() { _ = closer.Close() }()
 	}
 
-	headPutter, ok := putter.(streamPutHeadPutter)
-	if !ok {
-		err := fmt.Errorf("destination provider %q does not support Head", dest.Provider)
-		_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeProviderUnavailable, "Destination provider cannot check existing object", err, nil)
-		return exitError(foundry.ExitExternalServiceUnavailable, "Destination provider cannot check existing object", err)
-	}
-
-	if !streamPutOverwrite {
-		if _, err := headPutter.Head(ctx, dest.Key); err == nil {
-			existsErr := fmt.Errorf("destination object already exists: %s", outputDestURI(dest))
-			_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeAlreadyExists, "Destination exists", existsErr, map[string]any{"dest_uri": outputDestURI(dest)})
-			return exitError(foundry.ExitFileWriteError, "Destination exists", existsErr)
-		} else if !provider.IsNotFound(err) {
-			_ = emitStreamPutError(ctx, w, dest.Key, classifyStreamPutErrCode(err), "Failed to check destination", err, nil)
-			return exitError(foundry.ExitExternalServiceUnavailable, "Failed to check destination", err)
-		}
-	}
-
 	var (
 		tempPath       string
 		bytesWritten   int64
@@ -160,7 +137,12 @@ func runStreamPut(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = os.Remove(tempPath) }()
 
-	if err := uploadToOutputDest(ctx, putter, dest.Key, tempPath); err != nil {
+	if err := uploadStreamPutOutput(ctx, putter, dest.Key, tempPath, streamPutOverwrite); err != nil {
+		if provider.IsAlreadyExists(err) {
+			existsErr := fmt.Errorf("destination object already exists: %s", outputDestURI(dest))
+			_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeAlreadyExists, "Destination exists", existsErr, map[string]any{"dest_uri": outputDestURI(dest)})
+			return exitError(foundry.ExitFileWriteError, "Destination exists", existsErr)
+		}
 		_ = emitStreamPutError(ctx, w, dest.Key, classifyStreamPutErrCode(err), "PutObject failed", err, nil)
 		return exitError(foundry.ExitExternalServiceUnavailable, "PutObject failed", err)
 	}
@@ -173,6 +155,13 @@ func runStreamPut(cmd *cobra.Command, args []string) error {
 		SourceURI:      sourceURI,
 		SourceStreamID: sourceStreamID,
 	})
+}
+
+func uploadStreamPutOutput(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string, overwrite bool) error {
+	if overwrite {
+		return uploadToOutputDest(ctx, putter, key, tempFilePath)
+	}
+	return uploadConditionallyToOutputDest(ctx, putter, key, tempFilePath, provider.PutPrecondition{IfAbsent: true})
 }
 
 func spoolStreamPutInput(r io.Reader) (string, int64, error) {
@@ -359,6 +348,8 @@ func emitStreamPutError(ctx context.Context, w output.Writer, key, code, msg str
 
 func classifyStreamPutErrCode(err error) string {
 	switch {
+	case provider.IsAlreadyExists(err):
+		return output.ErrCodeAlreadyExists
 	case provider.IsAccessDenied(err):
 		return output.ErrCodeAccessDenied
 	case provider.IsNotFound(err):
