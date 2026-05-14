@@ -294,6 +294,30 @@ func TestStreamPutCommand_JSONLFramingCollisionBehavior(t *testing.T) {
 	require.Equal(t, streamPutRecordType, rec.Type)
 }
 
+func TestStreamPutCommand_JSONLFramingValidatesInputBeforeCollision(t *testing.T) {
+	resetStreamPutTestState(t)
+
+	dir := t.TempDir()
+	destPath := filepath.Join(dir, "object.bin")
+	require.NoError(t, os.WriteFile(destPath, []byte("original"), 0o644))
+
+	stdout, _, err := runStreamPutTestCommandBytes(t, []string{"--framing", "jsonl", "file://" + destPath}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing stream open record")
+
+	got, readErr := os.ReadFile(destPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "original", string(got))
+
+	rec := decodeSingleOutputRecord(t, stdout)
+	require.Equal(t, output.TypeError, rec.Type)
+
+	var errRec output.ErrorRecord
+	require.NoError(t, json.Unmarshal(rec.Data, &errRec))
+	require.Equal(t, output.ErrCodeInvalidInput, errRec.Code)
+	require.Contains(t, errRec.Message, "missing stream open record")
+}
+
 func TestStreamPutCommand_RejectsNonExactDestination(t *testing.T) {
 	resetStreamPutTestState(t)
 

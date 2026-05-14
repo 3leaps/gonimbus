@@ -241,6 +241,7 @@ func TestProviderType_String(t *testing.T) {
 func TestProvider_InterfaceCompliance(t *testing.T) {
 	// Verify that *Provider implements provider.Provider
 	var _ provider.Provider = (*Provider)(nil)
+	var _ provider.ConditionalPutter = (*Provider)(nil)
 }
 
 func TestListResult_Empty(t *testing.T) {
@@ -382,6 +383,27 @@ func TestWrapError_APIError(t *testing.T) {
 			assert.True(t, errors.Is(err, tt.expected), "expected %v for code %s", tt.expected, tt.code)
 		})
 	}
+}
+
+func TestWrapConditionalPutError_IfAbsentPreconditionFailure(t *testing.T) {
+	p := &Provider{bucket: "test-bucket"}
+
+	err := p.wrapConditionalPutError("key", provider.PutPrecondition{IfAbsent: true}, &mockAPIError{code: "PreconditionFailed", message: "object exists"})
+
+	var provErr *provider.ProviderError
+	require.True(t, errors.As(err, &provErr))
+	assert.Equal(t, "PutObjectConditional", provErr.Op)
+	assert.Equal(t, "key", provErr.Key)
+	assert.True(t, errors.Is(err, provider.ErrAlreadyExists))
+}
+
+func TestWrapConditionalPutError_NonPreconditionFailure(t *testing.T) {
+	p := &Provider{bucket: "test-bucket"}
+
+	err := p.wrapConditionalPutError("key", provider.PutPrecondition{IfAbsent: true}, &mockAPIError{code: "AccessDenied", message: "denied"})
+
+	assert.True(t, errors.Is(err, provider.ErrAccessDenied))
+	assert.False(t, errors.Is(err, provider.ErrAlreadyExists))
 }
 
 // Integration tests are in provider_cloudintegration_test.go

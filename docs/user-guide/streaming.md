@@ -101,8 +101,12 @@ gonimbus stream get s3://bucket/path/to/input.xml --profile my-profile \
   | gonimbus stream put --framing jsonl file:///tmp/input.xml
 ```
 
-`stream put` refuses to replace an existing object by default. Use `--overwrite`
-when replacement is intentional:
+`stream put` refuses to replace an existing object by default. For `file://`
+and S3-compatible destinations this default uses provider-level conditional
+create semantics, so concurrent writers cannot race through a separate
+existence check. If a destination provider cannot enforce that precondition,
+the command fails closed rather than falling back to a non-atomic write. Use
+`--overwrite` when replacement is intentional:
 
 ```bash
 cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --overwrite

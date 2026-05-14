@@ -24,11 +24,12 @@ type Provider struct {
 
 // Ensure Provider implements provider capability interfaces.
 var (
-	_ provider.Provider      = (*Provider)(nil)
-	_ provider.ObjectGetter  = (*Provider)(nil)
-	_ provider.ObjectRanger  = (*Provider)(nil)
-	_ provider.ObjectPutter  = (*Provider)(nil)
-	_ provider.ObjectDeleter = (*Provider)(nil)
+	_ provider.Provider          = (*Provider)(nil)
+	_ provider.ObjectGetter      = (*Provider)(nil)
+	_ provider.ObjectRanger      = (*Provider)(nil)
+	_ provider.ObjectPutter      = (*Provider)(nil)
+	_ provider.ConditionalPutter = (*Provider)(nil)
+	_ provider.ObjectDeleter     = (*Provider)(nil)
 )
 
 type Config struct {
@@ -231,6 +232,47 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 	return nil
 }
 
+func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	_ = ctx
+	_ = contentLength
+	if err := precond.Validate(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if !precond.IfAbsent {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, fmt.Errorf("unsupported put precondition"))
+	}
+
+	full, err := p.fullPath(key)
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil { // #nosec G301 -- match existing file-provider PutObject directory mode for local destination compatibility.
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+
+	f, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- fullPath cleans key under configured provider baseDir before opening.
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+
+	cleanup := true
+	defer func() {
+		_ = f.Close()
+		if cleanup {
+			_ = os.Remove(full)
+		}
+	}()
+
+	if _, err := io.Copy(f, body); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := f.Close(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	cleanup = false
+	return provider.PutResult{}, nil
+}
+
 func (p *Provider) DeleteObject(ctx context.Context, key string) error {
 	_ = ctx
 	full, err := p.fullPath(key)
@@ -297,6 +339,9 @@ func (p *Provider) wrapError(op, key string, err error) error {
 	// Normalize common filesystem errors to provider sentinels.
 	if os.IsNotExist(err) {
 		wrapped.Err = provider.ErrNotFound
+	}
+	if os.IsExist(err) {
+		wrapped.Err = provider.ErrAlreadyExists
 	}
 	if os.IsPermission(err) {
 		wrapped.Err = provider.ErrAccessDenied
