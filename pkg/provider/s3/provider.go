@@ -29,6 +29,7 @@ type Provider struct {
 var (
 	_ provider.Provider          = (*Provider)(nil)
 	_ provider.ObjectGetter      = (*Provider)(nil)
+	_ provider.VersionedGetter   = (*Provider)(nil)
 	_ provider.ObjectPutter      = (*Provider)(nil)
 	_ provider.ConditionalPutter = (*Provider)(nil)
 	_ provider.ObjectDeleter     = (*Provider)(nil)
@@ -291,6 +292,27 @@ func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, in
 	return out.Body, aws.ToInt64(out.ContentLength), nil
 }
 
+// GetObjectVersioned downloads an object and returns the version metadata from
+// the same S3 GetObject response.
+func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadCloser, provider.ObjectMeta, error) {
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	meta := provider.ObjectMeta{
+		ObjectSummary: provider.ObjectSummary{
+			Key:          key,
+			Size:         aws.ToInt64(out.ContentLength),
+			ETag:         cleanETag(aws.ToString(out.ETag)),
+			LastModified: aws.ToTime(out.LastModified),
+		},
+		Version:     aws.ToString(out.VersionId),
+		ContentType: aws.ToString(out.ContentType),
+		Metadata:    out.Metadata,
+	}
+	return out.Body, meta, nil
+}
+
 // GetRange downloads an object byte range as a stream.
 //
 // Caller must close the returned body.
@@ -325,16 +347,17 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
-	if !precond.IfAbsent {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, fmt.Errorf("unsupported put precondition"))
-	}
 
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(p.bucket),
 		Key:           aws.String(key),
 		Body:          body,
 		ContentLength: &contentLength,
-		IfNoneMatch:   aws.String("*"),
+	}
+	if precond.IfAbsent {
+		input.IfNoneMatch = aws.String("*")
+	} else if precond.IfMatchETag != nil {
+		input.IfMatch = aws.String(conditionETag(*precond.IfMatchETag))
 	}
 
 	out, err := p.client.PutObject(ctx, input)
@@ -458,9 +481,18 @@ func (p *Provider) wrapError(op, key string, err error) error {
 
 func (p *Provider) wrapConditionalPutError(key string, precond provider.PutPrecondition, err error) error {
 	wrapped := p.wrapError("PutObjectConditional", key, err)
-	if precond.IfAbsent && isPreconditionFailure(err) {
+	if !isPreconditionFailure(err) {
+		return wrapped
+	}
+	if precond.IfAbsent {
 		if providerErr, ok := wrapped.(*provider.ProviderError); ok {
 			providerErr.Err = provider.ErrAlreadyExists
+			return providerErr
+		}
+	}
+	if precond.IfMatchETag != nil {
+		if providerErr, ok := wrapped.(*provider.ProviderError); ok {
+			providerErr.Err = provider.ErrPreconditionFailed
 			return providerErr
 		}
 	}
@@ -483,6 +515,14 @@ func isPreconditionFailure(err error) bool {
 // S3 returns ETags with quotes, e.g., "d41d8cd98f00b204e9800998ecf8427e".
 func cleanETag(etag string) string {
 	return strings.Trim(etag, "\"")
+}
+
+func conditionETag(etag string) string {
+	etag = strings.TrimSpace(etag)
+	if strings.HasPrefix(etag, "\"") || strings.HasPrefix(etag, "W/\"") {
+		return etag
+	}
+	return `"` + etag + `"`
 }
 
 // clampMaxKeys applies defaults and limits to maxKeys values.

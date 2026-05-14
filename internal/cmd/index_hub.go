@@ -154,6 +154,7 @@ func init() {
 	// set-latest
 	indexHubSetLatestCmd.Flags().String("index-set", "", "Index set ID (required)")
 	indexHubSetLatestCmd.Flags().String("run-id", "", "Run ID to set as latest (required)")
+	addLatestPointerFlags(indexHubSetLatestCmd)
 	_ = indexHubSetLatestCmd.MarkFlagRequired("index-set")
 	_ = indexHubSetLatestCmd.MarkFlagRequired("run-id")
 
@@ -597,26 +598,6 @@ func runIndexHubSetLatest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("verify complete.json: %w", getErr)
 	}
 
-	// Build and upload latest.json
-	type latestDoc struct {
-		Version    string `json:"version"`
-		IndexSetID string `json:"index_set_id"`
-		RunID      string `json:"run_id"`
-		UpdatedAt  string `json:"updated_at"`
-		UpdatedBy  string `json:"updated_by"`
-	}
-	doc := latestDoc{
-		Version:    "1.0",
-		IndexSetID: indexSetFlag,
-		RunID:      runIDFlag,
-		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
-		UpdatedBy:  exportedByString(),
-	}
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal latest.json: %w", err)
-	}
-
 	putter, err := newHubProvider(ctx, hub)
 	if err != nil {
 		return fmt.Errorf("hub provider: %w", err)
@@ -625,14 +606,16 @@ func runIndexHubSetLatest(cmd *cobra.Command, args []string) error {
 		defer func() { _ = closer.Close() }()
 	}
 
-	// Best-effort pointer advance: plain PutObject, last-writer-wins.
-	// CAS / fail-closed semantics are tracked for v0.2.x.
-	latestKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "latest.json")
-	if err := uploadBytes(ctx, putter, latestKey, data); err != nil {
+	latestOpts, err := latestPointerOptionsFromCommand(cmd)
+	if err != nil {
+		return err
+	}
+	outcome, err := advanceLatestPointer(ctx, hub, getter, putter, indexSetFlag, runIDFlag, latestOpts)
+	if err != nil {
 		return fmt.Errorf("write latest.json: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(os.Stderr, "Set latest for %s to %s\n", indexSetFlag, runIDFlag)
+	printLatestPointerOutcome(os.Stderr, outcome, indexSetFlag, runIDFlag)
 	return nil
 }
 

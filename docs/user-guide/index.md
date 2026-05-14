@@ -616,4 +616,11 @@ gonimbus index hub set-latest --hub s3://bucket/index-hub/ \
   --index-set idx_da038d... --run-id run_1709654400000000000
 ```
 
+`index export` and `index hub set-latest` update `latest.json` with
+conditional compare-and-swap by default. If another writer advances the pointer
+first, gonimbus re-reads the current pointer and either retries, yields to the
+newer run, or fails closed with manual reconciliation guidance. Use
+`--latest-write-mode unconditional` only for explicit recovery after you have
+verified hub state.
+
 See [Workspace Pattern](workspace.md) for production workspace layout, shard strategies, and operational flows.

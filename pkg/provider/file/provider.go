@@ -2,6 +2,8 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -26,6 +29,7 @@ type Provider struct {
 var (
 	_ provider.Provider          = (*Provider)(nil)
 	_ provider.ObjectGetter      = (*Provider)(nil)
+	_ provider.VersionedGetter   = (*Provider)(nil)
 	_ provider.ObjectRanger      = (*Provider)(nil)
 	_ provider.ObjectPutter      = (*Provider)(nil)
 	_ provider.ConditionalPutter = (*Provider)(nil)
@@ -148,6 +152,35 @@ func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, in
 	return f, st.Size(), nil
 }
 
+func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadCloser, provider.ObjectMeta, error) {
+	_ = ctx
+	full, err := p.fullPath(key)
+	if err != nil {
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	f, err := os.Open(full) // #nosec G304 -- fullPath cleans key under configured provider baseDir before opening.
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectVersioned", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
+		}
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	meta := provider.ObjectMeta{
+		ObjectSummary: provider.ObjectSummary{
+			Key:          strings.TrimPrefix(key, "/"),
+			Size:         st.Size(),
+			ETag:         fileVersionToken(st),
+			LastModified: st.ModTime(),
+		},
+	}
+	return f, meta, nil
+}
+
 func (p *Provider) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, int64, error) {
 	_ = ctx
 	full, err := p.fullPath(key)
@@ -238,9 +271,6 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
-	if !precond.IfAbsent {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, fmt.Errorf("unsupported put precondition"))
-	}
 
 	full, err := p.fullPath(key)
 	if err != nil {
@@ -248,6 +278,10 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil { // #nosec G301 -- match existing file-provider PutObject directory mode for local destination compatibility.
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+
+	if precond.IfMatchETag != nil {
+		return p.putObjectIfMatch(ctx, key, full, body, *precond.IfMatchETag)
 	}
 
 	f, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- fullPath cleans key under configured provider baseDir before opening.
@@ -270,7 +304,94 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
 	cleanup = false
-	return provider.PutResult{}, nil
+	token, err := p.statVersion(full)
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	return provider.PutResult{ETag: token}, nil
+}
+
+func (p *Provider) putObjectIfMatch(ctx context.Context, key, full string, body io.Reader, etag string) (provider.PutResult, error) {
+	lockPath := full + ".gonimbus.lock"
+	lock, err := acquireFileLock(ctx, lockPath)
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	defer func() {
+		_ = lock.Close()
+		_ = os.Remove(lockPath)
+	}()
+
+	current, err := p.statVersion(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: provider.ErrPreconditionFailed}
+		}
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if current != etag {
+		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: provider.ErrPreconditionFailed}
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(full), "gonimbus-cas-*")
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := io.Copy(tmp, body); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := os.Rename(tmpName, full); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	cleanup = false
+	token, err := p.statVersion(full)
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	return provider.PutResult{ETag: token}, nil
+}
+
+func acquireFileLock(ctx context.Context, lockPath string) (*os.File, error) {
+	for {
+		f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- lockPath is derived from fullPath under configured provider baseDir.
+		if err == nil {
+			return f, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (p *Provider) statVersion(full string) (string, error) {
+	st, err := os.Stat(full)
+	if err != nil {
+		return "", err
+	}
+	return fileVersionToken(st), nil
+}
+
+func fileVersionToken(st os.FileInfo) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "size=%d;mtime=%d;mode=%s", st.Size(), st.ModTime().UnixNano(), st.Mode().String())
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (p *Provider) DeleteObject(ctx context.Context, key string) error {

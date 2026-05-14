@@ -93,6 +93,40 @@ func TestProvider_PutObjectConditionalIfAbsent_CloudIntegration(t *testing.T) {
 	assert.Equal(t, "first", string(got))
 }
 
+func TestProvider_VersionedGetAndIfMatch_CloudIntegration(t *testing.T) {
+	cloudtest.SkipIfUnavailable(t)
+	ctx := context.Background()
+	bucket := cloudtest.CreateBucket(t, ctx)
+
+	p, err := s3.New(ctx, s3.Config{
+		Bucket:          bucket,
+		Endpoint:        cloudtest.Endpoint,
+		Region:          cloudtest.Region,
+		AccessKeyID:     cloudtest.TestAccessKeyID,
+		SecretAccessKey: cloudtest.TestSecretAccessKey,
+		ForcePathStyle:  true,
+	})
+	require.NoError(t, err)
+	defer p.Close()
+
+	require.NoError(t, p.PutObject(ctx, "latest.json", strings.NewReader("first"), int64(len("first"))))
+	body, meta, err := p.GetObjectVersioned(ctx, "latest.json")
+	require.NoError(t, err)
+	require.NotEmpty(t, meta.ETag)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	assert.Equal(t, "first", string(got))
+
+	result, err := p.PutObjectConditional(ctx, "latest.json", strings.NewReader("second"), int64(len("second")), provider.PutPrecondition{IfMatchETag: &meta.ETag})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.ETag)
+
+	_, err = p.PutObjectConditional(ctx, "latest.json", strings.NewReader("third"), int64(len("third")), provider.PutPrecondition{IfMatchETag: &meta.ETag})
+	require.Error(t, err)
+	require.True(t, provider.IsPreconditionFailed(err), "got %v", err)
+}
+
 func TestProvider_List_CloudIntegration(t *testing.T) {
 	cloudtest.SkipIfUnavailable(t)
 	ctx := context.Background()
