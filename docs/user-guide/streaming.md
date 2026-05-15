@@ -414,7 +414,10 @@ GETs.
 
 MVP streaming extractor support is `xml_xpath` and `regex`; `json_path`
 continues to work under `fixed_window` and is rejected under
-`until_resolved`.
+`until_resolved`. For JSON-bodied content where the routing field sits past
+the head, the current path is `fixed_window` with a generous `--bytes`;
+streaming JSON support is being scoped separately and is not part of the
+GON-017 surface.
 
 ##### `on_missing`: fail vs. quarantine
 
@@ -431,7 +434,8 @@ unresolved required vars set to `"_unresolved"`. `transfer reflow` writes
 quarantined objects to `<dest>/<quarantine_prefix>/<source-key>`, bypassing
 `--rewrite-from` and `--rewrite-to` entirely — operators get a
 deterministic parallel landing zone for anomalies without disrupting the
-normal-routing flow.
+normal-routing flow. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing)
+for the end-to-end pipeline view.
 
 `quarantine_prefix` is required when any extractor uses `on_missing:
 quarantine`. It sits at the **top level** of the probe config (sibling of
@@ -484,6 +488,17 @@ Two error shapes to be aware of when consuming probe output:
   ran but did not satisfy the required set within the read budget. Inspect
   `bytes_read` and `termination_reason` to decide whether to widen
   `max_bytes`, adjust the extractor, or accept the quarantine outcome.
+
+When `on_missing: fail` triggers under `termination_reason:
+max_bytes_reached`, the human-readable `error.message` field typically
+surfaces the underlying partial-parse failure (for example, `XML syntax
+error on line N: unexpected EOF`) because the truncated buffer at the
+budget boundary is, by definition, incomplete. That is expected — the
+canonical record of _why_ the probe stopped is the audit block in
+`error.details.probe`. The load-bearing fields for automated consumers are
+the per-extractor `resolved: false` entries and the top-level
+`termination_reason`; treat the parse-error wording in `message` as
+diagnostic context, not as the failure reason itself.
 
 #### Output Modes
 
