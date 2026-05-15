@@ -6,6 +6,9 @@ For recurring production builds, see
 [Steady-State Index Operations](steady-state-index-operations.md) for cadence,
 run-history, and soft-delete guidance.
 
+For content-addressed post-pass artifacts over completed index runs, see
+[Atlas Artifacts](atlas.md).
+
 ## When to Use the Index
 
 Gonimbus supports two workflows based on bucket scale:

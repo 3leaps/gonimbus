@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/atlas-recipe.schema.json",
+  "title": "Gonimbus Atlas Recipe",
+  "description": "Phase A recipe contract for building local gonimbus.atlas.v1 artifacts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dimensions",
+    "shard_by"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": "1.0"
+    },
+    "hash": {
+      "const": "sha256"
+    },
+    "coverage": {
+      "enum": [
+        "full",
+        "scoped"
+      ]
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/dimension_recipe"
+      }
+    },
+    "shard_by": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "system_fields": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/field_policy"
+      }
+    }
+  },
+  "$defs": {
+    "dimension_recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "extractor"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "kind": {
+          "enum": [
+            "temporal-day",
+            "temporal-instant",
+            "categorical"
+          ]
+        },
+        "from": {
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "extractor": {
+          "$ref": "#/$defs/extractor"
+        }
+      }
+    },
+    "extractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "xml_xpath",
+            "regex",
+            "json_path"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "on_missing": {
+          "enum": [
+            "fail",
+            "quarantine"
+          ]
+        },
+        "xpath": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "json_path": {
+          "type": "string"
+        }
+      }
+    },
+    "field_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification"
+      ],
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/classification"
+        }
+      }
+    },
+    "classification": {
+      "enum": [
+        "unknown",
+        "0-public",
+        "1-confidential",
+        "2-blinded",
+        "3-proprietary",
+        "4-personal",
+        "5-privileged",
+        "6-eyes-only"
+      ]
+    }
+  }
+}

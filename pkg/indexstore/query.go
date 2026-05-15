@@ -234,6 +234,67 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	return results, stats, nil
 }
 
+// ListObjectsForRun returns active objects whose latest observation belongs to
+// the requested completed run. Results are ordered by rel_key for deterministic
+// post-pass consumers.
+func ListObjectsForRun(ctx context.Context, db *sql.DB, indexSetID, runID string) ([]ObjectRow, error) {
+	if strings.TrimSpace(indexSetID) == "" {
+		return nil, fmt.Errorf("index_set_id is required")
+	}
+	if strings.TrimSpace(runID) == "" {
+		return nil, fmt.Errorf("run_id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag,
+		        last_seen_run_id, last_seen_at, deleted_at
+		 FROM objects_current
+		 WHERE index_set_id = ? AND last_seen_run_id = ? AND deleted_at IS NULL
+		 ORDER BY rel_key`,
+		indexSetID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list objects for run: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ObjectRow
+	for rows.Next() {
+		var obj ObjectRow
+		var lastModifiedRaw any
+		var lastSeenAtRaw any
+		var deletedAtRaw any
+		if err := rows.Scan(
+			&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
+			&obj.ETag, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan object for run: %w", err)
+		}
+		lastModified, err := parseOptionalDBTime(lastModifiedRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse last_modified: %w", err)
+		}
+		obj.LastModified = lastModified
+		lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse last_seen_at: %w", err)
+		}
+		obj.LastSeenAt = lastSeenAt
+		deletedAt, err := parseOptionalDBTime(deletedAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse deleted_at: %w", err)
+		}
+		obj.DeletedAt = deletedAt
+		out = append(out, obj)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate objects for run: %w", err)
+	}
+	return out, nil
+}
+
 // QueryObjectCount counts objects matching the query without materializing results.
 //
 // This is optimized for --count scenarios:
