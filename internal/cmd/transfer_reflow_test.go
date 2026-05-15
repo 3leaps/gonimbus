@@ -211,6 +211,56 @@ func TestEnqueueReflowLine_ReflowInputRecord(t *testing.T) {
 	require.Equal(t, int64(42), task.SourceSize)
 	require.Equal(t, map[string]string{"site": "001"}, task.Vars)
 	require.Equal(t, "dest/file.xml", task.DestRelKey)
+	require.Equal(t, "normal", task.RoutingClass)
+}
+
+func TestEnqueueReflowLine_ReflowInputRecordQuarantine(t *testing.T) {
+	out := make(chan reflowTask, 1)
+	var providerBuckets []string
+	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+		providerBuckets = append(providerBuckets, bucket)
+		return &mockProvider{}, &mockProvider{}, nil
+	}
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine","quarantine_prefix":"_unresolved/","vars":{"date":"_unresolved"}}}`
+	srcBucket, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	require.NoError(t, err)
+	require.Equal(t, "bucket", srcBucket)
+	require.Equal(t, []string{"bucket"}, providerBuckets)
+
+	task := <-out
+	require.Equal(t, "quarantine", task.RoutingClass)
+	require.Equal(t, "_unresolved", task.QuarantinePrefix)
+	require.Equal(t, "source/file.xml", task.SourceKey)
+	require.Equal(t, "_unresolved/source/file.xml", buildQuarantineDestRel(task.QuarantinePrefix, task.SourceKey))
+}
+
+func TestEnqueueReflowLine_ReflowInputRecordQuarantineRequiresPrefix(t *testing.T) {
+	out := make(chan reflowTask, 1)
+	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+		return &mockProvider{}, &mockProvider{}, nil
+	}
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine"}}`
+	_, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "quarantine_prefix is required")
+	require.Empty(t, out)
+}
+
+func TestEnqueueReflowLine_ReflowInputRecordQuarantineRejectsAbsolutePrefix(t *testing.T) {
+	out := make(chan reflowTask, 1)
+	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+		return &mockProvider{}, &mockProvider{}, nil
+	}
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine","quarantine_prefix":"s3://other/prefix"}}`
+	_, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "quarantine_prefix must be a relative destination prefix")
+	require.Empty(t, out)
 }
 
 func TestEnqueueReflowLine_ReflowInputRecordRejectsPrefixURI(t *testing.T) {

@@ -354,6 +354,9 @@ gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.tx
 Create a `probe.yaml` file defining extraction rules:
 
 ```yaml
+read_strategy:
+  mode: fixed_window
+
 extract:
   - name: business_date
     type: xml_xpath
@@ -361,7 +364,7 @@ extract:
 
   - name: schema_version
     type: json_path
-    path: $.metadata.version
+    json_path: $.metadata.version
 
   - name: record_id
     type: regex
@@ -376,6 +379,126 @@ extract:
 | `xml_xpath` | XML element extraction | `//BusinessDate`           |
 | `json_path` | JSON field extraction  | `$.data.timestamp`         |
 | `regex`     | Pattern matching       | `date=(\d{4}-\d{2}-\d{2})` |
+
+#### Read Strategy
+
+`content probe` defaults to `fixed_window`, which reads the first `--bytes`
+bytes (default 4096, maximum 10 MB) and applies every extractor to that
+buffer. This works well when routing fields sit in the document header —
+most JSON metadata and small XML records resolve inside the first 4–16 KB.
+
+For larger structured documents — especially XML where the routing element
+may sit kilobytes or megabytes past the prologue — switch to
+`until_resolved` to read incrementally only as far as needed:
+
+```yaml
+read_strategy:
+  mode: until_resolved
+  max_bytes: 16MB
+  chunk_bytes: 64KB
+quarantine_prefix: "_unresolved/"
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+    required: true
+    on_missing: quarantine
+```
+
+`until_resolved` reads monotonic byte ranges (`[0, chunk_bytes)`,
+`[chunk_bytes, 2*chunk_bytes)`, ...) until every required extractor
+resolves, `max_bytes` is reached, or the stream is exhausted. The probe
+stops at the first chunk that satisfies every required extractor, so
+documents whose target field arrives early still complete in one or two
+GETs.
+
+MVP streaming extractor support is `xml_xpath` and `regex`; `json_path`
+continues to work under `fixed_window` and is rejected under
+`until_resolved`. For JSON-bodied content where the routing field sits past
+the head, the current path is `fixed_window` with a generous `--bytes`;
+streaming JSON support is being scoped separately and is not part of the
+GON-017 surface.
+
+##### `on_missing`: fail vs. quarantine
+
+When a required extractor does not resolve before the read budget is spent,
+`on_missing` controls what the probe does next:
+
+| Setting      | What it does                                                       | When to use                                                                                  |
+| ------------ | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `fail`       | Emit `gonimbus.error.v1`; nothing forwarded to reflow              | Strict pipelines where unresolved objects must be reviewed before any reorganization happens |
+| `quarantine` | Emit `gonimbus.reflow.input.v1` with `routing_class: "quarantine"` | Bulk pipelines where anomalies should be moved aside deterministically without halting work  |
+
+Quarantined records carry the configured `quarantine_prefix` and any
+unresolved required vars set to `"_unresolved"`. `transfer reflow` writes
+quarantined objects to `<dest>/<quarantine_prefix>/<source-key>`, bypassing
+`--rewrite-from` and `--rewrite-to` entirely — operators get a
+deterministic parallel landing zone for anomalies without disrupting the
+normal-routing flow. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing)
+for the end-to-end pipeline view.
+
+`quarantine_prefix` is required when any extractor uses `on_missing:
+quarantine`. It sits at the **top level** of the probe config (sibling of
+`read_strategy` and `extract`), not nested under `read_strategy`. Trailing
+slashes are normalized: `"_unresolved"` and `"_unresolved/"` are equivalent
+and both emit as `"_unresolved/"`.
+
+##### Probe Audit Block
+
+Under `until_resolved`, every probe output carries a `probe` audit block
+recording what was actually read and which extractors resolved:
+
+```json
+"probe": {
+  "bytes_read": 65536,
+  "termination_reason": "all_required_resolved",
+  "extractors": [
+    {
+      "name": "business_date",
+      "type": "xml_xpath",
+      "resolved": true,
+      "required": true,
+      "on_missing": "quarantine",
+      "bytes_at_resolution": 65536
+    }
+  ]
+}
+```
+
+`termination_reason` is one of:
+
+| Value                   | Meaning                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `all_required_resolved` | Every required extractor matched within the read budget; the probe stopped early |
+| `max_bytes_reached`     | The probe exhausted `max_bytes` before every required extractor resolved         |
+| `stream_exhausted`      | The object ended before every required extractor resolved                        |
+| `parse_error`           | A terminal parse failure prevented further extraction                            |
+
+`bytes_at_resolution` is the cumulative byte offset (from object start) at
+the first chunk boundary where the extractor resolved — it is chunk-aligned,
+not the byte-precise position of the matching element. A `null` value means
+the extractor never resolved.
+
+Two error shapes to be aware of when consuming probe output:
+
+- `probe` block is **`null`** — extraction never started, typically a
+  charset or framing problem that prevented the extractor loop from
+  running. Look in `error.details` for the underlying cause.
+- `probe` block is **present with `resolved: false` entries** — extraction
+  ran but did not satisfy the required set within the read budget. Inspect
+  `bytes_read` and `termination_reason` to decide whether to widen
+  `max_bytes`, adjust the extractor, or accept the quarantine outcome.
+
+When `on_missing: fail` triggers under `termination_reason:
+max_bytes_reached`, the human-readable `error.message` field typically
+surfaces the underlying partial-parse failure (for example, `XML syntax
+error on line N: unexpected EOF`) because the truncated buffer at the
+budget boundary is, by definition, incomplete. That is expected — the
+canonical record of _why_ the probe stopped is the audit block in
+`error.details.probe`. The load-bearing fields for automated consumers are
+the per-extractor `resolved: false` entries and the top-level
+`termination_reason`; treat the parse-error wording in `message` as
+diagnostic context, not as the failure reason itself.
 
 #### Output Modes
 
@@ -400,10 +523,27 @@ extract:
       "schema_version": "2.1"
     },
     "etag": "...",
-    "size": 2069
+    "size": 2069,
+    "probe": {
+      "bytes_read": 2069,
+      "termination_reason": "all_required_resolved",
+      "extractors": [
+        {
+          "name": "business_date",
+          "type": "xml_xpath",
+          "resolved": true,
+          "required": true,
+          "on_missing": "fail",
+          "bytes_at_resolution": 2069
+        }
+      ]
+    }
   }
 }
 ```
+
+`probe.termination_reason` is one of `all_required_resolved`,
+`max_bytes_reached`, `stream_exhausted`, or `parse_error`.
 
 ### Bulk Input (`--stdin`)
 
