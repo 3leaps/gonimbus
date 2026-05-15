@@ -166,6 +166,37 @@ The probe reads only the first N bytes (default 4096, max 10MB). For most struct
 gonimbus content probe --stdin --config probe.yaml --bytes 8192 --emit reflow-input < uris.txt
 ```
 
+### When Required Fields Sit Deeper
+
+Some structured documents put the routing field well past the prologue — large XML invoices, settlement files, or any format whose target element sits behind a long header. The 10 MB fixed-window cap protects against accidentally downloading whole files, but it also means a probe configured with `fixed_window` may not see the field at all.
+
+For these cases, opt in to bounded incremental reads with `read_strategy.mode: until_resolved`. The probe issues monotonic range reads and stops at the first chunk that resolves every required extractor:
+
+```yaml
+# probe-config.yaml — reach deeper into large structured docs
+read_strategy:
+  mode: until_resolved
+  max_bytes: 16MB
+  chunk_bytes: 64KB
+quarantine_prefix: "_unresolved/"
+
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+    required: true
+    on_missing: quarantine
+```
+
+Two operator choices matter here:
+
+- **`required: true`** marks the field as load-bearing — if the probe cannot resolve it within `max_bytes`, the record is anomalous.
+- **`on_missing`** decides what to do with anomalies. `fail` halts the record (emits `gonimbus.error.v1`, forwards nothing). `quarantine` keeps the pipeline moving: the probe emits a reflow input with `routing_class: "quarantine"`, and reflow files it under a parallel location — see [Quarantine Routing](#quarantine-routing) below.
+
+`until_resolved` currently supports `xml_xpath` and `regex` extractors. `json_path` remains valid under `fixed_window`; combining it with `until_resolved` is rejected at config-load.
+
+Probe output under `until_resolved` gains a `probe` audit block capturing `bytes_read`, the per-extractor resolution state and `bytes_at_resolution`, and `termination_reason` (`all_required_resolved`, `max_bytes_reached`, `stream_exhausted`, or `parse_error`). The audit block is the operator's record of how much was actually read — useful for tuning `max_bytes` and `chunk_bytes` on subsequent runs.
+
 ### Bulk Processing
 
 For pipelines with thousands of objects, use concurrency:
@@ -239,6 +270,20 @@ gonimbus transfer reflow --stdin \
 ```
 
 Cross-account means no server-side copy optimization — objects are downloaded and re-uploaded. This is inherent to the problem, not a gonimbus limitation.
+
+### Quarantine Routing
+
+When `content probe` emits a record with `routing_class: "quarantine"` (because a required extractor was not resolved within `max_bytes`), `transfer reflow` files it deterministically at:
+
+```
+<dest>/<quarantine_prefix>/<source-key>
+```
+
+`<quarantine_prefix>` is the relative path configured in the probe config (for example `_unresolved/`). `--rewrite-from` and `--rewrite-to` are bypassed entirely for quarantined records, and the source key is preserved end-to-end. That lets an operator re-probe the original objects later — with a wider `max_bytes`, a different chunk size, or an additional extractor — without losing identity.
+
+A single reflow command can land both normal and quarantined records in one pass: normal records flow through the rewrite template, quarantined records land at the parallel quarantine prefix. Operators stay in the bulk flow without an out-of-band handling step.
+
+Records without `routing_class` (or with `routing_class: "normal"`) continue to follow the normal `--rewrite-from` / `--rewrite-to` path as before — quarantine routing is opt-in at the probe layer.
 
 ### Deduplication
 

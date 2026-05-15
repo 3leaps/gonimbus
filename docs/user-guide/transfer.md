@@ -375,6 +375,18 @@ Control behavior when destination objects already exist:
 | `--on-collision fail`          | Fail immediately on first conflict    |
 | `--on-collision overwrite`     | Replace (requires `--overwrite` flag) |
 
+### Quarantine Routing
+
+Probe-emitted records may carry `routing_class: "quarantine"` when a required extractor could not be resolved within the probe's read budget. For these records `transfer reflow` writes to a deterministic parallel location:
+
+```
+<dest>/<quarantine_prefix>/<source-key>
+```
+
+`--rewrite-from` and `--rewrite-to` are bypassed for quarantined records — they land under the probe-configured `quarantine_prefix` with the original source key preserved. Normal records in the same input stream continue to flow through the rewrite templates, so a single reflow run can process both classes without an out-of-band step.
+
+Use this when bulk pipelines should keep moving past anomalies. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing) for the end-to-end flow, including how to configure `on_missing: quarantine` on the probe side.
+
 ### Checkpoint and Resume
 
 For large reflow jobs, use checkpointing to enable resume after interruption:
