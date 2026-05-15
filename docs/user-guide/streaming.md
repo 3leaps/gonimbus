@@ -471,9 +471,9 @@ recording what was actually read and which extractors resolved:
 | `parse_error`           | A terminal parse failure prevented further extraction                            |
 
 `bytes_at_resolution` is the cumulative byte offset (from object start) at
-the chunk boundary where the extractor was last evaluated — it is
-chunk-aligned, not the byte-precise position of the matching element. A
-`null` value means the extractor never resolved.
+the first chunk boundary where the extractor resolved — it is chunk-aligned,
+not the byte-precise position of the matching element. A `null` value means
+the extractor never resolved.
 
 Two error shapes to be aware of when consuming probe output:
 
