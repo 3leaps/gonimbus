@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,60 @@ func TestProber_XMLXPath(t *testing.T) {
 	vars, err := p.Probe(data)
 	require.NoError(t, err)
 	require.Equal(t, "2025-12-31", vars["business_date"])
+}
+
+func TestXMLXPathDeclaredCharsetISO88591(t *testing.T) {
+	x, err := CompileXMLXPath("//name")
+	require.NoError(t, err)
+	data := append([]byte(`<?xml version="1.0" encoding="ISO-8859-1"?><root><name>Caf`), 0xe9)
+	data = append(data, []byte(`</name></root>`)...)
+
+	got, ok, err := x.FindFirstText(data)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "Caf\u00e9", got)
+}
+
+func TestXMLXPathDeclaredCharsetWindows1252(t *testing.T) {
+	x, err := CompileXMLXPath("//quote")
+	require.NoError(t, err)
+	data := append([]byte(`<?xml version="1.0" encoding="Windows-1252"?><root><quote>`), 0x91)
+	data = append(data, []byte(`hello`)...)
+	data = append(data, 0x92)
+	data = append(data, []byte(`</quote></root>`)...)
+
+	got, ok, err := x.FindFirstText(data)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "\u2018hello\u2019", got)
+}
+
+func TestXMLXPathDeclaredCharsetUnsupportedLabel(t *testing.T) {
+	x, err := CompileXMLXPath("//name")
+	require.NoError(t, err)
+	data := []byte(`<?xml version="1.0" encoding="NOT-AN-ENCODING"?><root><name>value</name></root>`)
+
+	got, ok, err := x.FindFirstText(data)
+
+	require.Error(t, err)
+	require.Contains(t, strings.ToLower(err.Error()), "not-an-encoding")
+	require.False(t, ok)
+	require.Empty(t, got)
+}
+
+func TestXMLXPathMalformedDeclarationError(t *testing.T) {
+	x, err := CompileXMLXPath("//name")
+	require.NoError(t, err)
+	data := []byte(`<?xml version="1.0" encoding="UTF-8"<root><name>value</name></root>`)
+
+	got, ok, err := x.FindFirstText(data)
+
+	require.Error(t, err)
+	require.NotContains(t, strings.ToLower(err.Error()), "unsupported charset")
+	require.False(t, ok)
+	require.Empty(t, got)
 }
 
 func TestProber_JSONPath(t *testing.T) {
