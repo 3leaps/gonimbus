@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/atlas-object.schema.json",
+  "title": "Gonimbus Atlas Object Row",
+  "description": "Data payload for gonimbus.atlas.object.v1 JSONL records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_index_set_id",
+    "source_run_id",
+    "storage_key",
+    "rel_key",
+    "source_uri",
+    "content_hash",
+    "hash_profile",
+    "dimensions",
+    "shard",
+    "size_bytes",
+    "first_seen_run_id",
+    "first_seen_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "gonimbus.atlas.v1"
+    },
+    "source_index_set_id": {
+      "type": "string"
+    },
+    "source_run_id": {
+      "type": "string"
+    },
+    "storage_key": {
+      "type": "string"
+    },
+    "rel_key": {
+      "type": "string"
+    },
+    "source_uri": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hash_profile": {
+      "const": "sha256"
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "shard": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "etag": {
+      "type": "string"
+    },
+    "first_seen_run_id": {
+      "type": "string"
+    },
+    "first_seen_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

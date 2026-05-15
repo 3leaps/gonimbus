@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/atlas-diagnostic.schema.json",
+  "title": "Gonimbus Atlas Diagnostic Row",
+  "description": "Data payload for gonimbus.atlas.diagnostic.v1 JSONL records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_index_set_id",
+    "source_run_id",
+    "storage_key",
+    "rel_key",
+    "stage",
+    "code",
+    "message",
+    "occurred_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "gonimbus.atlas.v1"
+    },
+    "source_index_set_id": {
+      "type": "string"
+    },
+    "source_run_id": {
+      "type": "string"
+    },
+    "storage_key": {
+      "type": "string"
+    },
+    "rel_key": {
+      "type": "string"
+    },
+    "stage": {
+      "enum": [
+        "validation",
+        "read",
+        "extract",
+        "validate"
+      ]
+    },
+    "code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
