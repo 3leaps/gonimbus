@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,13 +112,15 @@ func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
 }
 
 type reflowTask struct {
-	SourceBucket string
-	SourceURI    string
-	SourceKey    string
-	SourceETag   string
-	SourceSize   int64
-	Vars         map[string]string
-	DestRelKey   string
+	SourceBucket     string
+	SourceURI        string
+	SourceKey        string
+	SourceETag       string
+	SourceSize       int64
+	Vars             map[string]string
+	DestRelKey       string
+	RoutingClass     string
+	QuarantinePrefix string
 }
 
 type reflowRecord struct {
@@ -393,7 +396,9 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				}
 
 				var destRel string
-				if task.DestRelKey != "" {
+				if task.RoutingClass == "quarantine" {
+					destRel = buildQuarantineDestRel(task.QuarantinePrefix, task.SourceKey)
+				} else if task.DestRelKey != "" {
 					destRel = task.DestRelKey
 				} else {
 					mapped, _, err := rewrite.ApplyWithVars(task.SourceKey, task.Vars)
@@ -627,12 +632,14 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			}
 		case "gonimbus.reflow.input.v1":
 			var data struct {
-				SourceURI  string            `json:"source_uri"`
-				SourceKey  string            `json:"source_key"`
-				SourceETag string            `json:"source_etag"`
-				SourceSize int64             `json:"source_size_bytes"`
-				Vars       map[string]string `json:"vars"`
-				DestRelKey string            `json:"dest_rel_key"`
+				SourceURI        string            `json:"source_uri"`
+				SourceKey        string            `json:"source_key"`
+				SourceETag       string            `json:"source_etag"`
+				SourceSize       int64             `json:"source_size_bytes"`
+				Vars             map[string]string `json:"vars"`
+				DestRelKey       string            `json:"dest_rel_key"`
+				RoutingClass     string            `json:"routing_class"`
+				QuarantinePrefix string            `json:"quarantine_prefix"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil {
 				return srcBucket, err
@@ -664,9 +671,26 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 				key = strings.TrimPrefix(strings.TrimSpace(data.SourceKey), "/")
 			}
 			destRel := strings.Trim(strings.TrimSpace(data.DestRelKey), "/")
+			routingClass := strings.TrimSpace(data.RoutingClass)
+			if routingClass == "" {
+				routingClass = "normal"
+			}
+			switch routingClass {
+			case "normal", "quarantine":
+				// ok
+			default:
+				return srcBucket, fmt.Errorf("unsupported routing_class %q", data.RoutingClass)
+			}
+			quarantinePrefix := strings.Trim(strings.TrimSpace(data.QuarantinePrefix), "/")
+			if routingClass == "quarantine" && quarantinePrefix == "" {
+				return srcBucket, fmt.Errorf("quarantine_prefix is required when routing_class=quarantine")
+			}
+			if routingClass == "quarantine" && !isRelativeQuarantinePrefix(data.QuarantinePrefix) {
+				return srcBucket, fmt.Errorf("quarantine_prefix must be a relative destination prefix")
+			}
 			srcURI := fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key)
 			select {
-			case out <- reflowTask{SourceBucket: u.Bucket, SourceURI: srcURI, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, Vars: data.Vars, DestRelKey: destRel}:
+			case out <- reflowTask{SourceBucket: u.Bucket, SourceURI: srcURI, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, Vars: data.Vars, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
 				return srcBucket, nil
 			case <-ctx.Done():
 				return srcBucket, ctx.Err()
@@ -735,6 +759,27 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 		token = res.ContinuationToken
 	}
 	return srcBucket, nil
+}
+
+func buildQuarantineDestRel(prefix string, sourceKey string) string {
+	prefix = strings.Trim(prefix, "/")
+	sourceKey = strings.Trim(sourceKey, "/")
+	if prefix == "" {
+		return sourceKey
+	}
+	if sourceKey == "" {
+		return prefix
+	}
+	return prefix + "/" + sourceKey
+}
+
+func isRelativeQuarantinePrefix(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if strings.HasPrefix(prefix, "/") {
+		return false
+	}
+	u, err := url.Parse(prefix)
+	return err != nil || u.Scheme == ""
 }
 
 func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {

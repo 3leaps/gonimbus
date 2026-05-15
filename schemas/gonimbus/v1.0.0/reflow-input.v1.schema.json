@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/reflow-input.v1",
+  "title": "Gonimbus Reflow Input Record",
+  "description": "Data payload for gonimbus.reflow.input.v1 records emitted by content probe and consumed by transfer reflow.",
+  "type": "object",
+  "required": [
+    "source_uri",
+    "source_key"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "source_uri": {
+      "type": "string",
+      "description": "Exact source object URI"
+    },
+    "source_key": {
+      "type": "string",
+      "description": "Source object key"
+    },
+    "source_etag": {
+      "type": "string",
+      "description": "Source object ETag, when known"
+    },
+    "source_size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Source object size in bytes, when known"
+    },
+    "vars": {
+      "type": "object",
+      "description": "Extractor-derived template variables",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "dest_rel_key": {
+      "type": "string",
+      "description": "Optional precomputed destination relative key"
+    },
+    "routing_class": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "quarantine"
+      ],
+      "default": "normal",
+      "description": "Routing behavior for transfer reflow. Missing is equivalent to normal."
+    },
+    "quarantine_prefix": {
+      "type": "string",
+      "description": "Relative destination prefix used when routing_class is quarantine"
+    },
+    "probe": {
+      "$ref": "#/$defs/probe_audit"
+    }
+  },
+  "$defs": {
+    "probe_audit": {
+      "type": "object",
+      "required": [
+        "extractors",
+        "bytes_read",
+        "termination_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "extractors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extractor_audit"
+          }
+        },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "termination_reason": {
+          "type": "string",
+          "enum": [
+            "all_required_resolved",
+            "max_bytes_reached",
+            "stream_exhausted",
+            "parse_error"
+          ]
+        }
+      }
+    },
+    "extractor_audit": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "resolved",
+        "required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "xml_xpath",
+            "regex",
+            "json_path"
+          ]
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "on_missing": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "quarantine"
+          ]
+        },
+        "bytes_at_resolution": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -354,6 +354,9 @@ gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.tx
 Create a `probe.yaml` file defining extraction rules:
 
 ```yaml
+read_strategy:
+  mode: fixed_window
+
 extract:
   - name: business_date
     type: xml_xpath
@@ -361,7 +364,7 @@ extract:
 
   - name: schema_version
     type: json_path
-    path: $.metadata.version
+    json_path: $.metadata.version
 
   - name: record_id
     type: regex
@@ -376,6 +379,38 @@ extract:
 | `xml_xpath` | XML element extraction | `//BusinessDate`           |
 | `json_path` | JSON field extraction  | `$.data.timestamp`         |
 | `regex`     | Pattern matching       | `date=(\d{4}-\d{2}-\d{2})` |
+
+#### Read Strategy
+
+`content probe` defaults to `fixed_window`, which reads the first `--bytes`
+bytes (default 4096, maximum 10 MB) and applies every extractor to that
+buffer. For large XML documents with required fields deeper in the object,
+opt in to bounded incremental reads:
+
+```yaml
+read_strategy:
+  mode: until_resolved
+  max_bytes: 16MB
+  chunk_bytes: 64KB
+quarantine_prefix: "_unresolved/"
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: //BusinessDate
+    required: true
+    on_missing: quarantine
+```
+
+`until_resolved` reads monotonic byte ranges until every required extractor
+resolves, `max_bytes` is reached, or the stream is exhausted. MVP streaming
+extractor support is `xml_xpath` and `regex`; `json_path` remains supported
+under `fixed_window` and is rejected under `until_resolved`.
+
+`on_missing: fail` emits `gonimbus.error.v1` and no reflow input for that
+object. `on_missing: quarantine` emits `gonimbus.reflow.input.v1` with
+`routing_class: "quarantine"`, sets unresolved required vars to
+`"_unresolved"`, and `transfer reflow` writes to
+`<dest>/<quarantine_prefix>/<source-key>` without rendering `--rewrite-to`.
 
 #### Output Modes
 
@@ -400,10 +435,27 @@ extract:
       "schema_version": "2.1"
     },
     "etag": "...",
-    "size": 2069
+    "size": 2069,
+    "probe": {
+      "bytes_read": 2069,
+      "termination_reason": "all_required_resolved",
+      "extractors": [
+        {
+          "name": "business_date",
+          "type": "xml_xpath",
+          "resolved": true,
+          "required": true,
+          "on_missing": "fail",
+          "bytes_at_resolution": 2069
+        }
+      ]
+    }
   }
 }
 ```
+
+`probe.termination_reason` is one of `all_required_resolved`,
+`max_bytes_reached`, `stream_exhausted`, or `parse_error`.
 
 ### Bulk Input (`--stdin`)
 

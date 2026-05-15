@@ -28,10 +28,18 @@ import (
 
 const contentProbeMaxBytes = 10 * 1024 * 1024
 
+type contentProbeProvider interface {
+	provider.Provider
+}
+
+var newContentProbeProvider = func(ctx context.Context, cfg s3.Config) (contentProbeProvider, error) {
+	return s3.New(ctx, cfg)
+}
+
 var contentProbeCmd = &cobra.Command{
 	Use:   "probe [uri]",
 	Short: "Probe object content for derived fields (JSONL)",
-	Long: `Probe object content within a fixed byte window and extract derived fields.
+	Long: `Probe object content and extract derived fields.
 
 Inputs:
 - Exact object URIs
@@ -42,6 +50,16 @@ Inputs:
 
 Output is JSONL on stdout.
 Errors are emitted on stdout as gonimbus.error.v1 records.
+
+Read strategies:
+- fixed_window (default): read --bytes from the object head
+- until_resolved: configure read_strategy.mode in probe config with max_bytes
+  and optional chunk_bytes; streams monotonic ranges until required extractors
+  resolve, max_bytes is reached, or the stream is exhausted
+
+until_resolved supports xml_xpath and regex extractors in this release.
+json_path remains available in fixed_window mode and is rejected under
+until_resolved. on_missing supports fail and quarantine; fallback is deferred.
 `,
 	Args: validateContentProbeArgs,
 	RunE: runContentProbe,
@@ -92,21 +110,27 @@ type probeTask struct {
 }
 
 type contentProbeRecord struct {
-	URI            string            `json:"uri"`
-	Key            string            `json:"key"`
-	BytesRequested int64             `json:"bytes_requested"`
-	BytesReturned  int64             `json:"bytes_returned"`
-	Vars           map[string]string `json:"vars"`
-	ETag           string            `json:"etag,omitempty"`
-	Size           int64             `json:"size,omitempty"`
+	URI              string            `json:"uri"`
+	Key              string            `json:"key"`
+	BytesRequested   int64             `json:"bytes_requested"`
+	BytesReturned    int64             `json:"bytes_returned"`
+	Vars             map[string]string `json:"vars"`
+	ETag             string            `json:"etag,omitempty"`
+	Size             int64             `json:"size,omitempty"`
+	RoutingClass     string            `json:"routing_class,omitempty"`
+	QuarantinePrefix string            `json:"quarantine_prefix,omitempty"`
+	Probe            *probe.ProbeAudit `json:"probe,omitempty"`
 }
 
 type reflowInputRecord struct {
-	SourceURI  string            `json:"source_uri"`
-	SourceKey  string            `json:"source_key"`
-	SourceETag string            `json:"source_etag,omitempty"`
-	SourceSize int64             `json:"source_size_bytes,omitempty"`
-	Vars       map[string]string `json:"vars,omitempty"`
+	SourceURI        string            `json:"source_uri"`
+	SourceKey        string            `json:"source_key"`
+	SourceETag       string            `json:"source_etag,omitempty"`
+	SourceSize       int64             `json:"source_size_bytes,omitempty"`
+	Vars             map[string]string `json:"vars,omitempty"`
+	RoutingClass     string            `json:"routing_class,omitempty"`
+	QuarantinePrefix string            `json:"quarantine_prefix,omitempty"`
+	Probe            *probe.ProbeAudit `json:"probe,omitempty"`
 }
 
 func runContentProbe(cmd *cobra.Command, args []string) error {
@@ -161,8 +185,8 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	)
 
 	provMu := sync.Mutex{}
-	providers := map[string]*s3.Provider{}
-	getProvider := func(bucket string) (*s3.Provider, error) {
+	providers := map[string]contentProbeProvider{}
+	getProvider := func(bucket string) (contentProbeProvider, error) {
 		provMu.Lock()
 		if p, ok := providers[bucket]; ok {
 			provMu.Unlock()
@@ -170,7 +194,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 		}
 		provMu.Unlock()
 
-		pNew, err := s3.New(ctx, s3.Config{
+		pNew, err := newContentProbeProvider(ctx, s3.Config{
 			Bucket:         bucket,
 			Region:         contentProbeRegion,
 			Endpoint:       contentProbeEndpoint,
@@ -193,7 +217,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	}
 	defer func() {
 		provMu.Lock()
-		toClose := make([]*s3.Provider, 0, len(providers))
+		toClose := make([]contentProbeProvider, 0, len(providers))
 		for _, p := range providers {
 			toClose = append(toClose, p)
 		}
@@ -220,38 +244,42 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 					continue
 				}
 
-				b, meta, err := content.HeadBytes(ctx, prov, task.Key, contentProbeBytes)
+				result, err := runContentProbeTask(ctx, prov, task, prober, probeCfg)
 				if err != nil {
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe read failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
-
-				vars, err := prober.Probe(b)
-				if err != nil {
+				if result.extractErr != nil {
 					errorCount.Add(1)
-					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe extract failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
+					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe extract failed", result.extractErr, map[string]any{"uri": task.URI, "base_input": task.BaseInput, "probe": result.audit})
 					continue
 				}
 
 				if contentProbeEmit == "probe" || contentProbeEmit == "both" {
 					_ = w.WriteAny(ctx, "gonimbus.content.probe.v1", &contentProbeRecord{
-						URI:            task.URI,
-						Key:            task.Key,
-						BytesRequested: contentProbeBytes,
-						BytesReturned:  int64(len(b)),
-						Vars:           vars,
-						ETag:           meta.ETag,
-						Size:           meta.Size,
+						URI:              task.URI,
+						Key:              task.Key,
+						BytesRequested:   result.bytesRequested,
+						BytesReturned:    result.bytesRead,
+						Vars:             result.vars,
+						ETag:             result.meta.ETag,
+						Size:             result.meta.Size,
+						RoutingClass:     omitNormalRoutingClass(result.routingClass),
+						QuarantinePrefix: result.quarantinePrefix,
+						Probe:            result.audit,
 					})
 				}
 				if contentProbeEmit == "reflow-input" || contentProbeEmit == "both" {
 					_ = w.WriteAny(ctx, "gonimbus.reflow.input.v1", &reflowInputRecord{
-						SourceURI:  task.URI,
-						SourceKey:  task.Key,
-						SourceETag: meta.ETag,
-						SourceSize: meta.Size,
-						Vars:       vars,
+						SourceURI:        task.URI,
+						SourceKey:        task.Key,
+						SourceETag:       result.meta.ETag,
+						SourceSize:       result.meta.Size,
+						Vars:             result.vars,
+						RoutingClass:     omitNormalRoutingClass(result.routingClass),
+						QuarantinePrefix: result.quarantinePrefix,
+						Probe:            result.audit,
 					})
 				}
 			}
@@ -292,11 +320,211 @@ func validateContentProbeBytes(n int64) error {
 	return nil
 }
 
+type contentProbeTaskResult struct {
+	vars             map[string]string
+	audit            *probe.ProbeAudit
+	meta             *provider.ObjectMeta
+	bytesRequested   int64
+	bytesRead        int64
+	routingClass     string
+	quarantinePrefix string
+	extractErr       error
+}
+
+func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task probeTask, prober *probe.Prober, cfg *probe.Config) (*contentProbeTaskResult, error) {
+	if cfg.ReadStrategy.Mode == probe.ReadStrategyUntilResolved {
+		return runContentProbeUntilResolved(ctx, prov, task.Key, prober, cfg)
+	}
+
+	b, meta, err := content.HeadBytes(ctx, prov, task.Key, contentProbeBytes)
+	if err != nil {
+		return nil, err
+	}
+	res, err := prober.ProbeDetailed(b, int64(len(b)), probe.TerminationAllRequiredResolved)
+	if err != nil {
+		return &contentProbeTaskResult{meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), extractErr: err}, nil
+	}
+	routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+	if requiredFailed {
+		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+	}
+	return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
+}
+
+func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider, key string, prober *probe.Prober, cfg *probe.Config) (*contentProbeTaskResult, error) {
+	ranger, ok := prov.(provider.ObjectRanger)
+	if !ok {
+		return nil, fmt.Errorf("provider does not support range reads")
+	}
+	meta, err := prov.Head(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	readLimit := cfg.ReadStrategy.MaxBytesValue
+	exhaustsObject := false
+	if meta.Size > 0 && meta.Size < readLimit {
+		readLimit = meta.Size
+		exhaustsObject = true
+	}
+	chunkBytes := cfg.ReadStrategy.ChunkBytesValue
+	if chunkBytes <= 0 {
+		chunkBytes = probe.DefaultChunkBytes
+	}
+
+	var (
+		buf          []byte
+		bytesRead    int64
+		lastErr      error
+		resolvedAt   = map[string]int64{}
+		lastProbeRes *probe.Result
+	)
+	termination := probe.TerminationStreamExhausted
+	for start := int64(0); start < readLimit; {
+		end := start + chunkBytes - 1
+		if end >= readLimit {
+			end = readLimit - 1
+		}
+		body, _, err := ranger.GetRange(ctx, key, start, end)
+		if err != nil {
+			return nil, err
+		}
+		chunk, readErr := io.ReadAll(body)
+		_ = body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(chunk) == 0 {
+			termination = probe.TerminationStreamExhausted
+			break
+		}
+		buf = append(buf, chunk...)
+		bytesRead += int64(len(chunk))
+		atReadLimit := bytesRead >= readLimit
+
+		res, err := prober.ProbeDetailedAllowIncomplete(buf, bytesRead, "", func(err error) bool {
+			return !atReadLimit && isIncompleteProbeParseError(err)
+		})
+		if err != nil {
+			lastErr = err
+			if isIncompleteProbeParseError(err) && atReadLimit && !exhaustsObject {
+				termination = probe.TerminationMaxBytesReached
+			} else {
+				termination = probe.TerminationParseError
+			}
+			break
+		}
+		rememberBytesAtResolution(res, resolvedAt)
+		lastProbeRes = res
+		if prober.AllRequiredResolved(res.Vars) {
+			res.Audit.TerminationReason = probe.TerminationAllRequiredResolved
+			applyBytesAtResolution(&res.Audit, resolvedAt)
+			routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+			if requiredFailed {
+				return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+			}
+			return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
+		}
+		if atReadLimit {
+			if exhaustsObject {
+				termination = probe.TerminationStreamExhausted
+			} else {
+				termination = probe.TerminationMaxBytesReached
+			}
+			break
+		}
+		start += int64(len(chunk))
+	}
+
+	if bytesRead >= cfg.ReadStrategy.MaxBytesValue {
+		termination = probe.TerminationMaxBytesReached
+	}
+	res, err := prober.ProbeDetailed(buf, bytesRead, termination)
+	if err != nil {
+		if termination != probe.TerminationMaxBytesReached && termination != probe.TerminationParseError && isIncompleteProbeParseError(err) {
+			termination = probe.TerminationParseError
+		}
+		if lastProbeRes != nil {
+			res = lastProbeRes
+			res.Audit.BytesRead = bytesRead
+		} else {
+			res = prober.UnresolvedResult(bytesRead, termination)
+		}
+		lastErr = err
+	}
+	res.Audit.TerminationReason = termination
+	applyBytesAtResolution(&res.Audit, resolvedAt)
+	routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+	if requiredFailed {
+		if lastErr != nil {
+			return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: lastErr}, nil
+		}
+		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+	}
+	if lastErr != nil && routingClass != "quarantine" {
+		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: lastErr}, nil
+	}
+	return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
+}
+
+func rememberBytesAtResolution(res *probe.Result, resolvedAt map[string]int64) {
+	if res == nil {
+		return
+	}
+	for _, item := range res.Audit.Extractors {
+		if !item.Resolved || item.BytesAtResolution == nil {
+			continue
+		}
+		if _, ok := resolvedAt[item.Name]; !ok {
+			resolvedAt[item.Name] = *item.BytesAtResolution
+		}
+	}
+}
+
+func applyBytesAtResolution(audit *probe.ProbeAudit, resolvedAt map[string]int64) {
+	if audit == nil {
+		return
+	}
+	for i := range audit.Extractors {
+		at, ok := resolvedAt[audit.Extractors[i].Name]
+		if !ok {
+			continue
+		}
+		audit.Extractors[i].BytesAtResolution = &at
+	}
+}
+
+func quarantinePrefixForRouting(routingClass string, cfg *probe.Config) string {
+	if routingClass != "quarantine" || cfg == nil {
+		return ""
+	}
+	return strings.Trim(cfg.QuarantinePrefix, "/") + "/"
+}
+
+func omitNormalRoutingClass(routingClass string) string {
+	if routingClass == "normal" {
+		return ""
+	}
+	return routingClass
+}
+
+func isIncompleteProbeParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "unexpected end") ||
+		strings.Contains(msg, "eof")
+}
+
 func loadProbeConfig(data []byte, path string) (*probe.Config, error) {
 	var cfg probe.Config
 	// Heuristic: yaml.v3 can parse JSON as well; use extension only for better errors later.
 	_ = path
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -324,7 +552,7 @@ func enqueueContentProbeInput(
 	input string,
 	ch chan<- probeTask,
 	w output.Writer,
-	getProvider func(bucket string) (*s3.Provider, error),
+	getProvider func(bucket string) (contentProbeProvider, error),
 	invalidCount *atomic.Int64,
 	errorCount *atomic.Int64,
 ) error {

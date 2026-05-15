@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/error.v1",
+  "title": "Gonimbus Error Record",
+  "description": "Data payload for gonimbus.error.v1 records.",
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "type": "string",
+      "description": "Machine-readable error code"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable error message"
+    },
+    "key": {
+      "type": "string",
+      "description": "Object key related to this error, if applicable"
+    },
+    "prefix": {
+      "type": "string",
+      "description": "Prefix related to this error, if applicable"
+    },
+    "details": {
+      "type": "object",
+      "description": "Additional command-specific error context",
+      "additionalProperties": true
+    }
+  }
+}
