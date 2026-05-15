@@ -64,7 +64,7 @@ func CompileXMLXPath(expr string) (*XMLXPath, error) {
 }
 
 func (x *XMLXPath) FindFirstText(xmlBytes []byte) (string, bool, error) {
-	dec := xml.NewDecoder(bytes.NewReader(xmlBytes))
+	dec := newXMLDecoder(bytes.NewReader(xmlBytes))
 
 	var stack []string
 	for {
