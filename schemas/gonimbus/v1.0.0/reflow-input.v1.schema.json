@@ -27,6 +27,11 @@
       "minimum": 0,
       "description": "Source object size in bytes, when known"
     },
+    "source_last_modified": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Source object LastModified timestamp from LIST/HEAD metadata, when known"
+    },
     "vars": {
       "type": "object",
       "description": "Extractor-derived template variables",

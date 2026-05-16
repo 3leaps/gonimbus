@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
@@ -127,6 +128,7 @@ type reflowInputRecord struct {
 	SourceKey        string            `json:"source_key"`
 	SourceETag       string            `json:"source_etag,omitempty"`
 	SourceSize       int64             `json:"source_size_bytes,omitempty"`
+	SourceLastMod    *time.Time        `json:"source_last_modified,omitempty"`
 	Vars             map[string]string `json:"vars,omitempty"`
 	RoutingClass     string            `json:"routing_class,omitempty"`
 	QuarantinePrefix string            `json:"quarantine_prefix,omitempty"`
@@ -271,11 +273,17 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 					})
 				}
 				if contentProbeEmit == "reflow-input" || contentProbeEmit == "both" {
+					var sourceLastMod *time.Time
+					if result.meta != nil && !result.meta.LastModified.IsZero() {
+						t := result.meta.LastModified.UTC()
+						sourceLastMod = &t
+					}
 					_ = w.WriteAny(ctx, "gonimbus.reflow.input.v1", &reflowInputRecord{
 						SourceURI:        task.URI,
 						SourceKey:        task.Key,
 						SourceETag:       result.meta.ETag,
 						SourceSize:       result.meta.Size,
+						SourceLastMod:    sourceLastMod,
 						Vars:             result.vars,
 						RoutingClass:     omitNormalRoutingClass(result.routingClass),
 						QuarantinePrefix: result.quarantinePrefix,

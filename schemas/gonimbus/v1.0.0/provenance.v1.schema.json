@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/provenance.v1",
+  "title": "Gonimbus Reflow Provenance Sidecar",
+  "description": "Destination-side provenance projection written next to reflowed objects.",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "source",
+    "destination",
+    "run",
+    "routing",
+    "action"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "gonimbus.provenance.v1"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "destination": {
+      "$ref": "#/$defs/destination"
+    },
+    "run": {
+      "$ref": "#/$defs/run"
+    },
+    "routing": {
+      "$ref": "#/$defs/routing"
+    },
+    "vars": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "probe": {
+      "$ref": "#/$defs/probe_audit"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "landed",
+        "skipped.duplicate",
+        "quarantined"
+      ]
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": [
+        "uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "etag": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "required": [
+        "uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "etag": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "ts",
+        "tool_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "required": [
+        "routing_class",
+        "quarantine_prefix"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "routing_class": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "quarantine"
+          ]
+        },
+        "rewrite_template": {
+          "type": "string"
+        },
+        "quarantine_prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "probe_audit": {
+      "type": "object",
+      "required": [
+        "extractors",
+        "bytes_read",
+        "termination_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "extractors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extractor_audit"
+          }
+        },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "termination_reason": {
+          "type": "string",
+          "enum": [
+            "all_required_resolved",
+            "max_bytes_reached",
+            "stream_exhausted",
+            "parse_error"
+          ]
+        }
+      }
+    },
+    "extractor_audit": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "resolved",
+        "required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "xml_xpath",
+            "regex",
+            "json_path"
+          ]
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "on_missing": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "quarantine"
+          ]
+        },
+        "bytes_at_resolution": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
