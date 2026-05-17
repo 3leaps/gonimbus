@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 // mockProvider implements provider.Provider for testing.
@@ -83,14 +84,14 @@ func TestFormatSize(t *testing.T) {
 func TestListObjects_ErrorPaths(t *testing.T) {
 	tests := []struct {
 		name    string
-		uri     *ObjectURI
+		uri     *uri.ObjectURI
 		headErr error
 		listErr error
 		wantErr bool
 	}{
 		{
 			name: "head error propagates",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "path/to/file.txt",
@@ -100,7 +101,7 @@ func TestListObjects_ErrorPaths(t *testing.T) {
 		},
 		{
 			name: "list error propagates",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "path/to/",
@@ -136,7 +137,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		uri          *ObjectURI
+		uri          *uri.ObjectURI
 		headResult   *provider.ObjectMeta
 		listResult   *provider.ListResult
 		wantHeadCall bool
@@ -147,7 +148,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 	}{
 		{
 			name: "exact key uses Head",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "path/to/file.txt",
@@ -166,7 +167,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 		},
 		{
 			name: "prefix uses List",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "path/to/",
@@ -185,7 +186,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 		},
 		{
 			name: "empty key (bucket root) uses List",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "",
@@ -203,7 +204,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 		},
 		{
 			name: "glob pattern uses List with derived prefix",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "data/2024/",
@@ -223,7 +224,7 @@ func TestListObjects_UsesHeadForExactKey(t *testing.T) {
 		},
 		{
 			name: "unescaped key with literal asterisk uses Head",
-			uri: &ObjectURI{
+			uri: &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "data/file*.txt", // already unescaped by ParseURI
@@ -335,7 +336,7 @@ func TestListObjectsDetailed_LimitSummary(t *testing.T) {
 			defer func() { inspectLimit = oldLimit }()
 
 			mock := &mockProvider{listResult: tt.listResult}
-			result, err := listObjectsDetailed(context.Background(), mock, &ObjectURI{
+			result, err := listObjectsDetailed(context.Background(), mock, &uri.ObjectURI{
 				Provider: "s3",
 				Bucket:   "bucket",
 				Key:      "prefix/",

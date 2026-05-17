@@ -17,6 +17,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/stream"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var streamGetCmd = &cobra.Command{
@@ -51,9 +52,9 @@ func init() {
 
 func runStreamGet(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	uri := args[0]
+	rawURI := args[0]
 
-	parsed, err := ParseURI(uri)
+	parsed, err := uri.ParseURI(rawURI)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
@@ -61,7 +62,7 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Unsupported provider", fmt.Errorf("provider %q is not supported", parsed.Provider))
 	}
 	if parsed.IsPattern() || parsed.IsPrefix() {
-		return exitError(foundry.ExitInvalidArgument, "stream get requires an exact object key", fmt.Errorf("provide an exact object URI (no glob, no trailing '/'): %s", uri))
+		return exitError(foundry.ExitInvalidArgument, "stream get requires an exact object key", fmt.Errorf("provide an exact object URI (no glob, no trailing '/'): %s", rawURI))
 	}
 
 	prov, err := s3.New(ctx, s3.Config{

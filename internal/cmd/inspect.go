@@ -16,6 +16,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var inspectCmd = &cobra.Command{
@@ -68,12 +69,12 @@ func init() {
 
 func runInspect(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	uri := args[0]
+	rawURI := args[0]
 
 	// Parse URI
-	parsed, err := ParseURI(uri)
+	parsed, err := uri.ParseURI(rawURI)
 	if err != nil {
-		observability.CLILogger.Error("Invalid URI", zap.String("uri", uri), zap.Error(err))
+		observability.CLILogger.Error("Invalid URI", zap.String("uri", rawURI), zap.Error(err))
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
 
@@ -148,7 +149,7 @@ func buildInspectFilter() (*match.CompositeFilter, error) {
 }
 
 // createInspectProvider creates an S3 provider for inspect command.
-func createInspectProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, error) {
+func createInspectProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
 	cfg := s3.Config{
 		Bucket:   uri.Bucket,
 		Region:   inspectRegion,
@@ -182,7 +183,7 @@ type inspectSummaryData struct {
 const inspectSummaryType = "gonimbus.inspect.summary.v1"
 
 // listObjects lists objects matching the URI and optional filter.
-func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, filter *match.CompositeFilter) ([]provider.ObjectSummary, error) {
+func listObjects(ctx context.Context, prov provider.Provider, uri *uri.ObjectURI, filter *match.CompositeFilter) ([]provider.ObjectSummary, error) {
 	result, err := listObjectsDetailed(ctx, prov, uri, filter)
 	if err != nil {
 		return nil, err
@@ -191,7 +192,7 @@ func listObjects(ctx context.Context, prov provider.Provider, uri *ObjectURI, fi
 }
 
 // listObjectsDetailed lists objects and reports whether output was capped by --limit.
-func listObjectsDetailed(ctx context.Context, prov provider.Provider, uri *ObjectURI, filter *match.CompositeFilter) (*inspectListResult, error) {
+func listObjectsDetailed(ctx context.Context, prov provider.Provider, uri *uri.ObjectURI, filter *match.CompositeFilter) (*inspectListResult, error) {
 	// If URI is an exact object key (not a pattern, not a prefix), use Head
 	// for precise lookup. This avoids prefix-based listing which could return
 	// unrelated objects (e.g., "object.txt" vs "object.txt.bak").
