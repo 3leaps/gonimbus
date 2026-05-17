@@ -387,6 +387,64 @@ Probe-emitted records may carry `routing_class: "quarantine"` when a required ex
 
 Use this when bulk pipelines should keep moving past anomalies. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing) for the end-to-end flow, including how to configure `on_missing: quarantine` on the probe side.
 
+### Provenance Sidecars
+
+`transfer reflow` can write an opt-in JSON sidecar next to each destination object:
+
+```bash
+gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt |
+  gonimbus transfer reflow --stdin \
+    --dest 's3://dest/landing/' \
+    --rewrite-from '{key}' \
+    --rewrite-to '{business_date}/{key}' \
+    --provenance sidecar
+```
+
+Sidecar mode writes one JSON object at `<dest-key>.gnb.json` by default. Each sidecar uses the `gonimbus.provenance.v1` schema and records the source URI, source ETag and size when known, destination URI and available metadata, run ID, tool version, rewrite routing, probe-derived `vars`, the full `probe.extractors[]` audit block when the input record carries it, and the object action:
+
+| Action              | When written                                  |
+| ------------------- | --------------------------------------------- |
+| `landed`            | A new destination object was written          |
+| `skipped.duplicate` | Existing destination bytes matched the source |
+| `quarantined`       | The object landed under the quarantine prefix |
+
+No sidecar is written for `gonimbus.error.v1` records because there is no successful destination object to colocate with.
+
+The sidecar key suffix is configurable:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --provenance sidecar \
+  --provenance-suffix '.audit.json' \
+  --provenance-on-write-error warn
+```
+
+The same defaults can live in the normal Gonimbus config file:
+
+```yaml
+provenance:
+  mode: sidecar
+  suffix: ".gnb.json"
+  on_write_error: warn
+```
+
+Suffixes must start with a dot, must not contain `/`, and must not look like glob patterns. Gonimbus also rejects common data extensions such as `.xml`, `.json`, `.jsonl`, `.csv`, `.parquet`, `.avro`, `.txt`, `.gz`, `.zst`, `.zip`, `.tar`, `.html`, and `.pdf` unless `--allow-unsafe-suffix` is passed.
+
+Sidecars are written after the main object. With `--provenance-on-write-error warn` (default), a sidecar write failure emits a `gonimbus.warning.v1` record and reflow continues. With `fail`, the failure emits `gonimbus.error.v1` and marks that per-object reflow as failed; the main object may already exist and can be filled in on a later run.
+
+Operational cost is one extra PUT per landed, duplicate, or quarantined object plus storage for the sidecar objects and any later list/get activity by audit jobs. Before enabling sidecars on sustained high-volume runs, estimate:
+
+```
+expected_objects_per_run * provider_put_price * run_cadence
+```
+
+Then add storage for sidecar size times retention duration. On versioned buckets, sidecar overwrite-on-duplicate creates a new sidecar version per touch, so lifecycle rules should account for sidecar versions as well as data-object versions.
+
+`destination.etag` is included only when reflow already has it without issuing an additional request, such as a duplicate-skip path that has already checked the existing destination object. For S3 multipart uploads, large objects may have a `<md5>-<part-count>` ETag, and it is normal for source and destination ETags to differ when provider multipart behavior differs.
+
 ### Checkpoint and Resume
 
 For large reflow jobs, use checkpointing to enable resume after interruption:

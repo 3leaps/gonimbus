@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,15 +12,18 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
@@ -28,8 +32,16 @@ import (
 )
 
 const (
-	reflowRecordType    = "gonimbus.reflow.v1"
-	reflowRunRecordType = "gonimbus.reflow.run.v1"
+	reflowRecordType      = "gonimbus.reflow.v1"
+	reflowRunRecordType   = "gonimbus.reflow.run.v1"
+	reflowWarningRecord   = "gonimbus.warning.v1"
+	provenanceSchema      = "gonimbus.provenance.v1"
+	provenanceSchemaVer   = "1.0.0"
+	provenanceModeNone    = "none"
+	provenanceModeSidecar = "sidecar"
+	provenanceErrorWarn   = "warn"
+	provenanceErrorFail   = "fail"
+	provenanceSuffix      = ".gnb.json"
 )
 
 var transferReflowCmd = &cobra.Command{
@@ -62,6 +74,10 @@ var (
 	reflowCheckpoint  string
 	reflowOverwrite   bool
 	reflowOnCollision string
+	reflowProvenance  string
+	reflowProvSuffix  string
+	reflowProvOnError string
+	reflowProvUnsafe  bool
 
 	reflowSrcRegion   string
 	reflowSrcProfile  string
@@ -69,6 +85,15 @@ var (
 	reflowDstRegion   string
 	reflowDstProfile  string
 	reflowDstEndpoint string
+)
+
+var (
+	newReflowS3Provider = func(ctx context.Context, cfg s3.Config) (provider.Provider, error) {
+		return s3.New(ctx, cfg)
+	}
+	newReflowFileProvider = func(cfg providerfile.Config) (provider.Provider, error) {
+		return providerfile.New(cfg)
+	}
 )
 
 func init() {
@@ -84,6 +109,10 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Checkpoint DB path (sqlite)")
 	transferReflowCmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "Allow overwriting destination objects")
 	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", "log", "Collision policy: log|fail|overwrite")
+	transferReflowCmd.Flags().StringVar(&reflowProvenance, "provenance", provenanceModeNone, "Provenance mode: none|sidecar")
+	transferReflowCmd.Flags().StringVar(&reflowProvSuffix, "provenance-suffix", provenanceSuffix, "Sidecar key suffix (default .gnb.json)")
+	transferReflowCmd.Flags().StringVar(&reflowProvOnError, "provenance-on-write-error", provenanceErrorWarn, "Sidecar write failure policy: warn|fail")
+	transferReflowCmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "Allow a provenance suffix that collides with common data extensions")
 
 	transferReflowCmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "Source AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "Source AWS profile")
@@ -91,6 +120,11 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowDstRegion, "dest-region", "", "Destination AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowDstProfile, "dest-profile", "", "Destination AWS profile")
 	transferReflowCmd.Flags().StringVar(&reflowDstEndpoint, "dest-endpoint", "", "Destination custom S3 endpoint")
+
+	_ = viper.BindPFlag("provenance.mode", transferReflowCmd.Flags().Lookup("provenance"))
+	_ = viper.BindPFlag("provenance.suffix", transferReflowCmd.Flags().Lookup("provenance-suffix"))
+	_ = viper.BindPFlag("provenance.on_write_error", transferReflowCmd.Flags().Lookup("provenance-on-write-error"))
+	_ = viper.BindPFlag("provenance.allow_unsafe_suffix", transferReflowCmd.Flags().Lookup("allow-unsafe-suffix"))
 
 	_ = transferReflowCmd.MarkFlagRequired("dest")
 	_ = transferReflowCmd.MarkFlagRequired("rewrite-from")
@@ -117,7 +151,9 @@ type reflowTask struct {
 	SourceKey        string
 	SourceETag       string
 	SourceSize       int64
+	SourceLastMod    time.Time
 	Vars             map[string]string
+	Probe            *probe.ProbeAudit
 	DestRelKey       string
 	RoutingClass     string
 	QuarantinePrefix string
@@ -136,15 +172,48 @@ type reflowRecord struct {
 	CollisionKind string         `json:"collision_kind,omitempty"`
 	CollisionETag string         `json:"collision_etag,omitempty"`
 	CollisionSize int64          `json:"collision_size_bytes,omitempty"`
+	Provenance    *provenanceRef `json:"provenance,omitempty"`
 	Details       map[string]any `json:"details,omitempty"`
 }
 
 type reflowRunRecord struct {
-	DestURI        string `json:"dest_uri"`
-	CheckpointPath string `json:"checkpoint_path"`
-	DryRun         bool   `json:"dry_run"`
-	Resume         bool   `json:"resume"`
-	Parallel       int    `json:"parallel"`
+	DestURI        string               `json:"dest_uri"`
+	CheckpointPath string               `json:"checkpoint_path"`
+	DryRun         bool                 `json:"dry_run"`
+	Resume         bool                 `json:"resume"`
+	Parallel       int                  `json:"parallel"`
+	Provenance     *provenanceRunConfig `json:"provenance,omitempty"`
+}
+
+type provenanceConfig struct {
+	Mode              string
+	Suffix            string
+	OnWriteError      string
+	AllowUnsafeSuffix bool
+}
+
+type provenanceRunConfig struct {
+	Mode         string `json:"mode"`
+	Suffix       string `json:"suffix,omitempty"`
+	OnWriteError string `json:"on_write_error,omitempty"`
+}
+
+type provenanceRef struct {
+	Written bool   `json:"written"`
+	Key     string `json:"key"`
+}
+
+func (t reflowTask) withSourceMeta(etag string, size int64) reflowTask {
+	t.SourceETag = etag
+	t.SourceSize = size
+	return t
+}
+
+func reflowActionForTask(task reflowTask) string {
+	if task.RoutingClass == "quarantine" {
+		return "quarantined"
+	}
+	return "landed"
 }
 
 type reflowDestSpec struct {
@@ -239,13 +308,239 @@ func buildReflowDestURI(dest *reflowDestSpec, destKey string) string {
 	}
 }
 
+func resolveProvenanceConfig(cmd *cobra.Command) (provenanceConfig, error) {
+	cfg := provenanceConfig{
+		Mode:              provenanceModeNone,
+		Suffix:            provenanceSuffix,
+		OnWriteError:      provenanceErrorWarn,
+		AllowUnsafeSuffix: false,
+	}
+
+	if cmd != nil && cmd.Flags().Changed("provenance") {
+		cfg.Mode = reflowProvenance
+	} else if viper.IsSet("provenance.mode") {
+		cfg.Mode = viper.GetString("provenance.mode")
+	}
+	if cmd != nil && cmd.Flags().Changed("provenance-suffix") {
+		cfg.Suffix = reflowProvSuffix
+	} else if viper.IsSet("provenance.suffix") {
+		cfg.Suffix = viper.GetString("provenance.suffix")
+	}
+	if cmd != nil && cmd.Flags().Changed("provenance-on-write-error") {
+		cfg.OnWriteError = reflowProvOnError
+	} else if viper.IsSet("provenance.on_write_error") {
+		cfg.OnWriteError = viper.GetString("provenance.on_write_error")
+	}
+	if cmd != nil && cmd.Flags().Changed("allow-unsafe-suffix") {
+		cfg.AllowUnsafeSuffix = reflowProvUnsafe
+	} else if viper.IsSet("provenance.allow_unsafe_suffix") {
+		cfg.AllowUnsafeSuffix = viper.GetBool("provenance.allow_unsafe_suffix")
+	}
+
+	cfg.Mode = strings.TrimSpace(strings.ToLower(cfg.Mode))
+	cfg.Suffix = strings.TrimSpace(cfg.Suffix)
+	cfg.OnWriteError = strings.TrimSpace(strings.ToLower(cfg.OnWriteError))
+	return cfg, validateProvenanceConfig(cfg)
+}
+
+func validateProvenanceConfig(cfg provenanceConfig) error {
+	switch cfg.Mode {
+	case "", provenanceModeNone:
+		return nil
+	case provenanceModeSidecar:
+		// Continue below.
+	default:
+		return fmt.Errorf("provenance must be one of: none, sidecar")
+	}
+
+	switch cfg.OnWriteError {
+	case "", provenanceErrorWarn, provenanceErrorFail:
+		// ok
+	default:
+		return fmt.Errorf("provenance-on-write-error must be one of: warn, fail")
+	}
+	if !strings.HasPrefix(cfg.Suffix, ".") {
+		return fmt.Errorf("provenance suffix must start with a leading dot")
+	}
+	if strings.Contains(cfg.Suffix, "/") {
+		return fmt.Errorf("provenance suffix must not contain '/'")
+	}
+	if strings.ContainsAny(cfg.Suffix, "*?[") {
+		return fmt.Errorf("provenance suffix must not look like a glob pattern")
+	}
+	if !cfg.AllowUnsafeSuffix && isUnsafeProvenanceSuffix(cfg.Suffix) {
+		return fmt.Errorf("provenance suffix %q collides with common data extensions; pass --allow-unsafe-suffix to confirm", cfg.Suffix)
+	}
+	return nil
+}
+
+func isUnsafeProvenanceSuffix(suffix string) bool {
+	switch strings.ToLower(suffix) {
+	case ".xml", ".json", ".jsonl", ".csv", ".parquet", ".avro", ".txt", ".gz", ".zst", ".zip", ".tar", ".html", ".pdf":
+		return true
+	default:
+		return false
+	}
+}
+
+func (cfg provenanceConfig) enabled() bool {
+	return cfg.Mode == provenanceModeSidecar
+}
+
+func (cfg provenanceConfig) runConfig() *provenanceRunConfig {
+	if !cfg.enabled() {
+		return nil
+	}
+	return &provenanceRunConfig{Mode: cfg.Mode, Suffix: cfg.Suffix, OnWriteError: cfg.OnWriteError}
+}
+
+type provenanceSidecar struct {
+	Schema        string                `json:"schema"`
+	SchemaVersion string                `json:"schema_version"`
+	Source        provenanceSource      `json:"source"`
+	Destination   provenanceDestination `json:"destination"`
+	Run           provenanceRun         `json:"run"`
+	Routing       provenanceRouting     `json:"routing"`
+	Vars          map[string]string     `json:"vars,omitempty"`
+	Probe         *probe.ProbeAudit     `json:"probe,omitempty"`
+	Action        string                `json:"action"`
+}
+
+type provenanceSource struct {
+	URI          string     `json:"uri"`
+	ETag         string     `json:"etag,omitempty"`
+	Size         int64      `json:"size,omitempty"`
+	LastModified *time.Time `json:"last_modified,omitempty"`
+}
+
+type provenanceDestination struct {
+	URI  string `json:"uri"`
+	ETag string `json:"etag,omitempty"`
+	Size int64  `json:"size,omitempty"`
+}
+
+type provenanceRun struct {
+	RunID       string `json:"run_id"`
+	TS          string `json:"ts"`
+	ToolVersion string `json:"tool_version"`
+}
+
+type provenanceRouting struct {
+	RoutingClass     string  `json:"routing_class"`
+	RewriteTemplate  string  `json:"rewrite_template,omitempty"`
+	QuarantinePrefix *string `json:"quarantine_prefix"`
+}
+
+type reflowWarning struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Key     string         `json:"key,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+func writeProvenanceSidecar(ctx context.Context, w *output.JSONLWriter, dst provider.Provider, cfg provenanceConfig, task reflowTask, destKey string, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string) (*provenanceRef, bool) {
+	if !cfg.enabled() {
+		return nil, false
+	}
+
+	sidecarKey := destKey + cfg.Suffix
+	ref := &provenanceRef{Written: false, Key: sidecarKey}
+	putter, ok := dst.(provider.ObjectPutter)
+	if !ok {
+		err := fmt.Errorf("destination provider does not support PutObject")
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+	}
+
+	payload, err := json.Marshal(buildProvenanceSidecar(task, destURI, destMeta, rewriteTemplate, action, jobID))
+	if err != nil {
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+	}
+	payload = append(payload, '\n')
+	if err := putter.PutObject(ctx, sidecarKey, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+	}
+	ref.Written = true
+	return ref, false
+}
+
+func buildProvenanceSidecar(task reflowTask, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string) provenanceSidecar {
+	routingClass := task.RoutingClass
+	if routingClass == "" {
+		routingClass = "normal"
+	}
+	var lastModified *time.Time
+	if !task.SourceLastMod.IsZero() {
+		t := task.SourceLastMod.UTC()
+		lastModified = &t
+	}
+	var quarantinePrefix *string
+	if routingClass == "quarantine" {
+		prefix := task.QuarantinePrefix
+		quarantinePrefix = &prefix
+	}
+
+	dest := provenanceDestination{URI: destURI}
+	if destMeta != nil {
+		dest.ETag = destMeta.ETag
+		dest.Size = destMeta.Size
+	}
+
+	return provenanceSidecar{
+		Schema:        provenanceSchema,
+		SchemaVersion: provenanceSchemaVer,
+		Source: provenanceSource{
+			URI:          task.SourceURI,
+			ETag:         task.SourceETag,
+			Size:         task.SourceSize,
+			LastModified: lastModified,
+		},
+		Destination: dest,
+		Run: provenanceRun{
+			RunID:       jobID,
+			TS:          time.Now().UTC().Format(time.RFC3339Nano),
+			ToolVersion: reflowToolVersion(),
+		},
+		Routing: provenanceRouting{
+			RoutingClass:     routingClass,
+			RewriteTemplate:  rewriteTemplate,
+			QuarantinePrefix: quarantinePrefix,
+		},
+		Vars:   task.Vars,
+		Probe:  task.Probe,
+		Action: action,
+	}
+}
+
+func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg provenanceConfig, sidecarKey string, destURI string, err error) bool {
+	details := map[string]any{"sidecar_key": sidecarKey, "dest_uri": destURI, "mode": "transfer_reflow"}
+	if cfg.OnWriteError == provenanceErrorFail {
+		_ = emitReflowError(ctx, w, sidecarKey, "provenance sidecar write failed", err, details)
+		return true
+	}
+	_ = w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
+		Code:    "PROVENANCE_WRITE_FAILED",
+		Message: fmt.Sprintf("provenance sidecar write failed: %s", err.Error()),
+		Key:     sidecarKey,
+		Details: details,
+	})
+	return false
+}
+
+func reflowToolVersion() string {
+	version := strings.TrimSpace(versionInfo.Version)
+	if version == "" {
+		version = "dev"
+	}
+	return "gonimbus " + version
+}
+
 func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provider, error) {
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
 	switch dest.Provider {
 	case string(provider.ProviderS3):
-		return s3.New(ctx, s3.Config{
+		return newReflowS3Provider(ctx, s3.Config{
 			Bucket:         dest.Bucket,
 			Region:         dest.Region,
 			Endpoint:       dest.Endpoint,
@@ -256,7 +551,7 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provid
 		if err := os.MkdirAll(dest.BaseDir, 0o755); err != nil {
 			return nil, err
 		}
-		return providerfile.New(providerfile.Config{BaseDir: dest.BaseDir})
+		return newReflowFileProvider(providerfile.Config{BaseDir: dest.BaseDir})
 	default:
 		return nil, fmt.Errorf("unsupported destination provider %q", dest.Provider)
 	}
@@ -278,6 +573,10 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	}
 	if reflowOnCollision == "overwrite" && !reflowOverwrite {
 		return exitError(foundry.ExitInvalidArgument, "Overwrite not enabled", fmt.Errorf("--on-collision=overwrite requires --overwrite"))
+	}
+	provCfg, err := resolveProvenanceConfig(cmd)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid provenance configuration", err)
 	}
 
 	destSpec, err := parseReflowDest(reflowDest)
@@ -321,6 +620,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		DryRun:         reflowDryRun,
 		Resume:         reflowResume,
 		Parallel:       reflowParallel,
+		Provenance:     provCfg.runConfig(),
 	})
 
 	// Providers are created after we discover the source bucket.
@@ -342,7 +642,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			dstProv = pNew
 		}
 		if srcProv == nil {
-			pNew, err := s3.New(ctx, s3.Config{
+			pNew, err := newReflowS3Provider(ctx, s3.Config{
 				Bucket:         bucket,
 				Region:         reflowSrcRegion,
 				Endpoint:       reflowSrcEndpoint,
@@ -446,6 +746,9 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					if err == nil {
 						srcETag = meta.ETag
 						srcSize = meta.Size
+						if !meta.LastModified.IsZero() {
+							task.SourceLastMod = meta.LastModified
+						}
 					}
 				}
 
@@ -471,10 +774,19 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
+						sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, dst, provCfg, task.withSourceMeta(srcETag, srcSize), dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID)
+						if sidecarFatal {
+							errorCount.Add(1)
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							}
+							_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: "provenance.write_failed", CollisionKind: "duplicate", CollisionETag: dstMeta.ETag, CollisionSize: dstMeta.Size, Provenance: sidecarRef})
+							continue
+						}
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.duplicate"}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
-						_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "skipped", Reason: "collision.duplicate", CollisionKind: "duplicate", CollisionETag: dstMeta.ETag, CollisionSize: dstMeta.Size})
+						_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "skipped", Reason: "collision.duplicate", CollisionKind: "duplicate", CollisionETag: dstMeta.ETag, CollisionSize: dstMeta.Size, Provenance: sidecarRef})
 						continue
 					}
 
@@ -515,10 +827,20 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				if werr := state.NoteDestKeySource(context.Background(), dstKey, task.SourceURI, srcETag, srcSize); werr != nil {
 					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 				}
+				destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: dstKey, Size: bytes}}
+				sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, dst, provCfg, task.withSourceMeta(srcETag, srcSize), dstKey, dstURI, destMeta, reflowRewriteTo, reflowActionForTask(task), jobID)
+				if sidecarFatal {
+					errorCount.Add(1)
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+					}
+					_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: "provenance.write_failed", Bytes: bytes, Provenance: sidecarRef})
+					continue
+				}
 				if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "complete", Bytes: bytes}); werr != nil {
 					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 				}
-				_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "complete", Bytes: bytes})
+				_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "complete", Bytes: bytes, Provenance: sidecarRef})
 			}
 		}()
 	}
@@ -636,7 +958,9 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 				SourceKey        string            `json:"source_key"`
 				SourceETag       string            `json:"source_etag"`
 				SourceSize       int64             `json:"source_size_bytes"`
+				SourceLastMod    time.Time         `json:"source_last_modified"`
 				Vars             map[string]string `json:"vars"`
+				Probe            *probe.ProbeAudit `json:"probe"`
 				DestRelKey       string            `json:"dest_rel_key"`
 				RoutingClass     string            `json:"routing_class"`
 				QuarantinePrefix string            `json:"quarantine_prefix"`
@@ -690,7 +1014,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			}
 			srcURI := fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key)
 			select {
-			case out <- reflowTask{SourceBucket: u.Bucket, SourceURI: srcURI, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, Vars: data.Vars, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
+			case out <- reflowTask{SourceBucket: u.Bucket, SourceURI: srcURI, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
 				return srcBucket, nil
 			case <-ctx.Done():
 				return srcBucket, ctx.Err()
@@ -747,7 +1071,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			}
 			uri := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, obj.Key)
 			select {
-			case out <- reflowTask{SourceBucket: parsed.Bucket, SourceURI: uri, SourceKey: obj.Key, SourceETag: obj.ETag, SourceSize: obj.Size}:
+			case out <- reflowTask{SourceBucket: parsed.Bucket, SourceURI: uri, SourceKey: obj.Key, SourceETag: obj.ETag, SourceSize: obj.Size, SourceLastMod: obj.LastModified}:
 				// ok
 			case <-ctx.Done():
 				return srcBucket, ctx.Err()
