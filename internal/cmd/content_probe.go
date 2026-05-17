@@ -25,6 +25,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 const contentProbeMaxBytes = 10 * 1024 * 1024
@@ -601,7 +602,7 @@ func enqueueContentProbeInput(
 		if data.DeletedAt != nil {
 			return nil
 		}
-		base, err := ParseURI(data.BaseURI)
+		base, err := uri.ParseURI(data.BaseURI)
 		if err != nil {
 			invalidCount.Add(1)
 			_ = emitContentProbeError(context.Background(), w, "", "invalid base_uri", err, map[string]any{"base_uri": data.BaseURI})
@@ -630,7 +631,7 @@ func enqueueContentProbeInput(
 		}
 	}
 
-	parsed, err := ParseURI(line)
+	parsed, err := uri.ParseURI(line)
 	if err != nil {
 		invalidCount.Add(1)
 		_ = emitContentProbeError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": line})

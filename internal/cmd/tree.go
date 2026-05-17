@@ -17,6 +17,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -91,11 +92,11 @@ func init() {
 
 func runTree(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	uri := args[0]
+	rawURI := args[0]
 
-	parsed, err := ParseURI(uri)
+	parsed, err := uri.ParseURI(rawURI)
 	if err != nil {
-		observability.CLILogger.Error("Invalid URI", zap.String("uri", uri), zap.Error(err))
+		observability.CLILogger.Error("Invalid URI", zap.String("uri", rawURI), zap.Error(err))
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
 	if parsed.Provider != string(provider.ProviderS3) {
@@ -159,7 +160,7 @@ func runTree(cmd *cobra.Command, args []string) error {
 	return runTreeTraversal(ctx, parsed, lister)
 }
 
-func runTreeTraversal(ctx context.Context, uri *ObjectURI, lister provider.DelimiterLister) error {
+func runTreeTraversal(ctx context.Context, uri *uri.ObjectURI, lister provider.DelimiterLister) error {
 	if treeParallel < 1 {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --parallel value", fmt.Errorf("parallel must be >= 1"))
 	}
@@ -582,7 +583,7 @@ func summarizeDirectPrefix(
 	}, children, nil
 }
 
-func createTreeProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, error) {
+func createTreeProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
 	cfg := s3.Config{
 		Bucket:         uri.Bucket,
 		Region:         treeRegion,

@@ -21,6 +21,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var contentHeadCmd = &cobra.Command{
@@ -273,7 +274,7 @@ func enqueueContentHeadInput(
 		return nil
 	}
 
-	parsed, err := ParseURI(uriStr)
+	parsed, err := uri.ParseURI(uriStr)
 	if err != nil {
 		invalidCount.Add(1)
 		_ = emitContentHeadError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": uriStr})
