@@ -219,6 +219,12 @@ func setDefaults() {
 	// Safety defaults
 	viper.SetDefault("readonly", false)
 
+	// Reflow provenance defaults
+	viper.SetDefault("provenance.mode", "none")
+	viper.SetDefault("provenance.suffix", ".gnb.json")
+	viper.SetDefault("provenance.on_write_error", "warn")
+	viper.SetDefault("provenance.allow_unsafe_suffix", false)
+
 	// Debug defaults
 	viper.SetDefault("debug.enabled", false)
 	viper.SetDefault("debug.pprof_enabled", false)

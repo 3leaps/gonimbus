@@ -88,6 +88,38 @@
     "workers": {
       "type": "integer",
       "minimum": 1
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Default provenance behavior for transfer reflow.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "sidecar"
+          ],
+          "default": "none"
+        },
+        "suffix": {
+          "type": "string",
+          "default": ".gnb.json",
+          "pattern": "^\\.[^/*?\\[]+$"
+        },
+        "on_write_error": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "fail"
+          ],
+          "default": "warn"
+        },
+        "allow_unsafe_suffix": {
+          "type": "boolean",
+          "default": false
+        }
+      }
     }
   },
   "additionalProperties": false
