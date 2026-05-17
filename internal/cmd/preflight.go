@@ -16,6 +16,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var preflightCmd = &cobra.Command{
@@ -84,7 +85,7 @@ func runPreflightCrawl(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	uriStr := args[0]
 
-	parsed, err := ParseURI(uriStr)
+	parsed, err := uri.ParseURI(uriStr)
 	if err != nil {
 		observability.CLILogger.Error("Invalid URI", zap.String("uri", uriStr), zap.Error(err))
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
@@ -173,7 +174,7 @@ func runPreflightWrite(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	uriStr := args[0]
 
-	parsed, err := ParseURI(uriStr)
+	parsed, err := uri.ParseURI(uriStr)
 	if err != nil {
 		observability.CLILogger.Error("Invalid URI", zap.String("uri", uriStr), zap.Error(err))
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
@@ -224,7 +225,7 @@ func runPreflightWrite(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func createPreflightProvider(ctx context.Context, uri *ObjectURI) (*s3.Provider, error) {
+func createPreflightProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
 	cfg := s3.Config{
 		Bucket:   uri.Bucket,
 		Region:   preflightRegion,

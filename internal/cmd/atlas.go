@@ -15,6 +15,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 type atlasBuildProvider interface {
@@ -131,7 +132,7 @@ func runAtlasBuild(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	parsed, err := ParseURI(indexSet.BaseURI)
+	parsed, err := uri.ParseURI(indexSet.BaseURI)
 	if err != nil {
 		return fmt.Errorf("parse index base_uri: %w", err)
 	}

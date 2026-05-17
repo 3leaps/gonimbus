@@ -1,4 +1,20 @@
-package cmd
+// Package uri provides parsing of cloud object-storage URIs in the
+// scheme-bucket-key/prefix/pattern shape used throughout gonimbus.
+//
+// Supported schemes as of v0.2.x: s3.
+//
+// Glob pattern characters in the key, including *, ?, [, ], {, }, and **, are
+// recognized and surface via ObjectURI.IsPattern. The original pattern is
+// preserved in ObjectURI.Pattern; the longest pre-glob listing prefix is
+// available in ObjectURI.Key. Escaped glob metacharacters are treated as
+// literal key characters, and non-pattern keys are unescaped for object-store
+// lookup.
+//
+// API stability: gonimbus is pre-v1.0. Breaking changes are possible across
+// minor versions and will be telegraphed in release-channel coordination for
+// known embedded library consumers. Pin to specific release tags for embedded
+// use.
+package uri
 
 import (
 	"errors"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/3leaps/gonimbus/pkg/uri"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -49,19 +50,19 @@ func TestValidateContentHeadBytes(t *testing.T) {
 
 func TestContentHeadURITypes(t *testing.T) {
 	{
-		u, err := ParseURI("s3://bucket/a.txt")
+		u, err := uri.ParseURI("s3://bucket/a.txt")
 		require.NoError(t, err)
 		require.False(t, u.IsPrefix())
 		require.False(t, u.IsPattern())
 	}
 	{
-		u, err := ParseURI("s3://bucket/prefix/")
+		u, err := uri.ParseURI("s3://bucket/prefix/")
 		require.NoError(t, err)
 		require.True(t, u.IsPrefix())
 		require.False(t, u.IsPattern())
 	}
 	{
-		u, err := ParseURI("s3://bucket/prefix/**/*.parquet")
+		u, err := uri.ParseURI("s3://bucket/prefix/**/*.parquet")
 		require.NoError(t, err)
 		require.True(t, u.IsPattern())
 		// For patterns, Key is the derived list prefix, which is a prefix URI.

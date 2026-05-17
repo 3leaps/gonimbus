@@ -29,6 +29,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 const (
@@ -314,7 +315,7 @@ func parseReflowDest(raw string) (*reflowDestSpec, error) {
 		return &reflowDestSpec{Provider: string(provider.ProviderFile), BaseURI: baseURI, BaseDir: baseDir}, nil
 	}
 
-	parsed, err := ParseURI(raw)
+	parsed, err := uri.ParseURI(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -1101,7 +1102,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			if data.DeletedAt != nil {
 				return srcBucket, fmt.Errorf("deleted objects are not supported in reflow input")
 			}
-			base, err := ParseURI(data.BaseURI)
+			base, err := uri.ParseURI(data.BaseURI)
 			if err != nil {
 				return srcBucket, fmt.Errorf("invalid base_uri: %w", err)
 			}
@@ -1150,7 +1151,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			if strings.TrimSpace(data.SourceURI) == "" {
 				return srcBucket, fmt.Errorf("missing data.source_uri")
 			}
-			u, err := ParseURI(data.SourceURI)
+			u, err := uri.ParseURI(data.SourceURI)
 			if err != nil {
 				return srcBucket, err
 			}
@@ -1203,7 +1204,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 		}
 	}
 
-	parsed, err := ParseURI(line)
+	parsed, err := uri.ParseURI(line)
 	if err != nil {
 		return srcBucket, err
 	}

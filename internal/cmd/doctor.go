@@ -20,6 +20,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providers3 "github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 	"github.com/fulmenhq/gofulmen/crucible"
 )
 
@@ -183,7 +184,7 @@ type doctorS3Options struct {
 }
 
 type doctorProbeTarget struct {
-	URI *ObjectURI
+	URI *uri.ObjectURI
 	Op  string
 }
 
@@ -234,22 +235,22 @@ func doctorS3OptionsFromFlags() (*doctorS3Options, error) {
 }
 
 func parseDoctorProbeURI(raw string) (*doctorProbeTarget, error) {
-	uri, err := ParseURI(strings.TrimSpace(raw))
+	parsed, err := uri.ParseURI(strings.TrimSpace(raw))
 	if err != nil {
 		return nil, fmt.Errorf("invalid --probe-uri: %w", err)
 	}
-	if uri.Provider != string(provider.ProviderS3) {
+	if parsed.Provider != string(provider.ProviderS3) {
 		return nil, fmt.Errorf("--probe-uri must use s3://")
 	}
-	if uri.IsPattern() {
+	if parsed.IsPattern() {
 		return nil, fmt.Errorf("--probe-uri does not accept glob patterns; provide a bucket, prefix, or exact key")
 	}
 
 	op := doctorProbeOpHeadObject
-	if uri.IsPrefix() {
+	if parsed.IsPrefix() {
 		op = doctorProbeOpListObjects
 	}
-	return &doctorProbeTarget{URI: uri, Op: op}, nil
+	return &doctorProbeTarget{URI: parsed, Op: op}, nil
 }
 
 func (o *doctorS3Options) awsConfigOptions() []func(*config.LoadOptions) error {

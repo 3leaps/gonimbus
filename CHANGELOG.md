@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--collision-quarantine-prefix`, and emits nested `collision` metadata on
   collision records while dual-emitting the legacy flat fields for one
   migration window.
+- **Public URI parser package** adds `pkg/uri` for Go library consumers that
+  need the CLI's existing S3 URI parsing behavior without importing internal
+  command code.
 
 ### Changed
 
