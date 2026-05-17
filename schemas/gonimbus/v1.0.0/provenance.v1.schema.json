@@ -33,6 +33,9 @@
     "routing": {
       "$ref": "#/$defs/routing"
     },
+    "collision": {
+      "$ref": "#/$defs/collision"
+    },
     "vars": {
       "type": "object",
       "additionalProperties": {
@@ -138,6 +141,41 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "collision": {
+      "type": "object",
+      "required": [
+        "kind",
+        "decision_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "duplicate",
+            "conflict",
+            "conflict_quarantined"
+          ]
+        },
+        "dest_etag_observed": {
+          "type": "string"
+        },
+        "dest_size_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decision_path": {
+          "type": "string",
+          "enum": [
+            "ifabsent_succeeded",
+            "ifabsent_then_head",
+            "unconditional_overwrite",
+            "quarantine_routed"
+          ],
+          "description": "ifabsent_succeeded is reserved and not emitted by the MVP happy path."
         }
       }
     },

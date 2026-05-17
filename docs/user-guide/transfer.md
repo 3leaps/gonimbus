@@ -369,11 +369,56 @@ Reflow supports multiple destination types:
 
 Control behavior when destination objects already exist:
 
-| Option                         | Behavior                              |
-| ------------------------------ | ------------------------------------- |
-| `--on-collision log` (default) | Log conflict, fail operation          |
-| `--on-collision fail`          | Fail immediately on first conflict    |
-| `--on-collision overwrite`     | Replace (requires `--overwrite` flag) |
+| Option                                       | Behavior                                                                                                                        |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--on-collision skip-if-duplicate` (default) | Atomically write only if absent; if the destination exists, skip byte-identical duplicates and fail non-identical conflicts     |
+| `--on-collision fail`                        | Atomically write only if absent; if the destination exists, mark the object failed whether it is duplicate or conflicting       |
+| `--on-collision overwrite --overwrite`       | Replace the destination object unconditionally                                                                                  |
+| `--on-collision quarantine`                  | Atomically write only if absent; route non-identical conflicts to `--collision-quarantine-prefix` and leave the original intact |
+
+`--on-collision log` remains a deprecated alias for `skip-if-duplicate` for one minor-version cycle.
+
+For `quarantine`, provide a relative collision prefix:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --on-collision quarantine \
+  --collision-quarantine-prefix '_conflict/'
+```
+
+Collision records include a nested `collision` object when a collision was actually observed:
+
+```json
+{
+  "status": "skipped",
+  "reason": "collision.duplicate",
+  "collision": {
+    "kind": "duplicate",
+    "dest_etag_observed": "60eda685...",
+    "dest_size_observed": 3729736,
+    "decision_path": "ifabsent_then_head"
+  },
+  "collision_kind": "duplicate",
+  "collision_etag": "60eda685...",
+  "collision_size_bytes": 3729736
+}
+```
+
+The nested `collision` field is omitted on the no-collision happy path. During the Phase A migration window, records dual-emit the legacy flat fields (`collision_kind`, `collision_etag`, `collision_size_bytes`) alongside the nested object with identical values. Later Phase B releases will remove the flat fields; audit tools that span historical and post-Phase-B logs should accept both shapes.
+
+`decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, and `quarantine_routed`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
+
+#### Reconciling Quarantined Conflicts
+
+When collision quarantine triggers, the destination keeps two versions: the original object at the normal key and the incoming source object under `<dest>/<collision_quarantine_prefix>/<source-key>`. A typical reconciliation pass is:
+
+1. List the quarantine prefix with `gonimbus inspect <dest>/<collision_quarantine_prefix>/`.
+2. Compare each quarantined object with the corresponding normal-key object using provider-native object metadata commands such as `aws s3api head-object`, `gcloud storage objects describe`, or `mc stat`; use `gonimbus content probe` when a content-aware comparison is useful.
+3. Pick the canonical version using domain knowledge.
+4. Promote or delete objects with the normal object-store CLI for that provider, such as `aws s3 cp` / `aws s3 rm`, `gcloud storage cp` / `gcloud storage rm`, or `mc cp` / `mc rm`.
 
 ### Quarantine Routing
 
@@ -400,7 +445,7 @@ gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.tx
     --provenance sidecar
 ```
 
-Sidecar mode writes one JSON object at `<dest-key>.gnb.json` by default. Each sidecar uses the `gonimbus.provenance.v1` schema and records the source URI, source ETag and size when known, destination URI and available metadata, run ID, tool version, rewrite routing, probe-derived `vars`, the full `probe.extractors[]` audit block when the input record carries it, and the object action:
+Sidecar mode writes one JSON object at `<dest-key>.gnb.json` by default. Each sidecar uses the `gonimbus.provenance.v1` schema and records the source URI, source ETag and size when known, destination URI and available metadata, run ID, tool version, rewrite routing, collision decision when present, probe-derived `vars`, the full `probe.extractors[]` audit block when the input record carries it, and the object action:
 
 | Action              | When written                                  |
 | ------------------- | --------------------------------------------- |

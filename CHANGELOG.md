@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Reflow collision refinement** adds `--on-collision skip-if-duplicate`
+  as the clearer default name, introduces `--on-collision quarantine` with
+  `--collision-quarantine-prefix`, and emits nested `collision` metadata on
+  collision records while dual-emitting the legacy flat fields for one
+  migration window.
+
 ### Changed
 
 - **Bumped version to `0.2.0-dev`** to open the v0.2.x development line.
   No release artifacts produced from this state; v0.2.x feature work follows
   in subsequent PRs (see `3leaps-productbook-internal/projmgmt/gonimbus/`).
+- **`--on-collision log` is deprecated** as an alias for
+  `skip-if-duplicate`. Audit tools that span old and future logs should read
+  both the legacy flat collision fields and the nested `collision` object
+  during the migration window.
 
 ### Fixed
 

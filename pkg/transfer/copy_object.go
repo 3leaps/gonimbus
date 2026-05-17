@@ -44,3 +44,39 @@ func CopyObject(ctx context.Context, src provider.Provider, dst provider.Provide
 
 	return gotSize, nil
 }
+
+// CopyObjectConditional streams a single object from srcKey to dstKey using an
+// atomic provider write precondition.
+func CopyObjectConditional(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, precond provider.PutPrecondition) (bytesTransferred int64, result provider.PutResult, err error) {
+	getter, ok := src.(provider.ObjectGetter)
+	if !ok {
+		return 0, provider.PutResult{}, errors.New("source provider does not support GetObject")
+	}
+	putter, ok := dst.(provider.ConditionalPutter)
+	if !ok {
+		return 0, provider.PutResult{}, errors.New("target provider does not support conditional PutObject")
+	}
+
+	body, gotSize, err := getter.GetObject(ctx, srcKey)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+
+	if expectedSize > 0 && gotSize >= 0 && expectedSize != gotSize {
+		_ = body.Close()
+		return 0, provider.PutResult{}, &SizeMismatchError{Key: srcKey, Expected: expectedSize, Got: gotSize}
+	}
+
+	retryBody, err := newRetryableBody(ctx, body, gotSize, retryBufferMaxMemoryBytes)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+	defer func() { _ = retryBody.Close() }()
+
+	result, err = putter.PutObjectConditional(ctx, dstKey, retryBody.Reader(), gotSize, precond)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+
+	return gotSize, result, nil
+}
