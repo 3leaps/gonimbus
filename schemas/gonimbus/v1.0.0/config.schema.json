@@ -89,6 +89,22 @@
       "type": "integer",
       "minimum": 1
     },
+    "on_collision": {
+      "type": "string",
+      "description": "Default collision behavior for transfer reflow. log is a deprecated alias for skip-if-duplicate.",
+      "enum": [
+        "skip-if-duplicate",
+        "log",
+        "fail",
+        "overwrite",
+        "quarantine"
+      ],
+      "default": "skip-if-duplicate"
+    },
+    "collision_quarantine_prefix": {
+      "type": "string",
+      "description": "Relative destination prefix used when transfer reflow on_collision is quarantine."
+    },
     "provenance": {
       "type": "object",
       "description": "Default provenance behavior for transfer reflow.",

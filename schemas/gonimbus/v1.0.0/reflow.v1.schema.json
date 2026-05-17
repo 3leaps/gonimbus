@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/reflow.v1",
+  "title": "Gonimbus Reflow Record",
+  "description": "Data payload for gonimbus.reflow.v1 records emitted by transfer reflow.",
+  "type": "object",
+  "required": [
+    "source_uri",
+    "source_key",
+    "dest_uri",
+    "dest_key",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "source_uri": {
+      "type": "string"
+    },
+    "source_key": {
+      "type": "string"
+    },
+    "source_etag": {
+      "type": "string"
+    },
+    "source_size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dest_uri": {
+      "type": "string"
+    },
+    "dest_key": {
+      "type": "string"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "in_progress",
+        "complete",
+        "skipped",
+        "failed",
+        "quarantined"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "routing_class": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "quarantine"
+      ]
+    },
+    "collision": {
+      "$ref": "#/$defs/collision"
+    },
+    "collision_kind": {
+      "type": "string",
+      "deprecated": true,
+      "description": "Deprecated Phase A compatibility field. Use collision.kind."
+    },
+    "collision_etag": {
+      "type": "string",
+      "deprecated": true,
+      "description": "Deprecated Phase A compatibility field. Use collision.dest_etag_observed."
+    },
+    "collision_size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "Deprecated Phase A compatibility field. Use collision.dest_size_observed."
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "written",
+        "key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "written": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        }
+      }
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "collision": {
+      "type": "object",
+      "required": [
+        "kind",
+        "decision_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "duplicate",
+            "conflict",
+            "conflict_quarantined"
+          ]
+        },
+        "dest_etag_observed": {
+          "type": "string"
+        },
+        "dest_size_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decision_path": {
+          "type": "string",
+          "enum": [
+            "ifabsent_succeeded",
+            "ifabsent_then_head",
+            "unconditional_overwrite",
+            "quarantine_routed"
+          ],
+          "description": "ifabsent_succeeded is reserved and not emitted by the MVP happy path."
+        }
+      }
+    }
+  }
+}

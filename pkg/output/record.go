@@ -162,6 +162,10 @@ type ErrorRecord struct {
 
 	// Details contains additional error context.
 	Details any `json:"details,omitempty"`
+
+	// Collision contains reflow collision context when an error is caused by a
+	// destination collision.
+	Collision any `json:"collision,omitempty"`
 }
 
 // Error codes for ErrorRecord.
