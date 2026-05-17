@@ -289,11 +289,12 @@ Records without `routing_class` (or with `routing_class: "normal"`) continue to 
 
 Real-world data has duplicates. The same file may appear in multiple folders due to retransmissions or retry logic. When destination objects already exist:
 
-- Default (`--on-collision log`): Log the conflict and fail the operation
-- Skip: `--on-collision skip` — skip if destination already has data
+- Default (`--on-collision skip-if-duplicate`): atomically write only if absent, then skip byte-identical duplicates and fail non-identical conflicts
+- Fail: `--on-collision fail` — mark any existing-destination collision as failed after duplicate/conflict classification
+- Quarantine: `--on-collision quarantine --collision-quarantine-prefix _conflict/` — route non-identical conflicts aside and leave the original intact
 - Overwrite: `--on-collision overwrite --overwrite` — replace existing
 
-For pipelines where duplicates are expected, `--on-collision skip` is the safest choice.
+`--on-collision log` is a deprecated alias for `skip-if-duplicate`. For pipelines where duplicates are expected, `skip-if-duplicate` is the safest default.
 
 ### Checkpoint and Resume
 
@@ -452,7 +453,7 @@ gonimbus index query 's3://source/' \
   | gonimbus transfer reflow --stdin \
       --dest 's3://dest/' \
       --rewrite-from '...' --rewrite-to '...' \
-      --on-collision skip
+      --on-collision skip-if-duplicate
 
 # Record current timestamp
 date -u +%Y-%m-%dT%H:%M:%SZ > last-run-date.txt
