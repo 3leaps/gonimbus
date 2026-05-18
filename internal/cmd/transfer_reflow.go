@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,27 +34,29 @@ import (
 )
 
 const (
-	reflowRecordType      = "gonimbus.reflow.v1"
-	reflowRunRecordType   = "gonimbus.reflow.run.v1"
-	reflowWarningRecord   = "gonimbus.warning.v1"
-	provenanceSchema      = "gonimbus.provenance.v1"
-	provenanceSchemaVer   = "1.0.0"
-	provenanceModeNone    = "none"
-	provenanceModeSidecar = "sidecar"
-	provenanceErrorWarn   = "warn"
-	provenanceErrorFail   = "fail"
-	provenanceSuffix      = ".gnb.json"
-	reflowCollisionSkip   = "skip-if-duplicate"
-	reflowCollisionLog    = "log"
-	reflowCollisionFail   = "fail"
-	reflowCollisionOver   = "overwrite"
-	reflowCollisionQuar   = "quarantine"
-	collisionDuplicate    = "duplicate"
-	collisionConflict     = "conflict"
-	collisionQuarantined  = "conflict_quarantined"
-	decisionIfAbsentHead  = "ifabsent_then_head"
-	decisionOverwrite     = "unconditional_overwrite"
-	decisionQuarantine    = "quarantine_routed"
+	reflowRecordType       = "gonimbus.reflow.v1"
+	reflowRunRecordType    = "gonimbus.reflow.run.v1"
+	reflowWarningRecord    = "gonimbus.warning.v1"
+	provenanceSchema       = "gonimbus.provenance.v1"
+	provenanceSchemaVer    = "1.0.0"
+	provenanceModeNone     = "none"
+	provenanceModeSidecar  = "sidecar"
+	provenancePlaceSibling = "sibling"
+	provenancePlaceMirror  = "mirrored-root"
+	provenanceErrorWarn    = "warn"
+	provenanceErrorFail    = "fail"
+	provenanceSuffix       = ".gnb.json"
+	reflowCollisionSkip    = "skip-if-duplicate"
+	reflowCollisionLog     = "log"
+	reflowCollisionFail    = "fail"
+	reflowCollisionOver    = "overwrite"
+	reflowCollisionQuar    = "quarantine"
+	collisionDuplicate     = "duplicate"
+	collisionConflict      = "conflict"
+	collisionQuarantined   = "conflict_quarantined"
+	decisionIfAbsentHead   = "ifabsent_then_head"
+	decisionOverwrite      = "unconditional_overwrite"
+	decisionQuarantine     = "quarantine_routed"
 )
 
 var transferReflowCmd = &cobra.Command{
@@ -88,6 +91,7 @@ var (
 	reflowOnCollision string
 	reflowCollQuar    string
 	reflowProvenance  string
+	reflowProvRoot    string
 	reflowProvSuffix  string
 	reflowProvOnError string
 	reflowProvUnsafe  bool
@@ -124,6 +128,7 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine (log is a deprecated alias)")
 	transferReflowCmd.Flags().StringVar(&reflowCollQuar, "collision-quarantine-prefix", "", "Relative destination prefix for --on-collision=quarantine")
 	transferReflowCmd.Flags().StringVar(&reflowProvenance, "provenance", provenanceModeNone, "Provenance mode: none|sidecar")
+	transferReflowCmd.Flags().StringVar(&reflowProvRoot, "provenance-sidecar-root", "", "Sidecar root URI for mirrored-root provenance placement (must end in /)")
 	transferReflowCmd.Flags().StringVar(&reflowProvSuffix, "provenance-suffix", provenanceSuffix, "Sidecar key suffix (default .gnb.json)")
 	transferReflowCmd.Flags().StringVar(&reflowProvOnError, "provenance-on-write-error", provenanceErrorWarn, "Sidecar write failure policy: warn|fail")
 	transferReflowCmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "Allow a provenance suffix that collides with common data extensions")
@@ -138,6 +143,7 @@ func init() {
 	_ = viper.BindPFlag("on_collision", transferReflowCmd.Flags().Lookup("on-collision"))
 	_ = viper.BindPFlag("collision_quarantine_prefix", transferReflowCmd.Flags().Lookup("collision-quarantine-prefix"))
 	_ = viper.BindPFlag("provenance.mode", transferReflowCmd.Flags().Lookup("provenance"))
+	_ = viper.BindPFlag("provenance.sidecar_root", transferReflowCmd.Flags().Lookup("provenance-sidecar-root"))
 	_ = viper.BindPFlag("provenance.suffix", transferReflowCmd.Flags().Lookup("provenance-suffix"))
 	_ = viper.BindPFlag("provenance.on_write_error", transferReflowCmd.Flags().Lookup("provenance-on-write-error"))
 	_ = viper.BindPFlag("provenance.allow_unsafe_suffix", transferReflowCmd.Flags().Lookup("allow-unsafe-suffix"))
@@ -221,17 +227,27 @@ type provenanceConfig struct {
 	Suffix            string
 	OnWriteError      string
 	AllowUnsafeSuffix bool
+	PlacementMode     string
+	SidecarRootRaw    string
+	SidecarRoot       *reflowDestSpec
 }
 
 type provenanceRunConfig struct {
-	Mode         string `json:"mode"`
-	Suffix       string `json:"suffix,omitempty"`
-	OnWriteError string `json:"on_write_error,omitempty"`
+	Mode         string                     `json:"mode"`
+	Suffix       string                     `json:"suffix,omitempty"`
+	OnWriteError string                     `json:"on_write_error,omitempty"`
+	Placement    provenancePlacementContext `json:"placement"`
+}
+
+type provenancePlacementContext struct {
+	Mode        string `json:"mode"`
+	SidecarRoot string `json:"sidecar_root,omitempty"`
 }
 
 type provenanceRef struct {
 	Written bool   `json:"written"`
 	Key     string `json:"key"`
+	URI     string `json:"uri,omitempty"`
 }
 
 func (t reflowTask) withSourceMeta(etag string, size int64) reflowTask {
@@ -426,18 +442,24 @@ func emitCollisionFlatFieldDeprecationBanner() {
 	)
 }
 
-func resolveProvenanceConfig(cmd *cobra.Command) (provenanceConfig, error) {
+func resolveProvenanceConfig(cmd *cobra.Command, dest *reflowDestSpec) (provenanceConfig, error) {
 	cfg := provenanceConfig{
 		Mode:              provenanceModeNone,
 		Suffix:            provenanceSuffix,
 		OnWriteError:      provenanceErrorWarn,
 		AllowUnsafeSuffix: false,
+		PlacementMode:     provenancePlaceSibling,
 	}
 
 	if cmd != nil && cmd.Flags().Changed("provenance") {
 		cfg.Mode = reflowProvenance
 	} else if viper.IsSet("provenance.mode") {
 		cfg.Mode = viper.GetString("provenance.mode")
+	}
+	if cmd != nil && cmd.Flags().Changed("provenance-sidecar-root") {
+		cfg.SidecarRootRaw = reflowProvRoot
+	} else if viper.IsSet("provenance.sidecar_root") {
+		cfg.SidecarRootRaw = viper.GetString("provenance.sidecar_root")
 	}
 	if cmd != nil && cmd.Flags().Changed("provenance-suffix") {
 		cfg.Suffix = reflowProvSuffix
@@ -456,14 +478,31 @@ func resolveProvenanceConfig(cmd *cobra.Command) (provenanceConfig, error) {
 	}
 
 	cfg.Mode = strings.TrimSpace(strings.ToLower(cfg.Mode))
+	cfg.SidecarRootRaw = strings.TrimSpace(cfg.SidecarRootRaw)
 	cfg.Suffix = strings.TrimSpace(cfg.Suffix)
 	cfg.OnWriteError = strings.TrimSpace(strings.ToLower(cfg.OnWriteError))
-	return cfg, validateProvenanceConfig(cfg)
+	if cfg.SidecarRootRaw != "" {
+		cfg.PlacementMode = provenancePlaceMirror
+	}
+	if err := validateProvenanceConfig(cfg); err != nil {
+		return cfg, err
+	}
+	if cfg.enabled() && cfg.SidecarRootRaw != "" {
+		root, err := parseProvenanceSidecarRoot(cfg.SidecarRootRaw, dest)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.SidecarRoot = root
+	}
+	return cfg, nil
 }
 
 func validateProvenanceConfig(cfg provenanceConfig) error {
 	switch cfg.Mode {
 	case "", provenanceModeNone:
+		if cfg.SidecarRootRaw != "" {
+			return fmt.Errorf("provenance-sidecar-root requires --provenance sidecar")
+		}
 		return nil
 	case provenanceModeSidecar:
 		// Continue below.
@@ -492,6 +531,79 @@ func validateProvenanceConfig(cfg provenanceConfig) error {
 	return nil
 }
 
+func parseProvenanceSidecarRoot(raw string, dest *reflowDestSpec) (*reflowDestSpec, error) {
+	if dest == nil {
+		return nil, fmt.Errorf("destination is required before provenance-sidecar-root validation")
+	}
+	if !strings.HasSuffix(raw, "/") {
+		return nil, fmt.Errorf("provenance-sidecar-root %q must end in '/'", raw)
+	}
+	root, err := parseReflowDest(raw)
+	if err != nil {
+		return nil, fmt.Errorf("provenance-sidecar-root %q invalid: %w", raw, err)
+	}
+	if root.Provider != dest.Provider {
+		return nil, fmt.Errorf("different-provider-scheme sidecar placement not supported -- file an issue if needed")
+	}
+	if root.Provider == string(provider.ProviderS3) && root.Bucket != dest.Bucket {
+		return nil, fmt.Errorf("different-bucket sidecar placement requires the --provenance-sidecar-* flag family -- future enhancement; file an issue if needed")
+	}
+	return root, nil
+}
+
+func emitProvenancePlacementWarnings(w io.Writer, dest *reflowDestSpec, cfg provenanceConfig) {
+	if w == nil || dest == nil || !cfg.enabled() || cfg.PlacementMode != provenancePlaceMirror || cfg.SidecarRoot == nil {
+		return
+	}
+	nesting := provenanceRootNesting(dest, cfg.SidecarRoot)
+	if nesting == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "warning: provenance sidecar root nesting detected: %s; sidecars may land inside the data tree this feature is designed to keep clean\n", nesting)
+}
+
+func provenanceRootNesting(dest, sidecar *reflowDestSpec) string {
+	if dest == nil || sidecar == nil || dest.Provider != sidecar.Provider {
+		return ""
+	}
+	destRoot := comparableRootURI(dest)
+	sidecarRoot := comparableRootURI(sidecar)
+	if destRoot == "" || sidecarRoot == "" {
+		return ""
+	}
+	switch {
+	case destRoot == sidecarRoot:
+		return "sidecar root equals dest root"
+	case strings.HasPrefix(sidecarRoot, destRoot):
+		return "sidecar root is a descendant of dest root"
+	case strings.HasPrefix(destRoot, sidecarRoot):
+		return "dest root is a descendant of sidecar root"
+	default:
+		return ""
+	}
+}
+
+func comparableRootURI(spec *reflowDestSpec) string {
+	if spec == nil {
+		return ""
+	}
+	switch spec.Provider {
+	case string(provider.ProviderS3):
+		return fmt.Sprintf("%s://%s/%s", spec.Provider, spec.Bucket, ensureTrailingSlash(strings.TrimPrefix(spec.Prefix, "/")))
+	case string(provider.ProviderFile):
+		return ensureTrailingSlash(fileURI(spec.BaseDir))
+	default:
+		return ensureTrailingSlash(spec.BaseURI)
+	}
+}
+
+func ensureTrailingSlash(s string) string {
+	if s == "" || strings.HasSuffix(s, "/") {
+		return s
+	}
+	return s + "/"
+}
+
 func isUnsafeProvenanceSuffix(suffix string) bool {
 	switch strings.ToLower(suffix) {
 	case ".xml", ".json", ".jsonl", ".csv", ".parquet", ".avro", ".txt", ".gz", ".zst", ".zip", ".tar", ".html", ".pdf":
@@ -509,7 +621,11 @@ func (cfg provenanceConfig) runConfig() *provenanceRunConfig {
 	if !cfg.enabled() {
 		return nil
 	}
-	return &provenanceRunConfig{Mode: cfg.Mode, Suffix: cfg.Suffix, OnWriteError: cfg.OnWriteError}
+	placement := provenancePlacementContext{Mode: cfg.PlacementMode}
+	if cfg.PlacementMode == provenancePlaceMirror {
+		placement.SidecarRoot = cfg.SidecarRootRaw
+	}
+	return &provenanceRunConfig{Mode: cfg.Mode, Suffix: cfg.Suffix, OnWriteError: cfg.OnWriteError, Placement: placement}
 }
 
 type provenanceSidecar struct {
@@ -557,29 +673,58 @@ type reflowWarning struct {
 	Details map[string]any `json:"details,omitempty"`
 }
 
-func writeProvenanceSidecar(ctx context.Context, w *output.JSONLWriter, dst provider.Provider, cfg provenanceConfig, task reflowTask, destKey string, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string, collision *collisionInfo) (*provenanceRef, bool) {
+func writeProvenanceSidecar(ctx context.Context, w *output.JSONLWriter, sidecarDst provider.Provider, cfg provenanceConfig, destSpec *reflowDestSpec, task reflowTask, destRel string, destKey string, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string, collision *collisionInfo) (*provenanceRef, bool) {
 	if !cfg.enabled() {
 		return nil, false
 	}
 
-	sidecarKey := destKey + cfg.Suffix
-	ref := &provenanceRef{Written: false, Key: sidecarKey}
-	putter, ok := dst.(provider.ObjectPutter)
+	sidecarKey := buildProvenanceSidecarKey(cfg, destSpec, destRel, destKey)
+	sidecarURI := buildProvenanceSidecarURI(cfg, destSpec, sidecarKey)
+	ref := &provenanceRef{Written: false, Key: sidecarKey, URI: sidecarURI}
+	putter, ok := sidecarDst.(provider.ObjectPutter)
 	if !ok {
 		err := fmt.Errorf("destination provider does not support PutObject")
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
 	}
 
 	payload, err := json.Marshal(buildProvenanceSidecar(task, destURI, destMeta, rewriteTemplate, action, jobID, collision))
 	if err != nil {
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
 	}
 	payload = append(payload, '\n')
 	if err := putter.PutObject(ctx, sidecarKey, bytes.NewReader(payload), int64(len(payload))); err != nil {
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, destURI, err)
+		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
 	}
 	ref.Written = true
 	return ref, false
+}
+
+func buildProvenanceSidecarKey(cfg provenanceConfig, destSpec *reflowDestSpec, destRel string, destKey string) string {
+	if cfg.PlacementMode != provenancePlaceMirror || cfg.SidecarRoot == nil {
+		return destKey + cfg.Suffix
+	}
+	rel := strings.Trim(destRel, "/")
+	switch cfg.SidecarRoot.Provider {
+	case string(provider.ProviderS3):
+		key := strings.TrimPrefix(cfg.SidecarRoot.Prefix+rel, "/")
+		key = strings.ReplaceAll(key, "//", "/")
+		return key + cfg.Suffix
+	case string(provider.ProviderFile):
+		return rel + cfg.Suffix
+	default:
+		if destSpec != nil {
+			return destKey + cfg.Suffix
+		}
+		return rel + cfg.Suffix
+	}
+}
+
+func buildProvenanceSidecarURI(cfg provenanceConfig, destSpec *reflowDestSpec, sidecarKey string) string {
+	root := destSpec
+	if cfg.PlacementMode == provenancePlaceMirror && cfg.SidecarRoot != nil {
+		root = cfg.SidecarRoot
+	}
+	return buildReflowDestURI(root, sidecarKey)
 }
 
 func buildProvenanceSidecar(task reflowTask, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string, collision *collisionInfo) provenanceSidecar {
@@ -631,8 +776,8 @@ func buildProvenanceSidecar(task reflowTask, destURI string, destMeta *provider.
 	}
 }
 
-func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg provenanceConfig, sidecarKey string, destURI string, err error) bool {
-	details := map[string]any{"sidecar_key": sidecarKey, "dest_uri": destURI, "mode": "transfer_reflow"}
+func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg provenanceConfig, sidecarKey string, sidecarURI string, destURI string, err error) bool {
+	details := map[string]any{"sidecar_key": sidecarKey, "sidecar_uri": sidecarURI, "dest_uri": destURI, "mode": "transfer_reflow"}
 	if cfg.OnWriteError == provenanceErrorFail {
 		_ = emitReflowError(ctx, w, sidecarKey, "provenance sidecar write failed", err, details)
 		return true
@@ -668,7 +813,7 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provid
 			ForcePathStyle: dest.ForcePathStyle,
 		})
 	case string(provider.ProviderFile):
-		if err := os.MkdirAll(dest.BaseDir, 0o755); err != nil {
+		if err := os.MkdirAll(dest.BaseDir, 0o750); err != nil {
 			return nil, err
 		}
 		return newReflowFileProvider(providerfile.Config{BaseDir: dest.BaseDir})
@@ -696,11 +841,6 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	if collCfg.Mode == reflowCollisionOver && !reflowOverwrite {
 		return exitError(foundry.ExitInvalidArgument, "Overwrite not enabled", fmt.Errorf("--on-collision=overwrite requires --overwrite"))
 	}
-	provCfg, err := resolveProvenanceConfig(cmd)
-	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid provenance configuration", err)
-	}
-
 	destSpec, err := parseReflowDest(reflowDest)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --dest URI", err)
@@ -712,6 +852,12 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		destSpec.ForcePathStyle = reflowDstEndpoint != ""
 	}
 	destURI := destSpec.BaseURI
+
+	provCfg, err := resolveProvenanceConfig(cmd, destSpec)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid provenance configuration", err)
+	}
+	emitProvenancePlacementWarnings(cmd.ErrOrStderr(), destSpec, provCfg)
 
 	rewrite, err := transfer.CompileReflowRewrite(reflowRewriteFrom, reflowRewriteTo)
 	if err != nil {
@@ -747,21 +893,33 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 
 	// Providers are created after we discover the source bucket.
 	var (
-		srcProv   provider.Provider
-		dstProv   provider.Provider
-		srcBucket string
-		provMu    sync.Mutex
+		srcProv     provider.Provider
+		dstProv     provider.Provider
+		sidecarProv provider.Provider
+		srcBucket   string
+		provMu      sync.Mutex
 	)
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+	getProviders := func(bucket string) (provider.Provider, provider.Provider, provider.Provider, error) {
 		provMu.Lock()
 		defer provMu.Unlock()
 
 		if dstProv == nil {
 			pNew, err := newDestProvider(ctx, destSpec)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			dstProv = pNew
+		}
+		if sidecarProv == nil {
+			if provCfg.PlacementMode == provenancePlaceMirror && provCfg.SidecarRoot != nil && provCfg.SidecarRoot.Provider == string(provider.ProviderFile) && provCfg.SidecarRoot.BaseDir != destSpec.BaseDir {
+				pNew, err := newDestProvider(ctx, provCfg.SidecarRoot)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				sidecarProv = pNew
+			} else {
+				sidecarProv = dstProv
+			}
 		}
 		if srcProv == nil {
 			pNew, err := newReflowS3Provider(ctx, s3.Config{
@@ -772,25 +930,33 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				ForcePathStyle: reflowSrcEndpoint != "",
 			})
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			srcProv = pNew
 			srcBucket = bucket
 		} else if srcBucket != "" && bucket != "" && srcBucket != bucket {
-			return nil, nil, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", bucket, srcBucket)
+			return nil, nil, nil, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", bucket, srcBucket)
 		}
-		return srcProv, dstProv, nil
+		return srcProv, dstProv, sidecarProv, nil
+	}
+	getInputProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+		src, dst, _, err := getProviders(bucket)
+		return src, dst, err
 	}
 	defer func() {
 		provMu.Lock()
 		toCloseSrc := srcProv
 		toCloseDst := dstProv
+		toCloseSidecar := sidecarProv
 		provMu.Unlock()
 		if toCloseSrc != nil {
 			_ = toCloseSrc.Close()
 		}
 		if toCloseDst != nil {
 			_ = toCloseDst.Close()
+		}
+		if toCloseSidecar != nil && toCloseSidecar != toCloseDst {
+			_ = toCloseSidecar.Close()
 		}
 	}()
 
@@ -810,7 +976,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					return
 				}
 
-				src, dst, err := getProviders(task.SourceBucket)
+				src, dst, sidecarDst, err := getProviders(task.SourceBucket)
 				if err != nil {
 					errorCount.Add(1)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "failed to connect to provider", err, map[string]any{"source_uri": task.SourceURI})
@@ -910,7 +1076,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
 							if collCfg.Mode == reflowCollisionSkip || collCfg.Mode == reflowCollisionQuar {
-								sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, dst, provCfg, task.withSourceMeta(srcETag, srcSize), dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID, collision)
+								sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID, collision)
 								if sidecarFatal {
 									errorCount.Add(1)
 									if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
@@ -959,7 +1125,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
 							destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
-							sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, dst, provCfg, task.withSourceMeta(srcETag, srcSize), quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, collision)
+							sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, collision)
 							if sidecarFatal {
 								errorCount.Add(1)
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
@@ -1008,7 +1174,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 				}
 				destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: dstKey, Size: bytes, ETag: putResult.ETag}}
-				sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, dst, provCfg, task.withSourceMeta(srcETag, srcSize), dstKey, dstURI, destMeta, reflowRewriteTo, reflowActionForTask(task), jobID, collision)
+				sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, destMeta, reflowRewriteTo, reflowActionForTask(task), jobID, collision)
 				if sidecarFatal {
 					errorCount.Add(1)
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
@@ -1035,7 +1201,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			if line == "" {
 				continue
 			}
-			srcBucket, inputErr = enqueueReflowLine(ctx, line, srcBucket, getProviders, tasks)
+			srcBucket, inputErr = enqueueReflowLine(ctx, line, srcBucket, getInputProviders, tasks)
 			if inputErr != nil {
 				invalidCount.Add(1)
 				_ = emitReflowError(context.Background(), w, "", "invalid input", inputErr, map[string]any{"input": line})
@@ -1047,7 +1213,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			inputErr = err
 		}
 	} else {
-		srcBucket, inputErr = enqueueReflowLine(ctx, args[0], srcBucket, getProviders, tasks)
+		srcBucket, inputErr = enqueueReflowLine(ctx, args[0], srcBucket, getInputProviders, tasks)
 	}
 	close(tasks)
 	wg.Wait()

@@ -142,8 +142,78 @@ func TestTransferReflowCommand_ProvenanceLandedWritesSidecarAndRef(t *testing.T)
 	require.Contains(t, string(dst.mustObject("source/file.xml.gnb.json")), `"etag":"dest-source/file.xml"`)
 
 	complete := requireRecord(t, stdout, reflowRecordType, "complete")
-	require.Contains(t, string(complete.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json"}`)
+	require.Contains(t, string(complete.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":`)
 	require.NotContains(t, string(complete.Data), `"collision"`)
+}
+
+func TestTransferReflowCommand_ProvenanceMirroredRootFileWritesSidecarAndURI(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	sidecarRoot := fileURI(t.TempDir()) + "/"
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""), "--provenance", "sidecar", "--provenance-sidecar-root", sidecarRoot)
+	require.NoError(t, err)
+
+	sidecar := readSidecar(t, dst, "source/file.xml.gnb.json")
+	require.Equal(t, "landed", sidecar["action"])
+
+	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	require.Contains(t, string(complete.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":"`+sidecarRoot+`source/file.xml.gnb.json"}`)
+	run := requireRecord(t, stdout, reflowRunRecordType, "")
+	require.Contains(t, string(run.Data), `"placement":{"mode":"mirrored-root","sidecar_root":"`+sidecarRoot+`"}`)
+}
+
+func TestTransferReflowCommand_ProvenanceMirroredRootS3WritesUnderRootPrefix(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+		"--provenance-sidecar-root", "s3://dest-bucket/runs/run-001/sidecars/",
+	)
+	require.NoError(t, err)
+	require.True(t, dst.hasObject("data/source/file.xml"))
+
+	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/source/file.xml.gnb.json")
+	require.Equal(t, "landed", sidecar["action"])
+
+	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	require.Contains(t, string(complete.Data), `"key":"runs/run-001/sidecars/source/file.xml.gnb.json"`)
+	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
+}
+
+func TestTransferReflowCommand_ProvenanceMirroredRootUsesMixedSegmentRenderedKey(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("tenant-a/2026-01-15/subj-9/file.xml", "payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLineNoDestRel("tenant-a/2026-01-15/subj-9/file.xml", "src-etag", int64(len("payload"))),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{tenant}/{partition}/{subject}/{file}",
+		"--rewrite-to", "tenant={tenant}/partition={partition}/{subject}/{file}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+		"--provenance-sidecar-root", "s3://dest-bucket/runs/run-001/sidecars/",
+	)
+	require.NoError(t, err)
+
+	renderedKey := "tenant=tenant-a/partition=2026-01-15/subj-9/file.xml"
+	require.True(t, dst.hasObject("data/"+renderedKey))
+	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/"+renderedKey+".gnb.json")
+	require.Equal(t, "landed", sidecar["action"])
+
+	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	require.Contains(t, string(complete.Data), `"dest_key":"data/`+renderedKey+`"`)
+	require.Contains(t, string(complete.Data), `"key":"runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
+	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
 }
 
 func TestTransferReflowCommand_ProvenanceDuplicateSkipOverwritesSidecar(t *testing.T) {
@@ -164,7 +234,37 @@ func TestTransferReflowCommand_ProvenanceDuplicateSkipOverwritesSidecar(t *testi
 
 	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
 	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
-	require.Contains(t, string(skipped.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json"}`)
+	require.Contains(t, string(skipped.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":`)
+}
+
+func TestTransferReflowCommand_ProvenanceMirroredRootDuplicateSkipOverwritesSidecar(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.putFixture("data/source/file.xml", "payload", "same-etag", time.Time{})
+	dst.putFixture("runs/run-001/sidecars/source/file.xml.gnb.json", `{"action":"old"}`, "old-sidecar", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "same-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+		"--provenance-sidecar-root", "s3://dest-bucket/runs/run-001/sidecars/",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"data/source/file.xml"}, dst.headCallsSnapshot())
+	require.Equal(t, []string{"runs/run-001/sidecars/source/file.xml.gnb.json"}, dst.putCallsSnapshot())
+
+	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/source/file.xml.gnb.json")
+	require.Equal(t, "skipped.duplicate", sidecar["action"])
+	require.Contains(t, string(dst.mustObject("runs/run-001/sidecars/source/file.xml.gnb.json")), `"etag":"same-etag"`)
+
+	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
+	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
+	require.Contains(t, string(skipped.Data), `"key":"runs/run-001/sidecars/source/file.xml.gnb.json"`)
+	require.Contains(t, string(skipped.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
 }
 
 func TestTransferReflowCommand_ProvenanceQuarantineWritesSidecarUnderPrefix(t *testing.T) {
@@ -198,7 +298,7 @@ func TestTransferReflowCommand_ProvenanceWriteFailureWarnsAndCompletes(t *testin
 	warn := requireRecord(t, stdout, reflowWarningRecord, "")
 	require.Contains(t, string(warn.Data), "PROVENANCE_WRITE_FAILED")
 	complete := requireRecord(t, stdout, reflowRecordType, "complete")
-	require.Contains(t, string(complete.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json"}`)
+	require.Contains(t, string(complete.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json","uri":`)
 }
 
 func TestTransferReflowCommand_ProvenanceWriteFailureFailsRecord(t *testing.T) {
@@ -217,7 +317,7 @@ func TestTransferReflowCommand_ProvenanceWriteFailureFailsRecord(t *testing.T) {
 	require.Contains(t, string(errRecord.Data), "provenance sidecar write failed")
 	failed := requireRecord(t, stdout, reflowRecordType, "failed")
 	require.Contains(t, string(failed.Data), `"reason":"provenance.write_failed"`)
-	require.Contains(t, string(failed.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json"}`)
+	require.Contains(t, string(failed.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json","uri":`)
 }
 
 func TestTransferReflowCommand_CollisionHappyPathUsesIfAbsentWithoutHead(t *testing.T) {
@@ -432,6 +532,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "")
 	cmd.Flags().StringVar(&reflowCollQuar, "collision-quarantine-prefix", "", "")
 	cmd.Flags().StringVar(&reflowProvenance, "provenance", provenanceModeNone, "")
+	cmd.Flags().StringVar(&reflowProvRoot, "provenance-sidecar-root", "", "")
 	cmd.Flags().StringVar(&reflowProvSuffix, "provenance-suffix", provenanceSuffix, "")
 	cmd.Flags().StringVar(&reflowProvOnError, "provenance-on-write-error", provenanceErrorWarn, "")
 	cmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "")
@@ -460,6 +561,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldOnCollision := reflowOnCollision
 	oldCollQuar := reflowCollQuar
 	oldProvenance := reflowProvenance
+	oldProvRoot := reflowProvRoot
 	oldProvSuffix := reflowProvSuffix
 	oldProvOnError := reflowProvOnError
 	oldProvUnsafe := reflowProvUnsafe
@@ -489,6 +591,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowOnCollision = reflowCollisionSkip
 	reflowCollQuar = ""
 	reflowProvenance = provenanceModeNone
+	reflowProvRoot = ""
 	reflowProvSuffix = provenanceSuffix
 	reflowProvOnError = provenanceErrorWarn
 	reflowProvUnsafe = false
@@ -513,6 +616,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowOnCollision = oldOnCollision
 		reflowCollQuar = oldCollQuar
 		reflowProvenance = oldProvenance
+		reflowProvRoot = oldProvRoot
 		reflowProvSuffix = oldProvSuffix
 		reflowProvOnError = oldProvOnError
 		reflowProvUnsafe = oldProvUnsafe
@@ -622,14 +726,20 @@ func TestResolveProvenanceConfig(t *testing.T) {
 	withTransferReflowTestState(t)
 
 	cmd := newTransferReflowTestCommand()
-	cfg, err := resolveProvenanceConfig(cmd)
+	dest, err := parseReflowDest("file://" + t.TempDir() + "/")
+	require.NoError(t, err)
+	cfg, err := resolveProvenanceConfig(cmd, dest)
 	require.NoError(t, err)
 	require.Equal(t, provenanceModeNone, cfg.Mode)
 
 	require.NoError(t, cmd.Flags().Parse([]string{"--provenance", "sidecar", "--provenance-suffix", ".audit.json", "--provenance-on-write-error", "fail"}))
-	cfg, err = resolveProvenanceConfig(cmd)
+	cfg, err = resolveProvenanceConfig(cmd, dest)
 	require.NoError(t, err)
-	require.Equal(t, provenanceConfig{Mode: provenanceModeSidecar, Suffix: ".audit.json", OnWriteError: provenanceErrorFail, AllowUnsafeSuffix: false}, cfg)
+	require.Equal(t, provenanceModeSidecar, cfg.Mode)
+	require.Equal(t, provenancePlaceSibling, cfg.PlacementMode)
+	require.Equal(t, ".audit.json", cfg.Suffix)
+	require.Equal(t, provenanceErrorFail, cfg.OnWriteError)
+	require.False(t, cfg.AllowUnsafeSuffix)
 }
 
 func TestValidateProvenanceConfigRejectsUnsafeSuffix(t *testing.T) {
@@ -647,6 +757,59 @@ func TestValidateProvenanceConfigRejectsUnsafeSuffix(t *testing.T) {
 	err = validateProvenanceConfig(provenanceConfig{Mode: provenanceModeSidecar, Suffix: ".*.json", OnWriteError: provenanceErrorWarn})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "glob")
+
+	err = validateProvenanceConfig(provenanceConfig{Mode: provenanceModeNone, SidecarRootRaw: "s3://b/sidecars/"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires --provenance sidecar")
+}
+
+func TestParseProvenanceSidecarRootValidation(t *testing.T) {
+	s3Dest, err := parseReflowDest("s3://b1/data/")
+	require.NoError(t, err)
+	fileDest, err := parseReflowDest("file://" + t.TempDir() + "/")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		raw     string
+		dest    *reflowDestSpec
+		wantErr string
+	}{
+		{name: "missing trailing slash", raw: "s3://b1/sidecars", dest: s3Dest, wantErr: "must end in '/'"},
+		{name: "different provider", raw: "file:///tmp/sidecars/", dest: s3Dest, wantErr: "different-provider-scheme"},
+		{name: "different bucket", raw: "s3://b2/sidecars/", dest: s3Dest, wantErr: "different-bucket"},
+		{name: "same bucket", raw: "s3://b1/sidecars/", dest: s3Dest},
+		{name: "file same scheme", raw: "file://" + t.TempDir() + "/", dest: fileDest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseProvenanceSidecarRoot(tt.raw, tt.dest)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, got)
+		})
+	}
+}
+
+func TestEmitProvenancePlacementWarningsForNestedRoots(t *testing.T) {
+	dest, err := parseReflowDest("s3://b/data/")
+	require.NoError(t, err)
+	sidecar, err := parseReflowDest("s3://b/data/sidecars/")
+	require.NoError(t, err)
+	var stderr bytes.Buffer
+
+	emitProvenancePlacementWarnings(&stderr, dest, provenanceConfig{
+		Mode:          provenanceModeSidecar,
+		PlacementMode: provenancePlaceMirror,
+		SidecarRoot:   sidecar,
+	})
+
+	require.Contains(t, stderr.String(), "sidecar root is a descendant of dest root")
 }
 
 func TestWriteProvenanceSidecarWritesJSON(t *testing.T) {
@@ -656,6 +819,8 @@ func TestWriteProvenanceSidecarWritesJSON(t *testing.T) {
 	destDir := t.TempDir()
 	dst, err := providerfile.New(providerfile.Config{BaseDir: destDir})
 	require.NoError(t, err)
+	destSpec, err := parseReflowDest(fileURI(destDir) + "/")
+	require.NoError(t, err)
 
 	resolvedAt := int64(128)
 	var stdout bytes.Buffer
@@ -663,7 +828,7 @@ func TestWriteProvenanceSidecarWritesJSON(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	srcLastMod := time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC)
-	ref, fatal := writeProvenanceSidecar(context.Background(), w, dst, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn}, reflowTask{
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, dst, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{
 		SourceURI:     "s3://source-bucket/source/file.xml",
 		SourceKey:     "source/file.xml",
 		SourceETag:    "src-etag",
@@ -675,12 +840,13 @@ func TestWriteProvenanceSidecarWritesJSON(t *testing.T) {
 			BytesRead:         128,
 			TerminationReason: "all_required_resolved",
 		},
-	}, "landing/file.xml", "file://"+filepath.Join(destDir, "landing/file.xml"), &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: "landing/file.xml", ETag: "dest-etag", Size: 42}}, "{site}/{file}", "landed", "job-123", nil)
+	}, "landing/file.xml", "landing/file.xml", "file://"+filepath.Join(destDir, "landing/file.xml"), &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: "landing/file.xml", ETag: "dest-etag", Size: 42}}, "{site}/{file}", "landed", "job-123", nil)
 
 	require.False(t, fatal)
 	require.NotNil(t, ref)
 	require.True(t, ref.Written)
 	require.Equal(t, "landing/file.xml.gnb.json", ref.Key)
+	require.Equal(t, fileURI(filepath.Join(destDir, "landing", "file.xml.gnb.json")), ref.URI)
 
 	raw, err := os.ReadFile(filepath.Join(destDir, "landing", "file.xml.gnb.json"))
 	require.NoError(t, err)
@@ -695,15 +861,40 @@ func TestWriteProvenanceSidecarWritesJSON(t *testing.T) {
 	require.Empty(t, stdout.String())
 }
 
+func TestWriteProvenanceSidecarMirroredRootFileWritesOutsideDestRoot(t *testing.T) {
+	destDir := t.TempDir()
+	sidecarDir := t.TempDir()
+	sidecarDst, err := providerfile.New(providerfile.Config{BaseDir: sidecarDir})
+	require.NoError(t, err)
+	destSpec, err := parseReflowDest(fileURI(destDir) + "/")
+	require.NoError(t, err)
+	sidecarRoot, err := parseReflowDest(fileURI(sidecarDir) + "/")
+	require.NoError(t, err)
+
+	var stdout bytes.Buffer
+	w := output.NewJSONLWriter(&stdout, "job-123", "file")
+	defer func() { _ = w.Close() }()
+
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, sidecarDst, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceMirror, SidecarRootRaw: fileURI(sidecarDir) + "/", SidecarRoot: sidecarRoot}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "source/file.xml"}, "tenant/a/file.xml", "data/tenant/a/file.xml", fileURI(filepath.Join(destDir, "data", "tenant", "a", "file.xml")), nil, "{tenant}/{file}", "landed", "job-123", nil)
+
+	require.False(t, fatal)
+	require.Equal(t, "tenant/a/file.xml.gnb.json", ref.Key)
+	require.Equal(t, fileURI(filepath.Join(sidecarDir, "tenant", "a", "file.xml.gnb.json")), ref.URI)
+	require.FileExists(t, filepath.Join(sidecarDir, "tenant", "a", "file.xml.gnb.json"))
+	require.NoFileExists(t, filepath.Join(destDir, "data", "tenant", "a", "file.xml.gnb.json"))
+}
+
 func TestWriteProvenanceSidecarWarnsOnFailure(t *testing.T) {
 	var stdout bytes.Buffer
 	w := output.NewJSONLWriter(&stdout, "job-123", "file")
 	defer func() { _ = w.Close() }()
 
-	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn}, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "s3://dest/key", nil, "{key}", "landed", "job-123", nil)
+	destSpec, err := parseReflowDest("s3://bucket/dest/")
+	require.NoError(t, err)
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.False(t, fatal)
-	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json"}, ref)
+	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
 	require.Contains(t, stdout.String(), reflowWarningRecord)
 	require.Contains(t, stdout.String(), "PROVENANCE_WRITE_FAILED")
 }
@@ -713,10 +904,12 @@ func TestWriteProvenanceSidecarFailsOnFailure(t *testing.T) {
 	w := output.NewJSONLWriter(&stdout, "job-123", "file")
 	defer func() { _ = w.Close() }()
 
-	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorFail}, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "s3://dest/key", nil, "{key}", "landed", "job-123", nil)
+	destSpec, err := parseReflowDest("s3://bucket/dest/")
+	require.NoError(t, err)
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorFail, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.True(t, fatal)
-	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json"}, ref)
+	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
 	require.Contains(t, stdout.String(), output.TypeError)
 	require.Contains(t, stdout.String(), "provenance sidecar write failed")
 }
@@ -777,6 +970,31 @@ func runTransferReflowWithProvidersAndErr(t *testing.T, src *reflowMemoryProvide
 	return stdout.String(), stderr.String(), err
 }
 
+func runTransferReflowWithProviderFactory(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, args ...string) (string, string, error) {
+	t.Helper()
+	withTransferReflowTestState(t)
+
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		if cfg.Bucket == "source-bucket" {
+			return src, nil
+		}
+		return dst, nil
+	}
+	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
+		return dst, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
 func reflowInputLine(key string, etag string, size int64, routingClass string, quarantinePrefix string) string {
 	data := map[string]any{
 		"source_uri":           "s3://source-bucket/" + key,
@@ -805,6 +1023,32 @@ func reflowInputLine(key string, etag string, size int64, routingClass string, q
 	}
 	if quarantinePrefix != "" {
 		data["quarantine_prefix"] = quarantinePrefix
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
+
+func reflowInputLineNoDestRel(key string, etag string, size int64) string {
+	data := map[string]any{
+		"source_uri":           "s3://source-bucket/" + key,
+		"source_key":           key,
+		"source_etag":          etag,
+		"source_size_bytes":    size,
+		"source_last_modified": "2026-01-15T20:53:44Z",
+		"probe": map[string]any{
+			"extractors": []map[string]any{{
+				"name":                "key",
+				"type":                "regex",
+				"resolved":            true,
+				"required":            true,
+				"bytes_at_resolution": int64(64),
+			}},
+			"bytes_read":         int64(64),
+			"termination_reason": "all_required_resolved",
+		},
 	}
 	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
 	if err != nil {

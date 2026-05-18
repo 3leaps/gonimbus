@@ -501,6 +501,19 @@ Sidecar mode writes one JSON object at `<dest-key>.gnb.json` by default. Each si
 
 No sidecar is written for `gonimbus.error.v1` records because there is no successful destination object to colocate with.
 
+For production data lake landing zones where recursive listings should contain only data files, use a mirrored sidecar root:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://bucket/data/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to 'tenant={tenant}/partition={partition}/{subject}/{file}' \
+  --provenance sidecar \
+  --provenance-sidecar-root 's3://bucket/runs/run-001/sidecars/'
+```
+
+With that placement, data lands under `s3://bucket/data/landing/<rendered-key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<rendered-key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
+
 The sidecar key suffix is configurable:
 
 ```bash
@@ -518,6 +531,7 @@ The same defaults can live in the normal Gonimbus config file:
 ```yaml
 provenance:
   mode: sidecar
+  sidecar_root: "s3://bucket/runs/run-001/sidecars/"
   suffix: ".gnb.json"
   on_write_error: warn
 ```
