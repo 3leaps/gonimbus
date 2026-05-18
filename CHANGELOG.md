@@ -12,8 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reflow collision refinement** adds `--on-collision skip-if-duplicate`
   as the clearer default name, introduces `--on-collision quarantine` with
   `--collision-quarantine-prefix`, and emits nested `collision` metadata on
-  collision records while dual-emitting the legacy flat fields for one
-  migration window.
+  collision records.
 - **Public URI parser package** adds `pkg/uri` for Go library consumers that
   need the CLI's existing S3 URI parsing behavior without importing internal
   command code.
@@ -33,9 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No release artifacts produced from this state; v0.2.x feature work follows
   in subsequent PRs (see `3leaps-productbook-internal/projmgmt/gonimbus/`).
 - **`--on-collision log` is deprecated** as an alias for
-  `skip-if-duplicate`. Audit tools that span old and future logs should read
-  both the legacy flat collision fields and the nested `collision` object
-  during the migration window.
+  `skip-if-duplicate`.
+- **Reflow collision Phase B** removes the legacy flat collision JSONL fields
+  (`collision_kind`, `collision_etag`, `collision_size_bytes`) from
+  `gonimbus.reflow.v1` records after the GON-020 Phase A warning window
+  (`Reflow collision flat fields are deprecated; use data.collision`). Audit
+  tools should read the nested `collision` object as the sole current collision
+  representation.
 
 ### Fixed
 
