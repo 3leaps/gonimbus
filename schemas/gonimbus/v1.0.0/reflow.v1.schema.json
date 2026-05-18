@@ -89,6 +89,10 @@
         },
         "key": {
           "type": "string"
+        },
+        "uri": {
+          "type": "string",
+          "description": "Full provenance sidecar URI. Additive to provider-relative key."
         }
       }
     },

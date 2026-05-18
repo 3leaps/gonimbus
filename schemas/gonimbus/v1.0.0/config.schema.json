@@ -123,6 +123,10 @@
           "default": ".gnb.json",
           "pattern": "^\\.[^/*?\\[]+$"
         },
+        "sidecar_root": {
+          "type": "string",
+          "description": "Optional mirrored-root URI for provenance sidecars. Must use the destination provider scheme, end in '/', and for s3:// use the destination bucket."
+        },
         "on_write_error": {
           "type": "string",
           "enum": [
