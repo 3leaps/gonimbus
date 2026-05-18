@@ -112,7 +112,20 @@ var (
 	newReflowFileProvider = func(cfg providerfile.Config) (provider.Provider, error) {
 		return providerfile.New(cfg)
 	}
+	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+		return reflowstate.Open(ctx, cfg)
+	}
 )
+
+type reflowStateStore interface {
+	Close() error
+	ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error)
+	UpsertItem(ctx context.Context, p reflowstate.UpsertItemParams) error
+	NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error
+	NoteCollision(ctx context.Context, destKey string, kind reflowstate.CollisionKind, sourceURI, sourceETag string, sourceSize int64, destETag string, destSize int64) error
+	DestKeyObserved(ctx context.Context, destKey string) (bool, error)
+	MarkDestKeyObserved(ctx context.Context, destKey string) error
+}
 
 func init() {
 	transferCmd.AddCommand(transferReflowCmd)
@@ -226,8 +239,9 @@ type reflowDestKeyArbiter struct {
 }
 
 type reflowDestKeyGate struct {
-	mu   sync.Mutex
-	refs int
+	mu       sync.Mutex
+	refs     int
+	observed bool
 }
 
 func newReflowDestKeyArbiter() *reflowDestKeyArbiter {
@@ -949,7 +963,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		checkpointPath = reflowCheckpoint
 	}
 
-	state, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
+	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {
 		return exitError(foundry.ExitFileWriteError, "Failed to open checkpoint", err)
 	}
@@ -1135,26 +1149,35 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					}
 					bytes, err = transfer.CopyObject(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes)
 				} else {
-					_, releaseGate := destArbiter.acquire(dstKey)
+					gate, releaseGate := destArbiter.acquire(dstKey)
 					// Keep active mutexes bounded to in-flight keys; durable per-run
 					// destination observations live in the checkpoint DB.
-					observed, observedErr := state.DestKeyObserved(ctx, dstKey)
-					if observedErr != nil {
-						releaseGate()
-						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
-						continue
-					}
-					if observed {
+					if gate.observed {
 						err = &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
 					} else {
-						bytes, putResult, err = transfer.CopyObjectConditional(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true})
-						if err == nil || isConditionalExists(err) {
-							if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
-								releaseGate()
-								errorCount.Add(1)
-								_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state write failed", markErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
-								continue
+						observed, observedErr := state.DestKeyObserved(ctx, dstKey)
+						if observedErr != nil {
+							releaseGate()
+							errorCount.Add(1)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+							continue
+						}
+						if observed {
+							gate.observed = true
+							err = &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
+						} else {
+							bytes, putResult, err = transfer.CopyObjectConditional(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true})
+							if err == nil || isConditionalExists(err) {
+								gate.observed = true
+								if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(markErr))
+									_ = w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
+										Code:    "REFLOW_ARBITRATION_STATE_WRITE_FAILED",
+										Message: fmt.Sprintf("destination arbitration state write failed: %s", markErr.Error()),
+										Key:     dstKey,
+										Details: map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI},
+									})
+								}
 							}
 						}
 					}

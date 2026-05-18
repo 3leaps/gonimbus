@@ -23,6 +23,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/reflowstate"
 )
 
 func TestValidateTransferReflowArgs(t *testing.T) {
@@ -554,6 +555,44 @@ func TestTransferReflowCommand_ParallelDuplicateRaceWithProvenanceWritesSidecarE
 	}
 }
 
+func TestTransferReflowCommand_MarkDestKeyObservedFailureStillEmitsCompleteAndProvenance(t *testing.T) {
+	oldStateStore := newReflowStateStore
+	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+		store, err := oldStateStore(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return markFailingReflowState{reflowStateStore: store, err: errors.New("mark failed")}, nil
+	}
+	t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""), "--provenance", "sidecar")
+	require.NoError(t, err)
+	require.Equal(t, []string{"source/file.xml"}, dst.conditionalPutCallsSnapshot())
+	require.True(t, dst.hasObject("source/file.xml"))
+	require.True(t, dst.hasObject("source/file.xml"+provenanceSuffix))
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	var complete testReflowData
+	for _, rec := range records {
+		if rec.Status == "complete" {
+			complete = rec
+			break
+		}
+	}
+	require.NotNil(t, complete.Provenance)
+	require.True(t, complete.Provenance.Written)
+
+	require.Contains(t, stdout, reflowWarningRecord)
+	require.Contains(t, stdout, "REFLOW_ARBITRATION_STATE_WRITE_FAILED")
+	requireNoRecordType(t, stdout, output.TypeError)
+}
+
 func TestTransferReflowCommand_DefaultAndExplicitSkipUseConditionalPath(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -868,6 +907,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldDstEndpoint := reflowDstEndpoint
 	oldS3Provider := newReflowS3Provider
 	oldFileProvider := newReflowFileProvider
+	oldStateStore := newReflowStateStore
 
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	appIdentity = &appidentity.Identity{
@@ -923,6 +963,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowDstEndpoint = oldDstEndpoint
 		newReflowS3Provider = oldS3Provider
 		newReflowFileProvider = oldFileProvider
+		newReflowStateStore = oldStateStore
 	})
 }
 
@@ -1256,6 +1297,15 @@ func (r *chunkedReader) Read(buf []byte) (int, error) {
 	return n, nil
 }
 
+type markFailingReflowState struct {
+	reflowStateStore
+	err error
+}
+
+func (s markFailingReflowState) MarkDestKeyObserved(context.Context, string) error {
+	return s.err
+}
+
 func (p failingPutter) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
 	return nil, nil
 }
@@ -1532,6 +1582,18 @@ func requireReflowStatusReasonCount(t *testing.T, records []testReflowData, stat
 		}
 	}
 	require.Equal(t, want, got, "status=%s reason=%s records=%+v", status, reason, records)
+}
+
+func requireNoRecordType(t *testing.T, stdout string, recordType string) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record testRecordEnvelope
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		require.NotEqual(t, recordType, record.Type)
+	}
 }
 
 func mustReadFile(t *testing.T, path string) []byte {
