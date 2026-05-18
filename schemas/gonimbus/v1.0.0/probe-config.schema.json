@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/probe-config",
+  "title": "Gonimbus Probe Config",
+  "description": "Configuration for content probe extraction and derived variables.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "extract"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "read_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "fixed_window",
+            "until_resolved"
+          ],
+          "default": "fixed_window"
+        },
+        "max_bytes": {
+          "type": "string"
+        },
+        "chunk_bytes": {
+          "type": "string"
+        }
+      }
+    },
+    "quarantine_prefix": {
+      "type": "string",
+      "description": "Relative destination prefix used when required extractors or derived fields use on_missing=quarantine."
+    },
+    "extract": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/extractor"
+      }
+    },
+    "derived": {
+      "type": "array",
+      "description": "Variables computed from extracted source variables. Names share the same namespace as extract[].name.",
+      "items": {
+        "$ref": "#/$defs/derived"
+      }
+    }
+  },
+  "$defs": {
+    "extractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "xml_xpath",
+            "regex",
+            "json_path"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "on_missing": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "quarantine"
+          ]
+        },
+        "xpath": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "json_path": {
+          "type": "string"
+        }
+      }
+    },
+    "derived": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "from",
+        "transform"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must reference an extract[].name entry. Derived-to-derived chaining is not supported."
+        },
+        "transform": {
+          "type": "string",
+          "enum": [
+            "substring",
+            "regex_capture",
+            "format",
+            "pad",
+            "lowercase",
+            "uppercase"
+          ]
+        },
+        "args": {
+          "type": "object",
+          "description": "Transform-specific arguments. Runtime validation enforces the closed shape for each transform."
+        },
+        "required": {
+          "type": "boolean",
+          "default": true
+        },
+        "on_missing": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "quarantine"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "transform": {
+                "const": "substring"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": -1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transform": {
+                "const": "regex_capture"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pattern",
+                  "group"
+                ],
+                "properties": {
+                  "pattern": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "group": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transform": {
+                "const": "format"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "input_layout",
+                  "output_layout"
+                ],
+                "properties": {
+                  "input_layout": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "output_layout": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transform": {
+                "const": "pad"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "width"
+                ],
+                "properties": {
+                  "char": {
+                    "type": "string",
+                    "description": "Single non-whitespace Unicode scalar used for padding.",
+                    "minLength": 1,
+                    "maxLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "side": {
+                    "type": "string",
+                    "enum": [
+                      "left",
+                      "right"
+                    ],
+                    "default": "left"
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1024
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

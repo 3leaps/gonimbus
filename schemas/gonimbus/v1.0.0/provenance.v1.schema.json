@@ -38,6 +38,7 @@
     },
     "vars": {
       "type": "object",
+      "description": "Probe-derived template variables from extractors and derived fields.",
       "additionalProperties": {
         "type": "string"
       }

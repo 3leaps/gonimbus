@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Public URI parser package** adds `pkg/uri` for Go library consumers that
   need the CLI's existing S3 URI parsing behavior without importing internal
   command code.
+- **Probe derived variables and mixed rewrite segments** let `content probe`
+  compute declared `derived` vars from extracted values (`substring`,
+  `regex_capture`, `format`, `pad`, `lowercase`, `uppercase`) and let
+  `transfer reflow` render one placeholder with literal prefix/suffix in a
+  path segment, such as `year={year}`.
 
 ### Changed
 

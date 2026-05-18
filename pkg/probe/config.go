@@ -17,6 +17,15 @@ const (
 
 	OnMissingFail       = "fail"
 	OnMissingQuarantine = "quarantine"
+
+	TransformSubstring    = "substring"
+	TransformRegexCapture = "regex_capture"
+	TransformFormat       = "format"
+	TransformPad          = "pad"
+	TransformLowercase    = "lowercase"
+	TransformUppercase    = "uppercase"
+
+	MaxPadWidth = 1024
 )
 
 // Config controls content probing and derived field extraction.
@@ -27,6 +36,7 @@ type Config struct {
 	ReadStrategy     ReadStrategyConfig `json:"read_strategy,omitempty" yaml:"read_strategy,omitempty"`
 	QuarantinePrefix string             `json:"quarantine_prefix,omitempty" yaml:"quarantine_prefix,omitempty"`
 	Extract          []ExtractorConfig  `json:"extract" yaml:"extract"`
+	Derived          []DerivedConfig    `json:"derived,omitempty" yaml:"derived,omitempty"`
 }
 
 type ReadStrategyConfig struct {
@@ -53,6 +63,22 @@ type ExtractorConfig struct {
 
 	// For type=json_path.
 	JSONPath string `json:"json_path" yaml:"json_path"`
+}
+
+type DerivedConfig struct {
+	Name      string         `json:"name" yaml:"name"`
+	From      string         `json:"from" yaml:"from"`
+	Transform string         `json:"transform" yaml:"transform"`
+	Args      map[string]any `json:"args,omitempty" yaml:"args,omitempty"`
+	Required  *bool          `json:"required,omitempty" yaml:"required,omitempty"`
+	OnMissing string         `json:"on_missing,omitempty" yaml:"on_missing,omitempty"`
+}
+
+func (d DerivedConfig) RequiredValue() bool {
+	if d.Required == nil {
+		return true
+	}
+	return *d.Required
 }
 
 func (c *Config) Validate() error {
@@ -92,7 +118,15 @@ func (c *Config) Validate() error {
 	}
 
 	needsQuarantine := false
-	seen := map[string]struct{}{}
+	extractNames := map[string]int{}
+	seen := map[string]string{}
+	allDerivedNames := map[string]int{}
+	for i := range c.Derived {
+		name := strings.TrimSpace(c.Derived[i].Name)
+		if name != "" {
+			allDerivedNames[name] = i
+		}
+	}
 	for i := range c.Extract {
 		e := c.Extract[i]
 		e.Name = strings.TrimSpace(e.Name)
@@ -106,10 +140,14 @@ func (c *Config) Validate() error {
 		if e.Name == "" {
 			return fmt.Errorf("extract[%d].name is required", i)
 		}
-		if _, ok := seen[e.Name]; ok {
+		if previous, ok := seen[e.Name]; ok {
+			if strings.HasPrefix(previous, "derived") {
+				return fmt.Errorf("extract[%d].name %q conflicts with %s", i, e.Name, previous)
+			}
 			return fmt.Errorf("extract[%d].name %q is duplicated", i, e.Name)
 		}
-		seen[e.Name] = struct{}{}
+		seen[e.Name] = fmt.Sprintf("extract[%d]", i)
+		extractNames[e.Name] = i
 
 		switch e.Type {
 		case "xml_xpath":
@@ -153,6 +191,51 @@ func (c *Config) Validate() error {
 			needsQuarantine = true
 		default:
 			return fmt.Errorf("extract[%d].on_missing %q is not supported", i, e.OnMissing)
+		}
+	}
+	for i := range c.Derived {
+		d := c.Derived[i]
+		d.Name = strings.TrimSpace(d.Name)
+		d.From = strings.TrimSpace(d.From)
+		d.Transform = strings.TrimSpace(strings.ToLower(d.Transform))
+		d.OnMissing = strings.TrimSpace(strings.ToLower(d.OnMissing))
+		if d.RequiredValue() && d.OnMissing == "" {
+			d.OnMissing = OnMissingFail
+		}
+		c.Derived[i] = d
+
+		if d.Name == "" {
+			return fmt.Errorf("derived[%d].name is required", i)
+		}
+		if previous, ok := seen[d.Name]; ok {
+			return fmt.Errorf("derived[%d].name %q conflicts with %s", i, d.Name, previous)
+		}
+		seen[d.Name] = fmt.Sprintf("derived[%d]", i)
+
+		if d.From == "" {
+			return fmt.Errorf("derived[%d].from is required", i)
+		}
+		if j, ok := allDerivedNames[d.From]; ok {
+			return fmt.Errorf("derived[%d].from = %q references derived[%d]; chaining is not supported; available source names: %s", i, d.From, j, formatAvailableNames(extractNames))
+		}
+		if _, ok := extractNames[d.From]; !ok {
+			return fmt.Errorf("derived[%d].from = %q is unknown; available source names: %s", i, d.From, formatAvailableNames(extractNames))
+		}
+
+		if err := validateDerivedTransform(i, d); err != nil {
+			return err
+		}
+
+		switch d.OnMissing {
+		case "", OnMissingFail:
+			// ok
+		case OnMissingQuarantine:
+			if !d.RequiredValue() {
+				return fmt.Errorf("derived[%d].on_missing=quarantine requires required=true", i)
+			}
+			needsQuarantine = true
+		default:
+			return fmt.Errorf("derived[%d].on_missing %q is not supported", i, d.OnMissing)
 		}
 	}
 	c.QuarantinePrefix = strings.TrimSpace(c.QuarantinePrefix)
