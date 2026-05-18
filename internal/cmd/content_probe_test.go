@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -129,6 +130,36 @@ func TestRunContentProbeUntilResolvedTargetPastMaxBytesQuarantine(t *testing.T) 
 	require.Equal(t, probe.TerminationMaxBytesReached, got.audit.TerminationReason)
 	require.Equal(t, int64(32), got.bytesRead)
 	require.Equal(t, []rangeCall{{0, 15}, {16, 31}}, prov.ranges)
+}
+
+func TestContentProbeDerivedFailureErrorOutputRedactsRawValue(t *testing.T) {
+	const marker = "SENSITIVE-MARKER-7f9a2c"
+	data := []byte(`date=` + marker)
+	prov := newRangeProbeProvider("bad-date.xml", data)
+	cfg := &probe.Config{
+		Extract: []probe.ExtractorConfig{{Name: "date", Type: "regex", Pattern: `date=([^ ]+)`, Group: 1}},
+		Derived: []probe.DerivedConfig{{
+			Name:      "date_iso",
+			From:      "date",
+			Transform: probe.TransformFormat,
+			Args:      map[string]any{"input_layout": "2006-01-02", "output_layout": "20060102"},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "bad-date.xml"}, p, cfg)
+	require.NoError(t, err)
+	require.Error(t, got.extractErr)
+	require.NotContains(t, got.extractErr.Error(), marker)
+
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+	require.NoError(t, emitContentProbeError(context.Background(), w, "bad-date.xml", "content probe extract failed", got.extractErr, map[string]any{"probe": got.audit}))
+	require.NoError(t, w.Close())
+	require.NotContains(t, buf.String(), marker)
+	require.Contains(t, buf.String(), `derive \"date_iso\" from \"date\" using format failed`)
 }
 
 type rangeCall struct {

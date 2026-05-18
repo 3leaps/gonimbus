@@ -353,9 +353,12 @@ func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task pr
 	if err != nil {
 		return &contentProbeTaskResult{meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), extractErr: err}, nil
 	}
-	routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+	routingClass, requiredFailed, failureErr := prober.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
 	if requiredFailed {
-		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+		if failureErr == nil {
+			failureErr = fmt.Errorf("required extractors unresolved")
+		}
+		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, extractErr: failureErr}, nil
 	}
 	return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
 }
@@ -427,9 +430,12 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		if prober.AllRequiredResolved(res.Vars) {
 			res.Audit.TerminationReason = probe.TerminationAllRequiredResolved
 			applyBytesAtResolution(&res.Audit, resolvedAt)
-			routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+			routingClass, requiredFailed, failureErr := prober.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
 			if requiredFailed {
-				return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+				if failureErr == nil {
+					failureErr = fmt.Errorf("required extractors unresolved")
+				}
+				return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: failureErr}, nil
 			}
 			return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
 		}
@@ -462,12 +468,18 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 	}
 	res.Audit.TerminationReason = termination
 	applyBytesAtResolution(&res.Audit, resolvedAt)
-	routingClass, requiredFailed := prober.ApplyMissingPolicies(res.Vars, &res.Audit)
+	routingClass, requiredFailed, failureErr := prober.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
 	if requiredFailed {
-		if lastErr != nil {
-			return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: lastErr}, nil
+		if failureErr == nil {
+			failureErr = lastErr
 		}
-		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: fmt.Errorf("required extractors unresolved")}, nil
+		if failureErr == nil {
+			failureErr = fmt.Errorf("required extractors unresolved")
+		}
+		if lastErr != nil {
+			return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: failureErr}, nil
+		}
+		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: failureErr}, nil
 	}
 	if lastErr != nil && routingClass != "quarantine" {
 		return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: cfg.ReadStrategy.MaxBytesValue, bytesRead: bytesRead, routingClass: routingClass, extractErr: lastErr}, nil

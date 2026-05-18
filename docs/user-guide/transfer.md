@@ -312,6 +312,11 @@ Templates use `{variable}` placeholders that are extracted from source paths or 
 | `{_}`       | Ignored segment (wildcard) | Matches any segment, not captured |
 | Probe vars  | From `content probe`       | `{business_date}`, `{version}`    |
 
+Template segments may be fully literal, a single placeholder, or one
+placeholder with a literal prefix and/or suffix. This supports segments such
+as `year={year}` and `prefix-{token}-suffix`. A segment may contain only one
+placeholder; templates such as `{a}-{b}` remain unsupported.
+
 ### Path-Based Reflow
 
 Extract variables directly from source path structure:
@@ -352,6 +357,47 @@ gonimbus transfer reflow --stdin \
   --dest 's3://dest/by-date/' \
   --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \
   --rewrite-to '{business_date}/{store}/{file}' \
+  < probe-output.jsonl
+```
+
+Derived probe variables can decompose one extracted value before reflow:
+
+```yaml
+extract:
+  - name: date
+    type: regex
+    pattern: "date=([0-9-]+)"
+    group: 1
+  - name: subject
+    type: regex
+    pattern: "subject=([A-Za-z0-9_-]+)"
+    group: 1
+
+derived:
+  - name: year
+    from: date
+    transform: substring
+    args: { start: 0, end: 4 }
+  - name: month
+    from: date
+    transform: substring
+    args: { start: 5, end: 7 }
+  - name: day
+    from: date
+    transform: substring
+    args: { start: 8, end: 10 }
+  - name: subject_lower
+    from: subject
+    transform: lowercase
+```
+
+Those derived names render like any other variable:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/partitioned/' \
+  --rewrite-from 'prefix/{subject}/{file}' \
+  --rewrite-to 'year={year}/month={month}/day={day}/subject={subject_lower}/{file}' \
   < probe-output.jsonl
 ```
 

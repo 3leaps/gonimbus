@@ -372,6 +372,61 @@ extract:
     group: 1
 ```
 
+##### Derived Variables
+
+Use `derived` when one extracted value needs to produce additional template
+variables. Derived names share the same `vars` map as extracted names, so
+`transfer reflow` uses them without a separate namespace.
+
+```yaml
+extract:
+  - name: date
+    type: regex
+    pattern: "date=([0-9-]+)"
+    group: 1
+    required: true
+
+derived:
+  - name: year
+    from: date
+    transform: substring
+    args: { start: 0, end: 4 }
+  - name: month
+    from: date
+    transform: substring
+    args: { start: 5, end: 7 }
+  - name: day
+    from: date
+    transform: substring
+    args: { start: 8, end: 10 }
+  - name: date_compact
+    from: date
+    transform: format
+    args: { input_layout: "2006-01-02", output_layout: "20060102" }
+```
+
+The initial transform set is closed: `substring`, `regex_capture`, `format`,
+`pad`, `lowercase`, and `uppercase`. `derived.from` must reference an
+`extract[].name`; chained derivations are rejected. Derived fields default to
+`required: true` and support the same `on_missing: fail|quarantine` policy as
+extractors. Derivation failure messages do not include the raw extracted value
+by default because those messages are durable JSONL diagnostics.
+
+For case-sensitive destinations, normalize a subject identifier before reflow:
+
+```yaml
+extract:
+  - name: subject
+    type: regex
+    pattern: "subject=([A-Za-z0-9_-]+)"
+    group: 1
+
+derived:
+  - name: subject_lower
+    from: subject
+    transform: lowercase
+```
+
 #### Extractor Types
 
 | Type        | Use Case               | Example                    |
