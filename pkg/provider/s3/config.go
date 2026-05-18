@@ -1,4 +1,3 @@
-// Package s3 implements the provider interface for AWS S3 and S3-compatible storage.
 package s3
 
 // Config configures an S3 provider.
@@ -19,6 +18,12 @@ package s3
 //
 // For S3-compatible stores (Wasabi, MinIO, DigitalOcean Spaces), set
 // Endpoint and typically ForcePathStyle.
+//
+// For hermetic embedded use, remember that explicit credentials only suppress
+// credential-chain lookup. If Endpoint is empty, AWS SDK configured endpoint
+// sources such as AWS_ENDPOINT_URL, AWS_ENDPOINT_URL_S3, and shared-config
+// endpoint_url can still redirect requests unless the embedding process sets
+// AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true.
 type Config struct {
 	// Bucket is the S3 bucket name (required).
 	Bucket string
