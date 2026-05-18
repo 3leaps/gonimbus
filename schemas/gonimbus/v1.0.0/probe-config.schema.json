@@ -254,8 +254,10 @@
                 "properties": {
                   "char": {
                     "type": "string",
+                    "description": "Single non-whitespace Unicode scalar used for padding.",
                     "minLength": 1,
-                    "maxLength": 1
+                    "maxLength": 1,
+                    "pattern": "\\S"
                   },
                   "side": {
                     "type": "string",

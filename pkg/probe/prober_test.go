@@ -364,7 +364,7 @@ func TestConfigDerivedValidation(t *testing.T) {
 				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
 				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "char": ""}}},
 			},
-			wantErr: `char must be exactly one Unicode scalar`,
+			wantErr: `char must be exactly one non-whitespace Unicode scalar`,
 		},
 		{
 			name: "pad char multi rune",
@@ -373,6 +373,38 @@ func TestConfigDerivedValidation(t *testing.T) {
 				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "char": "00"}}},
 			},
 			wantErr: `got "00" (2 runes)`,
+		},
+		{
+			name: "pad char whitespace",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "char": " "}}},
+			},
+			wantErr: `char must be exactly one non-whitespace Unicode scalar`,
+		},
+		{
+			name: "pad side non string",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "side": true}}},
+			},
+			wantErr: `args.side must be a string`,
+		},
+		{
+			name: "pad side empty",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "side": ""}}},
+			},
+			wantErr: `args.side must be left or right`,
+		},
+		{
+			name: "pad side unknown",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "id_pad", From: "id", Transform: TransformPad, Args: map[string]any{"width": 5, "side": "center"}}},
+			},
+			wantErr: `args.side must be left or right`,
 		},
 	}
 

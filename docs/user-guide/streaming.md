@@ -411,6 +411,9 @@ The initial transform set is closed: `substring`, `regex_capture`, `format`,
 `required: true` and support the same `on_missing: fail|quarantine` policy as
 extractors. Derivation failure messages do not include the raw extracted value
 by default because those messages are durable JSONL diagnostics.
+For `pad`, `args.width` is bounded to 1-1024, `args.side` defaults to `left`
+and must be `left` or `right` when present, and `args.char` must be exactly
+one non-whitespace Unicode scalar.
 
 For case-sensitive destinations, normalize a subject identifier before reflow:
 

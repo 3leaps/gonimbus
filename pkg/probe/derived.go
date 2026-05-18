@@ -76,23 +76,24 @@ func validateDerivedTransform(i int, d DerivedConfig) error {
 		if width < 1 || width > MaxPadWidth {
 			return fmt.Errorf("derived[%d].args.width must be in [1, %d]", i, MaxPadWidth)
 		}
-		char := "0"
-		if raw, ok := d.Args["char"]; ok {
-			got, ok := raw.(string)
-			if !ok {
-				return fmt.Errorf("derived[%d].args.char must be a string", i)
-			}
-			char = strings.TrimSpace(got)
+		char, err := stringArgDefault(d.Args, "char", "0")
+		if err != nil {
+			return fmt.Errorf("derived[%d].args.char %s", i, err)
 		}
 		switch utf8.RuneCountInString(char) {
 		case 0:
-			return fmt.Errorf("derived[%d].args.char must be exactly one Unicode scalar; got empty string", i)
+			return fmt.Errorf("derived[%d].args.char must be exactly one non-whitespace Unicode scalar; got empty string", i)
 		case 1:
-			// ok
+			if strings.TrimSpace(char) == "" {
+				return fmt.Errorf("derived[%d].args.char must be exactly one non-whitespace Unicode scalar; got whitespace", i)
+			}
 		default:
-			return fmt.Errorf("derived[%d].args.char must be exactly one Unicode scalar; got %q (%d runes)", i, char, utf8.RuneCountInString(char))
+			return fmt.Errorf("derived[%d].args.char must be exactly one non-whitespace Unicode scalar; got %q (%d runes)", i, char, utf8.RuneCountInString(char))
 		}
-		side := stringArgDefault(d.Args, "side", "left")
+		side, err := stringArgDefault(d.Args, "side", "left")
+		if err != nil {
+			return fmt.Errorf("derived[%d].args.side %s", i, err)
+		}
 		switch side {
 		case "left", "right":
 			// ok
@@ -159,8 +160,8 @@ func (d configuredDerived) derive(vars map[string]string) (string, bool, error) 
 		return t.Format(outputLayout), true, nil
 	case TransformPad:
 		width, _ := requiredIntArg(d.cfg.Args, "width")
-		char := stringArgDefault(d.cfg.Args, "char", "0")
-		side := stringArgDefault(d.cfg.Args, "side", "left")
+		char, _ := stringArgDefault(d.cfg.Args, "char", "0")
+		side, _ := stringArgDefault(d.cfg.Args, "side", "left")
 		runeCount := utf8.RuneCountInString(input)
 		if runeCount >= width {
 			return input, true, nil
@@ -204,16 +205,16 @@ func requiredStringArg(args map[string]any, name string) (string, error) {
 	return s, nil
 }
 
-func stringArgDefault(args map[string]any, name, def string) string {
+func stringArgDefault(args map[string]any, name, def string) (string, error) {
 	v, ok := args[name]
 	if !ok {
-		return def
+		return def, nil
 	}
 	s, ok := v.(string)
-	if !ok || strings.TrimSpace(s) == "" {
-		return def
+	if !ok {
+		return "", fmt.Errorf("must be a string")
 	}
-	return strings.TrimSpace(s)
+	return s, nil
 }
 
 func requiredIntArg(args map[string]any, name string) (int, error) {
