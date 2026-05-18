@@ -35,3 +35,7 @@ characters.
 Gonimbus is pre-v1.0. Public packages are intended for library use, but breaking
 changes may still happen across minor versions. Pin applications to specific
 release tags.
+
+For the full supported embedded-use contract, including credential injection,
+environment-read behavior, endpoint hermeticity, and dependency boundaries, see
+[`docs/library-consumers.md`](../library-consumers.md).
