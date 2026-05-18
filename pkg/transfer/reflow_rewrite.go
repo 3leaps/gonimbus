@@ -10,20 +10,21 @@ import (
 // The rewrite is a simple segment matcher/renderer:
 // - Templates are split on '/'.
 // - In the from template, literal segments must match exactly.
-// - Placeholders in the from template capture one segment: {var}
+// - Placeholders in the from template capture one segment or one segment substring: {var}, prefix-{var}-suffix
 // - The special placeholder {_} captures and ignores a segment.
-// - In the to template, {var} renders the captured value.
+// - In the to template, {var} renders the captured value, optionally with a literal prefix/suffix in the same segment.
 //
-// This stays deliberately simple for v0.1.x; more complex derivations
-// (content probes, filename parsing) are layered above this primitive.
+// Each segment may contain at most one placeholder.
 type ReflowRewrite struct {
 	from []reflowPart
 	to   []reflowPart
 }
 
 type reflowPart struct {
-	Lit string
-	Var string
+	Lit    string
+	Prefix string
+	Var    string
+	Suffix string
 }
 
 func CompileReflowRewrite(fromTemplate, toTemplate string) (*ReflowRewrite, error) {
@@ -65,19 +66,20 @@ func (r *ReflowRewrite) ApplyWithVars(sourceKey string, extraVars map[string]str
 	vars = map[string]string{}
 	for i, p := range r.from {
 		seg := srcSegs[i]
-		if p.Lit != "" {
+		if p.Var == "" {
 			if seg != p.Lit {
 				return "", nil, fmt.Errorf("source key %q does not match from template at segment %d: got %q expected %q", sourceKey, i, seg, p.Lit)
 			}
 			continue
 		}
-		if p.Var == "" {
-			return "", nil, fmt.Errorf("invalid template part")
+		captured, ok := captureReflowSegment(seg, p)
+		if !ok {
+			return "", nil, fmt.Errorf("source key %q does not match from template at segment %d", sourceKey, i)
 		}
 		if p.Var == "_" {
 			continue
 		}
-		vars[p.Var] = seg
+		vars[p.Var] = captured
 	}
 	for k, v := range extraVars {
 		vars[k] = v
@@ -85,18 +87,15 @@ func (r *ReflowRewrite) ApplyWithVars(sourceKey string, extraVars map[string]str
 
 	outSegs := make([]string, 0, len(r.to))
 	for _, p := range r.to {
-		if p.Lit != "" {
+		if p.Var == "" {
 			outSegs = append(outSegs, p.Lit)
 			continue
-		}
-		if p.Var == "" {
-			return "", nil, fmt.Errorf("invalid template part")
 		}
 		v, ok := vars[p.Var]
 		if !ok {
 			return "", nil, fmt.Errorf("missing variable %q", p.Var)
 		}
-		outSegs = append(outSegs, v)
+		outSegs = append(outSegs, p.Prefix+v+p.Suffix)
 	}
 
 	out := strings.Join(outSegs, "/")
@@ -121,24 +120,59 @@ func parseReflowTemplate(tpl string) ([]reflowPart, error) {
 		if seg == "" {
 			continue
 		}
-		if strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
-			name := strings.TrimSuffix(strings.TrimPrefix(seg, "{"), "}")
-			name = strings.TrimSpace(name)
-			if name == "" {
-				return nil, fmt.Errorf("empty placeholder")
-			}
-			if strings.Contains(name, "/") {
-				return nil, fmt.Errorf("invalid placeholder %q", name)
-			}
-			parts = append(parts, reflowPart{Var: name})
-			continue
+		part, err := parseReflowSegment(seg)
+		if err != nil {
+			return nil, err
 		}
-		if strings.Contains(seg, "{") || strings.Contains(seg, "}") {
-			return nil, fmt.Errorf("placeholders must occupy a full path segment: %q", seg)
-		}
-		parts = append(parts, reflowPart{Lit: seg})
+		parts = append(parts, part)
 	}
 	return parts, nil
+}
+
+func parseReflowSegment(seg string) (reflowPart, error) {
+	open := strings.Index(seg, "{")
+	close := strings.Index(seg, "}")
+	if open == -1 && close == -1 {
+		return reflowPart{Lit: seg}, nil
+	}
+	if close != -1 && (open == -1 || close < open) {
+		return reflowPart{}, fmt.Errorf("unmatched } in template segment %q", seg)
+	}
+	if open != -1 && close == -1 {
+		return reflowPart{}, fmt.Errorf("unmatched { in template segment %q", seg)
+	}
+	close = open + strings.Index(seg[open:], "}")
+	prefix := seg[:open]
+	name := strings.TrimSpace(seg[open+1 : close])
+	suffix := seg[close+1:]
+	if strings.Contains(name, "{") || strings.Contains(name, "}") || strings.Contains(suffix, "{") {
+		return reflowPart{}, fmt.Errorf("multiple placeholders in segment %q are not supported in this release", seg)
+	}
+	if strings.Contains(suffix, "}") {
+		return reflowPart{}, fmt.Errorf("unmatched } in template segment %q", seg)
+	}
+	if name == "" {
+		return reflowPart{}, fmt.Errorf("empty placeholder")
+	}
+	if strings.Contains(name, "/") {
+		return reflowPart{}, fmt.Errorf("invalid placeholder %q", name)
+	}
+	return reflowPart{Prefix: prefix, Var: name, Suffix: suffix}, nil
+}
+
+func captureReflowSegment(seg string, part reflowPart) (string, bool) {
+	if part.Prefix != "" && !strings.HasPrefix(seg, part.Prefix) {
+		return "", false
+	}
+	if part.Suffix != "" && !strings.HasSuffix(seg, part.Suffix) {
+		return "", false
+	}
+	start := len(part.Prefix)
+	end := len(seg) - len(part.Suffix)
+	if end <= start {
+		return "", false
+	}
+	return seg[start:end], true
 }
 
 func splitKeySegments(s string) []string {

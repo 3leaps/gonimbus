@@ -17,6 +17,7 @@ const (
 // Prober executes configured extractors against a byte window.
 type Prober struct {
 	extractors []configuredExtractor
+	derived    []configuredDerived
 }
 
 type configuredExtractor struct {
@@ -45,8 +46,9 @@ type ProbeAudit struct {
 }
 
 type Result struct {
-	Vars  map[string]string
-	Audit ProbeAudit
+	Vars     map[string]string
+	Audit    ProbeAudit
+	Failures map[string]error
 }
 
 func New(cfg Config) (*Prober, error) {
@@ -82,7 +84,16 @@ func New(cfg Config) (*Prober, error) {
 		extractors = append(extractors, configuredExtractor{cfg: e, extractor: ex})
 	}
 
-	return &Prober{extractors: extractors}, nil
+	derived := make([]configuredDerived, 0, len(cfg.Derived))
+	for _, d := range cfg.Derived {
+		cd, err := newConfiguredDerived(d)
+		if err != nil {
+			return nil, err
+		}
+		derived = append(derived, cd)
+	}
+
+	return &Prober{extractors: extractors, derived: derived}, nil
 }
 
 // Probe returns derived fields. Missing fields are omitted.
@@ -104,6 +115,7 @@ func (p *Prober) ProbeDetailedAllowIncomplete(data []byte, bytesRead int64, term
 
 func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason string, incomplete func(error) bool) (*Result, error) {
 	out := map[string]string{}
+	failures := map[string]error{}
 	audit := make([]ExtractorAudit, 0, len(p.extractors))
 	for _, entry := range p.extractors {
 		ex := entry.extractor
@@ -141,8 +153,20 @@ func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason s
 		item.BytesAtResolution = &at
 		audit = append(audit, item)
 	}
+	for _, d := range p.derived {
+		v, ok, err := d.derive(out)
+		if err != nil {
+			failures[d.cfg.Name] = err
+			continue
+		}
+		if !ok || strings.TrimSpace(v) == "" {
+			continue
+		}
+		out[d.cfg.Name] = strings.TrimSpace(v)
+	}
 	return &Result{
-		Vars: out,
+		Vars:     out,
+		Failures: failures,
 		Audit: ProbeAudit{
 			Extractors:        audit,
 			BytesRead:         bytesRead,
@@ -157,10 +181,20 @@ func (p *Prober) AllRequiredResolved(vars map[string]string) bool {
 			return false
 		}
 	}
+	for _, entry := range p.derived {
+		if entry.cfg.RequiredValue() && strings.TrimSpace(vars[entry.cfg.Name]) == "" {
+			return false
+		}
+	}
 	return true
 }
 
 func (p *Prober) ApplyMissingPolicies(vars map[string]string, audit *ProbeAudit) (routingClass string, requiredFailed bool) {
+	routingClass, requiredFailed, _ = p.ApplyMissingPoliciesDetailed(vars, audit, nil)
+	return routingClass, requiredFailed
+}
+
+func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *ProbeAudit, failures map[string]error) (routingClass string, requiredFailed bool, failureErr error) {
 	routingClass = "normal"
 	if vars == nil {
 		vars = map[string]string{}
@@ -190,7 +224,25 @@ func (p *Prober) ApplyMissingPolicies(vars map[string]string, audit *ProbeAudit)
 			}
 		}
 	}
-	return routingClass, requiredFailed
+	for _, entry := range p.derived {
+		if !entry.cfg.RequiredValue() {
+			continue
+		}
+		if strings.TrimSpace(vars[entry.cfg.Name]) != "" {
+			continue
+		}
+		if err := failures[entry.cfg.Name]; err != nil && failureErr == nil {
+			failureErr = err
+		}
+		switch entry.cfg.OnMissing {
+		case OnMissingQuarantine:
+			routingClass = "quarantine"
+			vars[entry.cfg.Name] = "_unresolved"
+		default:
+			requiredFailed = true
+		}
+	}
+	return routingClass, requiredFailed, failureErr
 }
 
 func (p *Prober) UnresolvedResult(bytesRead int64, terminationReason string) *Result {
@@ -204,7 +256,8 @@ func (p *Prober) UnresolvedResult(bytesRead int64, terminationReason string) *Re
 		})
 	}
 	return &Result{
-		Vars: map[string]string{},
+		Vars:     map[string]string{},
+		Failures: map[string]error{},
 		Audit: ProbeAudit{
 			Extractors:        audit,
 			BytesRead:         bytesRead,
@@ -216,6 +269,11 @@ func (p *Prober) UnresolvedResult(bytesRead int64, terminationReason string) *Re
 func (p *Prober) HasRequiredExtractors() bool {
 	for _, entry := range p.extractors {
 		if entry.cfg.Required {
+			return true
+		}
+	}
+	for _, entry := range p.derived {
+		if entry.cfg.RequiredValue() {
 			return true
 		}
 	}
