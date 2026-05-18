@@ -1,9 +1,18 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -447,6 +456,183 @@ func TestNew_ValidationError(t *testing.T) {
 
 	var configErr *ConfigError
 	assert.True(t, errors.As(err, &configErr))
+}
+
+func TestNew_DoesNotLogExplicitCredentials(t *testing.T) {
+	const (
+		accessKey = "AKIADOESNOTLOG00001"
+		secretKey = "secret-value-that-must-not-appear-in-logs"
+	)
+
+	var logs bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	_, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        "http://127.0.0.1:1",
+		ForcePathStyle:  true,
+		AccessKeyID:     accessKey,
+		SecretAccessKey: secretKey,
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, logs.String(), accessKey)
+	assert.NotContains(t, logs.String(), secretKey)
+}
+
+type observedS3Request struct {
+	host          string
+	authorization string
+}
+
+func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *testing.T) {
+	newServer := func(ch chan<- observedS3Request) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ch <- observedS3Request{
+				host:          r.Host,
+				authorization: r.Header.Get("Authorization"),
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
+		}))
+	}
+
+	reqs1 := make(chan observedS3Request, 2)
+	reqs2 := make(chan observedS3Request, 2)
+	server1 := newServer(reqs1)
+	defer server1.Close()
+	server2 := newServer(reqs2)
+	defer server2.Close()
+
+	provider1, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        server1.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIAFIRST000000001",
+		SecretAccessKey: "first-secret",
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = provider1.Close()
+	}()
+
+	provider2, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-west-2",
+		Endpoint:        server2.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIASECOND00000002",
+		SecretAccessKey: "second-secret",
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = provider2.Close()
+	}()
+
+	_, err = provider1.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+	_, err = provider2.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+
+	got1 := receiveObservedRequest(t, reqs1, "provider1 endpoint")
+	got2 := receiveObservedRequest(t, reqs2, "provider2 endpoint")
+
+	assert.Contains(t, got1.authorization, "Credential=AKIAFIRST000000001/")
+	assert.Contains(t, got1.authorization, "/us-east-1/s3/aws4_request")
+	assert.Contains(t, got1.host, strings.TrimPrefix(server1.URL, "http://"))
+
+	assert.Contains(t, got2.authorization, "Credential=AKIASECOND00000002/")
+	assert.Contains(t, got2.authorization, "/us-west-2/s3/aws4_request")
+	assert.Contains(t, got2.host, strings.TrimPrefix(server2.URL, "http://"))
+}
+
+func receiveObservedRequest(t *testing.T, ch <-chan observedS3Request, label string) observedS3Request {
+	t.Helper()
+
+	select {
+	case req := <-ch:
+		return req
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for request on %s; provider endpoint isolation may have regressed", label)
+		return observedS3Request{}
+	}
+}
+
+func TestEndpointConfiguredURLSuppression(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "aws-config")
+	require.NoError(t, os.WriteFile(configPath, []byte("[default]\nregion = us-east-1\nendpoint_url = https://evil-shared.example.com\n"), 0o600))
+
+	baseEnv := []string{
+		"GONIMBUS_S3_ENDPOINT_PROBE_HELPER=1",
+		"AWS_EC2_METADATA_DISABLED=true",
+		"AWS_SDK_LOAD_CONFIG=1",
+		"AWS_CONFIG_FILE=" + configPath,
+		"AWS_ENDPOINT_URL=https://evil-global.example.com",
+		"AWS_ENDPOINT_URL_S3=https://evil-s3.example.com",
+	}
+
+	unmitigated := runEndpointProbeHelper(t, baseEnv)
+	require.Contains(t, unmitigated, "evil", "empty cfg.Endpoint should document ambient endpoint redirection")
+
+	mitigated := runEndpointProbeHelper(t, append(baseEnv, "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true"))
+	assert.NotContains(t, mitigated, "evil")
+	assert.Empty(t, mitigated)
+}
+
+func TestEndpointProbeHelper(t *testing.T) {
+	if os.Getenv("GONIMBUS_S3_ENDPOINT_PROBE_HELPER") != "1" {
+		return
+	}
+
+	p, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		AccessKeyID:     "AKIAHELPER00000001",
+		SecretAccessKey: "helper-secret",
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	defer func() {
+		_ = p.Close()
+	}()
+
+	_, _ = fmt.Fprint(os.Stdout, reflectedS3BaseEndpoint(p.client))
+	os.Exit(0)
+}
+
+func runEndpointProbeHelper(t *testing.T, env []string) string {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestEndpointProbeHelper")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
+}
+
+func reflectedS3BaseEndpoint(client *awss3.Client) string {
+	clientValue := reflect.ValueOf(client).Elem()
+	options := clientValue.FieldByName("options")
+	if !options.IsValid() {
+		return ""
+	}
+	baseEndpoint := options.FieldByName("BaseEndpoint")
+	if !baseEndpoint.IsValid() || baseEndpoint.IsNil() {
+		return ""
+	}
+	return baseEndpoint.Elem().String()
 }
 
 func TestApplyS3ClientOptions_S3CompatibleEndpoint(t *testing.T) {

@@ -1,0 +1,22 @@
+{
+  "recommended_packages": [
+    "./pkg/uri",
+    "./pkg/match",
+    "./pkg/provider",
+    "./pkg/provider/s3",
+    "./pkg/provider/file"
+  ],
+  "denied_imports": [
+    "github.com/fulmenhq/gofulmen",
+    "github.com/go-chi/chi",
+    "github.com/go-viper/mapstructure",
+    "github.com/spf13/viper",
+    "github.com/tursodatabase/go-libsql",
+    "modernc.org/sqlite"
+  ],
+  "denied_env_calls": [
+    "os.Getenv",
+    "os.LookupEnv",
+    "os.Environ"
+  ]
+}
