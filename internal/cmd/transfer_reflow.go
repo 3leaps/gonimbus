@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -219,6 +220,48 @@ type collisionInfo struct {
 	DecisionPath     string `json:"decision_path"`
 }
 
+type reflowDestKeyArbiter struct {
+	mu    sync.Mutex
+	gates map[string]*reflowDestKeyGate
+}
+
+type reflowDestKeyGate struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func newReflowDestKeyArbiter() *reflowDestKeyArbiter {
+	return &reflowDestKeyArbiter{gates: map[string]*reflowDestKeyGate{}}
+}
+
+func (a *reflowDestKeyArbiter) acquire(key string) (*reflowDestKeyGate, func()) {
+	a.mu.Lock()
+	g, ok := a.gates[key]
+	if !ok {
+		g = &reflowDestKeyGate{}
+		a.gates[key] = g
+	}
+	g.refs++
+	a.mu.Unlock()
+
+	g.mu.Lock()
+	return g, func() {
+		g.mu.Unlock()
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		g.refs--
+		if g.refs == 0 && a.gates[key] == g {
+			delete(a.gates, key)
+		}
+	}
+}
+
+func (a *reflowDestKeyArbiter) activeCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.gates)
+}
+
 type provenanceConfig struct {
 	Mode              string
 	Suffix            string
@@ -287,6 +330,54 @@ func isDuplicateCollision(srcETag string, srcSize int64, dstMeta *provider.Objec
 		return false
 	}
 	return srcSize <= 0 || dstMeta.Size <= 0 || srcSize == dstMeta.Size
+}
+
+func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) (bool, error) {
+	if isDuplicateCollision(srcETag, srcSize, dstMeta) {
+		return true, nil
+	}
+	if destProvider != string(provider.ProviderFile) || dstMeta == nil {
+		return false, nil
+	}
+	if srcSize != dstMeta.Size {
+		return false, nil
+	}
+	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey)
+}
+
+func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string) (bool, error) {
+	srcGetter, ok := src.(provider.ObjectGetter)
+	if !ok {
+		return false, fmt.Errorf("source provider does not support GetObject")
+	}
+	dstGetter, ok := dst.(provider.ObjectGetter)
+	if !ok {
+		return false, fmt.Errorf("destination provider does not support GetObject")
+	}
+
+	srcBody, _, err := srcGetter.GetObject(ctx, srcKey)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = srcBody.Close() }()
+
+	dstBody, _, err := dstGetter.GetObject(ctx, dstKey)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = dstBody.Close() }()
+
+	srcHash := sha256.New()
+	if _, err := io.Copy(srcHash, srcBody); err != nil {
+		return false, err
+	}
+
+	dstHash := sha256.New()
+	if _, err := io.Copy(dstHash, dstBody); err != nil {
+		return false, err
+	}
+
+	return bytes.Equal(srcHash.Sum(nil), dstHash.Sum(nil)), nil
 }
 
 type reflowDestSpec struct {
@@ -948,6 +1039,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	)
 
 	tasks := make(chan reflowTask, reflowParallel*2)
+	destArbiter := newReflowDestKeyArbiter()
 	var wg sync.WaitGroup
 	for i := 0; i < reflowParallel; i++ {
 		wg.Add(1)
@@ -1043,7 +1135,30 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					}
 					bytes, err = transfer.CopyObject(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes)
 				} else {
-					bytes, putResult, err = transfer.CopyObjectConditional(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true})
+					_, releaseGate := destArbiter.acquire(dstKey)
+					// Keep active mutexes bounded to in-flight keys; durable per-run
+					// destination observations live in the checkpoint DB.
+					observed, observedErr := state.DestKeyObserved(ctx, dstKey)
+					if observedErr != nil {
+						releaseGate()
+						errorCount.Add(1)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+						continue
+					}
+					if observed {
+						err = &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
+					} else {
+						bytes, putResult, err = transfer.CopyObjectConditional(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true})
+						if err == nil || isConditionalExists(err) {
+							if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
+								releaseGate()
+								errorCount.Add(1)
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state write failed", markErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+								continue
+							}
+						}
+					}
+					releaseGate()
 					if err != nil && isConditionalExists(err) {
 						dstMeta, headErr := dst.Head(ctx, dstKey)
 						if headErr != nil {
@@ -1051,7 +1166,12 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
 							continue
 						}
-						dup := isDuplicateCollision(srcETag, srcSize, dstMeta)
+						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, destSpec.Provider, srcETag, srcSize, dstMeta)
+						if dupErr != nil {
+							errorCount.Add(1)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+							continue
+						}
 						if dup {
 							collision = newCollisionInfo(collisionDuplicate, dstMeta, decisionIfAbsentHead)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {

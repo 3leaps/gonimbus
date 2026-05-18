@@ -397,6 +397,185 @@ func TestTransferReflowCommand_CollisionUsesPreconditionFailedHelper(t *testing.
 	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
 }
 
+func TestTransferReflowCommand_ParallelDuplicateRaceUsesInProcessArbiter(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	destETag := "dest-" + destRel
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload", etag: destETag},
+		{key: "source/b.xml", body: "payload", etag: destETag},
+		{key: "source/c.xml", body: "payload", etag: destETag},
+		{key: "source/d.xml", body: "payload", etag: destETag},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4")
+	require.NoError(t, err)
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+	require.Len(t, dst.headCallsSnapshot(), 3)
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", 3)
+	for _, rec := range records {
+		if rec.Status == "skipped" {
+			requireCollisionEqual(t, rec, collisionDuplicate, decisionIfAbsentHead, destETag, int64(len("payload")))
+		}
+	}
+}
+
+func TestReflowDestKeyArbiterCleansUpInactiveGates(t *testing.T) {
+	arbiter := newReflowDestKeyArbiter()
+	_, releaseA := arbiter.acquire("shared/file.xml")
+	require.Equal(t, 1, arbiter.activeCount())
+	releaseA()
+	require.Equal(t, 0, arbiter.activeCount())
+
+	_, releaseB := arbiter.acquire("shared/file.xml")
+	require.Equal(t, 1, arbiter.activeCount())
+	releaseB()
+	require.Equal(t, 0, arbiter.activeCount())
+}
+
+func TestObjectBodiesEqualIgnoresReadChunkBoundaries(t *testing.T) {
+	src := chunkedObjectProvider{body: []byte("byte-identical payload"), chunkSize: 3}
+	dst := chunkedObjectProvider{body: []byte("byte-identical payload"), chunkSize: 7}
+
+	equal, err := objectBodiesEqual(context.Background(), src, dst, "src", "dst")
+	require.NoError(t, err)
+	require.True(t, equal)
+
+	dst.body = []byte("different payload")
+	equal, err = objectBodiesEqual(context.Background(), src, dst, "src", "dst")
+	require.NoError(t, err)
+	require.False(t, equal)
+}
+
+func TestTransferReflowCommand_ParallelRaceUsesRealFileProviderConditionalPath(t *testing.T) {
+	src := newReflowMemoryProvider()
+	destDir := t.TempDir()
+	destRel := "shared/file.xml"
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload-a", etag: "src-a"},
+		{key: "source/b.xml", body: "payload-b", etag: "src-b"},
+		{key: "source/c.xml", body: "payload-c", etag: "src-c"},
+		{key: "source/d.xml", body: "payload-d", etag: "src-d"},
+	})
+
+	stdout, _, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, input, "--parallel", "4")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.FileExists(t, filepath.Join(destDir, destRel))
+	require.Contains(t, []string{"payload-a", "payload-b", "payload-c", "payload-d"}, string(mustReadFile(t, filepath.Join(destDir, destRel))))
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "failed", "collision.conflict", 3)
+	for _, rec := range records {
+		if rec.Status == "failed" {
+			require.NotNil(t, rec.Collision)
+			require.Equal(t, collisionConflict, rec.Collision.Kind)
+			require.Equal(t, decisionIfAbsentHead, rec.Collision.DecisionPath)
+		}
+	}
+}
+
+func TestTransferReflowCommand_ParallelDuplicateRaceWithRealFileProviderAndProvenance(t *testing.T) {
+	src := newReflowMemoryProvider()
+	destDir := t.TempDir()
+	destRel := "shared/file.xml"
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload", etag: "src-a"},
+		{key: "source/b.xml", body: "payload", etag: "src-b"},
+		{key: "source/c.xml", body: "payload", etag: "src-c"},
+		{key: "source/d.xml", body: "payload", etag: "src-d"},
+	})
+
+	stdout, _, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, input, "--parallel", "4", "--provenance", "sidecar")
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(destDir, destRel))
+	require.Equal(t, "payload", string(mustReadFile(t, filepath.Join(destDir, destRel))))
+	sidecarPath := filepath.Join(destDir, destRel+provenanceSuffix)
+	require.FileExists(t, sidecarPath)
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", 3)
+	for _, rec := range records {
+		if rec.Status == "complete" || rec.Status == "skipped" {
+			require.NotNil(t, rec.Provenance)
+			require.True(t, rec.Provenance.Written)
+			require.Equal(t, destRel+provenanceSuffix, rec.Provenance.Key)
+		}
+		if rec.Status == "skipped" {
+			require.NotNil(t, rec.Collision)
+			require.Equal(t, collisionDuplicate, rec.Collision.Kind)
+			require.Equal(t, decisionIfAbsentHead, rec.Collision.DecisionPath)
+			require.NotNil(t, rec.Collision.DestSizeObserved)
+			require.Equal(t, int64(len("payload")), *rec.Collision.DestSizeObserved)
+		}
+	}
+
+	var sidecar map[string]any
+	require.NoError(t, json.Unmarshal(mustReadFile(t, sidecarPath), &sidecar))
+	require.Contains(t, []string{"landed", "skipped.duplicate"}, sidecar["action"])
+}
+
+func TestTransferReflowCommand_ParallelDuplicateRaceWithProvenanceWritesSidecarEvents(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	destETag := "dest-" + destRel
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload", etag: destETag},
+		{key: "source/b.xml", body: "payload", etag: destETag},
+		{key: "source/c.xml", body: "payload", etag: destETag},
+		{key: "source/d.xml", body: "payload", etag: destETag},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4", "--provenance", "sidecar")
+	require.NoError(t, err)
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+	require.Equal(t, []string{destRel + provenanceSuffix, destRel + provenanceSuffix, destRel + provenanceSuffix, destRel + provenanceSuffix}, dst.putCallsSnapshot())
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", 3)
+	for _, rec := range records {
+		if rec.Status == "complete" || rec.Status == "skipped" {
+			require.NotNil(t, rec.Provenance)
+			require.True(t, rec.Provenance.Written)
+			require.Equal(t, destRel+provenanceSuffix, rec.Provenance.Key)
+		}
+	}
+}
+
+func TestTransferReflowCommand_DefaultAndExplicitSkipUseConditionalPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "default"},
+		{name: "explicit", args: []string{"--on-collision", "skip-if-duplicate"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newReflowMemoryProvider()
+			src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+			dst := newReflowMemoryProvider()
+
+			_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""), tc.args...)
+			require.NoError(t, err)
+			require.Equal(t, []string{"source/file.xml"}, dst.conditionalPutCallsSnapshot())
+			require.Empty(t, dst.putCallsSnapshot())
+			require.Empty(t, dst.headCallsSnapshot())
+		})
+	}
+}
+
 func TestTransferReflowCommand_CollisionFailDuplicateIsFailure(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
@@ -411,6 +590,35 @@ func TestTransferReflowCommand_CollisionFailDuplicateIsFailure(t *testing.T) {
 	require.Equal(t, "collision.exists.duplicate", failed.Reason)
 	requireCollisionEqual(t, failed, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
 	requireRecord(t, stdout, output.TypeError, "")
+}
+
+func TestTransferReflowCommand_ParallelDuplicateRaceFailModeFailsWaiters(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	destETag := "dest-" + destRel
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload", etag: destETag},
+		{key: "source/b.xml", body: "payload", etag: destETag},
+		{key: "source/c.xml", body: "payload", etag: destETag},
+		{key: "source/d.xml", body: "payload", etag: destETag},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4", "--on-collision", "fail")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "failed", "collision.exists.duplicate", 3)
+	for _, rec := range records {
+		if rec.Status == "failed" {
+			requireCollisionEqual(t, rec, collisionDuplicate, decisionIfAbsentHead, destETag, int64(len("payload")))
+		}
+	}
 }
 
 func TestTransferReflowCommand_CollisionSkipConflictFails(t *testing.T) {
@@ -430,6 +638,34 @@ func TestTransferReflowCommand_CollisionSkipConflictFails(t *testing.T) {
 	require.NotNil(t, errRecord.Collision)
 	require.Equal(t, collisionConflict, errRecord.Collision.Kind)
 	require.NotContains(t, fmt.Sprint(errRecord.Details), "collision")
+}
+
+func TestTransferReflowCommand_ParallelConflictRaceSkipModeFailsWaiters(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload-a", etag: "src-a"},
+		{key: "source/b.xml", body: "payload-b", etag: "src-b"},
+		{key: "source/c.xml", body: "payload-c", etag: "src-c"},
+		{key: "source/d.xml", body: "payload-d", etag: "src-d"},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "failed", "collision.conflict", 3)
+	for _, rec := range records {
+		if rec.Status == "failed" {
+			requireCollisionEqual(t, rec, collisionConflict, decisionIfAbsentHead, "dest-"+destRel, int64(len("payload-a")))
+		}
+	}
 }
 
 func TestTransferReflowCommand_CollisionConflictFailureWritesNoSidecar(t *testing.T) {
@@ -465,6 +701,65 @@ func TestTransferReflowCommand_CollisionQuarantineRoutesConflictAndSidecar(t *te
 	require.True(t, ok)
 	require.Equal(t, collisionQuarantined, collision["kind"])
 	require.Equal(t, decisionQuarantine, collision["decision_path"])
+}
+
+func TestTransferReflowCommand_ParallelDuplicateRaceQuarantineModeSkipsWaiters(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	destETag := "dest-" + destRel
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload", etag: destETag},
+		{key: "source/b.xml", body: "payload", etag: destETag},
+		{key: "source/c.xml", body: "payload", etag: destETag},
+		{key: "source/d.xml", body: "payload", etag: destETag},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4", "--on-collision", "quarantine", "--collision-quarantine-prefix", "_conflict")
+	require.NoError(t, err)
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+	require.False(t, dst.hasObject("_conflict/source/b.xml"))
+	require.False(t, dst.hasObject("_conflict/source/c.xml"))
+	require.False(t, dst.hasObject("_conflict/source/d.xml"))
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", 3)
+	for _, rec := range records {
+		if rec.Status == "skipped" {
+			requireCollisionEqual(t, rec, collisionDuplicate, decisionIfAbsentHead, destETag, int64(len("payload")))
+		}
+	}
+}
+
+func TestTransferReflowCommand_ParallelConflictRaceQuarantineModeQuarantinesWaiters(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+
+	destRel := "shared/file.xml"
+	input := makeRaceInput(src, destRel, []raceSource{
+		{key: "source/a.xml", body: "payload-a", etag: "src-a"},
+		{key: "source/b.xml", body: "payload-b", etag: "src-b"},
+		{key: "source/c.xml", body: "payload-c", etag: "src-c"},
+		{key: "source/d.xml", body: "payload-d", etag: "src-d"},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, input, "--parallel", "4", "--on-collision", "quarantine", "--collision-quarantine-prefix", "_conflict")
+	require.NoError(t, err)
+	require.Equal(t, []string{destRel}, dst.conditionalPutCallsSnapshot())
+
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "quarantined", "collision.conflict.quarantined", 3)
+	for _, rec := range records {
+		if rec.Status == "quarantined" {
+			require.Equal(t, "quarantine", rec.RoutingClass)
+			requireCollisionEqual(t, rec, collisionQuarantined, decisionQuarantine, "dest-"+destRel, int64(len("payload-a")))
+		}
+	}
 }
 
 func TestTransferReflowCommand_CollisionOverwriteEmitsNestedCollision(t *testing.T) {
@@ -918,6 +1213,49 @@ type failingPutter struct {
 	err error
 }
 
+type chunkedObjectProvider struct {
+	body      []byte
+	chunkSize int
+}
+
+func (p chunkedObjectProvider) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
+	return &provider.ListResult{}, nil
+}
+
+func (p chunkedObjectProvider) Head(context.Context, string) (*provider.ObjectMeta, error) {
+	return &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Size: int64(len(p.body))}}, nil
+}
+
+func (p chunkedObjectProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return io.NopCloser(&chunkedReader{data: p.body, chunkSize: p.chunkSize}), int64(len(p.body)), nil
+}
+
+func (p chunkedObjectProvider) Close() error {
+	return nil
+}
+
+type chunkedReader struct {
+	data      []byte
+	offset    int
+	chunkSize int
+}
+
+func (r *chunkedReader) Read(buf []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := len(buf)
+	if r.chunkSize > 0 && r.chunkSize < n {
+		n = r.chunkSize
+	}
+	if remaining := len(r.data) - r.offset; remaining < n {
+		n = remaining
+	}
+	copy(buf[:n], r.data[r.offset:r.offset+n])
+	r.offset += n
+	return n, nil
+}
+
 func (p failingPutter) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
 	return nil, nil
 }
@@ -995,13 +1333,44 @@ func runTransferReflowWithProviderFactory(t *testing.T, src *reflowMemoryProvide
 	return stdout.String(), stderr.String(), err
 }
 
+func runTransferReflowWithMemorySourceAndRealFileDest(t *testing.T, src *reflowMemoryProvider, destDir string, input string, extraArgs ...string) (string, string, error) {
+	t.Helper()
+	withTransferReflowTestState(t)
+
+	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+		return src, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	args := []string{
+		"--stdin",
+		"--dest", fileURI(destDir),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	}
+	args = append(args, extraArgs...)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
 func reflowInputLine(key string, etag string, size int64, routingClass string, quarantinePrefix string) string {
+	return reflowInputLineWithDestRel(key, key, etag, size, routingClass, quarantinePrefix)
+}
+
+func reflowInputLineWithDestRel(key string, destRelKey string, etag string, size int64, routingClass string, quarantinePrefix string) string {
 	data := map[string]any{
 		"source_uri":           "s3://source-bucket/" + key,
 		"source_key":           key,
 		"source_etag":          etag,
 		"source_size_bytes":    size,
-		"dest_rel_key":         key,
+		"dest_rel_key":         destRelKey,
 		"source_last_modified": "2026-01-15T20:53:44Z",
 		"vars": map[string]string{
 			"key": key,
@@ -1029,6 +1398,21 @@ func reflowInputLine(key string, etag string, size int64, routingClass string, q
 		panic(err)
 	}
 	return string(line)
+}
+
+type raceSource struct {
+	key  string
+	body string
+	etag string
+}
+
+func makeRaceInput(src *reflowMemoryProvider, destRel string, sources []raceSource) string {
+	lines := make([]string, 0, len(sources))
+	for _, source := range sources {
+		src.putFixture(source.key, source.body, source.etag, time.Time{})
+		lines = append(lines, reflowInputLineWithDestRel(source.key, destRel, source.etag, int64(len(source.body)), "", ""))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func reflowInputLineNoDestRel(key string, etag string, size int64) string {
@@ -1119,6 +1503,44 @@ func requireReflowData(t *testing.T, stdout string, status string) testReflowDat
 	return data
 }
 
+func requireReflowRecords(t *testing.T, stdout string) []testReflowData {
+	t.Helper()
+	var out []testReflowData
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record testRecordEnvelope
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		if record.Type != reflowRecordType {
+			continue
+		}
+		var data testReflowData
+		require.NoError(t, json.Unmarshal(record.Data, &data))
+		out = append(out, data)
+	}
+	require.NotEmpty(t, out)
+	return out
+}
+
+func requireReflowStatusReasonCount(t *testing.T, records []testReflowData, status string, reason string, want int) {
+	t.Helper()
+	got := 0
+	for _, rec := range records {
+		if rec.Status == status && rec.Reason == reason {
+			got++
+		}
+	}
+	require.Equal(t, want, got, "status=%s reason=%s records=%+v", status, reason, records)
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path) // #nosec G304 -- tests read paths created under t.TempDir().
+	require.NoError(t, err)
+	return data
+}
+
 func requireErrorData(t *testing.T, stdout string) testErrorData {
 	t.Helper()
 	record := requireRecord(t, stdout, output.TypeError, "")
@@ -1165,6 +1587,7 @@ type reflowMemoryProvider struct {
 	putCalls            []string
 	conditionalPutCalls []string
 	ifAbsentErr         error
+	ignoreIfAbsent      bool
 	failSidecars        bool
 }
 
@@ -1280,7 +1703,7 @@ func (p *reflowMemoryProvider) PutObjectConditional(_ context.Context, key strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.conditionalPutCalls = append(p.conditionalPutCalls, key)
-	if _, ok := p.objects[key]; ok {
+	if _, ok := p.objects[key]; ok && !p.ignoreIfAbsent {
 		err := p.ifAbsentErr
 		if err == nil {
 			err = provider.ErrAlreadyExists
