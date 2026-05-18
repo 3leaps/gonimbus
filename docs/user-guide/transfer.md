@@ -401,6 +401,143 @@ gonimbus transfer reflow --stdin \
   < probe-output.jsonl
 ```
 
+### Hive-Style Partition Layouts
+
+Operators emitting into downstream-discoverable data trees for tools such as
+Spark, Trino, Glue crawlers, or Iceberg often want Hive-style partition segments
+such as `year=2026/month=01/day=12`. Gonimbus does not need a dedicated
+partition-style flag for this: compose
+`content probe` [`extract`](streaming.md#probe-configuration) rules, optional
+[`derived`](streaming.md#derived-variables) transforms, and mixed
+literal-variable rewrite segments from [Template Variables](#template-variables).
+
+Suppose a source object at `s3://<bucket>/<source-prefix>/record-001.xml`
+contains:
+
+```xml
+<record>
+  <business_date>20260112</business_date>
+  <subject_id>00042</subject_id>
+  <body>...</body>
+</record>
+```
+
+Use one probe recipe for both positional and Hive-style destination layouts:
+
+```yaml
+# recipe.yaml
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath: "//business_date"
+    required: true
+  - name: subject_id
+    type: xml_xpath
+    xpath: "//subject_id"
+    required: true
+
+derived:
+  - name: year
+    from: business_date
+    transform: substring
+    args: { start: 0, end: 4 }
+  - name: month
+    from: business_date
+    transform: substring
+    args: { start: 4, end: 6 }
+  - name: day
+    from: business_date
+    transform: substring
+    args: { start: 6, end: 8 }
+```
+
+`xml_xpath` extractors accept the bare-element-name form (`//business_date`).
+Deeper paths such as `//header/business_date` and XPath function calls such as
+`/text()` are out of scope for the current extractor.
+
+Each example below uses the same two-step pipeline: `content probe
+--emit reflow-input` resolves source URIs into JSONL records carrying the
+extracted and derived `vars`, then `transfer reflow --stdin` renders destination
+keys with the operator-chosen `--rewrite-to` template. This split is
+intentional: operators can cache probe output, parallelize stages, or re-emit
+the same probed records with a different template without re-probing.
+
+Example A uses positional rendering:
+
+```bash
+gonimbus content probe \
+    --config recipe.yaml \
+    --emit reflow-input \
+    s3://<bucket>/<source-prefix>/ \
+  | gonimbus transfer reflow --stdin \
+    --dest s3://<bucket>/<dest-prefix>/ \
+    --rewrite-to '{year}/{month}/{day}/{subject_id}/{file}'
+```
+
+It renders:
+
+```text
+s3://<bucket>/<dest-prefix>/2026/01/12/00042/record-001.xml
+```
+
+Example B uses Hive-style rendering. The recipe and probe stage are unchanged;
+only the `--rewrite-to` template differs:
+
+```bash
+gonimbus content probe \
+    --config recipe.yaml \
+    --emit reflow-input \
+    s3://<bucket>/<source-prefix>/ \
+  | gonimbus transfer reflow --stdin \
+    --dest s3://<bucket>/<dest-prefix>/ \
+    --rewrite-to 'year={year}/month={month}/day={day}/subject={subject_id}/{file}'
+```
+
+It renders:
+
+```text
+s3://<bucket>/<dest-prefix>/year=2026/month=01/day=12/subject=00042/record-001.xml
+```
+
+The same recipe and the same probe invocation produce both renderings. Operators
+choose positional or Hive-style output in the `transfer reflow` template, not in
+the probe recipe.
+
+`derived.substring` is a positional slice over a string, so the input's
+zero-padded shape is preserved in the output. In the example above,
+`business_date: "20260112"` yields `month: "01"` and `day: "12"` without an
+extra `pad` transform, and `subject_id: "00042"` renders unchanged. Use
+`derived.pad` only when the source value is short and needs padding added.
+
+Two concerns stay separate:
+
+- **Which dimensions appear**: the operator or orchestration layer decides which
+  path-captured vars and content-probed vars should participate.
+- **How dimensions render**: the `--rewrite-to` template decides whether those
+  vars render positionally (`2026/01/12`) or as Hive-style segments
+  (`year=2026/month=01/day=12`).
+
+Gonimbus deliberately does not auto-promote every extracted variable into a
+partition dimension. Omit any extracted or derived variable from `--rewrite-to`
+when it should remain available for audit but not appear in the destination key.
+
+This section does not add or imply these deferred capabilities:
+
+- **Auto-Hive-emission flag**: there is no `--hive-partition` flag that wraps
+  every extracted token as `<name>={<name>}`. Write the template explicitly when
+  a real pipeline needs Hive-style output.
+- **Dimension-name aliases**: reuse extracted and derived names directly in the
+  template. If recipes routinely grow large enough that aliasing matters, file a
+  follow-on brief with that operator need.
+- **Partition-character validation**: Gonimbus does not currently reject
+  extracted values containing characters such as `/`, `=`, `?`, `#`, or `%`.
+  If a downstream partition-discovery tool needs a specific reserved set, file a
+  follow-on brief grounded in that tool's rule.
+- **Type-aware formatting or int conversion**: the current closed transform set
+  covers `substring`, `regex_capture`, `format`, `pad`, `lowercase`, and
+  `uppercase`. If a real consumer needs integer conversion, file a follow-on
+  brief for that transform.
+
 ### Destination Providers
 
 Reflow supports multiple destination types:
