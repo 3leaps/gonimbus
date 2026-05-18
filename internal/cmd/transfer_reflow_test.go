@@ -189,6 +189,33 @@ func TestTransferReflowCommand_ProvenanceMirroredRootS3WritesUnderRootPrefix(t *
 	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
 }
 
+func TestTransferReflowCommand_ProvenanceMirroredRootUsesMixedSegmentRenderedKey(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("tenant-a/2026-01-15/subj-9/file.xml", "payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLineNoDestRel("tenant-a/2026-01-15/subj-9/file.xml", "src-etag", int64(len("payload"))),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{tenant}/{partition}/{subject}/{file}",
+		"--rewrite-to", "tenant={tenant}/partition={partition}/{subject}/{file}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+		"--provenance-sidecar-root", "s3://dest-bucket/runs/run-001/sidecars/",
+	)
+	require.NoError(t, err)
+
+	renderedKey := "tenant=tenant-a/partition=2026-01-15/subj-9/file.xml"
+	require.True(t, dst.hasObject("data/"+renderedKey))
+	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/"+renderedKey+".gnb.json")
+	require.Equal(t, "landed", sidecar["action"])
+
+	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	require.Contains(t, string(complete.Data), `"dest_key":"data/`+renderedKey+`"`)
+	require.Contains(t, string(complete.Data), `"key":"runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
+	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
+}
+
 func TestTransferReflowCommand_ProvenanceDuplicateSkipOverwritesSidecar(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
@@ -208,6 +235,36 @@ func TestTransferReflowCommand_ProvenanceDuplicateSkipOverwritesSidecar(t *testi
 	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
 	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
 	require.Contains(t, string(skipped.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":`)
+}
+
+func TestTransferReflowCommand_ProvenanceMirroredRootDuplicateSkipOverwritesSidecar(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.putFixture("data/source/file.xml", "payload", "same-etag", time.Time{})
+	dst.putFixture("runs/run-001/sidecars/source/file.xml.gnb.json", `{"action":"old"}`, "old-sidecar", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "same-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+		"--provenance-sidecar-root", "s3://dest-bucket/runs/run-001/sidecars/",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"data/source/file.xml"}, dst.headCallsSnapshot())
+	require.Equal(t, []string{"runs/run-001/sidecars/source/file.xml.gnb.json"}, dst.putCallsSnapshot())
+
+	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/source/file.xml.gnb.json")
+	require.Equal(t, "skipped.duplicate", sidecar["action"])
+	require.Contains(t, string(dst.mustObject("runs/run-001/sidecars/source/file.xml.gnb.json")), `"etag":"same-etag"`)
+
+	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
+	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
+	require.Contains(t, string(skipped.Data), `"key":"runs/run-001/sidecars/source/file.xml.gnb.json"`)
+	require.Contains(t, string(skipped.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
 }
 
 func TestTransferReflowCommand_ProvenanceQuarantineWritesSidecarUnderPrefix(t *testing.T) {
@@ -966,6 +1023,32 @@ func reflowInputLine(key string, etag string, size int64, routingClass string, q
 	}
 	if quarantinePrefix != "" {
 		data["quarantine_prefix"] = quarantinePrefix
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
+
+func reflowInputLineNoDestRel(key string, etag string, size int64) string {
+	data := map[string]any{
+		"source_uri":           "s3://source-bucket/" + key,
+		"source_key":           key,
+		"source_etag":          etag,
+		"source_size_bytes":    size,
+		"source_last_modified": "2026-01-15T20:53:44Z",
+		"probe": map[string]any{
+			"extractors": []map[string]any{{
+				"name":                "key",
+				"type":                "regex",
+				"resolved":            true,
+				"required":            true,
+				"bytes_at_resolution": int64(64),
+			}},
+			"bytes_read":         int64(64),
+			"termination_reason": "all_required_resolved",
+		},
 	}
 	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
 	if err != nil {
