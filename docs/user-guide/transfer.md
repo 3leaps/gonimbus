@@ -446,14 +446,11 @@ Collision records include a nested `collision` object when a collision was actua
     "dest_etag_observed": "60eda685...",
     "dest_size_observed": 3729736,
     "decision_path": "ifabsent_then_head"
-  },
-  "collision_kind": "duplicate",
-  "collision_etag": "60eda685...",
-  "collision_size_bytes": 3729736
+  }
 }
 ```
 
-The nested `collision` field is omitted on the no-collision happy path. During the Phase A migration window, records dual-emit the legacy flat fields (`collision_kind`, `collision_etag`, `collision_size_bytes`) alongside the nested object with identical values. Later Phase B releases will remove the flat fields; audit tools that span historical and post-Phase-B logs should accept both shapes.
+The nested `collision` field is omitted on the no-collision happy path. Older audit logs from the GON-020 Phase A migration window may also include legacy flat collision fields; current GON-026 Phase B output uses only the nested object.
 
 `decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, and `quarantine_routed`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
 

@@ -60,22 +60,6 @@
     "collision": {
       "$ref": "#/$defs/collision"
     },
-    "collision_kind": {
-      "type": "string",
-      "deprecated": true,
-      "description": "Deprecated Phase A compatibility field. Use collision.kind."
-    },
-    "collision_etag": {
-      "type": "string",
-      "deprecated": true,
-      "description": "Deprecated Phase A compatibility field. Use collision.dest_etag_observed."
-    },
-    "collision_size_bytes": {
-      "type": "integer",
-      "minimum": 0,
-      "deprecated": true,
-      "description": "Deprecated Phase A compatibility field. Use collision.dest_size_observed."
-    },
     "provenance": {
       "type": "object",
       "required": [

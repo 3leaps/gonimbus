@@ -182,22 +182,19 @@ type reflowTask struct {
 }
 
 type reflowRecord struct {
-	SourceURI     string         `json:"source_uri"`
-	SourceKey     string         `json:"source_key"`
-	SourceETag    string         `json:"source_etag,omitempty"`
-	SourceSize    int64          `json:"source_size_bytes,omitempty"`
-	DestURI       string         `json:"dest_uri"`
-	DestKey       string         `json:"dest_key"`
-	Bytes         int64          `json:"bytes,omitempty"`
-	Status        string         `json:"status"`
-	Reason        string         `json:"reason,omitempty"`
-	RoutingClass  string         `json:"routing_class,omitempty"`
-	CollisionKind string         `json:"collision_kind,omitempty"`
-	CollisionETag string         `json:"collision_etag,omitempty"`
-	CollisionSize *int64         `json:"collision_size_bytes,omitempty"`
-	Collision     *collisionInfo `json:"collision,omitempty"`
-	Provenance    *provenanceRef `json:"provenance,omitempty"`
-	Details       map[string]any `json:"details,omitempty"`
+	SourceURI    string         `json:"source_uri"`
+	SourceKey    string         `json:"source_key"`
+	SourceETag   string         `json:"source_etag,omitempty"`
+	SourceSize   int64          `json:"source_size_bytes,omitempty"`
+	DestURI      string         `json:"dest_uri"`
+	DestKey      string         `json:"dest_key"`
+	Bytes        int64          `json:"bytes,omitempty"`
+	Status       string         `json:"status"`
+	Reason       string         `json:"reason,omitempty"`
+	RoutingClass string         `json:"routing_class,omitempty"`
+	Collision    *collisionInfo `json:"collision,omitempty"`
+	Provenance   *provenanceRef `json:"provenance,omitempty"`
+	Details      map[string]any `json:"details,omitempty"`
 }
 
 type reflowRunRecord struct {
@@ -278,9 +275,6 @@ func recordWithCollision(rec reflowRecord, collision *collisionInfo) reflowRecor
 		return rec
 	}
 	rec.Collision = collision
-	rec.CollisionKind = collision.Kind
-	rec.CollisionETag = collision.DestETagObserved
-	rec.CollisionSize = collision.DestSizeObserved
 	return rec
 }
 
@@ -429,17 +423,6 @@ func validateCollisionConfig(cfg collisionConfig) error {
 		}
 	}
 	return nil
-}
-
-func emitCollisionFlatFieldDeprecationBanner() {
-	if observability.CLILogger == nil {
-		return
-	}
-	observability.CLILogger.Warn("Reflow collision flat fields are deprecated; use data.collision",
-		zap.String("phase", "phase_a"),
-		zap.Strings("deprecated_fields", []string{"collision_kind", "collision_etag", "collision_size_bytes"}),
-		zap.String("replacement", "collision"),
-	)
 }
 
 func resolveProvenanceConfig(cmd *cobra.Command, dest *reflowDestSpec) (provenanceConfig, error) {
@@ -837,7 +820,6 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	if collCfg.DeprecatedLog {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: --on-collision=log is deprecated; use --on-collision=skip-if-duplicate")
 	}
-	emitCollisionFlatFieldDeprecationBanner()
 	if collCfg.Mode == reflowCollisionOver && !reflowOverwrite {
 		return exitError(foundry.ExitInvalidArgument, "Overwrite not enabled", fmt.Errorf("--on-collision=overwrite requires --overwrite"))
 	}

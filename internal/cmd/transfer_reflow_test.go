@@ -333,10 +333,9 @@ func TestTransferReflowCommand_CollisionHappyPathUsesIfAbsentWithoutHead(t *test
 
 	complete := requireReflowData(t, stdout, "complete")
 	require.Nil(t, complete.Collision)
-	require.Empty(t, complete.CollisionKind)
 }
 
-func TestTransferReflowCommand_CollisionSkipDuplicateDualEmits(t *testing.T) {
+func TestTransferReflowCommand_CollisionSkipDuplicateEmitsNestedCollision(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
 	dst := newReflowMemoryProvider()
@@ -349,7 +348,8 @@ func TestTransferReflowCommand_CollisionSkipDuplicateDualEmits(t *testing.T) {
 
 	skipped := requireReflowData(t, stdout, "skipped")
 	require.Equal(t, "collision.duplicate", skipped.Reason)
-	requireCollisionEqualFlat(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
+	requireNoLegacyCollisionKeys(t, requireRecord(t, stdout, reflowRecordType, "skipped").Data)
 }
 
 func TestTransferReflowCommand_CollisionZeroByteDuplicatePreservesObservedSize(t *testing.T) {
@@ -362,10 +362,10 @@ func TestTransferReflowCommand_CollisionZeroByteDuplicatePreservesObservedSize(t
 	require.NoError(t, err)
 
 	skipped := requireReflowData(t, stdout, "skipped")
-	requireCollisionEqualFlat(t, skipped, collisionDuplicate, decisionIfAbsentHead, "empty-etag", 0)
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "empty-etag", 0)
 	record := requireRecord(t, stdout, reflowRecordType, "skipped")
-	require.Contains(t, string(record.Data), `"collision_size_bytes":0`)
 	require.Contains(t, string(record.Data), `"dest_size_observed":0`)
+	requireNoLegacyCollisionKeys(t, record.Data)
 }
 
 func TestTransferReflowCommand_CollisionQuarantineSkipsDuplicate(t *testing.T) {
@@ -380,7 +380,7 @@ func TestTransferReflowCommand_CollisionQuarantineSkipsDuplicate(t *testing.T) {
 
 	skipped := requireReflowData(t, stdout, "skipped")
 	require.Equal(t, "collision.duplicate", skipped.Reason)
-	requireCollisionEqualFlat(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
 }
 
 func TestTransferReflowCommand_CollisionUsesPreconditionFailedHelper(t *testing.T) {
@@ -394,7 +394,7 @@ func TestTransferReflowCommand_CollisionUsesPreconditionFailedHelper(t *testing.
 	require.NoError(t, err)
 
 	skipped := requireReflowData(t, stdout, "skipped")
-	requireCollisionEqualFlat(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
 }
 
 func TestTransferReflowCommand_CollisionFailDuplicateIsFailure(t *testing.T) {
@@ -409,7 +409,7 @@ func TestTransferReflowCommand_CollisionFailDuplicateIsFailure(t *testing.T) {
 
 	failed := requireReflowData(t, stdout, "failed")
 	require.Equal(t, "collision.exists.duplicate", failed.Reason)
-	requireCollisionEqualFlat(t, failed, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
+	requireCollisionEqual(t, failed, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
 	requireRecord(t, stdout, output.TypeError, "")
 }
 
@@ -425,7 +425,7 @@ func TestTransferReflowCommand_CollisionSkipConflictFails(t *testing.T) {
 
 	failed := requireReflowData(t, stdout, "failed")
 	require.Equal(t, "collision.conflict", failed.Reason)
-	requireCollisionEqualFlat(t, failed, collisionConflict, decisionIfAbsentHead, "dest-etag", int64(len("old payload")))
+	requireCollisionEqual(t, failed, collisionConflict, decisionIfAbsentHead, "dest-etag", int64(len("old payload")))
 	errRecord := requireErrorData(t, stdout)
 	require.NotNil(t, errRecord.Collision)
 	require.Equal(t, collisionConflict, errRecord.Collision.Kind)
@@ -457,7 +457,7 @@ func TestTransferReflowCommand_CollisionQuarantineRoutesConflictAndSidecar(t *te
 	quarantined := requireReflowData(t, stdout, "quarantined")
 	require.Equal(t, "collision.conflict.quarantined", quarantined.Reason)
 	require.Equal(t, "quarantine", quarantined.RoutingClass)
-	requireCollisionEqualFlat(t, quarantined, collisionQuarantined, decisionQuarantine, "dest-etag", int64(len("old payload")))
+	requireCollisionEqual(t, quarantined, collisionQuarantined, decisionQuarantine, "dest-etag", int64(len("old payload")))
 	require.Contains(t, string(quarantined.Provenance.Key), "_conflict/source/file.xml.gnb.json")
 
 	sidecar := readSidecar(t, dst, "_conflict/source/file.xml.gnb.json")
@@ -467,7 +467,7 @@ func TestTransferReflowCommand_CollisionQuarantineRoutesConflictAndSidecar(t *te
 	require.Equal(t, decisionQuarantine, collision["decision_path"])
 }
 
-func TestTransferReflowCommand_CollisionOverwriteDualEmits(t *testing.T) {
+func TestTransferReflowCommand_CollisionOverwriteEmitsNestedCollision(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
 	dst := newReflowMemoryProvider()
@@ -478,7 +478,7 @@ func TestTransferReflowCommand_CollisionOverwriteDualEmits(t *testing.T) {
 	require.Equal(t, "new payload", string(dst.mustObject("source/file.xml")))
 
 	complete := requireReflowData(t, stdout, "complete")
-	requireCollisionEqualFlat(t, complete, collisionConflict, decisionOverwrite, "dest-etag", int64(len("old payload")))
+	requireCollisionEqual(t, complete, collisionConflict, decisionOverwrite, "dest-etag", int64(len("old payload")))
 }
 
 func TestTransferReflowCommand_CollisionLogAliasWarns(t *testing.T) {
@@ -1063,21 +1063,18 @@ type testRecordEnvelope struct {
 }
 
 type testReflowData struct {
-	SourceURI     string         `json:"source_uri"`
-	SourceKey     string         `json:"source_key"`
-	SourceETag    string         `json:"source_etag"`
-	SourceSize    int64          `json:"source_size_bytes"`
-	DestURI       string         `json:"dest_uri"`
-	DestKey       string         `json:"dest_key"`
-	Bytes         int64          `json:"bytes"`
-	Status        string         `json:"status"`
-	Reason        string         `json:"reason"`
-	RoutingClass  string         `json:"routing_class"`
-	CollisionKind string         `json:"collision_kind"`
-	CollisionETag string         `json:"collision_etag"`
-	CollisionSize *int64         `json:"collision_size_bytes"`
-	Collision     *collisionInfo `json:"collision"`
-	Provenance    *provenanceRef `json:"provenance"`
+	SourceURI    string         `json:"source_uri"`
+	SourceKey    string         `json:"source_key"`
+	SourceETag   string         `json:"source_etag"`
+	SourceSize   int64          `json:"source_size_bytes"`
+	DestURI      string         `json:"dest_uri"`
+	DestKey      string         `json:"dest_key"`
+	Bytes        int64          `json:"bytes"`
+	Status       string         `json:"status"`
+	Reason       string         `json:"reason"`
+	RoutingClass string         `json:"routing_class"`
+	Collision    *collisionInfo `json:"collision"`
+	Provenance   *provenanceRef `json:"provenance"`
 }
 
 type testErrorData struct {
@@ -1130,7 +1127,7 @@ func requireErrorData(t *testing.T, stdout string) testErrorData {
 	return data
 }
 
-func requireCollisionEqualFlat(t *testing.T, data testReflowData, kind string, decisionPath string, etag string, size int64) {
+func requireCollisionEqual(t *testing.T, data testReflowData, kind string, decisionPath string, etag string, size int64) {
 	t.Helper()
 	require.NotNil(t, data.Collision)
 	require.Equal(t, kind, data.Collision.Kind)
@@ -1138,10 +1135,18 @@ func requireCollisionEqualFlat(t *testing.T, data testReflowData, kind string, d
 	require.Equal(t, etag, data.Collision.DestETagObserved)
 	require.NotNil(t, data.Collision.DestSizeObserved)
 	require.Equal(t, size, *data.Collision.DestSizeObserved)
-	require.Equal(t, data.Collision.Kind, data.CollisionKind)
-	require.Equal(t, data.Collision.DestETagObserved, data.CollisionETag)
-	require.NotNil(t, data.CollisionSize)
-	require.Equal(t, *data.Collision.DestSizeObserved, *data.CollisionSize)
+}
+
+func requireNoLegacyCollisionKeys(t *testing.T, data json.RawMessage) {
+	t.Helper()
+	raw := string(data)
+	for _, key := range []string{
+		"collision_" + "kind",
+		"collision_" + "etag",
+		"collision_" + "size_bytes",
+	} {
+		require.NotContains(t, raw, `"`+key+`"`)
+	}
 }
 
 func readSidecar(t *testing.T, p *reflowMemoryProvider, key string) map[string]any {
