@@ -112,7 +112,7 @@
         "from": {
           "type": "string",
           "minLength": 1,
-          "description": "Must reference an extract[].name entry. Derived-to-derived chaining is not supported."
+          "description": "Must reference an extract[].name entry or a rewriteFrom capture supplied by content probe --rewrite-from. Derived-to-derived chaining is not supported."
         },
         "transform": {
           "type": "string",
@@ -122,7 +122,8 @@
             "format",
             "pad",
             "lowercase",
-            "uppercase"
+            "uppercase",
+            "lookup"
           ]
         },
         "args": {
@@ -271,6 +272,63 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1024
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transform": {
+                "const": "lookup"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "match_mode",
+                  "table"
+                ],
+                "properties": {
+                  "match_mode": {
+                    "type": "string",
+                    "enum": [
+                      "regex",
+                      "prefix",
+                      "exact"
+                    ]
+                  },
+                  "table": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "match",
+                        "value"
+                      ],
+                      "properties": {
+                        "match": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "default": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 }
               }

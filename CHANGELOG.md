@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `regex_capture`, `format`, `pad`, `lowercase`, `uppercase`) and let
   `transfer reflow` render one placeholder with literal prefix/suffix in a
   path segment, such as `year={year}`.
+- **Probe lookup derived variables** add a `lookup` transform with `regex`,
+  `prefix`, and `exact` match modes, plus `content probe --rewrite-from` so
+  probe recipes can derive values from source-key captures before
+  `transfer reflow` renders destination keys.
 - **Mirrored provenance sidecar placement** adds
   `--provenance-sidecar-root` for `transfer reflow`, allowing sidecars to be
   written under a separate same-bucket root while preserving the sibling

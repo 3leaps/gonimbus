@@ -317,6 +317,11 @@ placeholder with a literal prefix and/or suffix. This supports segments such
 as `year={year}` and `prefix-{token}-suffix`. A segment may contain only one
 placeholder; templates such as `{a}-{b}` remain unsupported.
 
+When a probe recipe derives values from path captures, pass the same
+`--rewrite-from` template to `content probe` and `transfer reflow`.
+`content probe --rewrite-from` applies to the parsed source key, not the full
+URI, and seeds captures such as `{file}` before `derived` evaluation.
+
 ### Path-Based Reflow
 
 Extract variables directly from source path structure:
@@ -349,7 +354,9 @@ EOF
 # 2. List and probe objects
 gonimbus inspect 's3://source/prefix/' --json | \
   jq -r 'select(.key?) | "s3://source/" + .key' | \
-  gonimbus content probe --stdin --config probe.yaml --emit reflow-input \
+  gonimbus content probe --stdin --config probe.yaml \
+  --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \
+  --emit reflow-input \
   > probe-output.jsonl
 
 # 3. Reflow using extracted business_date
@@ -399,6 +406,33 @@ gonimbus transfer reflow --stdin \
   --rewrite-from 'prefix/{subject}/{file}' \
   --rewrite-to 'year={year}/month={month}/day={day}/subject={subject_lower}/{file}' \
   < probe-output.jsonl
+```
+
+`lookup` can classify a path-captured basename in the same recipe:
+
+```yaml
+derived:
+  - name: category
+    from: file
+    transform: lookup
+    args:
+      match_mode: prefix
+      table:
+        - { match: "RecordTypeAlpha", value: "category_alpha" }
+        - { match: "RecordTypeBeta", value: "category_alpha" }
+        - { match: "RecordTypeGamma", value: "category_beta" }
+      default: "category_unclassified"
+```
+
+```bash
+gonimbus content probe --stdin \
+  --config probe.yaml \
+  --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \
+  --emit reflow-input < uris.txt |
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/classified/' \
+  --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \
+  --rewrite-to '{category}/{business_date}/{store}/{file}'
 ```
 
 ### Hive-Style Partition Layouts
