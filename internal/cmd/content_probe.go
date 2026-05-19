@@ -25,6 +25,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -62,6 +63,10 @@ Read strategies:
 until_resolved supports xml_xpath and regex extractors in this release.
 json_path remains available in fixed_window mode and is rejected under
 until_resolved. on_missing supports fail and quarantine; fallback is deferred.
+
+Use --rewrite-from when derived fields reference source-key captures. The
+template is applied to the parsed object key, not the full URI, and its captures
+seed the variable map before content extraction and derived evaluation.
 `,
 	Args: validateContentProbeArgs,
 	RunE: runContentProbe,
@@ -76,6 +81,7 @@ var (
 	contentProbeRegion      string
 	contentProbeProfile     string
 	contentProbeEndpoint    string
+	contentProbeRewriteFrom string
 )
 
 func init() {
@@ -88,6 +94,7 @@ func init() {
 	contentProbeCmd.Flags().StringVarP(&contentProbeRegion, "region", "r", "", "AWS region")
 	contentProbeCmd.Flags().StringVarP(&contentProbeProfile, "profile", "p", "", "AWS profile")
 	contentProbeCmd.Flags().StringVar(&contentProbeEndpoint, "endpoint", "", "Custom S3 endpoint")
+	contentProbeCmd.Flags().StringVar(&contentProbeRewriteFrom, "rewrite-from", "", "Rewrite source template used to seed path captures before derived evaluation")
 	_ = contentProbeCmd.MarkFlagRequired("config")
 }
 
@@ -151,7 +158,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --emit value", fmt.Errorf("emit must be one of: probe, reflow-input, both"))
 	}
 
-	cfgBytes, err := os.ReadFile(contentProbeConfigPath)
+	cfgBytes, err := os.ReadFile(contentProbeConfigPath) // #nosec G304 -- operator-supplied probe config path is the CLI input being read.
 	if err != nil {
 		return exitError(foundry.ExitFileReadError, "Failed to read probe config", err)
 	}
@@ -159,7 +166,15 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid probe config", err)
 	}
-	prober, err := probe.New(*probeCfg)
+	rewriteCapture, err := compileContentProbeRewriteCapture(contentProbeRewriteFrom)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --rewrite-from value", err)
+	}
+	var rewriteCaptureNames []string
+	if rewriteCapture != nil {
+		rewriteCaptureNames = rewriteCapture.CaptureNames()
+	}
+	prober, err := newContentProbeProber(probeCfg, rewriteCaptureNames)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid probe config", err)
 	}
@@ -247,7 +262,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 					continue
 				}
 
-				result, err := runContentProbeTask(ctx, prov, task, prober, probeCfg)
+				result, err := runContentProbeTask(ctx, prov, task, prober, probeCfg, rewriteCapture)
 				if err != nil {
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe read failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
@@ -329,6 +344,25 @@ func validateContentProbeBytes(n int64) error {
 	return nil
 }
 
+func compileContentProbeRewriteCapture(raw string) (*transfer.ReflowCapture, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	return transfer.CompileReflowCapture(raw)
+}
+
+func contentProbeInitialVars(task probeTask, rewriteCapture *transfer.ReflowCapture) (map[string]string, error) {
+	if rewriteCapture == nil {
+		return nil, nil
+	}
+	vars, err := rewriteCapture.Apply(task.Key)
+	if err != nil {
+		return nil, fmt.Errorf("rewriteFrom capture failed: %w", err)
+	}
+	return vars, nil
+}
+
 type contentProbeTaskResult struct {
 	vars             map[string]string
 	audit            *probe.ProbeAudit
@@ -340,16 +374,20 @@ type contentProbeTaskResult struct {
 	extractErr       error
 }
 
-func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task probeTask, prober *probe.Prober, cfg *probe.Config) (*contentProbeTaskResult, error) {
+func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task probeTask, prober *probe.Prober, cfg *probe.Config, rewriteCapture *transfer.ReflowCapture) (*contentProbeTaskResult, error) {
+	initialVars, err := contentProbeInitialVars(task, rewriteCapture)
+	if err != nil {
+		return &contentProbeTaskResult{meta: &provider.ObjectMeta{}, bytesRequested: contentProbeBytes, routingClass: "normal", extractErr: err}, nil
+	}
 	if cfg.ReadStrategy.Mode == probe.ReadStrategyUntilResolved {
-		return runContentProbeUntilResolved(ctx, prov, task.Key, prober, cfg)
+		return runContentProbeUntilResolved(ctx, prov, task.Key, prober, cfg, initialVars)
 	}
 
 	b, meta, err := content.HeadBytes(ctx, prov, task.Key, contentProbeBytes)
 	if err != nil {
 		return nil, err
 	}
-	res, err := prober.ProbeDetailed(b, int64(len(b)), probe.TerminationAllRequiredResolved)
+	res, err := prober.ProbeDetailedWithVars(b, int64(len(b)), probe.TerminationAllRequiredResolved, initialVars)
 	if err != nil {
 		return &contentProbeTaskResult{meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), extractErr: err}, nil
 	}
@@ -363,7 +401,7 @@ func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task pr
 	return &contentProbeTaskResult{vars: res.Vars, audit: &res.Audit, meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), routingClass: routingClass, quarantinePrefix: quarantinePrefixForRouting(routingClass, cfg)}, nil
 }
 
-func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider, key string, prober *probe.Prober, cfg *probe.Config) (*contentProbeTaskResult, error) {
+func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider, key string, prober *probe.Prober, cfg *probe.Config, initialVars map[string]string) (*contentProbeTaskResult, error) {
 	ranger, ok := prov.(provider.ObjectRanger)
 	if !ok {
 		return nil, fmt.Errorf("provider does not support range reads")
@@ -413,7 +451,7 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		bytesRead += int64(len(chunk))
 		atReadLimit := bytesRead >= readLimit
 
-		res, err := prober.ProbeDetailedAllowIncomplete(buf, bytesRead, "", func(err error) bool {
+		res, err := prober.ProbeDetailedAllowIncompleteWithVars(buf, bytesRead, "", initialVars, func(err error) bool {
 			return !atReadLimit && isIncompleteProbeParseError(err)
 		})
 		if err != nil {
@@ -453,7 +491,7 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 	if bytesRead >= cfg.ReadStrategy.MaxBytesValue {
 		termination = probe.TerminationMaxBytesReached
 	}
-	res, err := prober.ProbeDetailed(buf, bytesRead, termination)
+	res, err := prober.ProbeDetailedWithVars(buf, bytesRead, termination, initialVars)
 	if err != nil {
 		if termination != probe.TerminationMaxBytesReached && termination != probe.TerminationParseError && isIncompleteProbeParseError(err) {
 			termination = probe.TerminationParseError
@@ -545,10 +583,11 @@ func loadProbeConfig(data []byte, path string) (*probe.Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 	return &cfg, nil
+}
+
+func newContentProbeProber(cfg *probe.Config, rewriteCaptureNames []string) (*probe.Prober, error) {
+	return probe.NewNormalizedWithRewriteCaptures(cfg, rewriteCaptureNames)
 }
 
 func readLines(r io.Reader) ([]string, error) {
