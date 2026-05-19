@@ -2,6 +2,10 @@
 
 The local index enables fast repeated queries against large buckets without re-enumerating via the provider API.
 
+For the operator mental model behind listing, ingest filtering, stored metadata,
+and what filtered indexes do not retain, see
+[Index Build Mental Model](index-build-mental-model.md).
+
 For recurring production builds, see
 [Steady-State Index Operations](steady-state-index-operations.md) for cadence,
 run-history, and soft-delete guidance.
