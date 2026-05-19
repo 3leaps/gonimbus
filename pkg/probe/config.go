@@ -24,6 +24,11 @@ const (
 	TransformPad          = "pad"
 	TransformLowercase    = "lowercase"
 	TransformUppercase    = "uppercase"
+	TransformLookup       = "lookup"
+
+	LookupMatchModeRegex  = "regex"
+	LookupMatchModePrefix = "prefix"
+	LookupMatchModeExact  = "exact"
 
 	MaxPadWidth = 1024
 )
@@ -72,6 +77,8 @@ type DerivedConfig struct {
 	Args      map[string]any `json:"args,omitempty" yaml:"args,omitempty"`
 	Required  *bool          `json:"required,omitempty" yaml:"required,omitempty"`
 	OnMissing string         `json:"on_missing,omitempty" yaml:"on_missing,omitempty"`
+
+	lookup *configuredLookup
 }
 
 func (d DerivedConfig) RequiredValue() bool {
@@ -82,6 +89,10 @@ func (d DerivedConfig) RequiredValue() bool {
 }
 
 func (c *Config) Validate() error {
+	return c.ValidateWithRewriteCaptures(nil)
+}
+
+func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 	c.ReadStrategy.Mode = strings.TrimSpace(strings.ToLower(c.ReadStrategy.Mode))
 	if c.ReadStrategy.Mode == "" {
 		c.ReadStrategy.Mode = ReadStrategyFixedWindow
@@ -120,6 +131,18 @@ func (c *Config) Validate() error {
 	needsQuarantine := false
 	extractNames := map[string]int{}
 	seen := map[string]string{}
+	rewriteCaptureNames := map[string]int{}
+	for i, capture := range rewriteCaptures {
+		name := strings.TrimSpace(capture)
+		if name == "" || name == "_" {
+			continue
+		}
+		if _, ok := rewriteCaptureNames[name]; ok {
+			continue
+		}
+		rewriteCaptureNames[name] = i
+		seen[name] = "rewriteFrom capture"
+	}
 	allDerivedNames := map[string]int{}
 	for i := range c.Derived {
 		name := strings.TrimSpace(c.Derived[i].Name)
@@ -141,6 +164,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("extract[%d].name is required", i)
 		}
 		if previous, ok := seen[e.Name]; ok {
+			if previous == "rewriteFrom capture" {
+				return fmt.Errorf("name %q conflicts between extract[%d] and rewriteFrom capture", e.Name, i)
+			}
 			if strings.HasPrefix(previous, "derived") {
 				return fmt.Errorf("extract[%d].name %q conflicts with %s", i, e.Name, previous)
 			}
@@ -208,6 +234,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("derived[%d].name is required", i)
 		}
 		if previous, ok := seen[d.Name]; ok {
+			if previous == "rewriteFrom capture" {
+				return fmt.Errorf("name %q conflicts between derived[%d] and rewriteFrom capture", d.Name, i)
+			}
 			return fmt.Errorf("derived[%d].name %q conflicts with %s", i, d.Name, previous)
 		}
 		seen[d.Name] = fmt.Sprintf("derived[%d]", i)
@@ -216,15 +245,20 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("derived[%d].from is required", i)
 		}
 		if j, ok := allDerivedNames[d.From]; ok {
-			return fmt.Errorf("derived[%d].from = %q references derived[%d]; chaining is not supported; available source names: %s", i, d.From, j, formatAvailableNames(extractNames))
+			return fmt.Errorf("derived[%d].from = %q references derived[%d]; chaining is not supported; available source names: %s", i, d.From, j, formatAvailableNames(mergeAvailableNames(extractNames, rewriteCaptureNames)))
 		}
 		if _, ok := extractNames[d.From]; !ok {
-			return fmt.Errorf("derived[%d].from = %q is unknown; available source names: %s", i, d.From, formatAvailableNames(extractNames))
+			if _, ok := rewriteCaptureNames[d.From]; !ok {
+				return fmt.Errorf("derived[%d].from = %q is unknown; available source names: %s", i, d.From, formatAvailableNames(mergeAvailableNames(extractNames, rewriteCaptureNames)))
+			}
 		}
 
-		if err := validateDerivedTransform(i, d); err != nil {
+		lookup, err := validateDerivedTransform(i, d)
+		if err != nil {
 			return err
 		}
+		d.lookup = lookup
+		c.Derived[i] = d
 
 		switch d.OnMissing {
 		case "", OnMissingFail:

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestRunContentProbeUntilResolvedReadsMonotonicRanges(t *testing.T) {
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeUntilResolved(context.Background(), prov, "deep.xml", p, cfg)
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "deep.xml", p, cfg, nil)
 
 	require.NoError(t, err)
 	require.Nil(t, got.extractErr)
@@ -54,7 +55,7 @@ func TestRunContentProbeUntilResolvedTracksFirstResolutionBytes(t *testing.T) {
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeUntilResolved(context.Background(), prov, "multi.xml", p, cfg)
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "multi.xml", p, cfg, nil)
 
 	require.NoError(t, err)
 	require.Nil(t, got.extractErr)
@@ -79,7 +80,7 @@ func TestRunContentProbeUntilResolvedMissingRequiredFail(t *testing.T) {
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeUntilResolved(context.Background(), prov, "missing.xml", p, cfg)
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "missing.xml", p, cfg, nil)
 
 	require.NoError(t, err)
 	require.Error(t, got.extractErr)
@@ -100,7 +101,7 @@ func TestRunContentProbeUntilResolvedMissingRequiredQuarantine(t *testing.T) {
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeUntilResolved(context.Background(), prov, "missing.xml", p, cfg)
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "missing.xml", p, cfg, nil)
 
 	require.NoError(t, err)
 	require.Nil(t, got.extractErr)
@@ -122,7 +123,7 @@ func TestRunContentProbeUntilResolvedTargetPastMaxBytesQuarantine(t *testing.T) 
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeUntilResolved(context.Background(), prov, "past-max.xml", p, cfg)
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "past-max.xml", p, cfg, nil)
 
 	require.NoError(t, err)
 	require.Nil(t, got.extractErr)
@@ -149,7 +150,7 @@ func TestContentProbeDerivedFailureErrorOutputRedactsRawValue(t *testing.T) {
 	p, err := probe.New(*cfg)
 	require.NoError(t, err)
 
-	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "bad-date.xml"}, p, cfg)
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "bad-date.xml"}, p, cfg, nil)
 	require.NoError(t, err)
 	require.Error(t, got.extractErr)
 	require.NotContains(t, got.extractErr.Error(), marker)
@@ -160,6 +161,148 @@ func TestContentProbeDerivedFailureErrorOutputRedactsRawValue(t *testing.T) {
 	require.NoError(t, w.Close())
 	require.NotContains(t, buf.String(), marker)
 	require.Contains(t, buf.String(), `derive \"date_iso\" from \"date\" using format failed`)
+}
+
+func TestContentProbeRewriteFromSeedsSourceKeyCaptures(t *testing.T) {
+	data := []byte(`<root/>`)
+	prov := newRangeProbeProvider("source/RecordTypeBeta20260218.xml", data)
+	cfg := &probe.Config{
+		Extract: []probe.ExtractorConfig{},
+		Derived: []probe.DerivedConfig{{
+			Name:      "category",
+			From:      "file",
+			Transform: probe.TransformLookup,
+			Args: map[string]any{
+				"match_mode": "prefix",
+				"table": []any{
+					map[string]any{"match": "RecordTypeAlpha", "value": "category_alpha"},
+					map[string]any{"match": "RecordTypeBeta", "value": "category_alpha"},
+				},
+			},
+		}},
+	}
+	capture, err := compileContentProbeRewriteCapture("source/{file}")
+	require.NoError(t, err)
+	p, err := probe.NewWithRewriteCaptures(*cfg, capture.CaptureNames())
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{
+		Key: "source/RecordTypeBeta20260218.xml",
+		URI: "s3://bucket/source/RecordTypeBeta20260218.xml",
+	}, p, cfg, capture)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "RecordTypeBeta20260218.xml", got.vars["file"])
+	require.Equal(t, "category_alpha", got.vars["category"])
+}
+
+func TestContentProbeUntilResolvedLoadedConfigUsesNormalizedRuntimeValuesWithRewriteFrom(t *testing.T) {
+	data := []byte(`<root><pad>` + strings.Repeat("x", 40) + `</pad><date>2026-05-15</date></root>`)
+	prov := newRangeProbeProvider("source/RecordTypeBeta20260218.xml", data)
+	cfg, err := loadProbeConfig([]byte(`
+read_strategy:
+  mode: until_resolved
+  max_bytes: "128"
+  chunk_bytes: "16"
+extract:
+  - name: date
+    type: xml_xpath
+    xpath: //date
+    required: true
+    on_missing: fail
+derived:
+  - name: category
+    from: file
+    transform: lookup
+    args:
+      match_mode: prefix
+      table:
+        - match: RecordTypeBeta
+          value: category_alpha
+`), "probe.yaml")
+	require.NoError(t, err)
+	capture, err := compileContentProbeRewriteCapture("source/{file}")
+	require.NoError(t, err)
+	p, err := newContentProbeProber(cfg, capture.CaptureNames())
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{
+		Key: "source/RecordTypeBeta20260218.xml",
+		URI: "s3://bucket/source/RecordTypeBeta20260218.xml",
+	}, p, cfg, capture)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, int64(128), cfg.ReadStrategy.MaxBytesValue)
+	require.Equal(t, int64(16), cfg.ReadStrategy.ChunkBytesValue)
+	require.Equal(t, "RecordTypeBeta20260218.xml", got.vars["file"])
+	require.Equal(t, "2026-05-15", got.vars["date"])
+	require.Equal(t, "category_alpha", got.vars["category"])
+	require.NotEmpty(t, prov.ranges)
+}
+
+func TestContentProbeJSONLInputUsesSourceKeyForRewriteCapture(t *testing.T) {
+	line := `{"type":"gonimbus.index.object.v1","data":{"base_uri":"s3://bucket/source/","key":"source/RecordTypeAlpha20260218.xml","size_bytes":12}}`
+	tasks := make(chan probeTask, 1)
+	var invalidCount atomic.Int64
+	var errorCount atomic.Int64
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+
+	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(string) (contentProbeProvider, error) {
+		t.Fatal("jsonl exact object input should not connect to provider")
+		return nil, nil
+	}, &invalidCount, &errorCount)
+	require.NoError(t, err)
+	close(tasks)
+	task := <-tasks
+
+	capture, err := compileContentProbeRewriteCapture("source/{file}")
+	require.NoError(t, err)
+	vars, err := contentProbeInitialVars(task, capture)
+	require.NoError(t, err)
+	require.Equal(t, "source/RecordTypeAlpha20260218.xml", task.Key)
+	require.Equal(t, "RecordTypeAlpha20260218.xml", vars["file"])
+	require.Zero(t, invalidCount.Load())
+	require.Zero(t, errorCount.Load())
+}
+
+func TestContentProbeLookupNoMatchErrorOutputRedactsRawValue(t *testing.T) {
+	const marker = "SENSITIVE-MARKER-7f9a2c"
+	data := []byte(`file=` + marker)
+	prov := newRangeProbeProvider("sensitive.xml", data)
+	cfg := &probe.Config{
+		Extract: []probe.ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=([^ ]+)`, Group: 1}},
+		Derived: []probe.DerivedConfig{{
+			Name:      "category",
+			From:      "file",
+			Transform: probe.TransformLookup,
+			Args: map[string]any{
+				"match_mode": "prefix",
+				"table": []any{
+					map[string]any{"match": "OtherPrefix", "value": "category_other"},
+				},
+			},
+			OnMissing: probe.OnMissingFail,
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "sensitive.xml"}, p, cfg, nil)
+	require.NoError(t, err)
+	require.Error(t, got.extractErr)
+	require.NotContains(t, got.extractErr.Error(), marker)
+
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+	require.NoError(t, emitContentProbeError(context.Background(), w, "sensitive.xml", "content probe extract failed", got.extractErr, map[string]any{"probe": got.audit}))
+	require.NoError(t, w.Close())
+	require.NotContains(t, buf.String(), marker)
+	require.Contains(t, buf.String(), `derive \"category\" from \"file\" using lookup failed`)
+	require.Contains(t, buf.String(), `match_mode=prefix`)
 }
 
 type rangeCall struct {

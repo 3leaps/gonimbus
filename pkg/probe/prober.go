@@ -52,10 +52,30 @@ type Result struct {
 }
 
 func New(cfg Config) (*Prober, error) {
-	if err := cfg.Validate(); err != nil {
+	return NewWithRewriteCaptures(cfg, nil)
+}
+
+func NewWithRewriteCaptures(cfg Config, rewriteCaptures []string) (*Prober, error) {
+	if err := cfg.ValidateWithRewriteCaptures(rewriteCaptures); err != nil {
 		return nil, err
 	}
+	return newValidatedProber(cfg)
+}
 
+// NewNormalizedWithRewriteCaptures validates cfg in place and builds a prober
+// from the normalized config. Callers that need config-derived runtime values
+// after construction, such as read_strategy byte limits, should use this form.
+func NewNormalizedWithRewriteCaptures(cfg *Config, rewriteCaptures []string) (*Prober, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("probe config is nil")
+	}
+	if err := cfg.ValidateWithRewriteCaptures(rewriteCaptures); err != nil {
+		return nil, err
+	}
+	return newValidatedProber(*cfg)
+}
+
+func newValidatedProber(cfg Config) (*Prober, error) {
 	extractors := make([]configuredExtractor, 0, len(cfg.Extract))
 	for _, e := range cfg.Extract {
 		var ex extractor
@@ -106,15 +126,28 @@ func (p *Prober) Probe(data []byte) (map[string]string, error) {
 }
 
 func (p *Prober) ProbeDetailed(data []byte, bytesRead int64, terminationReason string) (*Result, error) {
-	return p.probeDetailed(data, bytesRead, terminationReason, nil)
+	return p.ProbeDetailedWithVars(data, bytesRead, terminationReason, nil)
+}
+
+func (p *Prober) ProbeDetailedWithVars(data []byte, bytesRead int64, terminationReason string, initialVars map[string]string) (*Result, error) {
+	return p.probeDetailed(data, bytesRead, terminationReason, initialVars, nil)
 }
 
 func (p *Prober) ProbeDetailedAllowIncomplete(data []byte, bytesRead int64, terminationReason string, incomplete func(error) bool) (*Result, error) {
-	return p.probeDetailed(data, bytesRead, terminationReason, incomplete)
+	return p.ProbeDetailedAllowIncompleteWithVars(data, bytesRead, terminationReason, nil, incomplete)
 }
 
-func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason string, incomplete func(error) bool) (*Result, error) {
+func (p *Prober) ProbeDetailedAllowIncompleteWithVars(data []byte, bytesRead int64, terminationReason string, initialVars map[string]string, incomplete func(error) bool) (*Result, error) {
+	return p.probeDetailed(data, bytesRead, terminationReason, initialVars, incomplete)
+}
+
+func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason string, initialVars map[string]string, incomplete func(error) bool) (*Result, error) {
 	out := map[string]string{}
+	for k, v := range initialVars {
+		if strings.TrimSpace(v) != "" {
+			out[k] = strings.TrimSpace(v)
+		}
+	}
 	failures := map[string]error{}
 	audit := make([]ExtractorAudit, 0, len(p.extractors))
 	for _, entry := range p.extractors {

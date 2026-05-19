@@ -20,6 +20,12 @@ type ReflowRewrite struct {
 	to   []reflowPart
 }
 
+// ReflowCapture applies a rewrite-from template to a source key and returns
+// the captured variables without rendering a destination template.
+type ReflowCapture struct {
+	from []reflowPart
+}
+
 type reflowPart struct {
 	Lit    string
 	Prefix string
@@ -45,6 +51,65 @@ func CompileReflowRewrite(fromTemplate, toTemplate string) (*ReflowRewrite, erro
 	return &ReflowRewrite{from: from, to: to}, nil
 }
 
+func CompileReflowCapture(fromTemplate string) (*ReflowCapture, error) {
+	from, err := parseReflowTemplate(fromTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("parse from template: %w", err)
+	}
+	if len(from) == 0 {
+		return nil, fmt.Errorf("from template must not be empty")
+	}
+	return &ReflowCapture{from: from}, nil
+}
+
+func (r *ReflowCapture) CaptureNames() []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(r.from))
+	for _, p := range r.from {
+		if p.Var == "" || p.Var == "_" {
+			continue
+		}
+		if _, ok := seen[p.Var]; ok {
+			continue
+		}
+		seen[p.Var] = struct{}{}
+		out = append(out, p.Var)
+	}
+	return out
+}
+
+func (r *ReflowCapture) Apply(sourceKey string) (map[string]string, error) {
+	key := strings.Trim(sourceKey, "/")
+	if key == "" {
+		return nil, fmt.Errorf("empty source key")
+	}
+
+	srcSegs := splitKeySegments(key)
+	if len(srcSegs) != len(r.from) {
+		return nil, fmt.Errorf("source key %q does not match from template (segments=%d expected=%d)", sourceKey, len(srcSegs), len(r.from))
+	}
+
+	vars := map[string]string{}
+	for i, p := range r.from {
+		seg := srcSegs[i]
+		if p.Var == "" {
+			if seg != p.Lit {
+				return nil, fmt.Errorf("source key %q does not match from template at segment %d: got %q expected %q", sourceKey, i, seg, p.Lit)
+			}
+			continue
+		}
+		captured, ok := captureReflowSegment(seg, p)
+		if !ok {
+			return nil, fmt.Errorf("source key %q does not match from template at segment %d", sourceKey, i)
+		}
+		if p.Var == "_" {
+			continue
+		}
+		vars[p.Var] = captured
+	}
+	return vars, nil
+}
+
 func (r *ReflowRewrite) Apply(sourceKey string) (destRelKey string, vars map[string]string, err error) {
 	return r.ApplyWithVars(sourceKey, nil)
 }
@@ -53,33 +118,10 @@ func (r *ReflowRewrite) Apply(sourceKey string) (destRelKey string, vars map[str
 //
 // extraVars override captured variables when a key is present in both maps.
 func (r *ReflowRewrite) ApplyWithVars(sourceKey string, extraVars map[string]string) (destRelKey string, vars map[string]string, err error) {
-	key := strings.Trim(sourceKey, "/")
-	if key == "" {
-		return "", nil, fmt.Errorf("empty source key")
-	}
-
-	srcSegs := splitKeySegments(key)
-	if len(srcSegs) != len(r.from) {
-		return "", nil, fmt.Errorf("source key %q does not match from template (segments=%d expected=%d)", sourceKey, len(srcSegs), len(r.from))
-	}
-
-	vars = map[string]string{}
-	for i, p := range r.from {
-		seg := srcSegs[i]
-		if p.Var == "" {
-			if seg != p.Lit {
-				return "", nil, fmt.Errorf("source key %q does not match from template at segment %d: got %q expected %q", sourceKey, i, seg, p.Lit)
-			}
-			continue
-		}
-		captured, ok := captureReflowSegment(seg, p)
-		if !ok {
-			return "", nil, fmt.Errorf("source key %q does not match from template at segment %d", sourceKey, i)
-		}
-		if p.Var == "_" {
-			continue
-		}
-		vars[p.Var] = captured
+	capture := ReflowCapture{from: r.from}
+	vars, err = capture.Apply(sourceKey)
+	if err != nil {
+		return "", nil, err
 	}
 	for k, v := range extraVars {
 		vars[k] = v

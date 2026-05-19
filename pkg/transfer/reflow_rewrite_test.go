@@ -38,6 +38,22 @@ func TestReflowRewrite_MixedSegmentCapture(t *testing.T) {
 	require.Equal(t, "007", vars["store"])
 }
 
+func TestReflowCapture_ParityWithRewriteSourceKeyCaptures(t *testing.T) {
+	capture, err := CompileReflowCapture("source/vendor-{store}-site/{file}")
+	require.NoError(t, err)
+	require.Equal(t, []string{"store", "file"}, capture.CaptureNames())
+
+	captureVars, err := capture.Apply("source/vendor-007-site/RecordTypeAlpha20260218.xml")
+	require.NoError(t, err)
+
+	rewrite, err := CompileReflowRewrite("source/vendor-{store}-site/{file}", "dest/{store}/{file}")
+	require.NoError(t, err)
+	_, rewriteVars, err := rewrite.Apply("source/vendor-007-site/RecordTypeAlpha20260218.xml")
+	require.NoError(t, err)
+
+	require.Equal(t, rewriteVars, captureVars)
+}
+
 func TestReflowRewrite_MixedSegmentCaptureRejectsEmptyValue(t *testing.T) {
 	r, err := CompileReflowRewrite("source/vendor-{store}-site/{file}", "stores/{store}/{file}")
 	require.NoError(t, err)

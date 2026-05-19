@@ -405,12 +405,13 @@ derived:
     args: { input_layout: "2006-01-02", output_layout: "20060102" }
 ```
 
-The initial transform set is closed: `substring`, `regex_capture`, `format`,
-`pad`, `lowercase`, and `uppercase`. `derived.from` must reference an
-`extract[].name`; chained derivations are rejected. Derived fields default to
-`required: true` and support the same `on_missing: fail|quarantine` policy as
-extractors. Derivation failure messages do not include the raw extracted value
-by default because those messages are durable JSONL diagnostics.
+The transform set is closed: `substring`, `regex_capture`, `format`, `pad`,
+`lowercase`, `uppercase`, and `lookup`. `derived.from` must reference an
+`extract[].name` or a source-key capture made available by
+`content probe --rewrite-from`; chained derivations are rejected. Derived fields
+default to `required: true` and support the same `on_missing: fail|quarantine`
+policy as extractors. Derivation failure messages do not include the raw
+extracted value by default because those messages are durable JSONL diagnostics.
 For `pad`, `args.width` is bounded to 1-1024, `args.side` defaults to `left`
 and must be `left` or `right` when present, and `args.char` must be exactly
 one non-whitespace Unicode scalar.
@@ -429,6 +430,47 @@ derived:
     from: subject
     transform: lowercase
 ```
+
+Use `lookup` when a single extracted or path-captured value needs recipe-local
+classification:
+
+```yaml
+derived:
+  - name: category
+    from: file
+    transform: lookup
+    args:
+      match_mode: prefix
+      table:
+        - { match: "RecordTypeAlpha", value: "category_alpha" }
+        - { match: "RecordTypeBeta", value: "category_alpha" }
+        - { match: "RecordTypeGamma", value: "category_beta" }
+      default: "category_unclassified"
+```
+
+`lookup.args.match_mode` is required and must be `regex`, `prefix`, or `exact`.
+Table entries are evaluated in order and the first match wins. If no entry
+matches, `default` is returned when present; otherwise the derived field follows
+its `on_missing` policy. Regex lookup patterns are compiled when the config is
+loaded and reused for the run.
+
+When `from` references a path capture such as `{file}`, pass the same
+rewrite-from template to `content probe` that `transfer reflow` will use later:
+
+```bash
+gonimbus content probe --stdin \
+  --config probe.yaml \
+  --rewrite-from 'arrivals/{store}/{file}' \
+  --emit reflow-input < uris.txt |
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/classified/' \
+  --rewrite-from 'arrivals/{store}/{file}' \
+  --rewrite-to '{category}/{store}/{file}'
+```
+
+`content probe --rewrite-from` is applied to the parsed source key, not to the
+full `s3://bucket/...` URI. Its captures seed the probe variable map before
+content extractors and derived fields run.
 
 #### Extractor Types
 

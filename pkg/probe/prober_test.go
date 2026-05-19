@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -170,6 +171,153 @@ func TestProber_DerivedFailureSanitizesRawValue(t *testing.T) {
 	require.NotContains(t, failureErr.Error(), "SENSITIVE-MARKER-7f9a2c")
 }
 
+func TestProber_DerivedLookupTransform(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		data []byte
+		want string
+	}{
+		{
+			name: "prefix first match wins",
+			args: lookupArgs("prefix",
+				lookupEntry("RecordTypeAlpha", "category_first"),
+				lookupEntry("RecordTypeAlpha", "category_second"),
+			),
+			data: []byte(`file=RecordTypeAlpha20260218.xml`),
+			want: "category_first",
+		},
+		{
+			name: "regex",
+			args: lookupArgs("regex",
+				lookupEntry(`^RecordType(Alpha|Beta)`, "category_alpha"),
+				lookupEntry(`^RecordTypeGamma`, "category_beta"),
+			),
+			data: []byte(`file=RecordTypeBeta20260218.xml`),
+			want: "category_alpha",
+		},
+		{
+			name: "exact",
+			args: lookupArgs("exact",
+				lookupEntry("RecordTypeAlpha20260218.xml", "category_alpha"),
+			),
+			data: []byte(`file=RecordTypeAlpha20260218.xml`),
+			want: "category_alpha",
+		},
+		{
+			name: "default",
+			args: lookupArgsWithDefault("prefix", "category_unclassified",
+				lookupEntry("RecordTypeAlpha", "category_alpha"),
+			),
+			data: []byte(`file=SomethingElse.xml`),
+			want: "category_unclassified",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=([^ ]+)`, Group: 1}},
+				Derived: []DerivedConfig{{
+					Name:      "category",
+					From:      "file",
+					Transform: TransformLookup,
+					Args:      tt.args,
+				}},
+			}
+			p, err := New(cfg)
+			require.NoError(t, err)
+
+			vars, err := p.Probe(tt.data)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, vars["category"])
+		})
+	}
+}
+
+func TestProber_DerivedLookupFromRewriteCapture(t *testing.T) {
+	cfg := Config{
+		Extract: []ExtractorConfig{},
+		Derived: []DerivedConfig{{
+			Name:      "category",
+			From:      "file",
+			Transform: TransformLookup,
+			Args: lookupArgs("prefix",
+				lookupEntry("RecordTypeAlpha", "category_alpha"),
+				lookupEntry("RecordTypeBeta", "category_alpha"),
+				lookupEntry("RecordTypeGamma", "category_beta"),
+			),
+		}},
+	}
+	p, err := NewWithRewriteCaptures(cfg, []string{"file"})
+	require.NoError(t, err)
+
+	res, err := p.ProbeDetailedWithVars(nil, 0, TerminationAllRequiredResolved, map[string]string{"file": "RecordTypeBeta20260218.xml"})
+	require.NoError(t, err)
+	require.Equal(t, "RecordTypeBeta20260218.xml", res.Vars["file"])
+	require.Equal(t, "category_alpha", res.Vars["category"])
+}
+
+func TestProber_DerivedLookupNoMatchRedactsRawValue(t *testing.T) {
+	const marker = "SENSITIVE-MARKER-7f9a2c"
+	cfg := Config{
+		Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=([^ ]+)`, Group: 1}},
+		Derived: []DerivedConfig{{
+			Name:      "category",
+			From:      "file",
+			Transform: TransformLookup,
+			Args: lookupArgs("prefix",
+				lookupEntry("OtherPrefix", "category_other"),
+			),
+			OnMissing: OnMissingFail,
+		}},
+	}
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	res, err := p.ProbeDetailed([]byte(`file=`+marker), int64(len(marker)+5), TerminationAllRequiredResolved)
+	require.NoError(t, err)
+	_, requiredFailed, failureErr := p.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
+
+	require.True(t, requiredFailed)
+	require.Error(t, failureErr)
+	require.Contains(t, failureErr.Error(), `derive "category" from "file" using lookup failed`)
+	require.Contains(t, failureErr.Error(), "match_mode=prefix")
+	require.Contains(t, failureErr.Error(), "table_entries=1")
+	require.NotContains(t, failureErr.Error(), marker)
+}
+
+func TestProber_DerivedLookupRegexCompilesOncePerTableEntry(t *testing.T) {
+	oldCompile := compileLookupRegex
+	var compiled []string
+	compileLookupRegex = func(pattern string) (*regexp.Regexp, error) {
+		compiled = append(compiled, pattern)
+		return regexp.Compile(pattern)
+	}
+	defer func() { compileLookupRegex = oldCompile }()
+
+	cfg := Config{
+		Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=([^ ]+)`, Group: 1}},
+		Derived: []DerivedConfig{{
+			Name:      "category",
+			From:      "file",
+			Transform: TransformLookup,
+			Args: lookupArgs("regex",
+				lookupEntry(`^RecordTypeAlpha`, "category_alpha"),
+				lookupEntry(`^RecordTypeBeta`, "category_beta"),
+			),
+		}},
+	}
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		vars, err := p.Probe([]byte(`file=RecordTypeBeta20260218.xml`))
+		require.NoError(t, err)
+		require.Equal(t, "category_beta", vars["category"])
+	}
+	require.Equal(t, []string{`^RecordTypeAlpha`, `^RecordTypeBeta`}, compiled)
+}
+
 func TestProber_DerivedTransformFailurePaths(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -289,9 +437,10 @@ func TestProber_DerivedRequiredMatrix(t *testing.T) {
 
 func TestConfigDerivedValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		cfg     Config
-		wantErr string
+		name            string
+		cfg             Config
+		rewriteCaptures []string
+		wantErr         string
 	}{
 		{
 			name: "duplicate extract derived",
@@ -406,11 +555,80 @@ func TestConfigDerivedValidation(t *testing.T) {
 			},
 			wantErr: `args.side must be left or right`,
 		},
+		{
+			name: "lookup match mode missing",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "category", From: "file", Transform: TransformLookup, Args: map[string]any{"table": []any{lookupEntry("A", "a")}}}},
+			},
+			wantErr: `args.match_mode is required`,
+		},
+		{
+			name: "lookup match mode unknown",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "category", From: "file", Transform: TransformLookup, Args: lookupArgs("substr", lookupEntry("A", "a"))}},
+			},
+			wantErr: `unknown match_mode "substr"; valid: [regex, prefix, exact]`,
+		},
+		{
+			name: "lookup table empty",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "category", From: "file", Transform: TransformLookup, Args: map[string]any{"match_mode": "prefix", "table": []any{}}}},
+			},
+			wantErr: `args.table must contain at least one entry`,
+		},
+		{
+			name: "lookup invalid regex",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "category", From: "file", Transform: TransformLookup, Args: lookupArgs("regex", lookupEntry("[", "a"))}},
+			},
+			wantErr: `args.table[0].match invalid regex`,
+		},
+		{
+			name: "lookup from derived rejected",
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{
+					{Name: "file_lower", From: "file", Transform: TransformLowercase},
+					{Name: "category", From: "file_lower", Transform: TransformLookup, Args: lookupArgs("prefix", lookupEntry("a", "category_a"))},
+				},
+			},
+			wantErr: `derived[1].from = "file_lower" references derived[0]; chaining is not supported`,
+		},
+		{
+			name:            "extract conflicts with rewriteFrom capture",
+			rewriteCaptures: []string{"file"},
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "file", Type: "regex", Pattern: `file=(.+)`, Group: 1}},
+			},
+			wantErr: `name "file" conflicts between extract[0] and rewriteFrom capture`,
+		},
+		{
+			name:            "derived conflicts with rewriteFrom capture",
+			rewriteCaptures: []string{"file"},
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "file", From: "id", Transform: TransformLowercase}},
+			},
+			wantErr: `name "file" conflicts between derived[0] and rewriteFrom capture`,
+		},
+		{
+			name:            "unknown from lists rewriteFrom captures",
+			rewriteCaptures: []string{"file"},
+			cfg: Config{
+				Extract: []ExtractorConfig{{Name: "id", Type: "regex", Pattern: `id=(.+)`, Group: 1}},
+				Derived: []DerivedConfig{{Name: "category", From: "missing", Transform: TransformLookup, Args: lookupArgs("prefix", lookupEntry("A", "a"))}},
+			},
+			wantErr: `available source names: [file, id]`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.Validate()
+			err := tt.cfg.ValidateWithRewriteCaptures(tt.rewriteCaptures)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -531,4 +749,22 @@ func TestUnresolvedResultIncludesExtractorAudit(t *testing.T) {
 	require.True(t, got.Audit.Extractors[0].Required)
 	require.Equal(t, OnMissingQuarantine, got.Audit.Extractors[0].OnMissing)
 	require.False(t, got.Audit.Extractors[0].Resolved)
+}
+
+func lookupEntry(match, value string) map[string]any {
+	return map[string]any{"match": match, "value": value}
+}
+
+func lookupArgs(matchMode string, entries ...map[string]any) map[string]any {
+	table := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		table = append(table, entry)
+	}
+	return map[string]any{"match_mode": matchMode, "table": table}
+}
+
+func lookupArgsWithDefault(matchMode, def string, entries ...map[string]any) map[string]any {
+	args := lookupArgs(matchMode, entries...)
+	args["default"] = def
+	return args
 }
