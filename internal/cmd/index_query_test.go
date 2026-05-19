@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -187,4 +189,50 @@ func TestOpenIndexDBByIDInRoot_BaseURIFromIndex(t *testing.T) {
 
 	// The returned IndexSet carries the authoritative base_uri from the DB.
 	require.Equal(t, "s3://my-bucket/data/", indexSet.BaseURI)
+}
+
+func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) {
+	lastModified := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	deletedAt := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	group := indexstore.CanonicalObjectGroup{
+		ETag: "etag-shared",
+		Canonical: indexstore.QueryResult{
+			RelKey:       "canonical.xml",
+			SizeBytes:    123,
+			LastModified: &lastModified,
+			ETag:         "etag-shared",
+		},
+		Alternates: []indexstore.QueryResult{{
+			RelKey:       "alternate.xml",
+			SizeBytes:    456,
+			LastModified: &lastModified,
+			ETag:         "etag-shared",
+			DeletedAt:    &deletedAt,
+		}},
+	}
+
+	record := newIndexCanonicalQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", group, indexstore.CanonicalTieBreakMinKey, true)
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+
+	require.Contains(t, string(b), `"type":"gonimbus.index.object.canonical.v1"`)
+	require.Contains(t, string(b), `"key":"prefix/canonical.xml"`)
+	require.Contains(t, string(b), `"alternates_count":1`)
+	require.Contains(t, string(b), `"size_bytes":456`)
+	require.Contains(t, string(b), `"deleted_at":"2026-05-20T12:00:00Z"`)
+
+	withoutAlternates := newIndexCanonicalQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", group, indexstore.CanonicalTieBreakMinKey, false)
+	b, err = json.Marshal(withoutAlternates)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"alternates_count":1`)
+	require.NotContains(t, string(b), `"alternates":[`)
+}
+
+func TestIndexQueryHelpDocumentsCanonicalETagCaveat(t *testing.T) {
+	help := strings.Join(strings.Fields(indexQueryCmd.Long), " ")
+
+	require.Contains(t, help, "--canonical-by-etag")
+	require.Contains(t, help, "ETag is a provider version/fingerprint hint")
+	require.Contains(t, help, "not a universal content hash")
+	require.Contains(t, help, "docs/user-guide/index-build-mental-model.md")
 }

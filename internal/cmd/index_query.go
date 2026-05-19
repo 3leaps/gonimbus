@@ -58,7 +58,13 @@ Examples:
   gonimbus index query --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"
 
   # Query a specific index with explicit base-uri override
-  gonimbus index query s3://bucket/prefix/ --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"`,
+  gonimbus index query s3://bucket/prefix/ --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"
+
+  # Emit one canonical object per non-empty ETag group
+  gonimbus index query s3://bucket/prefix/ --canonical-by-etag
+
+  ETag caveat: ETag is a provider version/fingerprint hint, not a universal
+  content hash. See docs/user-guide/index-build-mental-model.md.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runIndexQuery,
 }
@@ -82,6 +88,9 @@ func init() {
 	indexQueryCmd.Flags().Int("limit", 0, "Maximum number of results (0 = no limit)")
 	indexQueryCmd.Flags().Bool("include-deleted", false, "Include soft-deleted objects")
 	indexQueryCmd.Flags().Bool("count", false, "Only output count of matching objects")
+	indexQueryCmd.Flags().Bool("canonical-by-etag", false, "Emit one canonical record per non-empty ETag group; empty ETags pass through as standard records")
+	indexQueryCmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule for --canonical-by-etag: min-key, min-modified, max-modified")
+	indexQueryCmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
 
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
@@ -110,6 +119,36 @@ type indexQueryRecordData struct {
 	DeletedAt    *string `json:"deleted_at,omitempty"`
 }
 
+type indexCanonicalQueryRecord struct {
+	Type string                        `json:"type"`
+	TS   string                        `json:"ts"`
+	Data indexCanonicalQueryRecordData `json:"data"`
+}
+
+type indexCanonicalQueryRecordData struct {
+	BaseURI         string                        `json:"base_uri"`
+	ETag            string                        `json:"etag"`
+	Canonical       indexCanonicalObjectData      `json:"canonical"`
+	TieBreakRule    string                        `json:"tie_break_rule"`
+	AlternatesCount int                           `json:"alternates_count"`
+	Alternates      []indexCanonicalAlternateData `json:"alternates,omitempty"`
+}
+
+type indexCanonicalObjectData struct {
+	RelKey       string  `json:"rel_key"`
+	Key          string  `json:"key"`
+	SizeBytes    int64   `json:"size_bytes"`
+	LastModified *string `json:"last_modified,omitempty"`
+	DeletedAt    *string `json:"deleted_at"`
+}
+
+type indexCanonicalAlternateData struct {
+	RelKey       string  `json:"rel_key"`
+	SizeBytes    int64   `json:"size_bytes"`
+	LastModified *string `json:"last_modified,omitempty"`
+	DeletedAt    *string `json:"deleted_at"`
+}
+
 func runIndexQuery(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
@@ -132,6 +171,9 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	includeDeleted, _ := cmd.Flags().GetBool("include-deleted")
 	countOnly, _ := cmd.Flags().GetBool("count")
+	canonicalByETag, _ := cmd.Flags().GetBool("canonical-by-etag")
+	canonicalTieBreakRaw, _ := cmd.Flags().GetString("canonical-tie-break")
+	includeAlternates, _ := cmd.Flags().GetBool("include-alternates")
 	outputURI, _ := cmd.Flags().GetString("output")
 	outputProfile, _ := cmd.Flags().GetString("output-profile")
 	outputRegion, _ := cmd.Flags().GetString("output-region")
@@ -170,6 +212,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		IncludeDeleted: includeDeleted,
 		Limit:          limit,
 	}
+	params.CanonicalTieBreak = indexstore.CanonicalTieBreak(canonicalTieBreakRaw)
 
 	// Parse size filters using match package
 	if minSizeStr != "" {
@@ -212,6 +255,18 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		// Clear limit for count - we want total matches
 		countParams := params
 		countParams.Limit = 0
+		if canonicalByETag {
+			_, stats, err := indexstore.QueryCanonicalObjects(ctx, db, countParams)
+			if err != nil {
+				return fmt.Errorf("count query failed: %w", err)
+			}
+			_, _ = fmt.Fprintf(os.Stdout, "%d\n", stats.TotalRecords)
+			_, _ = fmt.Fprintf(os.Stderr, "%d canonical groups, %d ungrouped empty-ETag rows, %d total records\n", stats.CanonicalGroups, stats.PassthroughRows, stats.TotalRecords)
+			if stats.TimestampParseErrors > 0 {
+				_, _ = fmt.Fprintf(os.Stderr, "warning: %d rows had unparseable timestamps (fields set to null)\n", stats.TimestampParseErrors)
+			}
+			return nil
+		}
 		count, err := indexstore.QueryObjectCount(ctx, db, countParams)
 		if err != nil {
 			return fmt.Errorf("count query failed: %w", err)
@@ -220,10 +275,23 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Execute full query
-	results, stats, err := indexstore.QueryObjects(ctx, db, params)
-	if err != nil {
-		return fmt.Errorf("query failed: %w", err)
+	var (
+		results          []indexstore.QueryResult
+		canonicalResults []indexstore.CanonicalOutputRecord
+		stats            indexstore.QueryStats
+		canonicalStats   indexstore.CanonicalQueryStats
+	)
+	if canonicalByETag {
+		canonicalResults, canonicalStats, err = indexstore.QueryCanonicalObjects(ctx, db, params)
+		stats = canonicalStats.QueryStats
+		if err != nil {
+			return fmt.Errorf("query failed: %w", err)
+		}
+	} else {
+		results, stats, err = indexstore.QueryObjects(ctx, db, params)
+		if err != nil {
+			return fmt.Errorf("query failed: %w", err)
+		}
 	}
 
 	// Set up output writer: temp file when --output is set, stdout otherwise.
@@ -247,34 +315,26 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	enc := json.NewEncoder(writer)
 
-	for _, r := range results {
-		// Reconstruct full key from base URI + rel_key
-		fullKey := reconstructFullKey(baseURI, r.RelKey)
-
-		record := indexQueryRecord{
-			Type: "gonimbus.index.object.v1",
-			TS:   now,
-			Data: indexQueryRecordData{
-				BaseURI:   baseURI,
-				RelKey:    r.RelKey,
-				Key:       fullKey,
-				SizeBytes: r.SizeBytes,
-				ETag:      r.ETag,
-			},
+	if canonicalByETag {
+		for _, r := range canonicalResults {
+			if r.Passthrough != nil {
+				if err := enc.Encode(newIndexQueryRecord(baseURI, now, *r.Passthrough)); err != nil {
+					return fmt.Errorf("encode record: %w", err)
+				}
+				continue
+			}
+			if r.Group == nil {
+				continue
+			}
+			if err := enc.Encode(newIndexCanonicalQueryRecord(baseURI, now, *r.Group, indexstore.CanonicalTieBreak(canonicalTieBreakRaw), includeAlternates)); err != nil {
+				return fmt.Errorf("encode record: %w", err)
+			}
 		}
-
-		if r.LastModified != nil {
-			ts := r.LastModified.Format(time.RFC3339)
-			record.Data.LastModified = &ts
-		}
-
-		if r.DeletedAt != nil {
-			ts := r.DeletedAt.Format(time.RFC3339)
-			record.Data.DeletedAt = &ts
-		}
-
-		if err := enc.Encode(record); err != nil {
-			return fmt.Errorf("encode record: %w", err)
+	} else {
+		for _, r := range results {
+			if err := enc.Encode(newIndexQueryRecord(baseURI, now, r)); err != nil {
+				return fmt.Errorf("encode record: %w", err)
+			}
 		}
 	}
 
@@ -307,16 +367,105 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		_, _ = fmt.Fprintf(os.Stderr, "Wrote %d records to %s\n", len(results), outputURI)
+		_, _ = fmt.Fprintf(os.Stderr, "Wrote %d records to %s\n", outputRecordCount(results, canonicalResults, canonicalByETag), outputURI)
 	}
 
 	// Summary to stderr
-	_, _ = fmt.Fprintf(os.Stderr, "Matched %d objects\n", len(results))
+	if canonicalByETag {
+		_, _ = fmt.Fprintf(os.Stderr, "%d canonical groups, %d ungrouped empty-ETag rows, %d total records\n", canonicalStats.CanonicalGroups, canonicalStats.PassthroughRows, canonicalStats.TotalRecords)
+	} else {
+		_, _ = fmt.Fprintf(os.Stderr, "Matched %d objects\n", len(results))
+	}
 	if stats.TimestampParseErrors > 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d rows had unparseable timestamps (fields set to null)\n", stats.TimestampParseErrors)
 	}
 
 	return nil
+}
+
+func outputRecordCount(results []indexstore.QueryResult, canonicalResults []indexstore.CanonicalOutputRecord, canonicalByETag bool) int {
+	if canonicalByETag {
+		return len(canonicalResults)
+	}
+	return len(results)
+}
+
+func newIndexQueryRecord(baseURI string, ts string, r indexstore.QueryResult) indexQueryRecord {
+	record := indexQueryRecord{
+		Type: "gonimbus.index.object.v1",
+		TS:   ts,
+		Data: indexQueryRecordData{
+			BaseURI:   baseURI,
+			RelKey:    r.RelKey,
+			Key:       reconstructFullKey(baseURI, r.RelKey),
+			SizeBytes: r.SizeBytes,
+			ETag:      r.ETag,
+		},
+	}
+
+	if r.LastModified != nil {
+		lastModified := r.LastModified.Format(time.RFC3339)
+		record.Data.LastModified = &lastModified
+	}
+	if r.DeletedAt != nil {
+		deletedAt := r.DeletedAt.Format(time.RFC3339)
+		record.Data.DeletedAt = &deletedAt
+	}
+	return record
+}
+
+func newIndexCanonicalQueryRecord(baseURI string, ts string, group indexstore.CanonicalObjectGroup, rule indexstore.CanonicalTieBreak, includeAlternates bool) indexCanonicalQueryRecord {
+	record := indexCanonicalQueryRecord{
+		Type: "gonimbus.index.object.canonical.v1",
+		TS:   ts,
+		Data: indexCanonicalQueryRecordData{
+			BaseURI:         baseURI,
+			ETag:            group.ETag,
+			Canonical:       newIndexCanonicalObjectData(baseURI, group.Canonical),
+			TieBreakRule:    string(rule),
+			AlternatesCount: len(group.Alternates),
+		},
+	}
+	if includeAlternates {
+		record.Data.Alternates = make([]indexCanonicalAlternateData, 0, len(group.Alternates))
+		for _, alternate := range group.Alternates {
+			record.Data.Alternates = append(record.Data.Alternates, newIndexCanonicalAlternateData(alternate))
+		}
+	}
+	return record
+}
+
+func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) indexCanonicalObjectData {
+	record := indexCanonicalObjectData{
+		RelKey:    r.RelKey,
+		Key:       reconstructFullKey(baseURI, r.RelKey),
+		SizeBytes: r.SizeBytes,
+	}
+	if r.LastModified != nil {
+		lastModified := r.LastModified.Format(time.RFC3339)
+		record.LastModified = &lastModified
+	}
+	if r.DeletedAt != nil {
+		deletedAt := r.DeletedAt.Format(time.RFC3339)
+		record.DeletedAt = &deletedAt
+	}
+	return record
+}
+
+func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlternateData {
+	record := indexCanonicalAlternateData{
+		RelKey:    r.RelKey,
+		SizeBytes: r.SizeBytes,
+	}
+	if r.LastModified != nil {
+		lastModified := r.LastModified.Format(time.RFC3339)
+		record.LastModified = &lastModified
+	}
+	if r.DeletedAt != nil {
+		deletedAt := r.DeletedAt.Format(time.RFC3339)
+		record.DeletedAt = &deletedAt
+	}
+	return record
 }
 
 type indexDBEntry struct {

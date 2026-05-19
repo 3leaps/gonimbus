@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -51,7 +52,20 @@ type QueryParams struct {
 	// Limit caps the number of results returned.
 	// Optional. Zero means no limit.
 	Limit int
+
+	// CanonicalTieBreak selects the canonical row for ETag groups.
+	// Optional. Empty means CanonicalTieBreakMinKey.
+	CanonicalTieBreak CanonicalTieBreak
 }
+
+// CanonicalTieBreak selects the canonical row for an ETag group.
+type CanonicalTieBreak string
+
+const (
+	CanonicalTieBreakMinKey      CanonicalTieBreak = "min-key"
+	CanonicalTieBreakMinModified CanonicalTieBreak = "min-modified"
+	CanonicalTieBreakMaxModified CanonicalTieBreak = "max-modified"
+)
 
 // QueryResult holds a single object from the query.
 type QueryResult struct {
@@ -60,6 +74,28 @@ type QueryResult struct {
 	LastModified *time.Time
 	ETag         string
 	DeletedAt    *time.Time
+}
+
+// CanonicalObjectGroup holds one ETag group after canonical selection.
+type CanonicalObjectGroup struct {
+	ETag       string
+	Canonical  QueryResult
+	Alternates []QueryResult
+}
+
+// CanonicalOutputRecord is one output record in canonical-by-ETag mode.
+// Rows with empty ETag pass through as standard object records.
+type CanonicalOutputRecord struct {
+	Group       *CanonicalObjectGroup
+	Passthrough *QueryResult
+}
+
+// CanonicalQueryStats holds summary counts for canonical-by-ETag output.
+type CanonicalQueryStats struct {
+	QueryStats
+	CanonicalGroups int
+	PassthroughRows int
+	TotalRecords    int
 }
 
 // QueryStats holds statistics about the query execution.
@@ -232,6 +268,152 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	}
 
 	return results, stats, nil
+}
+
+// QueryCanonicalObjects returns canonical-by-ETag output over the same filtered
+// row set as QueryObjects. Existing filters are applied before ETag grouping.
+func QueryCanonicalObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]CanonicalOutputRecord, CanonicalQueryStats, error) {
+	rule := params.CanonicalTieBreak
+	if rule == "" {
+		rule = CanonicalTieBreakMinKey
+	}
+	if err := validateCanonicalTieBreak(rule); err != nil {
+		return nil, CanonicalQueryStats{}, err
+	}
+
+	filterParams := params
+	filterParams.Limit = 0
+	results, queryStats, err := QueryObjects(ctx, db, filterParams)
+	if err != nil {
+		return nil, CanonicalQueryStats{}, err
+	}
+
+	groups := map[string][]QueryResult{}
+	outputs := make([]CanonicalOutputRecord, 0, len(results))
+	for _, result := range results {
+		if strings.TrimSpace(result.ETag) == "" {
+			r := result
+			outputs = append(outputs, CanonicalOutputRecord{Passthrough: &r})
+			continue
+		}
+		groups[result.ETag] = append(groups[result.ETag], result)
+	}
+
+	for etag, members := range groups {
+		group := makeCanonicalObjectGroup(etag, members, rule)
+		outputs = append(outputs, CanonicalOutputRecord{Group: &group})
+	}
+
+	sort.SliceStable(outputs, func(i, j int) bool {
+		return canonicalOutputRelKey(outputs[i]) < canonicalOutputRelKey(outputs[j])
+	})
+
+	if params.Limit > 0 && len(outputs) > params.Limit {
+		outputs = outputs[:params.Limit]
+	}
+
+	stats := CanonicalQueryStats{
+		QueryStats:      queryStats,
+		CanonicalGroups: 0,
+		PassthroughRows: 0,
+		TotalRecords:    len(outputs),
+	}
+	for _, output := range outputs {
+		if output.Group != nil {
+			stats.CanonicalGroups++
+		}
+		if output.Passthrough != nil {
+			stats.PassthroughRows++
+		}
+	}
+
+	return outputs, stats, nil
+}
+
+func validateCanonicalTieBreak(rule CanonicalTieBreak) error {
+	switch rule {
+	case CanonicalTieBreakMinKey, CanonicalTieBreakMinModified, CanonicalTieBreakMaxModified:
+		return nil
+	default:
+		return fmt.Errorf("canonical_tie_break %q is not supported; available values: %s, %s, %s", rule, CanonicalTieBreakMinKey, CanonicalTieBreakMinModified, CanonicalTieBreakMaxModified)
+	}
+}
+
+func makeCanonicalObjectGroup(etag string, members []QueryResult, rule CanonicalTieBreak) CanonicalObjectGroup {
+	sorted := append([]QueryResult(nil), members...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return compareCanonicalCandidates(sorted[i], sorted[j], rule) < 0
+	})
+
+	group := CanonicalObjectGroup{
+		ETag:      etag,
+		Canonical: sorted[0],
+	}
+	if len(sorted) > 1 {
+		group.Alternates = append(group.Alternates, sorted[1:]...)
+		sort.SliceStable(group.Alternates, func(i, j int) bool {
+			return group.Alternates[i].RelKey < group.Alternates[j].RelKey
+		})
+	}
+	return group
+}
+
+func compareCanonicalCandidates(a QueryResult, b QueryResult, rule CanonicalTieBreak) int {
+	switch rule {
+	case CanonicalTieBreakMinModified:
+		if cmp := compareOptionalTimeAsc(a.LastModified, b.LastModified); cmp != 0 {
+			return cmp
+		}
+	case CanonicalTieBreakMaxModified:
+		if cmp := compareOptionalTimeDesc(a.LastModified, b.LastModified); cmp != 0 {
+			return cmp
+		}
+	}
+	return strings.Compare(a.RelKey, b.RelKey)
+}
+
+func compareOptionalTimeAsc(a *time.Time, b *time.Time) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return 1
+	case b == nil:
+		return -1
+	case a.Before(*b):
+		return -1
+	case a.After(*b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareOptionalTimeDesc(a *time.Time, b *time.Time) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	case a.After(*b):
+		return -1
+	case a.Before(*b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func canonicalOutputRelKey(output CanonicalOutputRecord) string {
+	if output.Group != nil {
+		return output.Group.Canonical.RelKey
+	}
+	if output.Passthrough != nil {
+		return output.Passthrough.RelKey
+	}
+	return ""
 }
 
 // ListObjectsForRun returns active objects whose latest observation belongs to

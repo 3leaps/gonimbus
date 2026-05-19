@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prefix`, and `exact` match modes, plus `content probe --rewrite-from` so
   probe recipes can derive values from source-key captures before
   `transfer reflow` renders destination keys.
+- **Index query canonical-by-ETag mode** adds
+  `gonimbus index query --canonical-by-etag` to emit one canonical object per
+  non-empty ETag group, with deterministic tie-breaks, mixed empty-ETag
+  passthrough records, output-record-count `--count` / `--limit` semantics,
+  and optional `--include-alternates` audit detail.
 - **Mirrored provenance sidecar placement** adds
   `--provenance-sidecar-root` for `transfer reflow`, allowing sidecars to be
   written under a separate same-bucket root while preserving the sibling
