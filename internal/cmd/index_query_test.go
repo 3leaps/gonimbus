@@ -227,3 +227,12 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 	require.Contains(t, string(b), `"alternates_count":1`)
 	require.NotContains(t, string(b), `"alternates":[`)
 }
+
+func TestIndexQueryHelpDocumentsCanonicalETagCaveat(t *testing.T) {
+	help := strings.Join(strings.Fields(indexQueryCmd.Long), " ")
+
+	require.Contains(t, help, "--canonical-by-etag")
+	require.Contains(t, help, "ETag is a provider version/fingerprint hint")
+	require.Contains(t, help, "not a universal content hash")
+	require.Contains(t, help, "docs/user-guide/index-build-mental-model.md")
+}

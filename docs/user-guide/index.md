@@ -278,6 +278,9 @@ the lexicographically smallest `rel_key`. `min-modified` and `max-modified`
 choose by `last_modified` with `rel_key` as the deterministic secondary
 tie-break. `--include-alternates` adds an `alternates[]` array for audit and
 verification flows; `alternates_count` is always emitted on canonical records.
+Canonical records include `canonical.size_bytes`, and alternate entries include
+`alternates[].size_bytes` so dedup audit consumers can calculate skipped bytes
+without issuing a second query.
 `--count` and `--limit` operate on output records after grouping, counting
 canonical records and empty-ETag passthrough records together.
 
