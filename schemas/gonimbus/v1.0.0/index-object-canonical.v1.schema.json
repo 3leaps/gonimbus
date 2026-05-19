@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/index-object-canonical.v1.schema.json",
+  "title": "Gonimbus Index Canonical Object Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "ts",
+    "data"
+  ],
+  "properties": {
+    "type": {
+      "const": "gonimbus.index.object.canonical.v1"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_uri",
+        "etag",
+        "canonical",
+        "tie_break_rule",
+        "alternates_count"
+      ],
+      "properties": {
+        "base_uri": {
+          "type": "string"
+        },
+        "etag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical": {
+          "$ref": "#/$defs/canonical_object"
+        },
+        "tie_break_rule": {
+          "enum": [
+            "min-key",
+            "min-modified",
+            "max-modified"
+          ]
+        },
+        "alternates_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "alternates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/alternate_object"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "canonical_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rel_key",
+        "key",
+        "size_bytes",
+        "deleted_at"
+      ],
+      "properties": {
+        "rel_key": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "alternate_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rel_key",
+        "size_bytes",
+        "deleted_at"
+      ],
+      "properties": {
+        "rel_key": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

@@ -241,6 +241,14 @@ gonimbus index query 's3://bucket/prefix/' \
 # Count only (no output records)
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
 
+# Emit one canonical object per non-empty ETag group
+gonimbus index query 's3://bucket/prefix/' --canonical-by-etag
+
+# Include non-canonical ETag-equivalent rows for audit flows
+gonimbus index query 's3://bucket/prefix/' \
+  --canonical-by-etag \
+  --include-alternates
+
 # Write results to a local file
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
   --output file:///tmp/results.jsonl
@@ -256,6 +264,27 @@ gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
 ```
 
 When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
+
+`--canonical-by-etag` groups query results by non-empty ETag and emits one
+`gonimbus.index.object.canonical.v1` record per group. Rows with empty or
+missing ETag are emitted unchanged as standard `gonimbus.index.object.v1`
+records, so consumers should branch on the JSONL `type` field when using this
+mode. Existing filters apply before grouping: a row excluded by `--pattern`,
+`--key-regex`, size, or date filters cannot become canonical and cannot appear
+as an alternate.
+
+Canonical selection defaults to `--canonical-tie-break min-key`, which chooses
+the lexicographically smallest `rel_key`. `min-modified` and `max-modified`
+choose by `last_modified` with `rel_key` as the deterministic secondary
+tie-break. `--include-alternates` adds an `alternates[]` array for audit and
+verification flows; `alternates_count` is always emitted on canonical records.
+`--count` and `--limit` operate on output records after grouping, counting
+canonical records and empty-ETag passthrough records together.
+
+ETag is a provider version/fingerprint hint, not a universal content hash. In
+particular, multipart-uploaded S3 objects can have ETags that differ across
+uploads of the same bytes. See [Index Build Mental Model](index-build-mental-model.md)
+for the indexing caveats behind this mode.
 
 ### `index stats`
 
@@ -429,6 +458,12 @@ Index queries support the same filters as `inspect`:
 | After date  | `--after`    | `2025-12-01`                     |
 | Before date | `--before`   | `2026-01-01`                     |
 | Count only  | `--count`    | Returns count instead of records |
+
+| Canonical Option   | Flag                    | Behavior                                       |
+| ------------------ | ----------------------- | ---------------------------------------------- |
+| ETag grouping      | `--canonical-by-etag`   | One canonical record per non-empty ETag group  |
+| Tie-break          | `--canonical-tie-break` | `min-key`, `min-modified`, or `max-modified`   |
+| Include alternates | `--include-alternates`  | Populate alternates for canonical ETag records |
 
 | Output Option   | Flag                | Example                                         |
 | --------------- | ------------------- | ----------------------------------------------- |

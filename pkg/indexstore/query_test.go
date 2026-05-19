@@ -709,6 +709,201 @@ func TestQueryObjects_TimestampParseErrors(t *testing.T) {
 	}
 }
 
+func TestQueryCanonicalObjects_MixedStreamCountLimitAndAlternates(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "canonical-mixed")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "dup/b.xml", 20, "2025-01-02T00:00:00Z", "etag-dup", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "dup/a.xml", 10, "2025-01-01T00:00:00Z", "etag-dup", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "solo.xml", 30, "2025-01-03T00:00:00Z", "etag-solo", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "empty/one.xml", 40, "2025-01-04T00:00:00Z", "", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "empty/two.xml", 50, "2025-01-05T00:00:00Z", "", "")
+
+	out, stats, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects: %v", err)
+	}
+	if stats.CanonicalGroups != 2 || stats.PassthroughRows != 2 || stats.TotalRecords != 4 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if len(out) != 4 {
+		t.Fatalf("expected 4 output records, got %d", len(out))
+	}
+
+	var dup *CanonicalObjectGroup
+	for _, record := range out {
+		if record.Group != nil && record.Group.ETag == "etag-dup" {
+			dup = record.Group
+		}
+	}
+	if dup == nil {
+		t.Fatal("missing etag-dup group")
+	}
+	if dup.Canonical.RelKey != "dup/a.xml" {
+		t.Fatalf("expected min-key canonical dup/a.xml, got %s", dup.Canonical.RelKey)
+	}
+	if len(dup.Alternates) != 1 || dup.Alternates[0].RelKey != "dup/b.xml" {
+		t.Fatalf("unexpected alternates: %+v", dup.Alternates)
+	}
+
+	limited, limitedStats, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID, Limit: 2})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects limited: %v", err)
+	}
+	if len(limited) != 2 || limitedStats.TotalRecords != 2 {
+		t.Fatalf("expected 2 limited output records, got len=%d stats=%+v", len(limited), limitedStats)
+	}
+}
+
+func TestQueryCanonicalObjects_TieBreakDeterminism(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "canonical-tiebreak")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "group/b.xml", 20, "2025-01-01T00:00:00Z", "etag-group", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "group/a.xml", 10, "2025-01-01T00:00:00Z", "etag-group", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "group/z.xml", 30, "2025-01-03T00:00:00Z", "etag-group", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "group/nil.xml", 40, "", "etag-group", "")
+
+	tests := []struct {
+		name string
+		rule CanonicalTieBreak
+		want string
+	}{
+		{name: "min key", rule: CanonicalTieBreakMinKey, want: "group/a.xml"},
+		{name: "min modified secondary rel key", rule: CanonicalTieBreakMinModified, want: "group/a.xml"},
+		{name: "max modified nil sorts first", rule: CanonicalTieBreakMaxModified, want: "group/nil.xml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, _, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID, CanonicalTieBreak: tt.rule})
+			if err != nil {
+				t.Fatalf("QueryCanonicalObjects: %v", err)
+			}
+			if len(out) != 1 || out[0].Group == nil {
+				t.Fatalf("expected one canonical group, got %+v", out)
+			}
+			if got := out[0].Group.Canonical.RelKey; got != tt.want {
+				t.Fatalf("canonical rel_key = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQueryCanonicalObjects_FilterBeforeGroup(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "canonical-filter")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "match/keep.xml", 10, "2025-01-01T00:00:00Z", "etag-shared", "")
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "skip/drop.xml", 20, "2025-01-02T00:00:00Z", "etag-shared", "")
+
+	out, _, err := QueryCanonicalObjects(ctx, db, QueryParams{
+		IndexSetID: indexSetID,
+		KeyRegex:   `^match/`,
+	})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects: %v", err)
+	}
+	if len(out) != 1 || out[0].Group == nil {
+		t.Fatalf("expected one canonical group, got %+v", out)
+	}
+	group := out[0].Group
+	if group.Canonical.RelKey != "match/keep.xml" {
+		t.Fatalf("canonical rel_key = %s", group.Canonical.RelKey)
+	}
+	if len(group.Alternates) != 0 {
+		t.Fatalf("filtered row appeared as alternate: %+v", group.Alternates)
+	}
+}
+
+func TestQueryCanonicalObjects_IncludeDeletedParticipatesInGrouping(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "canonical-deleted")
+	defer func() { _ = db.Close() }()
+
+	deletedAt := "2026-05-19T12:00:00Z"
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "a-deleted.xml", 10, "2025-01-01T00:00:00Z", "etag-deleted", deletedAt)
+	insertQueryTestObject(t, ctx, db, indexSetID, runID, "b-active.xml", 20, "2025-01-02T00:00:00Z", "etag-deleted", "")
+
+	defaultOut, defaultStats, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects default: %v", err)
+	}
+	if len(defaultOut) != 1 || defaultStats.CanonicalGroups != 1 {
+		t.Fatalf("unexpected default output: len=%d stats=%+v", len(defaultOut), defaultStats)
+	}
+	if got := defaultOut[0].Group.Canonical.RelKey; got != "b-active.xml" {
+		t.Fatalf("default canonical = %s, want active row", got)
+	}
+
+	withDeleted, _, err := QueryCanonicalObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects include deleted: %v", err)
+	}
+	if len(withDeleted) != 1 || withDeleted[0].Group == nil {
+		t.Fatalf("expected one group with deleted rows, got %+v", withDeleted)
+	}
+	group := withDeleted[0].Group
+	if group.Canonical.RelKey != "a-deleted.xml" {
+		t.Fatalf("min-key should select deleted row uniformly, got %s", group.Canonical.RelKey)
+	}
+	if group.Canonical.DeletedAt == nil {
+		t.Fatal("canonical deleted_at was not populated")
+	}
+	if len(group.Alternates) != 1 || group.Alternates[0].RelKey != "b-active.xml" {
+		t.Fatalf("unexpected alternates: %+v", group.Alternates)
+	}
+}
+
+func setupQueryTestDB(t *testing.T, indexSetID string) (context.Context, *sql.DB, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("libsql", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
+		VALUES (?, 's3://canonical-bucket/', 's3', 'hash', datetime('now'))
+	`, indexSetID)
+	if err != nil {
+		t.Fatalf("insert index set: %v", err)
+	}
+	runID := indexSetID + "-run"
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO index_runs (run_id, index_set_id, started_at, acquired_at, source_type, status)
+		VALUES (?, ?, datetime('now'), datetime('now'), 'crawl', 'success')
+	`, runID, indexSetID)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	return ctx, db, indexSetID, runID
+}
+
+func insertQueryTestObject(t *testing.T, ctx context.Context, db *sql.DB, indexSetID string, runID string, relKey string, sizeBytes int64, lastModified string, etag string, deletedAt string) {
+	t.Helper()
+	var lastModifiedArg any
+	if lastModified != "" {
+		lastModifiedArg = lastModified
+	}
+	var deletedAtArg any
+	if deletedAt != "" {
+		deletedAtArg = deletedAt
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO objects_current (index_set_id, rel_key, size_bytes, last_modified, etag, last_seen_run_id, last_seen_at, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+	`, indexSetID, relKey, sizeBytes, lastModifiedArg, etag, runID, deletedAtArg)
+	if err != nil {
+		t.Fatalf("insert object %s: %v", relKey, err)
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	tests := []struct {
 		name      string
