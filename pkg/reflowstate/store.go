@@ -78,6 +78,12 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			seen_count INTEGER NOT NULL,
 			PRIMARY KEY (dest_key, source_uri)
 		);`,
+		`CREATE TABLE IF NOT EXISTS reflow_dest_keys (
+			dest_key TEXT PRIMARY KEY,
+			first_observed_at TEXT NOT NULL,
+			last_observed_at TEXT NOT NULL,
+			observed_count INTEGER NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS reflow_collisions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			dest_key TEXT NOT NULL,
@@ -175,6 +181,30 @@ func (s *Store) NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourc
 			last_seen_at=excluded.last_seen_at,
 			seen_count=reflow_dest_key_sources.seen_count + 1
 	`, destKey, sourceURI, sourceETag, sourceSize, now, now)
+	return err
+}
+
+func (s *Store) DestKeyObserved(ctx context.Context, destKey string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM reflow_dest_keys WHERE dest_key = ?`, destKey).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) MarkDestKeyObserved(ctx context.Context, destKey string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO reflow_dest_keys (dest_key, first_observed_at, last_observed_at, observed_count)
+		VALUES (?, ?, ?, 1)
+		ON CONFLICT(dest_key) DO UPDATE SET
+			last_observed_at=excluded.last_observed_at,
+			observed_count=reflow_dest_keys.observed_count + 1
+	`, destKey, now, now)
 	return err
 }
 

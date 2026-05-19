@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Parallel content-aware reflow now preserves the default
+  `skip-if-duplicate` contract**. When `transfer reflow --parallel N>1`
+  routes multiple source objects to the same destination key, a single
+  gonimbus process now arbitrates per destination key before conditional
+  writes. The first object lands; byte-identical race losers emit
+  `status=skipped reason=collision.duplicate` instead of redundant
+  `complete collision=no` records. This protects the single-run operator
+  path even on S3-compatible substrates that accept but do not enforce
+  `If-None-Match: *`; cross-process and cross-operator races still depend on
+  substrate-level conditional-write support. Active in-memory gates are
+  bounded to in-flight destination keys; per-run observed destination keys are
+  tracked in the checkpoint database. For local file destinations, same-size
+  collision losers fall back to a byte comparison because file version tokens
+  are not source-provider ETags.
 - **`go install`-built binaries now report the correct version** ([#6](https://github.com/3leaps/gonimbus/issues/6)).
   The Makefile's `-ldflags -X main.version=…` injection is no longer the only
   source of the version string — a new `internal/buildinfo` package resolves
