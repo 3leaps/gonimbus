@@ -17,6 +17,13 @@ jobs:
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
+    # Force bash for all run: steps. The -glibc image does not expose bash as
+    # GHA's default container shell, so GHA falls back to sh which lacks
+    # `set -o pipefail`. Per-step `shell: bash` works too (see release.yml);
+    # the job-level default is the same idea expressed once.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,6 +54,10 @@ jobs:
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
+    # Force bash for run: steps; see format-check job for rationale.
+    defaults:
+      run:
+        shell: bash
     env:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
       # GOPATH points to a workspace-relative path because goneat-tools-runner
@@ -113,6 +124,10 @@ jobs:
     container:
       image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
       options: --user 1001
+    # Force bash for run: steps; see format-check job for rationale.
+    defaults:
+      run:
+        shell: bash
     services:
       moto:
         image: motoserver/moto:latest
