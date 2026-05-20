@@ -12,7 +12,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.4.2
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
       options: --user 1001
     env:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
