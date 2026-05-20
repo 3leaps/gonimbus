@@ -49,20 +49,15 @@ jobs:
       options: --user 1001
     env:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Check Go presence (pre-setup)
-        run: |
-          set -euo pipefail
-          if command -v go >/dev/null 2>&1; then
-            echo "Go already present:"; go version
-          else
-            echo "Go not present (expected); installing via actions/setup-go"
-          fi
+      - name: Prepare Go directories
+        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -121,12 +116,15 @@ jobs:
     env:
       MOTO_ENDPOINT: http://moto:5000
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Prepare Go directories
+        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
