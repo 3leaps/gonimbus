@@ -13,10 +13,17 @@ jobs:
   format-check:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
+    # Force bash for all run: steps. The -glibc image does not expose bash as
+    # GHA's default container shell, so GHA falls back to sh which lacks
+    # `set -o pipefail`. Per-step `shell: bash` works too (see release.yml);
+    # the job-level default is the same idea expressed once.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,26 +50,30 @@ jobs:
     needs: [format-check]
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
+    # Force bash for run: steps; see format-check job for rationale.
+    defaults:
+      run:
+        shell: bash
     env:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      # GOPATH points to a workspace-relative path because goneat-tools-runner
+      # v0.3+ runs as non-root (UID 1001) and /opt/gopath/bin is not writable
+      # by that user. actions/setup-go@v5 expects $GOPATH/bin to be writable.
+      GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Check Go presence (pre-setup)
-        run: |
-          set -euo pipefail
-          if command -v go >/dev/null 2>&1; then
-            echo "Go already present:"; go version
-          else
-            echo "Go not present (expected); installing via actions/setup-go"
-          fi
+      - name: Prepare Go directories
+        # Pre-create the writable workspace-relative GOPATH so actions/setup-go
+        # does not fail with EACCES under the non-root runner user.
+        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -111,8 +122,12 @@ jobs:
     needs: [build-test]
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
       options: --user 1001
+    # Force bash for run: steps; see format-check job for rationale.
+    defaults:
+      run:
+        shell: bash
     services:
       moto:
         image: motoserver/moto:latest
@@ -121,12 +136,17 @@ jobs:
     env:
       MOTO_ENDPOINT: http://moto:5000
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      # Workspace-relative GOPATH: see build-test job for rationale (non-root
+      # runner user cannot write to the image's default /opt/gopath/bin).
+      GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Prepare Go directories
+        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

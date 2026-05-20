@@ -4,7 +4,13 @@ This document explains the CI/CD setup for this repository.
 
 ## Container-Based CI Pattern
 
-This repository uses the **goneat-tools-runner container** (`ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1`) for CI jobs. This is the recommended "low friction" approach from goneat v0.3.14+.
+This repository uses the **goneat-tools-runner container** for CI jobs. Specifically the **glibc variant** at the current fulmen-toolbox release:
+
+```
+ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+```
+
+See [Image variant](#image-variant-musl-default-vs--glibc) below for why gonimbus uses `-glibc` rather than the default musl image.
 
 ### Why Containers?
 
@@ -18,13 +24,24 @@ The container provides all foundation tools pre-installed:
 
 This eliminates tool installation friction in CI - no package manager setup, no version conflicts, no install failures.
 
+### Image variant: musl default vs `-glibc`
+
+`fulmenhq/fulmen-toolbox` publishes two flavors of the runner image:
+
+- `ghcr.io/fulmenhq/goneat-tools-runner` — Alpine/musl base. Smaller image, the default choice for pure-Go projects with no cgo or only musl-compatible cgo.
+- `ghcr.io/fulmenhq/goneat-tools-runner-glibc` — Debian/glibc base. Required when cgo links against glibc-compiled static libraries that cannot resolve under musl.
+
+**gonimbus uses `-glibc`** because the cgo path pulls in `github.com/tursodatabase/go-libsql/lib/linux_amd64/libsql_experimental.a`, which is a glibc-compiled `.a`. Under musl it fails to link with "undefined reference to `lseek64` / `open64` / `pread64` / `mmap64` / `sendfile64` / `gnu_get_libc_version` / `__res_init`" and similar glibc-specific symbols (musl is natively 64-bit-clean and does not emit the `64`-suffixed LFS symbols).
+
+Once [GON-023](https://github.com/3leaps/3leaps-productbook-internal/blob/main/content/projmgmt/gonimbus/GON-023-indexstore-substrate-evaluation.md) lands the pure-Go `modernc.org/sqlite` default (libsql becomes opt-in via `-tags gonimbus_libsql`), the default CI build will be CGO-free and the standard musl image will work for the default lane. The `-glibc` variant remains the right choice for any release-lane or CI run that explicitly enables the libsql build tag.
+
 ### Container Permissions (`--user 1001`)
 
 This template uses `options: --user 1001` for `goneat-tools-runner` container jobs.
 
 ```yaml
 container:
-  image: ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1
+  image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
   options: --user 1001
 ```
 
@@ -33,6 +50,64 @@ container:
 GitHub Actions mounts the workspace and temp directories into the container under `/__w`. Using UID 1001 aligns with GitHub-hosted runner workspace ownership and avoids `EACCES` errors when actions write state files (e.g. checkout).
 
 If your org uses self-hosted runners with different ownership, adjust the UID accordingly.
+
+### Workspace-relative `GOPATH` for non-root runner
+
+Runner images from `v0.3+` no longer have `/opt/gopath/bin` writable by UID 1001. `actions/setup-go@v5` calls `mkdir` on `$GOPATH/bin` during cache setup and fails with `EACCES: permission denied` unless `GOPATH` points to a writable location.
+
+The workaround is small but mandatory for every job that runs Go:
+
+```yaml
+jobs:
+  build-test:
+    container:
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+      options: --user 1001
+    env:
+      GOPATH: ${{ github.workspace }}/../_go
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Go directories
+        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
+      - uses: actions/setup-go@v5
+```
+
+The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is in use across `fulmenhq/limensafe`, `fulmenhq/idpbolt`, `fulmenhq/dimlox`, and the `fixture-server-proving-*` repos.
+
+Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which only uses foundation tools) do not need this workaround.
+
+### Bash shell required for `run:` steps
+
+The `-glibc` image does not expose `bash` as GitHub Actions' default container shell. GHA falls back to `sh`, which does not support `set -o pipefail`. The first `run:` step that uses bash-only syntax (we use `set -euo pipefail` widely) fails with:
+
+```
+/__w/_temp/<...>.sh: 1: set: Illegal option -o pipefail
+```
+
+Two equivalent fixes:
+
+1. **Job-level default** (concise, what `ci.yml` uses):
+
+   ```yaml
+   jobs:
+     format-check:
+       container: { image: ..., options: --user 1001 }
+       defaults:
+         run:
+           shell: bash
+   ```
+
+2. **Per-step `shell: bash`** (what `release.yml` uses):
+
+   ```yaml
+   - name: Lint
+     shell: bash
+     run: |
+       set -euo pipefail
+       make lint
+   ```
+
+Pick one per workflow file; both are correct. The job-level default is preferred for new jobs.
 
 ### Additional Hardening Patterns
 
@@ -138,7 +213,7 @@ For local development, you have two options:
 
    ```bash
    docker run --rm -v "$(pwd)":/work -w /work --entrypoint "" \
-     ghcr.io/fulmenhq/goneat-tools-runner:v0.2.1 yamlfmt -lint .
+     ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2 yamlfmt -lint .
    ```
 
 2. **Install tools locally via sfetch + goneat**:
