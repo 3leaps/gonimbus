@@ -49,6 +49,9 @@ jobs:
       options: --user 1001
     env:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      # GOPATH points to a workspace-relative path because goneat-tools-runner
+      # v0.3+ runs as non-root (UID 1001) and /opt/gopath/bin is not writable
+      # by that user. actions/setup-go@v5 expects $GOPATH/bin to be writable.
       GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
@@ -57,6 +60,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Prepare Go directories
+        # Pre-create the writable workspace-relative GOPATH so actions/setup-go
+        # does not fail with EACCES under the non-root runner user.
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -116,6 +121,8 @@ jobs:
     env:
       MOTO_ENDPOINT: http://moto:5000
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
+      # Workspace-relative GOPATH: see build-test job for rationale (non-root
+      # runner user cannot write to the image's default /opt/gopath/bin).
       GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
