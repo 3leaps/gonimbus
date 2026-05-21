@@ -56,7 +56,7 @@ derived:
 ```yaml
 # rewrite.yaml — mixed-segment rendering
 rewrite:
-  destination_template: 'reflowed/region={region}/year={year}/{rel_key}'
+  destination_template: "reflowed/region={region}/year={year}/{rel_key}"
 ```
 
 Provenance sidecars (`.provenance.jsonl` next to each destination, or under `--provenance-sidecar-root`) record source URI, derived fields, and rewrite path. `--on-collision quarantine` writes collisions to an explicit prefix; nested `collision` metadata replaces the legacy flat fields.
