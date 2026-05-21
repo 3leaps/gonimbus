@@ -70,11 +70,21 @@ jobs:
       - name: Prepare Go directories
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.10"
 ```
 
 The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is in use across `fulmenhq/limensafe`, `fulmenhq/idpbolt`, `fulmenhq/dimlox`, and the `fixture-server-proving-*` repos.
 
 Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which only uses foundation tools) do not need this workaround.
+
+### Pin Go to an exact patch release
+
+CI and release workflows pin `actions/setup-go` to `1.25.10` rather than the
+floating `1.25.x` selector. Vulnerability scans report standard-library CVEs
+against the Go toolchain used to build or scan the repo, so release builds and
+SBOM/vulnerability reports need a fixed patched toolchain for attributable
+results. Local scans should use Go `1.25.10` or newer on the 1.25 lane.
 
 ### Bash shell required for `run:` steps
 

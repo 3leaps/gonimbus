@@ -14,6 +14,8 @@
 
 formatter:
   type: basic
+  indent: 2
+  line_ending: lf
   # Two spaces before "#" in inline comments. This matches goneat's pinned
   # default and yamllint convention; pinning here makes CI's bare
   # `yamlfmt -lint .` pick up the same setting via the auto-loaded config.
