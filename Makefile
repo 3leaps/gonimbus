@@ -101,9 +101,12 @@ sync:  ## Sync assets from Crucible SSOT (placeholder)
 	@echo "⚠️  Gonimbus does not consume SSOT assets directly"
 	@echo "✅ Sync target satisfied (no-op)"
 
-dependencies:  ## Generate SBOM for supply-chain security
-	@echo "Generating Software Bill of Materials (SBOM)..."; $(GONEAT_RESOLVE); $$GONEAT dependencies --sbom --sbom-output sbom/$(BINARY_NAME).cdx.json
+dependencies:  ## Generate SBOM and vulnerability report for supply-chain security
+	@set -e; echo "Generating Software Bill of Materials (SBOM) and vulnerability report..."; mkdir -p sbom; rm -f sbom/$(BINARY_NAME)-dependencies.json sbom/$(BINARY_NAME)-vuln.json sbom/vuln-*.json sbom/vuln-*.grype.json; go version > sbom/go-version.txt; $(GONEAT_RESOLVE); $$GONEAT dependencies --sbom --vuln --format json --output sbom/$(BINARY_NAME)-dependencies.json --sbom-output sbom/$(BINARY_NAME).cdx.json; vuln_report=$$(ls -t sbom/vuln-*.json 2>/dev/null | grep -v '\.grype\.json$$' | head -n 1 || true); if [ -z "$$vuln_report" ]; then echo "❌ No goneat vulnerability report found" >&2; exit 1; fi; cp "$$vuln_report" sbom/$(BINARY_NAME)-vuln.json
 	@echo "✅ SBOM generated at sbom/$(BINARY_NAME).cdx.json"
+	@echo "✅ Vulnerability report generated at sbom/$(BINARY_NAME)-vuln.json"
+	@echo "✅ Dependency wrapper report generated at sbom/$(BINARY_NAME)-dependencies.json"
+	@echo "✅ Go toolchain recorded at sbom/go-version.txt"
 
 verify-dependencies:  ## Alias for dependencies (compatibility)
 	@$(MAKE) dependencies

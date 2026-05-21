@@ -79,6 +79,18 @@ cooling:
       approved_by: "@3leapsdave"
       approved_date: "2025-01-01"
 # ============================================================================
+# VULNERABILITY POLICY
+# ============================================================================
+# Fail on high-or-worse findings once scans run under the pinned Go toolchain.
+#
+# Commands:
+#   goneat dependencies --licenses --cooling --vuln
+#   make prepush
+#
+vulnerabilities:
+  enabled: true
+  fail_on: high
+# ============================================================================
 # POLICY ENGINE CONFIGURATION
 # ============================================================================
 policy_engine:

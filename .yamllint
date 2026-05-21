@@ -1,0 +1,7 @@
+extends: default
+
+rules:
+  document-start: disable
+  # Existing role docs and generated identity YAML exceed 80 columns; keep that
+  # cleanup out of this mechanical config PR.
+  line-length: disable

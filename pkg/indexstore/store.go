@@ -107,14 +107,13 @@ func configureLocalSQLite(ctx context.Context, db *sql.DB, dsn string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// Best-effort: if PRAGMA is unsupported by a backend, treat it as non-fatal.
-	var journalMode string
-	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
-		return fmt.Errorf("enable WAL mode: %w", err)
-	}
 	var busyTimeout int
 	if err := db.QueryRowContext(ctx, "PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
 		return fmt.Errorf("set busy timeout: %w", err)
+	}
+	var journalMode string
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		return fmt.Errorf("enable WAL mode: %w", err)
 	}
 
 	return nil
