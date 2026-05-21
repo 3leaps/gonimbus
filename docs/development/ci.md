@@ -109,6 +109,32 @@ Two equivalent fixes:
 
 Pick one per workflow file; both are correct. The job-level default is preferred for new jobs.
 
+### `CGO_ENABLED=0` for release cross-compiles
+
+The `-glibc` image sets `CGO_ENABLED=1` image-wide. That image-wide pin cascades into the cross-compile targets in `make release-build` — a step like `GOOS=darwin GOARCH=amd64 go build` inherits `CGO_ENABLED=1` and asks for `clang` (cgo's default C compiler for the darwin target). The image does not ship clang, and the non-root runner user cannot `apt-get install` it. The release workflow fails with:
+
+```
+cgo: C compiler "clang" not found: exec: "clang": executable file not found in $PATH
+make: *** [Makefile:199: release-build] Error 1
+```
+
+Pin `CGO_ENABLED=0` at the release job's `env:` block so all release cross-compiles default to the pure-Go path:
+
+```yaml
+jobs:
+  release:
+    container:
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+      options: --user 1001
+    env:
+      GOPATH: ${{ github.workspace }}/../_go
+      CGO_ENABLED: "0"
+```
+
+Released binaries use `modernc.org/sqlite` for the index store, which is the same shape v0.1.x released as. Consumers who need libsql build from source with `CGO_ENABLED=1` (and, post-[GON-023](https://github.com/3leaps/3leaps-productbook-internal/blob/main/content/projmgmt/gonimbus/GON-023-indexstore-substrate-evaluation.md), with `-tags gonimbus_libsql`).
+
+The `build-test` job is the opposite case — it intentionally runs with cgo enabled to exercise libsql against the test suite, which is why the `-glibc` image is required there. The `cloud-integration` job inherits the same image and the same image-wide `CGO_ENABLED=1` default, and that is correct for its scope.
+
 ### Additional Hardening Patterns
 
 #### Minimize `GITHUB_TOKEN` capabilities

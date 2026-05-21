@@ -20,6 +20,16 @@ jobs:
       # v0.3+ runs as non-root (UID 1001) and /opt/gopath/bin is not writable
       # by that user. actions/setup-go@v5 expects $GOPATH/bin to be writable.
       GOPATH: ${{ github.workspace }}/../_go
+      # Release artifacts ship CGO-free. The goneat-tools-runner-glibc image
+      # sets CGO_ENABLED=1 image-wide, which cascades into the GOOS=darwin
+      # cross-compile in make release-build — that target inherits CGO_ENABLED=1,
+      # tries to invoke clang (cgo's default for darwin target), and fails
+      # because clang is not installed (and cannot be installed under the
+      # non-root user). Pin CGO_ENABLED=0 at the job level so all release
+      # cross-compiles default to the pure-Go path (modernc.org/sqlite for the
+      # index store). Consumers who need libsql build from source with
+      # CGO_ENABLED=1 (or, post-GON-023, with -tags gonimbus_libsql).
+      CGO_ENABLED: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
