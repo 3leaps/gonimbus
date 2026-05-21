@@ -15,7 +15,7 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 - **CLI**: Run validated crawl/inspect jobs from manifests; stream JSONL to stdout/files or index sinks
 - **Server**: Long-running runner with streaming results; intended to live near the data and accept remote job submissions
-- **Library**: Embeddable components (matcher, crawler, outputs, provider backends) for Go apps
+- **Library**: Embeddable components (matcher, crawler, outputs, provider backends) for Go apps. See [docs/library-consumers.md](docs/library-consumers.md) for the supported import surface (`pkg/uri`, `pkg/match`, `pkg/provider`, `pkg/provider/s3`, `pkg/provider/file`) and the embedding contract
 
 ## Quick Start
 
@@ -28,7 +28,10 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ```bash
 go install github.com/3leaps/gonimbus/cmd/gonimbus@latest
+gonimbus version
 ```
+
+`go install`-built binaries report the correct version via `runtime/debug.ReadBuildInfo` + an embedded `VERSION` file (no `-ldflags` injection required).
 
 ### Run
 
@@ -65,7 +68,7 @@ make build
 
 - **S3/S3-compatible**: First-class support with access key/secret
 - **AWS profiles**: Assume-role chains, SSO, cached tokens
-- **GCS**: Fast-follow (v0.2.x)
+- **GCS**: Roadmap (placeholder stub today; full provider tracked for a later release)
 
 ### Authentication
 

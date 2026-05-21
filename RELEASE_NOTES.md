@@ -4,6 +4,101 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.2.0 (2026-05-20)
+
+**Library-Enabling and Scaling — Far More Complex Reflow Patterns**
+
+v0.2.0 grows the tool along three axes simultaneously: stable library surface for Go consumers, deeper content-aware reflow patterns (derived vars, mixed segments, lookups, mirrored sidecars, Hive partitions, canonical-by-ETag dedup), and correctness primitives that keep behavior right at scale (atlas, conditional CAS, parallel-race arbitration). The core promise stays the same: predictable, prefix-first crawls with JSONL-first outputs.
+
+### Library Enablement
+
+Public URI parser package (`pkg/uri`), library-consumer config-contract docs, and reliable version stamping for `go install`-built binaries:
+
+```go
+import "github.com/3leaps/gonimbus/pkg/uri"
+
+ou, err := uri.ParseObjectURI("s3://my-bucket/some/prefix/object.json")
+```
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.0
+gonimbus version
+# gonimbus 0.2.0
+```
+
+See [`docs/library-consumers.md`](docs/library-consumers.md) for the embedding contract (credentials, env-var precedence, hermetic-embedder posture, dep-tree boundary).
+
+### Reflow + Probe Sophistication
+
+Derived variables, mixed-segment rewrites, lookup transforms, mirrored sidecars, Hive-partition pattern, and canonical-by-ETag dedup all compose in one pipeline:
+
+```yaml
+# probe.yaml — derived vars + lookup transform
+extract:
+  - name: date
+    xpath: //Record/Date
+
+derived:
+  - name: year
+    from: date
+    transform: substring
+    start: 0
+    length: 4
+  - name: region
+    from: site_id
+    transform: lookup
+    match: prefix
+    table:
+      a1: north
+      b2: west
+```
+
+```yaml
+# rewrite.yaml — mixed-segment rendering
+rewrite:
+  destination_template: "reflowed/region={region}/year={year}/{rel_key}"
+```
+
+Provenance sidecars (`.provenance.jsonl` next to each destination, or under `--provenance-sidecar-root`) record source URI, derived fields, and rewrite path. `--on-collision quarantine` writes collisions to an explicit prefix; nested `collision` metadata replaces the legacy flat fields.
+
+Content-fingerprint dedup at query time:
+
+```bash
+gonimbus index query 's3://bucket/prefix/' --canonical-by-etag
+```
+
+### Scaling Correctness
+
+- **Atlas phase A** (`gonimbus atlas build`) — derived views across completed indexes for cross-run analytics without re-scanning the substrate
+- **Conditional `latest.json` CAS** — fail-closed publish semantics via `If-Match` / `If-None-Match` on substrates that support it; best-effort fallback preserved for v0.1.x-compatible hubs
+- **Atomic conditional puts** — provider-level `If-None-Match: *` opt-in for race-safe creation
+- **Parallel-race arbitration** — `transfer reflow --parallel N>1` arbitrates per destination key before issuing conditional writes, preserving the `skip-if-duplicate` contract even on substrates that don't enforce `If-None-Match: *`
+- **Opt-in build summary** — `gonimbus index build --summary` emits per-run JSONL totals without changing default streaming behavior
+
+### Stack
+
+Bounded dependency refresh: gofulmen v0.3.5 (pulls crucible v0.4.12, doublestar v4.10.0, zap v1.28.0), AWS SDK family coherent settle (`aws-sdk-go-v2` v1.41.7, `s3` v1.101.0, smithy v1.25.1), chi v5.2.5, mapstructure v2.5.0, cobra v1.10.2, `golang.org/x/net` v0.54.0, `golang.org/x/time` v0.15.0.
+
+CI runner image now `goneat-tools-runner-glibc:v0.4.2` (glibc variant required for libsql cgo); see [`docs/development/ci.md`](docs/development/ci.md).
+
+### Breaking Changes
+
+**Reflow collision flat fields removed.** The legacy `collision_kind`, `collision_etag`, `collision_size_bytes` are no longer emitted in `gonimbus.reflow.v1` records. Audit tooling must read the nested `collision` object. The Phase A warning window has expired.
+
+**`--on-collision log` deprecated.** Use `--on-collision skip-if-duplicate` (same behavior, clearer name). The alias is retained for one minor release and removed in v0.3.0.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.0
+```
+
+Re-install required to pick up the version-stamping fix; older binaries built via `go install` report incorrect version strings.
+
+See [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md) for the complete release notes.
+
+---
+
 ## v0.1.8 (2026-05-05)
 
 **Index Hub + Workspace Pattern + DX Hardening — Final v0.1.x Release**
@@ -185,101 +280,6 @@ gonimbus transfer reflow --stdin \
 
 ---
 
-## v0.1.6 (2026-01-25)
+For v0.1.6 and earlier release notes, see [docs/releases/](docs/releases/) or the [CHANGELOG](CHANGELOG.md).
 
-**Content Inspection with Range Requests**
-
-This release introduces content inspection commands that read object headers without downloading entire files, using HTTP Range requests for efficiency.
-
-### Content Inspection Commands
-
-New `content` subcommands provide JSONL-only inspection operations:
-
-```bash
-# Read the first 4KB of an object (default)
-gonimbus content head s3://bucket/path/to/file.xml --profile my-profile
-
-# Read the first 256 bytes (magic bytes, file headers)
-gonimbus content head s3://bucket/path/to/file.xml --bytes 256 --profile my-profile
-```
-
-#### Output Format
-
-Output is a single `gonimbus.content.head.v1` JSONL record:
-
-```json
-{
-  "type": "gonimbus.content.head.v1",
-  "ts": "2026-01-25T12:00:00Z",
-  "job_id": "...",
-  "provider": "s3",
-  "data": {
-    "uri": "s3://bucket/path/to/file.xml",
-    "key": "path/to/file.xml",
-    "bytes_requested": 4096,
-    "bytes_returned": 4096,
-    "content_b64": "PD94bWwgdmVyc2lvbj0iMS4wIi4uLg==",
-    "etag": "60eda68512f8238bd2ba9abac0de63d7",
-    "size": 3729736,
-    "last_modified": "2025-12-15T20:53:44Z",
-    "content_type": "application/xml"
-  }
-}
-```
-
-### stream vs content Commands
-
-| Command        | Output                            | Use Case                       |
-| -------------- | --------------------------------- | ------------------------------ |
-| `stream head`  | JSONL (metadata only)             | Routing decisions, size checks |
-| `stream get`   | Mixed framing (JSONL + raw bytes) | Full content download          |
-| `content head` | JSONL (base64 content)            | Header inspection, magic bytes |
-
-**Key difference**: `content` commands are JSONL-only with no mixed framing, making them easier to integrate with tools like `jq`.
-
-### Provider Range Requests
-
-The S3 provider now supports HTTP Range requests via the `ObjectRanger` interface:
-
-- **Efficient partial reads**: Only downloads requested bytes
-- **Automatic fallback**: Falls back to GetObject if provider doesn't support ranges
-- **Standard semantics**: Uses HTTP Range header with inclusive byte offsets
-
-### Use Cases
-
-#### File Type Detection
-
-Inspect magic bytes without downloading entire files:
-
-```bash
-# Read first 16 bytes for magic number detection
-gonimbus content head s3://bucket/data/file --bytes 16 --profile prod | \
-  jq -r '.data.content_b64' | base64 -d | xxd
-```
-
-#### XML Declaration Extraction
-
-Extract XML version and encoding from document headers:
-
-```bash
-# Read first 256 bytes for XML declaration
-gonimbus content head s3://bucket/data/doc.xml --bytes 256 --profile prod | \
-  jq -r '.data.content_b64' | base64 -d | head -1
-```
-
-#### Content-Aware Routing
-
-Make routing decisions based on file headers without full download:
-
-```bash
-# Check if file starts with expected header
-header=$(gonimbus content head s3://bucket/file --bytes 64 --profile prod | \
-  jq -r '.data.content_b64' | base64 -d)
-if [[ "$header" == *"expected-pattern"* ]]; then
-  # Route to processor A
-fi
-```
-
-### Documentation
-
-- See [docs/releases/v0.1.6.md](docs/releases/v0.1.6.md) for complete release notes
+<!-- v0.1.6 entry removed when v0.2.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.6.md -->
