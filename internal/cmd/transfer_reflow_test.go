@@ -1037,6 +1037,46 @@ func TestTransferReflowCommand_MetadataOnMissingSourceModes(t *testing.T) {
 	})
 }
 
+func TestTransferReflowCommand_MetadataDerivationFailQuarantinesWhenRequested(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	checkpoint := filepath.Join(t.TempDir(), "reflow-state.db")
+	sentinel := "DERIVED_SENTINEL_VALUE"
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		Metadata: map[string]string{"blob": sentinel + "%ZZ"},
+	})
+
+	stdout, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--checkpoint", checkpoint,
+		"--metadata-set-from-source-derived", "secret=urldecode(meta.blob).token",
+		"--metadata-on-missing-source", "fail",
+		"--on-collision", "quarantine",
+		"--collision-quarantine-prefix", "_metadata",
+		"--provenance", "sidecar",
+	)
+	require.NoError(t, err)
+	require.False(t, dst.hasObject("source/file.xml"))
+	require.Equal(t, "payload", string(dst.mustObject("_metadata/source/file.xml")))
+	require.NotContains(t, stdout, sentinel)
+	require.NotContains(t, stderr, sentinel)
+
+	errData := requireErrorData(t, stdout)
+	require.Contains(t, errData.Message, "metadata derivation failed")
+	require.Equal(t, "secret", errData.Details["metadata_dest_key"])
+	require.Equal(t, "url decode failed", errData.Details["metadata_reason"])
+
+	quarantined := requireReflowData(t, stdout, "quarantined")
+	require.Equal(t, "metadata.derivation.quarantined", quarantined.Reason)
+	require.Equal(t, "quarantine", quarantined.RoutingClass)
+	require.Equal(t, "_metadata/source/file.xml", quarantined.DestKey)
+	require.Contains(t, string(quarantined.Provenance.Key), "_metadata/source/file.xml.gnb.json")
+
+	checkpointItem := readCheckpointItem(t, checkpoint)
+	require.Equal(t, "quarantined", checkpointItem.Status)
+	require.Equal(t, "metadata.derivation.quarantined", checkpointItem.Reason)
+	require.NotContains(t, checkpointItem.ErrorMessage, sentinel)
+}
+
 func TestTransferReflowMetadataConfigRejectsPerObjectDuplicatesAndParseErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2045,6 +2085,22 @@ func readCheckpointErrorMessage(t *testing.T, path string) string {
 	var msg string
 	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT error_message FROM reflow_items WHERE status = 'failed' LIMIT 1`).Scan(&msg))
 	return msg
+}
+
+type testCheckpointItem struct {
+	Status       string
+	Reason       string
+	ErrorMessage string
+}
+
+func readCheckpointItem(t *testing.T, path string) testCheckpointItem {
+	t.Helper()
+	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: path})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	var item testCheckpointItem
+	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT status, COALESCE(reason, ''), COALESCE(error_message, '') FROM reflow_items LIMIT 1`).Scan(&item.Status, &item.Reason, &item.ErrorMessage))
+	return item
 }
 
 func requireErrorData(t *testing.T, stdout string) testErrorData {

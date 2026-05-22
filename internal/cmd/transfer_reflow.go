@@ -1598,7 +1598,6 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					err = validateMetadataBudget(putOptions.UserMetadata)
 				}
 				if err != nil {
-					errorCount.Add(1)
 					details := map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI}
 					var budgetErr *metadataBudgetError
 					if errors.As(err, &budgetErr) {
@@ -1613,6 +1612,41 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						}
 					}
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "destination metadata options failed", err, details)
+					if derivErr != nil && collCfg.Mode == reflowCollisionQuar {
+						quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
+						quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
+						quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
+						bytes, qerr := transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutOptions{})
+						if qerr != nil {
+							errorCount.Add(1)
+							code := reflowErrCode(qerr)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": task.SourceURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
+								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							}
+							_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "metadata.quarantine_copy_failed", RoutingClass: "quarantine"})
+							continue
+						}
+						if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, task.SourceURI, srcETag, srcSize); werr != nil {
+							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						}
+						destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
+						sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, nil)
+						if sidecarFatal {
+							errorCount.Add(1)
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							}
+							_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "provenance.write_failed", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef})
+							continue
+						}
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes}); werr != nil {
+							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						}
+						_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef})
+						continue
+					}
+					errorCount.Add(1)
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
 						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 					}
