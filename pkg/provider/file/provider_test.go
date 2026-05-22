@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,64 @@ func TestPutObjectConditionalRejectsInvalidPrecondition(t *testing.T) {
 	_, err = p.PutObjectConditional(ctx, "object.txt", strings.NewReader("payload"), 7, provider.PutPrecondition{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exactly one put precondition")
+}
+
+func TestPutObjectWithOptionsWritesMetadataSidecar(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+
+	err = p.PutObjectWithOptions(ctx, "nested/object.txt", strings.NewReader("payload"), int64(len("payload")), provider.PutOptions{
+		UserMetadata: map[string]string{"owner": "team-a"},
+		ContentType:  "text/plain",
+		StorageClass: "STANDARD_IA",
+	})
+	require.NoError(t, err)
+
+	meta, err := p.Head(ctx, "nested/object.txt")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"owner": "team-a"}, meta.Metadata)
+	require.Equal(t, "text/plain", meta.ContentType)
+	require.Equal(t, "STANDARD_IA", meta.StorageClass)
+
+	raw, err := os.ReadFile(filepath.Join(baseDir, "nested", "object.txt"+DefaultMetadataSidecarSuffix))
+	require.NoError(t, err)
+	var sidecar map[string]any
+	require.NoError(t, json.Unmarshal(raw, &sidecar))
+	require.Equal(t, metadataSidecarSchema, sidecar["schema"])
+}
+
+func TestPutObjectConditionalWithOptionsWritesMetadataSidecar(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+
+	_, err = p.PutObjectConditionalWithOptions(ctx, "object.txt", strings.NewReader("payload"), int64(len("payload")), provider.PutPrecondition{IfAbsent: true}, provider.PutOptions{
+		UserMetadata: map[string]string{"owner": "team-a"},
+		ContentType:  "text/plain",
+	})
+	require.NoError(t, err)
+
+	meta, err := p.Head(ctx, "object.txt")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"owner": "team-a"}, meta.Metadata)
+	require.Equal(t, "text/plain", meta.ContentType)
+}
+
+func TestPutObjectClearsExistingMetadataSidecar(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+	require.NoError(t, p.PutObjectWithOptions(ctx, "object.txt", strings.NewReader("payload"), int64(len("payload")), provider.PutOptions{UserMetadata: map[string]string{"owner": "team-a"}}))
+
+	require.NoError(t, p.PutObject(ctx, "object.txt", strings.NewReader("replacement"), int64(len("replacement"))))
+	meta, err := p.Head(ctx, "object.txt")
+	require.NoError(t, err)
+	require.Nil(t, meta.Metadata)
+	require.NoFileExists(t, filepath.Join(baseDir, "object.txt"+DefaultMetadataSidecarSuffix))
 }
 
 func TestGetObjectVersionedReturnsOpaqueLocalVersion(t *testing.T) {

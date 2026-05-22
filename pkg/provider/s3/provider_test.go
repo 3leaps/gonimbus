@@ -556,6 +556,40 @@ func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *
 	assert.Contains(t, got2.host, strings.TrimPrefix(server2.URL, "http://"))
 }
 
+func TestCreateMultipartUploadWithOptionsSendsMetadataHeaders(t *testing.T) {
+	reqs := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs <- r.Clone(context.Background())
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>object.txt</Key><UploadId>upload-123</UploadId></InitiateMultipartUploadResult>`))
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        server.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIAFIRST000000001",
+		SecretAccessKey: "first-secret",
+	})
+	require.NoError(t, err)
+
+	uploadID, err := p.CreateMultipartUploadWithOptions(context.Background(), "object.txt", provider.PutOptions{
+		UserMetadata: map[string]string{"owner": "team-a"},
+		ContentType:  "text/plain",
+		StorageClass: "STANDARD_IA",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "upload-123", uploadID)
+	req := receiveRequest(t, reqs, "multipart initiate")
+	require.Equal(t, "POST", req.Method)
+	require.Contains(t, req.URL.RawQuery, "uploads")
+	require.Equal(t, "team-a", req.Header.Get("X-Amz-Meta-Owner"))
+	require.Equal(t, "text/plain", req.Header.Get("Content-Type"))
+	require.Equal(t, "STANDARD_IA", req.Header.Get("X-Amz-Storage-Class"))
+}
+
 func receiveObservedRequest(t *testing.T, ch <-chan observedS3Request, label string) observedS3Request {
 	t.Helper()
 
@@ -565,6 +599,18 @@ func receiveObservedRequest(t *testing.T, ch <-chan observedS3Request, label str
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("timed out waiting for request on %s; provider endpoint isolation may have regressed", label)
 		return observedS3Request{}
+	}
+}
+
+func receiveRequest(t *testing.T, ch <-chan *http.Request, label string) *http.Request {
+	t.Helper()
+
+	select {
+	case req := <-ch:
+		return req
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for request on %s", label)
+		return nil
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,27 +23,45 @@ import (
 //
 // This provider is intended for bucket-to-local transfer workflows.
 type Provider struct {
-	baseDir string
+	baseDir               string
+	metadataSidecarSuffix string
 }
 
 // Ensure Provider implements provider capability interfaces.
 var (
-	_ provider.Provider          = (*Provider)(nil)
-	_ provider.ObjectGetter      = (*Provider)(nil)
-	_ provider.VersionedGetter   = (*Provider)(nil)
-	_ provider.ObjectRanger      = (*Provider)(nil)
-	_ provider.ObjectPutter      = (*Provider)(nil)
-	_ provider.ConditionalPutter = (*Provider)(nil)
-	_ provider.ObjectDeleter     = (*Provider)(nil)
+	_ provider.Provider            = (*Provider)(nil)
+	_ provider.ObjectGetter        = (*Provider)(nil)
+	_ provider.VersionedGetter     = (*Provider)(nil)
+	_ provider.ObjectRanger        = (*Provider)(nil)
+	_ provider.ObjectPutter        = (*Provider)(nil)
+	_ provider.ConditionalPutter   = (*Provider)(nil)
+	_ provider.MetadataAwarePutter = (*Provider)(nil)
+	_ provider.ObjectDeleter       = (*Provider)(nil)
 )
 
 type Config struct {
-	BaseDir string
+	BaseDir               string
+	MetadataSidecarSuffix string
+}
+
+const (
+	DefaultMetadataSidecarSuffix = ".gnb-meta.json"
+	metadataSidecarSchema        = "gonimbus.reflow.meta.v1"
+)
+
+type metadataSidecar struct {
+	Schema       string            `json:"schema"`
+	UserMetadata map[string]string `json:"user_metadata,omitempty"`
+	ContentType  string            `json:"content_type,omitempty"`
+	StorageClass string            `json:"storage_class,omitempty"`
 }
 
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.BaseDir) == "" {
 		return fmt.Errorf("base dir is required")
+	}
+	if strings.Contains(strings.TrimSpace(c.MetadataSidecarSuffix), "/") {
+		return fmt.Errorf("metadata sidecar suffix must not contain '/'")
 	}
 	return nil
 }
@@ -52,7 +71,11 @@ func New(cfg Config) (*Provider, error) {
 		return nil, err
 	}
 	base := filepath.Clean(cfg.BaseDir)
-	return &Provider{baseDir: base}, nil
+	suffix := strings.TrimSpace(cfg.MetadataSidecarSuffix)
+	if suffix == "" {
+		suffix = DefaultMetadataSidecarSuffix
+	}
+	return &Provider{baseDir: base, metadataSidecarSuffix: suffix}, nil
 }
 
 func (p *Provider) Close() error { return nil }
@@ -124,11 +147,21 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 	}
 
-	return &provider.ObjectMeta{
+	out := &provider.ObjectMeta{
 		ObjectSummary: provider.ObjectSummary{Key: strings.TrimPrefix(key, "/"), Size: st.Size(), LastModified: st.ModTime()},
 		ContentType:   "",
 		Metadata:      nil,
-	}, nil
+	}
+	sidecar, err := p.readMetadataSidecar(key)
+	if err != nil {
+		return nil, p.wrapError("Head", key, err)
+	}
+	if sidecar != nil {
+		out.ContentType = sidecar.ContentType
+		out.Metadata = sidecar.UserMetadata
+		out.StorageClass = sidecar.StorageClass
+	}
+	return out, nil
 }
 
 func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
@@ -177,6 +210,16 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 			ETag:         fileVersionToken(st),
 			LastModified: st.ModTime(),
 		},
+	}
+	sidecar, err := p.readMetadataSidecar(key)
+	if err != nil {
+		_ = f.Close()
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	if sidecar != nil {
+		meta.ContentType = sidecar.ContentType
+		meta.Metadata = sidecar.UserMetadata
+		meta.StorageClass = sidecar.StorageClass
 	}
 	return f, meta, nil
 }
@@ -262,6 +305,22 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 	if err := os.Rename(tmpName, full); err != nil {
 		return p.wrapError("PutObject", key, err)
 	}
+	if err := p.removeMetadataSidecar(key); err != nil {
+		return p.wrapError("PutObject", key, err)
+	}
+	return nil
+}
+
+func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	if err := p.PutObject(ctx, key, body, contentLength); err != nil {
+		return err
+	}
+	if opts.Empty() {
+		return nil
+	}
+	if err := p.writeMetadataSidecar(key, opts); err != nil {
+		return p.wrapError("PutObject", key, err)
+	}
 	return nil
 }
 
@@ -308,7 +367,24 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 	if err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
+	if err := p.removeMetadataSidecar(key); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
 	return provider.PutResult{ETag: token}, nil
+}
+
+func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
+	result, err := p.PutObjectConditional(ctx, key, body, contentLength, precond)
+	if err != nil {
+		return provider.PutResult{}, err
+	}
+	if opts.Empty() {
+		return result, nil
+	}
+	if err := p.writeMetadataSidecar(key, opts); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	return result, nil
 }
 
 func (p *Provider) putObjectIfMatch(ctx context.Context, key, full string, body io.Reader, etag string) (provider.PutResult, error) {
@@ -360,6 +436,9 @@ func (p *Provider) putObjectIfMatch(ctx context.Context, key, full string, body 
 	if err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
+	if err := p.removeMetadataSidecar(key); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
 	return provider.PutResult{ETag: token}, nil
 }
 
@@ -406,7 +485,88 @@ func (p *Provider) DeleteObject(ctx context.Context, key string) error {
 		}
 		return p.wrapError("DeleteObject", key, err)
 	}
+	if err := p.removeMetadataSidecar(key); err != nil {
+		return p.wrapError("DeleteObject", key, err)
+	}
 	return nil
+}
+
+func (p *Provider) readMetadataSidecar(key string) (*metadataSidecar, error) {
+	full, err := p.metadataSidecarPath(key)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(full) // #nosec G304 -- metadataSidecarPath cleans key under configured provider baseDir.
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var sidecar metadataSidecar
+	if err := json.Unmarshal(raw, &sidecar); err != nil {
+		return nil, err
+	}
+	if sidecar.Schema != metadataSidecarSchema {
+		return nil, fmt.Errorf("metadata sidecar schema mismatch")
+	}
+	return &sidecar, nil
+}
+
+func (p *Provider) writeMetadataSidecar(key string, opts provider.PutOptions) error {
+	full, err := p.metadataSidecarPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	sidecar := metadataSidecar{
+		Schema:       metadataSidecarSchema,
+		UserMetadata: cloneStringMap(opts.UserMetadata),
+		ContentType:  opts.ContentType,
+		StorageClass: opts.StorageClass,
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(full), "gonimbus-meta-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(sidecar); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, full); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func (p *Provider) removeMetadataSidecar(key string) error {
+	full, err := p.metadataSidecarPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (p *Provider) metadataSidecarPath(key string) (string, error) {
+	return p.fullPath(key + p.metadataSidecarSuffix)
 }
 
 func (p *Provider) fullPath(key string) (string, error) {
@@ -446,10 +606,24 @@ func (p *Provider) collectKeys(prefix string) ([]string, error) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		if p.metadataSidecarSuffix != "" && strings.HasSuffix(rel, p.metadataSidecarSuffix) {
+			return nil
+		}
 		keys = append(keys, rel)
 		return nil
 	})
 	return keys, nil
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (p *Provider) wrapError(op, key string, err error) error {

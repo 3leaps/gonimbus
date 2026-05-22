@@ -87,6 +87,10 @@ type ObjectMeta struct {
 
 	// Metadata contains user-defined metadata key-value pairs.
 	Metadata map[string]string
+
+	// StorageClass is the provider-native object storage class. Providers may
+	// leave it empty when the concept is unsupported or unknown.
+	StorageClass string
 }
 
 // ProviderType identifies a cloud storage provider.
