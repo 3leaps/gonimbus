@@ -4,6 +4,80 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.2.1 (2026-05-22)
+
+**Reflow Destination Metadata — Explicit Control, Explicit Disclosure Discipline**
+
+v0.2.1 is a focused operator release for landing reflowed objects with durable destination metadata. It adds caller-controlled metadata, content-type and storage-class controls, per-object metadata derivation from source metadata and system fields, and a release-lane hardening pass. The headline is not only the feature surface: the disclosure posture is part of the contract. Destination metadata is durable and visible to destination readers, so v0.2.1 makes allow-list discipline and destination-system-metadata boundaries explicit.
+
+### Destination Metadata Controls
+
+`transfer reflow` can now set destination user metadata and selected destination PUT attributes directly:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --metadata-policy clear \
+  --metadata-set dataset=transactions \
+  --metadata-set owner=data-platform \
+  --preserve-content-type \
+  --destination-storage-class STANDARD_IA
+```
+
+`--metadata-policy clear|preserve|merge` controls source user-metadata handling. `clear` keeps the historic default: write only explicitly requested destination metadata. `preserve` copies source user metadata and fails the object on canonical key collisions. `merge` copies source metadata, then applies `--metadata-set` overrides. File destinations write metadata to cleartext `.gnb-meta.json` sidecars.
+
+### Per-Object Metadata Derivation
+
+When each destination object needs values derived from the corresponding source object, v0.2.1 adds explicit per-object rules:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --metadata-policy clear \
+  --metadata-set source-system=example \
+  --metadata-set-from-source-key source-md5=md5 \
+  --metadata-set-from-source-derived source-etag='system.etag' \
+  --metadata-set-from-source-derived broker-device='urldecode(meta.payload).device' \
+  --metadata-on-missing-source skip
+```
+
+Supported v1 expressions are deliberately small: JSON subfields (`meta.payload.device`), URL-decoded JSON subfields (`urldecode(meta.payload).device`), source system fields (`system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`), and one string-literal concatenation (`system.etag + "-src"`). JSON numbers preserve source precision via `json.Decoder.UseNumber`-style handling; JSON booleans render as `true` / `false`.
+
+`--metadata-on-missing-source skip|fail|empty` controls missing keys, invalid JSON, URL-decode failures, null values, arrays, and objects. The default `skip` omits only the affected destination key. `empty` writes an empty string. `fail` emits a redacted per-object `gonimbus.error.v1`; when paired with `--on-collision quarantine`, the object routes to the quarantine prefix with reason `metadata.derivation.quarantined`.
+
+### Security and Disclosure Posture
+
+This release treats metadata disclosure as an operator-visible headline:
+
+- **Destination metadata is durable and not redacted at destination.** Values supplied by `--metadata-set`, copied via `preserve`/`merge`, derived per object, preserved as content type, propagated as storage class, or written to local file sidecars are visible to destination readers with HEAD/GET or filesystem access.
+- **Use allow-lists for sensitive source buckets.** Prefer `--metadata-policy clear` plus explicit `--metadata-set`, `--metadata-set-from-source-key`, and `--metadata-set-from-source-derived` rules when source metadata may contain credential URIs, tokens, or other sensitive values. Gonimbus rejects wildcard metadata projection.
+- **Scalar-only derivation protects the allow-list boundary.** v1 writes only string, number, and boolean JSON subfield values. Null, arrays, and objects route through `--metadata-on-missing-source`, preventing accidental serialization of entire nested structures.
+- **Destination system metadata is not writable through derivation.** `system.<field>` reads source-side system fields as inputs, then writes a destination user-metadata key. It does not override destination ETag, LastModified, ContentLength, or other object-store-generated system fields. Content-Type and StorageClass are controlled only by their explicit flags.
+- **Failure paths redact raw source values.** Derivation-evaluation failures report destination key, expression, and reason kind without echoing the source metadata value in error JSONL, checkpoint rows, or default stderr.
+
+### Release Lane Hardening
+
+- CI and release workflows pin Go `1.25.10` for attributable vulnerability scans and SBOMs.
+- `make dependencies` emits stable SBOM and vulnerability-report artifacts under `sbom/`.
+- YAML formatting is pinned with `.yamlfmt` and `.yamllint` so local formatting and CI agree.
+- Index-store setup applies `busy_timeout` before WAL mode to reduce intermittent root DB open lock flakes.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.1
+```
+
+Reflow behavior remains opt-in: existing reflow runs that do not pass the new metadata flags keep writing destination objects without caller-controlled metadata. Review any new metadata rules as part of pipeline disclosure review before running against source buckets with sensitive metadata.
+
+See [docs/releases/v0.2.1.md](docs/releases/v0.2.1.md) for the complete release notes.
+
+---
+
 ## v0.2.0 (2026-05-20)
 
 **Library-Enabling and Scaling — Far More Complex Reflow Patterns**
@@ -59,7 +133,7 @@ rewrite:
   destination_template: "reflowed/region={region}/year={year}/{rel_key}"
 ```
 
-Provenance sidecars (`.provenance.jsonl` next to each destination, or under `--provenance-sidecar-root`) record source URI, derived fields, and rewrite path. `--on-collision quarantine` writes collisions to an explicit prefix; nested `collision` metadata replaces the legacy flat fields.
+Provenance sidecars (`.gnb.json` next to each destination, or under `--provenance-sidecar-root`) record source URI, derived fields, and rewrite path. `--on-collision quarantine` writes collisions to an explicit prefix; nested `collision` metadata replaces the legacy flat fields.
 
 Content-fingerprint dedup at query time:
 
@@ -184,102 +258,6 @@ See [docs/releases/v0.1.8.md](docs/releases/v0.1.8.md) for complete release note
 
 ---
 
-## v0.1.7 (2026-01-28)
+For v0.1.7 and earlier release notes, see [docs/releases/](docs/releases/) or the [CHANGELOG](CHANGELOG.md).
 
-**Transfer Reflow with Content-Aware Routing**
-
-This release delivers the complete transfer reflow pipeline, enabling content-aware data reorganization across cloud storage providers and local filesystems.
-
-### Transfer Reflow Command
-
-Copy objects while rewriting keys based on templates:
-
-```bash
-# Path-based reflow
-gonimbus transfer reflow 's3://source/prefix/' \
-  --dest 's3://dest/base/' \
-  --rewrite-from '{program}/{site}/{date}/{file}' \
-  --rewrite-to '{date}/{program}/{site}/{file}'
-
-# Content-aware reflow (with probe-derived variables)
-gonimbus transfer reflow --stdin \
-  --dest 's3://dest/base/' \
-  --rewrite-from '{_}/{store}/{device}/{date}/{file}' \
-  --rewrite-to '{business_date}/{store}/{file}' < probe.jsonl
-
-# Bucket to local filesystem
-gonimbus transfer reflow --stdin \
-  --dest 'file:///tmp/output/' \
-  --rewrite-from '...' \
-  --rewrite-to '...' < probe.jsonl
-```
-
-#### Features
-
-- Template variables from path segments or probe-derived fields
-- Parallel copy with configurable workers (`--parallel`)
-- Checkpoint/resume for large jobs (`--checkpoint`, `--resume`)
-- Collision handling (`--on-collision log|fail|overwrite`)
-- Dry-run mode (`--dry-run`)
-
-### Content Probe Command
-
-Extract derived fields from object content:
-
-```bash
-# Probe single object
-gonimbus content probe 's3://bucket/file.xml' --config probe.yaml
-
-# Bulk probe via stdin
-gonimbus content probe --stdin --config probe.yaml < uris.txt
-```
-
-#### probe.yaml Example
-
-```yaml
-extract:
-  - name: business_date
-    type: xml_xpath
-    xpath: //BusinessDate
-  - name: schema_version
-    type: json_path
-    path: $.metadata.version
-```
-
-#### Extractor Types
-
-| Type        | Use Case               | Example                    |
-| ----------- | ---------------------- | -------------------------- |
-| `xml_xpath` | XML element extraction | `//BusinessDate`           |
-| `regex`     | Pattern matching       | `date=(\d{4}-\d{2}-\d{2})` |
-| `json_path` | JSON field extraction  | `$.data.timestamp`         |
-
-### file:// Provider
-
-Transfer reflow now supports local filesystem destinations:
-
-```bash
-gonimbus transfer reflow --stdin \
-  --dest 'file:///tmp/reflow-out/' \
-  --src-profile my-aws-profile \
-  --rewrite-from '...' \
-  --rewrite-to '...' < probe.jsonl
-```
-
-### Collision Handling
-
-| Mode                           | Behavior                                  |
-| ------------------------------ | ----------------------------------------- |
-| `--on-collision log` (default) | Log conflict, fail operation              |
-| `--on-collision fail`          | Fail immediately on first conflict        |
-| `--on-collision overwrite`     | Replace existing (requires `--overwrite`) |
-
-### Documentation
-
-- See [docs/releases/v0.1.7.md](docs/releases/v0.1.7.md) for complete release notes
-
----
-
-For v0.1.6 and earlier release notes, see [docs/releases/](docs/releases/) or the [CHANGELOG](CHANGELOG.md).
-
-<!-- v0.1.6 entry removed when v0.2.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.6.md -->
+<!-- v0.1.7 entry removed when v0.2.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.7.md -->

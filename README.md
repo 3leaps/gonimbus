@@ -87,6 +87,12 @@ See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for enterprise authen
 - Include/exclude pattern support
 - Path-scoped index builds for date-partitioned data (see [docs/user-guide/index.md](docs/user-guide/index.md))
 
+### Reflow Destination Metadata
+
+`transfer reflow` can write explicit destination user metadata, preserve source content type, set or propagate destination storage class, and derive per-object destination metadata from named source metadata fields or source system fields.
+
+Metadata writes are opt-in and disclosure-sensitive: destination metadata is durable, visible to destination readers, and not redacted at destination. Use `--metadata-policy clear` plus explicit `--metadata-set`, `--metadata-set-from-source-key`, and `--metadata-set-from-source-derived` allow-lists when source metadata may contain sensitive values. See [docs/user-guide/transfer.md](docs/user-guide/transfer.md#destination-metadata) and [docs/releases/v0.2.1.md](docs/releases/v0.2.1.md) for the full operator posture, including the destination-system-metadata non-goal.
+
 ### Outputs
 
 Stream-friendly JSONL records:
