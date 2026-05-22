@@ -27,15 +27,17 @@ type Provider struct {
 
 // Ensure Provider implements the interfaces.
 var (
-	_ provider.Provider          = (*Provider)(nil)
-	_ provider.ObjectGetter      = (*Provider)(nil)
-	_ provider.VersionedGetter   = (*Provider)(nil)
-	_ provider.ObjectPutter      = (*Provider)(nil)
-	_ provider.ConditionalPutter = (*Provider)(nil)
-	_ provider.ObjectDeleter     = (*Provider)(nil)
-	_ provider.MultipartUploader = (*Provider)(nil)
-	_ provider.PrefixLister      = (*Provider)(nil)
-	_ provider.DelimiterLister   = (*Provider)(nil)
+	_ provider.Provider                       = (*Provider)(nil)
+	_ provider.ObjectGetter                   = (*Provider)(nil)
+	_ provider.VersionedGetter                = (*Provider)(nil)
+	_ provider.ObjectPutter                   = (*Provider)(nil)
+	_ provider.ConditionalPutter              = (*Provider)(nil)
+	_ provider.MetadataAwarePutter            = (*Provider)(nil)
+	_ provider.ObjectDeleter                  = (*Provider)(nil)
+	_ provider.MultipartUploader              = (*Provider)(nil)
+	_ provider.MetadataAwareMultipartUploader = (*Provider)(nil)
+	_ provider.PrefixLister                   = (*Provider)(nil)
+	_ provider.DelimiterLister                = (*Provider)(nil)
 )
 
 // New creates a new S3 provider with the given configuration.
@@ -274,8 +276,9 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 			ETag:         cleanETag(aws.ToString(output.ETag)),
 			LastModified: aws.ToTime(output.LastModified),
 		},
-		ContentType: aws.ToString(output.ContentType),
-		Metadata:    output.Metadata,
+		ContentType:  aws.ToString(output.ContentType),
+		Metadata:     output.Metadata,
+		StorageClass: normalizeStorageClassString(string(output.StorageClass)),
 	}
 
 	return meta, nil
@@ -306,9 +309,10 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 			ETag:         cleanETag(aws.ToString(out.ETag)),
 			LastModified: aws.ToTime(out.LastModified),
 		},
-		Version:     aws.ToString(out.VersionId),
-		ContentType: aws.ToString(out.ContentType),
-		Metadata:    out.Metadata,
+		Version:      aws.ToString(out.VersionId),
+		ContentType:  aws.ToString(out.ContentType),
+		Metadata:     out.Metadata,
+		StorageClass: normalizeStorageClassString(string(out.StorageClass)),
 	}
 	return out.Body, meta, nil
 }
@@ -329,12 +333,17 @@ func (p *Provider) GetRange(ctx context.Context, key string, start, endInclusive
 //
 // This is used for write-probe preflight and future transfer operations.
 func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	return p.PutObjectWithOptions(ctx, key, body, contentLength, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(p.bucket),
 		Key:           aws.String(key),
 		Body:          body,
 		ContentLength: &contentLength,
 	}
+	applyPutOptions(input, opts)
 
 	_, err := p.client.PutObject(ctx, input)
 	if err != nil {
@@ -344,6 +353,10 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 }
 
 func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	return p.PutObjectConditionalWithOptions(ctx, key, body, contentLength, precond, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
@@ -354,6 +367,7 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 		Body:          body,
 		ContentLength: &contentLength,
 	}
+	applyPutOptions(input, opts)
 	if precond.IfAbsent {
 		input.IfNoneMatch = aws.String("*")
 	} else if precond.IfMatchETag != nil {
@@ -385,7 +399,13 @@ func (p *Provider) DeleteObject(ctx context.Context, key string) error {
 //
 // This is used for minimal-side-effect write probes.
 func (p *Provider) CreateMultipartUpload(ctx context.Context, key string) (string, error) {
-	out, err := p.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
+	return p.CreateMultipartUploadWithOptions(ctx, key, provider.PutOptions{})
+}
+
+func (p *Provider) CreateMultipartUploadWithOptions(ctx context.Context, key string, opts provider.PutOptions) (string, error) {
+	input := &s3.CreateMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key)}
+	applyMultipartOptions(input, opts)
+	out, err := p.client.CreateMultipartUpload(ctx, input)
 	if err != nil {
 		return "", p.wrapError("CreateMultipartUpload", key, err)
 	}
@@ -515,6 +535,37 @@ func isPreconditionFailure(err error) bool {
 // S3 returns ETags with quotes, e.g., "d41d8cd98f00b204e9800998ecf8427e".
 func cleanETag(etag string) string {
 	return strings.Trim(etag, "\"")
+}
+
+func applyPutOptions(input *s3.PutObjectInput, opts provider.PutOptions) {
+	if len(opts.UserMetadata) > 0 {
+		input.Metadata = opts.UserMetadata
+	}
+	if opts.ContentType != "" {
+		input.ContentType = aws.String(opts.ContentType)
+	}
+	if opts.StorageClass != "" {
+		input.StorageClass = types.StorageClass(opts.StorageClass)
+	}
+}
+
+func applyMultipartOptions(input *s3.CreateMultipartUploadInput, opts provider.PutOptions) {
+	if len(opts.UserMetadata) > 0 {
+		input.Metadata = opts.UserMetadata
+	}
+	if opts.ContentType != "" {
+		input.ContentType = aws.String(opts.ContentType)
+	}
+	if opts.StorageClass != "" {
+		input.StorageClass = types.StorageClass(opts.StorageClass)
+	}
+}
+
+func normalizeStorageClassString(storageClass string) string {
+	if storageClass == "" {
+		return "STANDARD"
+	}
+	return storageClass
 }
 
 func conditionETag(etag string) string {

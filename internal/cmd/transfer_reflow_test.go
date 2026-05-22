@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -847,6 +848,169 @@ func TestTransferReflowCommand_CollisionQuarantineRejectsAbsolutePrefix(t *testi
 	require.Contains(t, err.Error(), "collision_quarantine_prefix must be a relative destination prefix")
 }
 
+func TestTransferReflowCommand_MetadataSetUsesConditionalPutWithoutSourceHead(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+
+	_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-set", "Owner=first",
+		"--metadata-set", "owner=final",
+	)
+	require.NoError(t, err)
+	require.Empty(t, src.headCallsSnapshot())
+	require.Equal(t, []string{"source/file.xml"}, dst.conditionalPutCallsSnapshot())
+	meta := dst.metaSnapshot("source/file.xml")
+	require.Equal(t, map[string]string{"owner": "final"}, meta.Metadata)
+	require.Empty(t, meta.ContentType)
+	require.Empty(t, meta.StorageClass)
+}
+
+func TestTransferReflowCommand_MetadataMergePreservesContentTypeAndPropagatesStorage(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		ContentType:  "application/xml",
+		Metadata:     map[string]string{"Foo": "old", "Bar": "keep"},
+		StorageClass: "standard_ia",
+	})
+
+	_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-policy", "merge",
+		"--metadata-set", "foo=new",
+		"--preserve-content-type",
+		"--destination-storage-class", "propagate",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"source/file.xml"}, src.headCallsSnapshot())
+	meta := dst.metaSnapshot("source/file.xml")
+	require.Equal(t, map[string]string{"bar": "keep", "foo": "new"}, meta.Metadata)
+	require.Equal(t, "application/xml", meta.ContentType)
+	require.Equal(t, "STANDARD_IA", meta.StorageClass)
+}
+
+func TestTransferReflowCommand_MetadataPreserveRejectsCanonicalSourceCollision(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		Metadata: map[string]string{"Foo": "secret-one", "foo": "secret-two"},
+	})
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-policy", "preserve",
+	)
+	require.Error(t, err)
+	require.False(t, dst.hasObject("source/file.xml"))
+	errData := requireErrorData(t, stdout)
+	require.Contains(t, errData.Message, "destination metadata options failed")
+	require.NotContains(t, stdout, "secret-one")
+	require.NotContains(t, stdout, "secret-two")
+}
+
+func TestTransferReflowCommand_MetadataBudgetErrorRedactsValuesEverywhere(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+	sentinel := "sentinel-secret-value-" + strings.Repeat("x", metadataMaxTotalBytes+1)
+	checkpoint := filepath.Join(t.TempDir(), "reflow-state.db")
+
+	stdout, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--checkpoint", checkpoint,
+		"--metadata-set", "secret_token="+sentinel,
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), sentinel)
+	require.NotContains(t, stdout, sentinel)
+	require.NotContains(t, stderr, sentinel)
+
+	errData := requireErrorData(t, stdout)
+	require.Equal(t, output.ErrCodeInvalidInput, errData.Code)
+	require.Contains(t, errData.Message, "user metadata exceeds S3 metadata budget")
+	require.NotContains(t, errData.Message, sentinel)
+	require.Contains(t, errData.Details["metadata_keys"], "secret_token")
+	require.EqualValues(t, 1, errData.Details["metadata_count"])
+	require.NotContains(t, readCheckpointErrorMessage(t, checkpoint), sentinel)
+}
+
+func TestTransferReflowCommand_FileMetadataSidecarDoesNotUseS3Budget(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+	destDir := t.TempDir()
+	oversized := "file-sidecar-value-" + strings.Repeat("x", metadataMaxTotalBytes+1)
+
+	_, stderr, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-set", "oversized="+oversized,
+	)
+	require.NoError(t, err, stderr)
+
+	sidecarPath := filepath.Join(destDir, "source", "file.xml"+providerfile.DefaultMetadataSidecarSuffix)
+	raw := mustReadFile(t, sidecarPath)
+	var sidecar map[string]any
+	require.NoError(t, json.Unmarshal(raw, &sidecar))
+	require.Equal(t, "gonimbus.reflow.meta.v1", sidecar["schema"])
+	userMeta, ok := sidecar["user_metadata"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, oversized, userMeta["oversized"])
+}
+
+func TestTransferReflowCommand_MetadataCapabilityFailureEmitsConfigJSONLError(t *testing.T) {
+	withTransferReflowTestState(t)
+	src := newReflowMemoryProvider()
+	dst := &reflowBareProvider{p: newReflowMemoryProvider()}
+	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+		return src, nil
+	}
+	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
+		return dst, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", "") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--metadata-set", "owner=team",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	errData := requireErrorData(t, stdout.String())
+	require.Equal(t, output.ErrCodeInvalidInput, errData.Code)
+	require.Contains(t, errData.Message, "metadata-aware PUT")
+	require.Equal(t, "MetadataAwarePutter", errData.Details["missing_capability"])
+	require.Contains(t, errData.Details["flags"], "--metadata-set")
+}
+
+func TestTransferReflowMetadataConfigValidation(t *testing.T) {
+	require.NoError(t, validateMetadataConfig(reflowMetadataConfig{Policy: metadataPolicyClear, MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix}))
+	require.ErrorContains(t, validateMetadataConfig(reflowMetadataConfig{Policy: "copy", MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix}), "metadata-policy")
+	require.ErrorContains(t, validateMetadataConfig(reflowMetadataConfig{Policy: metadataPolicyClear, MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix, DestinationStorageClass: "GLACIER"}), "not a valid PUT target")
+	require.NoError(t, validateMetadataConfig(reflowMetadataConfig{Policy: metadataPolicyClear, MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix, DestinationStorageClass: storageClassPropagate}))
+}
+
+func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testing.T) {
+	require.NoError(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear}))
+	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, Set: map[string]string{"owner": "team"}}), "metadata-aware PUT")
+	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyPreserve}), "--metadata-policy")
+}
+
+func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
+	require.Contains(t, transferReflowCmd.Long, "durable destination metadata")
+	require.Contains(t, transferReflowCmd.Long, "cleartext JSON sidecars")
+	require.Contains(t, transferReflowCmd.Long, "--metadata-sidecar-suffix")
+}
+
 func newTransferReflowTestCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "reflow [source-uri]",
@@ -870,6 +1034,11 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowProvSuffix, "provenance-suffix", provenanceSuffix, "")
 	cmd.Flags().StringVar(&reflowProvOnError, "provenance-on-write-error", provenanceErrorWarn, "")
 	cmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "")
+	cmd.Flags().StringVar(&reflowMetaPolicy, "metadata-policy", metadataPolicyClear, "")
+	cmd.Flags().StringArrayVar(&reflowMetaSets, "metadata-set", nil, "")
+	cmd.Flags().BoolVar(&reflowMetaContent, "preserve-content-type", false, "")
+	cmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "")
+	cmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "")
 	cmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "")
 	cmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "")
 	cmd.Flags().StringVar(&reflowSrcEndpoint, "src-endpoint", "", "")
@@ -899,6 +1068,11 @@ func withTransferReflowTestState(t *testing.T) {
 	oldProvSuffix := reflowProvSuffix
 	oldProvOnError := reflowProvOnError
 	oldProvUnsafe := reflowProvUnsafe
+	oldMetaPolicy := reflowMetaPolicy
+	oldMetaSets := reflowMetaSets
+	oldMetaContent := reflowMetaContent
+	oldMetaStorage := reflowMetaStorage
+	oldMetaSuffix := reflowMetaSuffix
 	oldSrcRegion := reflowSrcRegion
 	oldSrcProfile := reflowSrcProfile
 	oldSrcEndpoint := reflowSrcEndpoint
@@ -930,6 +1104,11 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowProvSuffix = provenanceSuffix
 	reflowProvOnError = provenanceErrorWarn
 	reflowProvUnsafe = false
+	reflowMetaPolicy = metadataPolicyClear
+	reflowMetaSets = nil
+	reflowMetaContent = false
+	reflowMetaStorage = ""
+	reflowMetaSuffix = providerfile.DefaultMetadataSidecarSuffix
 	reflowSrcRegion = ""
 	reflowSrcProfile = ""
 	reflowSrcEndpoint = ""
@@ -955,6 +1134,11 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowProvSuffix = oldProvSuffix
 		reflowProvOnError = oldProvOnError
 		reflowProvUnsafe = oldProvUnsafe
+		reflowMetaPolicy = oldMetaPolicy
+		reflowMetaSets = oldMetaSets
+		reflowMetaContent = oldMetaContent
+		reflowMetaStorage = oldMetaStorage
+		reflowMetaSuffix = oldMetaSuffix
 		reflowSrcRegion = oldSrcRegion
 		reflowSrcProfile = oldSrcProfile
 		reflowSrcEndpoint = oldSrcEndpoint
@@ -1603,6 +1787,16 @@ func mustReadFile(t *testing.T, path string) []byte {
 	return data
 }
 
+func readCheckpointErrorMessage(t *testing.T, path string) string {
+	t.Helper()
+	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: path})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	var msg string
+	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT error_message FROM reflow_items WHERE status = 'failed' LIMIT 1`).Scan(&msg))
+	return msg
+}
+
 func requireErrorData(t *testing.T, stdout string) testErrorData {
 	t.Helper()
 	record := requireRecord(t, stdout, output.TypeError, "")
@@ -1667,6 +1861,14 @@ func (p *reflowMemoryProvider) putFixture(key string, body string, etag string, 
 	p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(body)), ETag: etag, LastModified: lastModified}}
 }
 
+func (p *reflowMemoryProvider) putFixtureWithMeta(key string, body string, etag string, lastModified time.Time, meta provider.ObjectMeta) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	meta.ObjectSummary = provider.ObjectSummary{Key: key, Size: int64(len(body)), ETag: etag, LastModified: lastModified}
+	p.objects[key] = []byte(body)
+	p.meta[key] = meta
+}
+
 func (p *reflowMemoryProvider) hasObject(key string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1702,6 +1904,12 @@ func (p *reflowMemoryProvider) conditionalPutCallsSnapshot() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.conditionalPutCalls...)
+}
+
+func (p *reflowMemoryProvider) metaSnapshot(key string) provider.ObjectMeta {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.meta[key]
 }
 
 func (p *reflowMemoryProvider) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
@@ -1748,6 +1956,14 @@ func (p *reflowMemoryProvider) PutObject(_ context.Context, key string, body io.
 	return nil
 }
 
+func (p *reflowMemoryProvider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	if err := p.PutObject(ctx, key, body, contentLength); err != nil {
+		return err
+	}
+	p.applyPutOptions(key, opts)
+	return nil
+}
+
 func (p *reflowMemoryProvider) PutObjectConditional(_ context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, err
@@ -1778,6 +1994,53 @@ func (p *reflowMemoryProvider) PutObjectConditional(_ context.Context, key strin
 	return provider.PutResult{ETag: etag}, nil
 }
 
+func (p *reflowMemoryProvider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
+	result, err := p.PutObjectConditional(ctx, key, body, contentLength, precond)
+	if err != nil {
+		return provider.PutResult{}, err
+	}
+	p.applyPutOptions(key, opts)
+	return result, nil
+}
+
+func (p *reflowMemoryProvider) applyPutOptions(key string, opts provider.PutOptions) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	meta := p.meta[key]
+	meta.Metadata = cloneMetadataMap(opts.UserMetadata)
+	meta.ContentType = opts.ContentType
+	meta.StorageClass = opts.StorageClass
+	p.meta[key] = meta
+}
+
 func (p *reflowMemoryProvider) Close() error {
+	return nil
+}
+
+type reflowBareProvider struct {
+	p *reflowMemoryProvider
+}
+
+func (p *reflowBareProvider) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	return p.p.List(ctx, opts)
+}
+
+func (p *reflowBareProvider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	return p.p.Head(ctx, key)
+}
+
+func (p *reflowBareProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	return p.p.GetObject(ctx, key)
+}
+
+func (p *reflowBareProvider) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	return p.p.PutObject(ctx, key, body, contentLength)
+}
+
+func (p *reflowBareProvider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	return p.p.PutObjectConditional(ctx, key, body, contentLength, precond)
+}
+
+func (p *reflowBareProvider) Close() error {
 	return nil
 }

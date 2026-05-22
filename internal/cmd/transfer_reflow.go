@@ -6,11 +6,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +60,12 @@ const (
 	decisionIfAbsentHead   = "ifabsent_then_head"
 	decisionOverwrite      = "unconditional_overwrite"
 	decisionQuarantine     = "quarantine_routed"
+	metadataPolicyClear    = "clear"
+	metadataPolicyPreserve = "preserve"
+	metadataPolicyMerge    = "merge"
+	metadataMaxPairBytes   = 2 * 1024
+	metadataMaxTotalBytes  = 8 * 1024
+	storageClassPropagate  = "propagate"
 )
 
 var transferReflowCmd = &cobra.Command{
@@ -71,6 +79,7 @@ Input can be provided via --stdin (one item per line):
 
 Notes:
 - v0.1.7 supports a single source bucket per reflow run.
+- Metadata values supplied via --metadata-set or carried by --metadata-policy=preserve|merge, --preserve-content-type, or --destination-storage-class are durable destination metadata and are not redacted at destination. For file destinations, metadata is written in cleartext JSON sidecars using --metadata-sidecar-suffix.
 
 Output is JSONL on stdout.
 Errors are emitted on stdout as gonimbus.error.v1 records.
@@ -96,6 +105,11 @@ var (
 	reflowProvSuffix  string
 	reflowProvOnError string
 	reflowProvUnsafe  bool
+	reflowMetaPolicy  string
+	reflowMetaSets    []string
+	reflowMetaContent bool
+	reflowMetaStorage string
+	reflowMetaSuffix  string
 
 	reflowSrcRegion   string
 	reflowSrcProfile  string
@@ -146,6 +160,11 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowProvSuffix, "provenance-suffix", provenanceSuffix, "Sidecar key suffix (default .gnb.json)")
 	transferReflowCmd.Flags().StringVar(&reflowProvOnError, "provenance-on-write-error", provenanceErrorWarn, "Sidecar write failure policy: warn|fail")
 	transferReflowCmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "Allow a provenance suffix that collides with common data extensions")
+	transferReflowCmd.Flags().StringVar(&reflowMetaPolicy, "metadata-policy", metadataPolicyClear, "Destination user metadata policy: clear|preserve|merge")
+	transferReflowCmd.Flags().StringArrayVar(&reflowMetaSets, "metadata-set", nil, "Destination user metadata key=value override; repeatable; keys are normalized to lower case")
+	transferReflowCmd.Flags().BoolVar(&reflowMetaContent, "preserve-content-type", false, "Preserve the source Content-Type on destination objects")
+	transferReflowCmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "Destination storage class, or propagate to copy source storage class")
+	transferReflowCmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "File destination metadata sidecar suffix")
 
 	transferReflowCmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "Source AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "Source AWS profile")
@@ -161,6 +180,11 @@ func init() {
 	_ = viper.BindPFlag("provenance.suffix", transferReflowCmd.Flags().Lookup("provenance-suffix"))
 	_ = viper.BindPFlag("provenance.on_write_error", transferReflowCmd.Flags().Lookup("provenance-on-write-error"))
 	_ = viper.BindPFlag("provenance.allow_unsafe_suffix", transferReflowCmd.Flags().Lookup("allow-unsafe-suffix"))
+	_ = viper.BindPFlag("metadata.policy", transferReflowCmd.Flags().Lookup("metadata-policy"))
+	_ = viper.BindPFlag("metadata.set", transferReflowCmd.Flags().Lookup("metadata-set"))
+	_ = viper.BindPFlag("metadata.preserve_content_type", transferReflowCmd.Flags().Lookup("preserve-content-type"))
+	_ = viper.BindPFlag("metadata.destination_storage_class", transferReflowCmd.Flags().Lookup("destination-storage-class"))
+	_ = viper.BindPFlag("metadata.sidecar_suffix", transferReflowCmd.Flags().Lookup("metadata-sidecar-suffix"))
 
 	_ = transferReflowCmd.MarkFlagRequired("dest")
 	_ = transferReflowCmd.MarkFlagRequired("rewrite-from")
@@ -218,6 +242,7 @@ type reflowRunRecord struct {
 	Resume         bool                 `json:"resume"`
 	Parallel       int                  `json:"parallel"`
 	Provenance     *provenanceRunConfig `json:"provenance,omitempty"`
+	Metadata       *metadataRunConfig   `json:"metadata,omitempty"`
 }
 
 type collisionConfig struct {
@@ -231,6 +256,88 @@ type collisionInfo struct {
 	DestETagObserved string `json:"dest_etag_observed,omitempty"`
 	DestSizeObserved *int64 `json:"dest_size_observed,omitempty"`
 	DecisionPath     string `json:"decision_path"`
+}
+
+type reflowMetadataConfig struct {
+	Policy                  string
+	Set                     map[string]string
+	PreserveContentType     bool
+	DestinationStorageClass string
+	MetadataSidecarSuffix   string
+}
+
+type metadataRunConfig struct {
+	Policy                  string            `json:"policy"`
+	SetKeys                 []string          `json:"set_keys,omitempty"`
+	PreserveContentType     bool              `json:"preserve_content_type,omitempty"`
+	DestinationStorageClass string            `json:"destination_storage_class,omitempty"`
+	MetadataSidecarSuffix   string            `json:"metadata_sidecar_suffix,omitempty"`
+	Set                     map[string]string `json:"set,omitempty"`
+}
+
+type metadataBudgetError struct {
+	OverLimitKeys []string
+	PairLimit     int
+	TotalBytes    int
+	TotalLimit    int
+	Count         int
+}
+
+func (e *metadataBudgetError) Error() string {
+	return fmt.Sprintf("user metadata exceeds S3 metadata budget: keys=%v count=%d total_bytes=%d total_limit=%d pair_limit=%d", e.OverLimitKeys, e.Count, e.TotalBytes, e.TotalLimit, e.PairLimit)
+}
+
+func (e *metadataBudgetError) details() map[string]any {
+	return map[string]any{
+		"metadata_keys":        append([]string(nil), e.OverLimitKeys...),
+		"metadata_count":       e.Count,
+		"metadata_total_bytes": e.TotalBytes,
+		"metadata_total_limit": e.TotalLimit,
+		"metadata_pair_limit":  e.PairLimit,
+	}
+}
+
+func (c reflowMetadataConfig) needsSourceHead() bool {
+	return c.Policy == metadataPolicyPreserve || c.Policy == metadataPolicyMerge || c.PreserveContentType || c.DestinationStorageClass == storageClassPropagate
+}
+
+func (c reflowMetadataConfig) requiresCapability() bool {
+	return c.Policy == metadataPolicyPreserve || c.Policy == metadataPolicyMerge || len(c.Set) > 0 || c.PreserveContentType || c.DestinationStorageClass != ""
+}
+
+func (c reflowMetadataConfig) capabilityFlags() []string {
+	var out []string
+	if c.Policy == metadataPolicyPreserve || c.Policy == metadataPolicyMerge {
+		out = append(out, "--metadata-policy")
+	}
+	if len(c.Set) > 0 {
+		out = append(out, "--metadata-set")
+	}
+	if c.PreserveContentType {
+		out = append(out, "--preserve-content-type")
+	}
+	if c.DestinationStorageClass != "" {
+		out = append(out, "--destination-storage-class")
+	}
+	return out
+}
+
+func (c reflowMetadataConfig) runConfig() *metadataRunConfig {
+	if !c.requiresCapability() && c.MetadataSidecarSuffix == providerfile.DefaultMetadataSidecarSuffix {
+		return nil
+	}
+	keys := make([]string, 0, len(c.Set))
+	for key := range c.Set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return &metadataRunConfig{
+		Policy:                  c.Policy,
+		SetKeys:                 keys,
+		PreserveContentType:     c.PreserveContentType,
+		DestinationStorageClass: c.DestinationStorageClass,
+		MetadataSidecarSuffix:   c.MetadataSidecarSuffix,
+	}
 }
 
 type reflowDestKeyArbiter struct {
@@ -528,6 +635,261 @@ func validateCollisionConfig(cfg collisionConfig) error {
 		}
 	}
 	return nil
+}
+
+func resolveMetadataConfig(cmd *cobra.Command) (reflowMetadataConfig, error) {
+	cfg := reflowMetadataConfig{
+		Policy:                metadataPolicyClear,
+		MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix,
+	}
+	if cmd != nil && cmd.Flags().Changed("metadata-policy") {
+		cfg.Policy = reflowMetaPolicy
+	} else if viper.IsSet("metadata.policy") {
+		cfg.Policy = viper.GetString("metadata.policy")
+	}
+	if cmd != nil && cmd.Flags().Changed("metadata-set") {
+		cfg.Set = parseMetadataSetRaw(reflowMetaSets)
+	} else if viper.IsSet("metadata.set") {
+		cfg.Set = parseMetadataSetRaw(viper.GetStringSlice("metadata.set"))
+	}
+	if cmd != nil && cmd.Flags().Changed("preserve-content-type") {
+		cfg.PreserveContentType = reflowMetaContent
+	} else if viper.IsSet("metadata.preserve_content_type") {
+		cfg.PreserveContentType = viper.GetBool("metadata.preserve_content_type")
+	}
+	if cmd != nil && cmd.Flags().Changed("destination-storage-class") {
+		cfg.DestinationStorageClass = reflowMetaStorage
+	} else if viper.IsSet("metadata.destination_storage_class") {
+		cfg.DestinationStorageClass = viper.GetString("metadata.destination_storage_class")
+	}
+	if cmd != nil && cmd.Flags().Changed("metadata-sidecar-suffix") {
+		cfg.MetadataSidecarSuffix = reflowMetaSuffix
+	} else if viper.IsSet("metadata.sidecar_suffix") {
+		cfg.MetadataSidecarSuffix = viper.GetString("metadata.sidecar_suffix")
+	}
+
+	cfg.Policy = strings.TrimSpace(strings.ToLower(cfg.Policy))
+	cfg.DestinationStorageClass = strings.TrimSpace(cfg.DestinationStorageClass)
+	cfg.MetadataSidecarSuffix = strings.TrimSpace(cfg.MetadataSidecarSuffix)
+	if cfg.MetadataSidecarSuffix == "" {
+		cfg.MetadataSidecarSuffix = providerfile.DefaultMetadataSidecarSuffix
+	}
+	if err := validateMetadataConfig(cfg); err != nil {
+		return cfg, err
+	}
+	if strings.EqualFold(cfg.DestinationStorageClass, storageClassPropagate) {
+		cfg.DestinationStorageClass = storageClassPropagate
+	} else {
+		cfg.DestinationStorageClass = strings.ToUpper(cfg.DestinationStorageClass)
+	}
+	return cfg, nil
+}
+
+func parseMetadataSetRaw(raw []string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for _, entry := range raw {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			out[""] = ""
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	return out
+}
+
+func validateMetadataConfig(cfg reflowMetadataConfig) error {
+	switch cfg.Policy {
+	case metadataPolicyClear, metadataPolicyPreserve, metadataPolicyMerge:
+		// ok
+	default:
+		return fmt.Errorf("metadata-policy must be one of: clear, preserve, merge")
+	}
+	if _, bad := cfg.Set[""]; bad {
+		return fmt.Errorf("metadata-set entries must use non-empty key=value syntax")
+	}
+	for key := range cfg.Set {
+		if strings.ContainsAny(key, " \t\r\n=") {
+			return fmt.Errorf("metadata-set keys must be non-empty tokens without whitespace or '='")
+		}
+	}
+	if !strings.HasPrefix(cfg.MetadataSidecarSuffix, ".") {
+		return fmt.Errorf("metadata-sidecar-suffix must start with a leading dot")
+	}
+	if strings.Contains(cfg.MetadataSidecarSuffix, "/") {
+		return fmt.Errorf("metadata-sidecar-suffix must not contain '/'")
+	}
+	if cfg.DestinationStorageClass == "" {
+		return nil
+	}
+	if strings.EqualFold(cfg.DestinationStorageClass, storageClassPropagate) {
+		return nil
+	}
+	if !isValidPutStorageClass(strings.ToUpper(cfg.DestinationStorageClass)) {
+		return fmt.Errorf("destination-storage-class is not a valid PUT target")
+	}
+	return nil
+}
+
+func isValidPutStorageClass(storageClass string) bool {
+	switch strings.ToUpper(strings.TrimSpace(storageClass)) {
+	case "STANDARD", "INTELLIGENT_TIERING", "STANDARD_IA", "ONEZONE_IA", "GLACIER_IR", "REDUCED_REDUNDANCY":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateMetadataBudget(metadata map[string]string) error {
+	if len(metadata) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	total := 0
+	overLimitKeys := make([]string, 0)
+	for _, key := range keys {
+		pairBytes := len([]byte(key)) + len([]byte(metadata[key]))
+		total += pairBytes
+		if pairBytes > metadataMaxPairBytes {
+			overLimitKeys = append(overLimitKeys, key)
+		}
+	}
+	if total > metadataMaxTotalBytes {
+		overLimitKeys = append(overLimitKeys, keys...)
+	}
+	if len(overLimitKeys) == 0 {
+		return nil
+	}
+	overLimitKeys = uniqueSortedStrings(overLimitKeys)
+	return &metadataBudgetError{
+		OverLimitKeys: overLimitKeys,
+		PairLimit:     metadataMaxPairBytes,
+		TotalBytes:    total,
+		TotalLimit:    metadataMaxTotalBytes,
+		Count:         len(metadata),
+	}
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Strings(values)
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func ensureMetadataCapability(dst provider.Provider, cfg reflowMetadataConfig) error {
+	if !cfg.requiresCapability() {
+		return nil
+	}
+	if _, ok := dst.(provider.MetadataAwarePutter); ok {
+		return nil
+	}
+	return fmt.Errorf("destination provider does not support metadata-aware PUT required by %s", strings.Join(cfg.capabilityFlags(), ", "))
+}
+
+func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err error, details map[string]any) error {
+	if details == nil {
+		details = map[string]any{}
+	}
+	details["mode"] = "transfer_reflow"
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInvalidInput, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Details: details}); werr != nil {
+		observability.CLILogger.Debug("Failed to emit reflow config error record", zap.Error(werr))
+	}
+	return exitError(foundry.ExitInvalidArgument, msg, err)
+}
+
+func (c reflowMetadataConfig) putOptions(source *provider.ObjectMeta) (provider.PutOptions, error) {
+	var opts provider.PutOptions
+	switch c.Policy {
+	case metadataPolicyPreserve:
+		userMeta, err := canonicalizeSourceMetadata(source)
+		if err != nil {
+			return opts, err
+		}
+		opts.UserMetadata = userMeta
+	case metadataPolicyMerge:
+		userMeta, err := canonicalizeSourceMetadata(source)
+		if err != nil {
+			return opts, err
+		}
+		opts.UserMetadata = userMeta
+		for key, value := range c.Set {
+			opts.UserMetadata[key] = value
+		}
+	case metadataPolicyClear:
+		opts.UserMetadata = cloneMetadataMap(c.Set)
+	}
+	if c.PreserveContentType {
+		if source == nil {
+			return opts, fmt.Errorf("source metadata is required to preserve content type")
+		}
+		opts.ContentType = source.ContentType
+	}
+	if c.DestinationStorageClass != "" {
+		if c.DestinationStorageClass == storageClassPropagate {
+			if source == nil {
+				return opts, fmt.Errorf("source metadata is required to propagate storage class")
+			}
+			storageClass := source.StorageClass
+			if storageClass == "" {
+				storageClass = "STANDARD"
+			}
+			storageClass = strings.ToUpper(storageClass)
+			if !isValidPutStorageClass(storageClass) {
+				return opts, fmt.Errorf("source storage class is not a valid PUT target")
+			}
+			opts.StorageClass = storageClass
+		} else {
+			opts.StorageClass = strings.ToUpper(c.DestinationStorageClass)
+		}
+	}
+	return opts, nil
+}
+
+func canonicalizeSourceMetadata(source *provider.ObjectMeta) (map[string]string, error) {
+	if source == nil {
+		return nil, fmt.Errorf("source metadata is required for metadata-policy")
+	}
+	out := make(map[string]string, len(source.Metadata))
+	seenOriginal := make(map[string]string, len(source.Metadata))
+	for key, value := range source.Metadata {
+		canon := strings.ToLower(strings.TrimSpace(key))
+		if canon == "" {
+			continue
+		}
+		if first, ok := seenOriginal[canon]; ok && first != key {
+			return nil, fmt.Errorf("source metadata contains duplicate key after normalization: %s", canon)
+		}
+		seenOriginal[canon] = key
+		out[canon] = value
+	}
+	return out, nil
+}
+
+func cloneMetadataMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func resolveProvenanceConfig(cmd *cobra.Command, dest *reflowDestSpec) (provenanceConfig, error) {
@@ -887,7 +1249,7 @@ func reflowToolVersion() string {
 	return "gonimbus " + version
 }
 
-func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provider, error) {
+func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMetadataConfig) (provider.Provider, error) {
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
@@ -904,7 +1266,7 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec) (provider.Provid
 		if err := os.MkdirAll(dest.BaseDir, 0o750); err != nil {
 			return nil, err
 		}
-		return newReflowFileProvider(providerfile.Config{BaseDir: dest.BaseDir})
+		return newReflowFileProvider(providerfile.Config{BaseDir: dest.BaseDir, MetadataSidecarSuffix: metaCfg.MetadataSidecarSuffix})
 	default:
 		return nil, fmt.Errorf("unsupported destination provider %q", dest.Provider)
 	}
@@ -940,6 +1302,11 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	}
 	destURI := destSpec.BaseURI
 
+	metaCfg, err := resolveMetadataConfig(cmd)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid metadata configuration", err)
+	}
+
 	provCfg, err := resolveProvenanceConfig(cmd, destSpec)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid provenance configuration", err)
@@ -969,16 +1336,6 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = state.Close() }()
 
-	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
-		DestURI:        destURI,
-		CheckpointPath: checkpointPath,
-		DryRun:         reflowDryRun,
-		Resume:         reflowResume,
-		Parallel:       reflowParallel,
-		Provenance:     provCfg.runConfig(),
-	})
-
-	// Providers are created after we discover the source bucket.
 	var (
 		srcProv     provider.Provider
 		dstProv     provider.Provider
@@ -986,20 +1343,45 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		srcBucket   string
 		provMu      sync.Mutex
 	)
+	dstProv, err = newDestProvider(ctx, destSpec, metaCfg)
+	if err != nil {
+		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to destination provider", err)
+	}
+	if err := ensureMetadataCapability(dstProv, metaCfg); err != nil {
+		return emitReflowConfigError(ctx, w, "Invalid metadata configuration", err, map[string]any{
+			"missing_capability": "MetadataAwarePutter",
+			"flags":              metaCfg.capabilityFlags(),
+		})
+	}
+
+	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
+		DestURI:        destURI,
+		CheckpointPath: checkpointPath,
+		DryRun:         reflowDryRun,
+		Resume:         reflowResume,
+		Parallel:       reflowParallel,
+		Provenance:     provCfg.runConfig(),
+		Metadata:       metaCfg.runConfig(),
+	})
+
+	// Source providers are created after we discover the source bucket.
 	getProviders := func(bucket string) (provider.Provider, provider.Provider, provider.Provider, error) {
 		provMu.Lock()
 		defer provMu.Unlock()
 
 		if dstProv == nil {
-			pNew, err := newDestProvider(ctx, destSpec)
+			pNew, err := newDestProvider(ctx, destSpec, metaCfg)
 			if err != nil {
+				return nil, nil, nil, err
+			}
+			if err := ensureMetadataCapability(pNew, metaCfg); err != nil {
 				return nil, nil, nil, err
 			}
 			dstProv = pNew
 		}
 		if sidecarProv == nil {
 			if provCfg.PlacementMode == provenancePlaceMirror && provCfg.SidecarRoot != nil && provCfg.SidecarRoot.Provider == string(provider.ProviderFile) && provCfg.SidecarRoot.BaseDir != destSpec.BaseDir {
-				pNew, err := newDestProvider(ctx, provCfg.SidecarRoot)
+				pNew, err := newDestProvider(ctx, provCfg.SidecarRoot, metaCfg)
 				if err != nil {
 					return nil, nil, nil, err
 				}
@@ -1117,15 +1499,40 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 
 				srcETag := task.SourceETag
 				srcSize := task.SourceSize
-				if srcETag == "" || srcSize == 0 {
+				var sourceMeta *provider.ObjectMeta
+				if metaCfg.needsSourceHead() || srcETag == "" || srcSize == 0 {
 					meta, err := src.Head(ctx, task.SourceKey)
 					if err == nil {
+						sourceMeta = meta
 						srcETag = meta.ETag
 						srcSize = meta.Size
 						if !meta.LastModified.IsZero() {
 							task.SourceLastMod = meta.LastModified
 						}
+					} else if metaCfg.needsSourceHead() {
+						errorCount.Add(1)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": task.SourceURI})
+						continue
 					}
+				}
+				putOptions, err := metaCfg.putOptions(sourceMeta)
+				if err == nil && destSpec.Provider == string(provider.ProviderS3) {
+					err = validateMetadataBudget(putOptions.UserMetadata)
+				}
+				if err != nil {
+					errorCount.Add(1)
+					details := map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI}
+					var budgetErr *metadataBudgetError
+					if errors.As(err, &budgetErr) {
+						for key, value := range budgetErr.details() {
+							details[key] = value
+						}
+					}
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "destination metadata options failed", err, details)
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+					}
+					continue
 				}
 
 				var collision *collisionInfo
@@ -1147,7 +1554,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
 						continue
 					}
-					bytes, err = transfer.CopyObject(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes)
+					bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, putOptions)
 				} else {
 					gate, releaseGate := destArbiter.acquire(dstKey)
 					// Keep active mutexes bounded to in-flight keys; durable per-run
@@ -1166,7 +1573,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							gate.observed = true
 							err = &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
 						} else {
-							bytes, putResult, err = transfer.CopyObjectConditional(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true})
+							bytes, putResult, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true}, putOptions)
 							if err == nil || isConditionalExists(err) {
 								gate.observed = true
 								if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
@@ -1235,7 +1642,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 							quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
 							quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
-							bytes, err = transfer.CopyObject(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes)
+							bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, putOptions)
 							if err != nil {
 								errorCount.Add(1)
 								code := reflowErrCode(err)
@@ -1595,7 +2002,10 @@ func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err 
 }
 
 func reflowErrCode(err error) string {
+	var budgetErr *metadataBudgetError
 	switch {
+	case errors.As(err, &budgetErr):
+		return output.ErrCodeInvalidInput
 	case provider.IsNotFound(err):
 		return output.ErrCodeNotFound
 	case provider.IsAccessDenied(err):

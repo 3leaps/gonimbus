@@ -646,6 +646,40 @@ Probe-emitted records may carry `routing_class: "quarantine"` when a required ex
 
 Use this when bulk pipelines should keep moving past anomalies. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing) for the end-to-end flow, including how to configure `on_missing: quarantine` on the probe side.
 
+### Destination Metadata
+
+By default, `transfer reflow` preserves the historical behavior: destination objects are written without caller-controlled user metadata, without preserving source content type, and without setting a storage class.
+
+Use explicit metadata flags when destination consumers need durable object attributes:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --metadata-policy clear \
+  --metadata-set dataset=transactions \
+  --metadata-set owner=data-platform \
+  --preserve-content-type \
+  --destination-storage-class STANDARD_IA
+```
+
+User metadata policy:
+
+| Policy     | Behavior                                                                                         |
+| ---------- | ------------------------------------------------------------------------------------------------ |
+| `clear`    | Do not copy source user metadata; only `--metadata-set` values are used                          |
+| `preserve` | Copy source user metadata; fail the object if source keys collide after lower-case normalization |
+| `merge`    | Copy source user metadata, then apply `--metadata-set` overrides                                 |
+
+`--metadata-set key=value` is repeatable. Keys are normalized to lower case when the command starts, and the last value wins for repeated keys. Values are not redacted at the destination.
+
+`--preserve-content-type` copies the source object's content type. `--destination-storage-class <class>` sets a storage class for destination PUTs; use `--destination-storage-class propagate` to copy the source storage class. Gonimbus accepts only PUT-target classes such as `STANDARD`, `INTELLIGENT_TIERING`, `STANDARD_IA`, `ONEZONE_IA`, `GLACIER_IR`, and `REDUCED_REDUNDANCY`; archive classes such as Glacier and Deep Archive are rejected as destination PUT targets.
+
+Metadata warning: values supplied via `--metadata-set` or carried by `--metadata-policy=preserve|merge`, `--preserve-content-type`, or `--destination-storage-class` are durable destination metadata and are not redacted at destination. Use `--metadata-policy clear --metadata-set ...` as an include-list pattern when source metadata might contain credential URIs, tokens, or other sensitive values.
+
+For local file destinations, Gonimbus stores destination metadata in a cleartext JSON sidecar next to the object. The default suffix is `.gnb-meta.json` and can be changed with `--metadata-sidecar-suffix`.
+
 ### Provenance Sidecars
 
 `transfer reflow` can write an opt-in JSON sidecar next to each destination object:

@@ -25,6 +25,35 @@ type ConditionalPutter interface {
 	PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond PutPrecondition) (PutResult, error)
 }
 
+// PutOptions carries optional destination object attributes for providers that
+// can persist caller-controlled metadata on PUT.
+type PutOptions struct {
+	// UserMetadata contains user-defined object metadata keys without provider
+	// wire prefixes such as x-amz-meta-. Keys should already be canonicalized by
+	// callers that expose user input.
+	UserMetadata map[string]string
+
+	// ContentType is the destination object's content type. Empty means provider
+	// default.
+	ContentType string
+
+	// StorageClass is the destination object's provider-native storage class.
+	// Empty means provider default.
+	StorageClass string
+}
+
+// Empty returns true when no optioned destination attributes are requested.
+func (o PutOptions) Empty() bool {
+	return len(o.UserMetadata) == 0 && o.ContentType == "" && o.StorageClass == ""
+}
+
+// MetadataAwarePutter can persist caller-controlled metadata, content type, and
+// storage class on both unconditional and conditional PUTs.
+type MetadataAwarePutter interface {
+	PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts PutOptions) error
+	PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond PutPrecondition, opts PutOptions) (PutResult, error)
+}
+
 // PutPrecondition describes the predicate that must hold for a conditional put.
 //
 // Exactly one predicate must be set. Callers that want unconditional replacement
@@ -71,6 +100,12 @@ type ObjectDeleter interface {
 type MultipartUploader interface {
 	CreateMultipartUpload(ctx context.Context, key string) (uploadID string, err error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
+}
+
+// MetadataAwareMultipartUploader can start multipart uploads with the same
+// destination object attributes as a single-part PUT.
+type MetadataAwareMultipartUploader interface {
+	CreateMultipartUploadWithOptions(ctx context.Context, key string, opts PutOptions) (uploadID string, err error)
 }
 
 // ObjectGetter can download objects as a stream.
