@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-22
+
+**Reflow destination metadata — explicit operator control with explicit disclosure discipline.**
+
+v0.2.1 is a focused release for reflow operators who need destination objects to carry durable, queryable metadata while preserving gonimbus's safety posture: metadata writes are opt-in, per-object derivation is allow-listed, failure paths redact source values, and destination system metadata remains owned by the object store. See [`docs/releases/v0.2.1.md`](docs/releases/v0.2.1.md) for the narrative walkthrough.
+
+### Added
+
+#### Reflow destination metadata
+
+- **Caller-controlled destination user metadata** — `transfer reflow` can write explicit destination user metadata with repeatable `--metadata-set key=value`. Keys are normalized to lower case and repeated keys use last-value-wins semantics (GON-033).
+- **Source metadata policies** — `--metadata-policy clear|preserve|merge` controls whether source user metadata is omitted, copied, or copied then overridden by `--metadata-set`. Preserve/merge reject source metadata key collisions after lower-case normalization instead of guessing (GON-033).
+- **Content-Type and storage-class controls** — `--preserve-content-type` copies the source content type, and `--destination-storage-class <class>|propagate` writes an explicit destination storage class or propagates the source class when it is a valid PUT target (GON-033).
+- **Metadata-aware provider writes** — S3 and file providers implement metadata-aware PUT paths, including conditional PUT variants, so destination metadata composes with the default `skip-if-duplicate` reflow path. Local file destinations store metadata in cleartext `.gnb-meta.json` sidecars (GON-033).
+
+#### Per-object metadata derivation
+
+- **Per-object source-key projection** — `--metadata-set-from-source-key dest=src` copies one named source user-metadata key into one named destination user-metadata key per object (GON-034).
+- **Per-object expression derivation** — `--metadata-set-from-source-derived dest=expr` supports the v1 expression set: `meta.<key>.<subfield>`, `urldecode(meta.<key>).<subfield>`, `system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`, and one string-literal concatenation such as `system.etag + "-src"` (GON-034).
+- **Missing-source routing** — `--metadata-on-missing-source skip|fail|empty` controls missing source keys, invalid JSON, URL-decode failures, null values, and unsupported non-scalar JSON results. `fail` emits a redacted `gonimbus.error.v1`; with `--on-collision=quarantine`, failed derivations route to the quarantine prefix (GON-034).
+
+### Changed
+
+- **Bumped version to `0.2.1`** for this release. Version stamping continues through `VERSION`, `.fulmen/app.yaml`, the embedded app identity mirror, and `internal/buildinfo/VERSION`.
+- **CI and release workflows pin Go `1.25.10`** so vulnerability scans, SBOMs, and release artifacts are attributable to an exact patched toolchain (PR #46).
+
+### Fixed
+
+- **SQLite open-ordering WAL flake reduced** — index-store setup now applies `busy_timeout` before switching WAL mode, reducing intermittent lock failures when opening root index databases under test and local operations (PR #46).
+- **YAML formatting drift pinned** — `.yamlfmt` now pins indentation/line endings and `.yamllint` disables mandatory document starts so local `make fmt` and CI format checks agree (PR #46).
+
+### Security
+
+- **Destination metadata disclosure is explicit operator surface.** Values supplied by `--metadata-set`, copied or derived from source metadata, preserved content type, propagated storage class, and file-provider metadata sidecars are durable destination metadata. They are visible to callers with destination HEAD/GET or filesystem access and are not redacted at destination. Use `--metadata-policy clear` plus explicit `--metadata-set*` allow-lists when source metadata might contain credential URIs, tokens, or other sensitive values.
+- **Per-object derivation is an allow-list, not projection.** Gonimbus rejects wildcard destination keys and wildcard subfield projection. v1 derivation accepts only scalar JSON outputs (string, number, bool); null, arrays, and objects route through `--metadata-on-missing-source` so a nested object cannot be serialized wholesale by accident.
+- **Destination system metadata remains a non-goal.** `system.<field>` expressions read source-side system fields as derivation inputs, but the new flags write only destination user metadata (`x-amz-meta-*` for S3-compatible stores). Gonimbus does not set destination ETag, destination LastModified, destination ContentLength, or other object-store-generated system fields. Content-Type and StorageClass are writable only through their explicit GON-033 flags.
+- **Derivation failures redact source values.** Invalid JSON, invalid URL escapes, decoded-invalid JSON, non-scalar fail mode, and source canonical-collision failures name the destination key, expression, and reason kind without echoing raw source metadata values in error JSONL, checkpoints, or default stderr.
+
+### Internal
+
+- **Stable dependency evidence artifacts** — `make dependencies` now writes stable SBOM and vulnerability report outputs under `sbom/`, with an explicit goneat vulnerability policy for release-lane scans (PR #46).
+- **CI hardening lane documented** — `docs/development/ci.md` records the exact Go pin, glibc runner rationale, workspace-relative GOPATH, bash-shell requirement, and SBOM/vulnerability report behavior.
+
 ## [0.2.0] - 2026-05-20
 
 **Library-enabling and scaling — far more complex reflow patterns, the same predictable engine.**
@@ -26,7 +69,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 - **Probe derived variables** — `content probe` computes declared `derived` vars from extracted values via `substring`, `regex_capture`, `format`, `pad`, `lowercase`, `uppercase` transforms. Pair with `transfer reflow`'s mixed-segment rendering (below) to build destination keys without a separate transform step (GON-024).
 - **Mixed rewrite segments** — `transfer reflow` renders one placeholder with literal prefix/suffix inside a single path segment, e.g. `year={year}` or `events/{tenant}-{date}/`. Earlier releases required a whole segment per placeholder (GON-024).
 - **Probe lookup derived variables** — new `lookup` transform with `regex`, `prefix`, and `exact` match modes for table-driven derivations. Pairs with `content probe --rewrite-from` so probe recipes can derive values from source-key captures before `transfer reflow` renders destination keys (GON-031).
-- **Reflow provenance sidecars** — `transfer reflow` writes a `.provenance.jsonl` sidecar next to each destination object recording source URI, derived fields, and rewrite path. Sibling default; sidecar-suppression flag also available (GON-019).
+- **Reflow provenance sidecars** — `transfer reflow` writes a `.gnb.json` sidecar next to each destination object recording source URI, derived fields, and rewrite path. Sibling default; sidecar-suppression flag also available (GON-019).
 - **Mirrored provenance sidecar placement** — `--provenance-sidecar-root` for `transfer reflow` allows sidecars to be written under a separate same-bucket root while preserving the sibling default and the provider-relative `provenance.key` contract (GON-025).
 - **Reflow collision modes refined** — `--on-collision skip-if-duplicate` is the clearer default name; new `--on-collision quarantine` with `--collision-quarantine-prefix` for explicit isolation of collisions; nested `collision` metadata on collision records (GON-020).
 - **Hive-style partition emission pattern** — `docs/user-guide/examples/` documents the recommended pattern for emitting Hive-style partitions (`category={x}/date={y}/`) by composing `extract` + `derived` + mixed-segment rewrites without per-pattern engine changes (GON-027).
@@ -579,7 +622,10 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/3leaps/gonimbus/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/3leaps/gonimbus/compare/v0.1.8...v0.2.0
+[0.1.8]: https://github.com/3leaps/gonimbus/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/3leaps/gonimbus/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/3leaps/gonimbus/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/3leaps/gonimbus/compare/v0.1.4...v0.1.5
