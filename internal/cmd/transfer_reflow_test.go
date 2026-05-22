@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -889,6 +890,218 @@ func TestTransferReflowCommand_MetadataMergePreservesContentTypeAndPropagatesSto
 	require.Equal(t, "STANDARD_IA", meta.StorageClass)
 }
 
+func TestTransferReflowCommand_PerObjectMetadataDerivation(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	lmA := time.Date(2026, 5, 22, 10, 11, 12, 123456789, time.FixedZone("source", -4*60*60))
+	lmB := time.Date(2026, 5, 22, 11, 12, 13, 987654321, time.UTC)
+	src.putFixtureWithMeta("source/a.xml", "payload-a", "etag-a", lmA, provider.ObjectMeta{
+		ContentType:  "application/xml",
+		StorageClass: "standard_ia",
+		Metadata: map[string]string{
+			"Src":     "copy-a",
+			"blob":    `{"subfield":"json-a","big":99999999999999999999,"flag":true}`,
+			"encoded": `%7B%22subfield%22%3A%22url-a%22%7D`,
+		},
+	})
+	src.putFixtureWithMeta("source/b.xml", "payload-b", "etag-b", lmB, provider.ObjectMeta{
+		ContentType: "text/plain",
+		Metadata: map[string]string{
+			"src":     "copy-b",
+			"blob":    `{"subfield":"json-b","big":12345,"flag":false}`,
+			"encoded": `%7B%22subfield%22%3A%22url-b%22%7D`,
+		},
+	})
+	input := strings.Join([]string{
+		reflowInputLine("source/a.xml", "etag-a", int64(len("payload-a")), "", ""),
+		reflowInputLine("source/b.xml", "etag-b", int64(len("payload-b")), "", ""),
+	}, "\n")
+
+	_, err := runTransferReflowWithProviders(t, src, dst, input,
+		"--metadata-set-from-source-key", "source-copy=src",
+		"--metadata-set-from-source-derived", "json-field=meta.blob.subfield",
+		"--metadata-set-from-source-derived", "url-field=urldecode(meta.encoded).subfield",
+		"--metadata-set-from-source-derived", "source-etag=system.etag",
+		"--metadata-set-from-source-derived", "etag-tag=system.etag + \"-src\"",
+		"--metadata-set-from-source-derived", "source-modified=system.last_modified",
+		"--metadata-set-from-source-derived", "source-size=system.content_length",
+		"--metadata-set-from-source-derived", "source-content-type=system.content_type",
+		"--metadata-set-from-source-derived", "source-storage-class=system.storage_class",
+		"--metadata-set-from-source-derived", "big=meta.blob.big",
+		"--metadata-set-from-source-derived", "flag=meta.blob.flag",
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"source/a.xml", "source/b.xml"}, src.headCallsSnapshot())
+	require.Equal(t, []string{"source/a.xml", "source/b.xml"}, dst.conditionalPutCallsSnapshot())
+
+	metaA := dst.metaSnapshot("source/a.xml")
+	require.Equal(t, "copy-a", metaA.Metadata["source-copy"])
+	require.Equal(t, "json-a", metaA.Metadata["json-field"])
+	require.Equal(t, "url-a", metaA.Metadata["url-field"])
+	require.Equal(t, "etag-a", metaA.Metadata["source-etag"])
+	require.Equal(t, "etag-a-src", metaA.Metadata["etag-tag"])
+	require.Equal(t, lmA.UTC().Format(time.RFC3339Nano), metaA.Metadata["source-modified"])
+	require.Equal(t, strconv.Itoa(len("payload-a")), metaA.Metadata["source-size"])
+	require.Equal(t, "application/xml", metaA.Metadata["source-content-type"])
+	require.Equal(t, "standard_ia", metaA.Metadata["source-storage-class"])
+	require.Equal(t, "99999999999999999999", metaA.Metadata["big"])
+	require.Equal(t, "true", metaA.Metadata["flag"])
+
+	metaB := dst.metaSnapshot("source/b.xml")
+	require.Equal(t, "copy-b", metaB.Metadata["source-copy"])
+	require.Equal(t, "json-b", metaB.Metadata["json-field"])
+	require.Equal(t, "url-b", metaB.Metadata["url-field"])
+	require.Equal(t, "etag-b", metaB.Metadata["source-etag"])
+	require.Equal(t, "STANDARD", metaB.Metadata["source-storage-class"])
+	require.Equal(t, "false", metaB.Metadata["flag"])
+}
+
+func TestTransferReflowCommand_PerInvocationMetadataWinsOverPerObject(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{Metadata: map[string]string{"src": "per-object"}})
+
+	_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-set-from-source-key", "foo=src",
+		"--metadata-set", "foo=invocation",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "invocation", dst.metaSnapshot("source/file.xml").Metadata["foo"])
+}
+
+func TestTransferReflowCommand_MetadataOnMissingSourceModes(t *testing.T) {
+	t.Run("skip", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{Metadata: map[string]string{"present": "value", "blob": `{"array":["x"]}`}})
+		_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+			"--metadata-set-from-source-key", "present=present",
+			"--metadata-set-from-source-key", "missing=missing",
+			"--metadata-set-from-source-derived", "array=meta.blob.array",
+		)
+		require.NoError(t, err)
+		meta := dst.metaSnapshot("source/file.xml").Metadata
+		require.Equal(t, "value", meta["present"])
+		require.NotContains(t, meta, "missing")
+		require.NotContains(t, meta, "array")
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{Metadata: map[string]string{"blob": `{"object":{"nested":"x"}` + `}`}})
+		_, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+			"--metadata-set-from-source-key", "missing=missing",
+			"--metadata-set-from-source-derived", "object=meta.blob.object",
+			"--metadata-on-missing-source", "empty",
+		)
+		require.NoError(t, err)
+		meta := dst.metaSnapshot("source/file.xml").Metadata
+		require.Equal(t, "", meta["missing"])
+		require.Equal(t, "", meta["object"])
+	})
+
+	t.Run("fail redacts source value", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		checkpoint := filepath.Join(t.TempDir(), "reflow-state.db")
+		sentinel := "DERIVED_SENTINEL_VALUE"
+		src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{Metadata: map[string]string{"blob": sentinel + "%ZZ"}})
+		stdout, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+			"--checkpoint", checkpoint,
+			"--metadata-set-from-source-derived", "secret=urldecode(meta.blob).token",
+			"--metadata-on-missing-source", "fail",
+		)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), sentinel)
+		require.NotContains(t, stdout, sentinel)
+		require.NotContains(t, stderr, sentinel)
+		require.NotContains(t, readCheckpointErrorMessage(t, checkpoint), sentinel)
+		errData := requireErrorData(t, stdout)
+		require.Contains(t, errData.Message, "metadata derivation failed")
+		require.Equal(t, "secret", errData.Details["metadata_dest_key"])
+		require.Equal(t, "url decode failed", errData.Details["metadata_reason"])
+	})
+
+	t.Run("fail reports non-scalar kind", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{Metadata: map[string]string{"blob": `{"array":["x"]}`}})
+		stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+			"--metadata-set-from-source-derived", "array=meta.blob.array",
+			"--metadata-on-missing-source", "fail",
+		)
+		require.Error(t, err)
+		errData := requireErrorData(t, stdout)
+		require.Equal(t, "array", errData.Details["metadata_result_kind"])
+	})
+}
+
+func TestTransferReflowCommand_MetadataDerivationFailQuarantinesWhenRequested(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	checkpoint := filepath.Join(t.TempDir(), "reflow-state.db")
+	sentinel := "DERIVED_SENTINEL_VALUE"
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		Metadata: map[string]string{"blob": sentinel + "%ZZ"},
+	})
+
+	stdout, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--checkpoint", checkpoint,
+		"--metadata-set-from-source-derived", "secret=urldecode(meta.blob).token",
+		"--metadata-on-missing-source", "fail",
+		"--on-collision", "quarantine",
+		"--collision-quarantine-prefix", "_metadata",
+		"--provenance", "sidecar",
+	)
+	require.NoError(t, err)
+	require.False(t, dst.hasObject("source/file.xml"))
+	require.Equal(t, "payload", string(dst.mustObject("_metadata/source/file.xml")))
+	require.NotContains(t, stdout, sentinel)
+	require.NotContains(t, stderr, sentinel)
+
+	errData := requireErrorData(t, stdout)
+	require.Contains(t, errData.Message, "metadata derivation failed")
+	require.Equal(t, "secret", errData.Details["metadata_dest_key"])
+	require.Equal(t, "url decode failed", errData.Details["metadata_reason"])
+
+	quarantined := requireReflowData(t, stdout, "quarantined")
+	require.Equal(t, "metadata.derivation.quarantined", quarantined.Reason)
+	require.Equal(t, "quarantine", quarantined.RoutingClass)
+	require.Equal(t, "_metadata/source/file.xml", quarantined.DestKey)
+	require.Contains(t, string(quarantined.Provenance.Key), "_metadata/source/file.xml.gnb.json")
+
+	checkpointItem := readCheckpointItem(t, checkpoint)
+	require.Equal(t, "quarantined", checkpointItem.Status)
+	require.Equal(t, "metadata.derivation.quarantined", checkpointItem.Reason)
+	require.NotContains(t, checkpointItem.ErrorMessage, sentinel)
+}
+
+func TestTransferReflowMetadataConfigRejectsPerObjectDuplicatesAndParseErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "duplicate source key rules", args: []string{"--metadata-set-from-source-key", "foo=a", "--metadata-set-from-source-key", "foo=b"}, want: "duplicate per-object metadata destination key"},
+		{name: "duplicate mixed rules", args: []string{"--metadata-set-from-source-key", "foo=a", "--metadata-set-from-source-derived", "foo=system.etag"}, want: "duplicate per-object metadata destination key"},
+		{name: "unknown function", args: []string{"--metadata-set-from-source-derived", "foo=base64decode(meta.blob).x"}, want: "unknown function"},
+		{name: "unknown system field", args: []string{"--metadata-set-from-source-derived", "foo=system.bogus_field"}, want: "unknown system field"},
+		{name: "dangling plus", args: []string{"--metadata-set-from-source-derived", "foo=meta.blob.x +"}, want: "dangling + operator"},
+		{name: "unclosed call", args: []string{"--metadata-set-from-source-derived", "foo=urldecode(meta.blob.x"}, want: "unclosed urldecode call"},
+		{name: "wildcard", args: []string{"--metadata-set-from-source-derived", "foo=urldecode(meta.blob).*"}, want: "wildcard"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			cmd := newTransferReflowTestCommand()
+			require.NoError(t, cmd.Flags().Parse(tt.args))
+			_, err := resolveMetadataConfig(cmd)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
 func TestTransferReflowCommand_MetadataPreserveRejectsCanonicalSourceCollision(t *testing.T) {
 	src := newReflowMemoryProvider()
 	dst := newReflowMemoryProvider()
@@ -905,6 +1118,32 @@ func TestTransferReflowCommand_MetadataPreserveRejectsCanonicalSourceCollision(t
 	require.Contains(t, errData.Message, "destination metadata options failed")
 	require.NotContains(t, stdout, "secret-one")
 	require.NotContains(t, stdout, "secret-two")
+}
+
+func TestTransferReflowCommand_PerObjectMetadataCanonicalCollisionRedactsValues(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	checkpoint := filepath.Join(t.TempDir(), "reflow-state.db")
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		Metadata: map[string]string{"Foo": "secret-one", "foo": "secret-two"},
+	})
+
+	stdout, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--checkpoint", checkpoint,
+		"--metadata-set-from-source-key", "foo-copy=foo",
+		"--metadata-on-missing-source", "fail",
+	)
+	require.Error(t, err)
+	require.False(t, dst.hasObject("source/file.xml"))
+	for _, text := range []string{err.Error(), stdout, stderr, readCheckpointErrorMessage(t, checkpoint)} {
+		require.NotContains(t, text, "secret-one")
+		require.NotContains(t, text, "secret-two")
+	}
+	errData := requireErrorData(t, stdout)
+	require.Equal(t, "foo-copy", errData.Details["metadata_dest_key"])
+	require.Equal(t, "source metadata canonical collision", errData.Details["metadata_reason"])
+	require.Contains(t, errData.Details["metadata_colliding_keys"], "Foo")
+	require.Contains(t, errData.Details["metadata_colliding_keys"], "foo")
 }
 
 func TestTransferReflowCommand_MetadataBudgetErrorRedactsValuesEverywhere(t *testing.T) {
@@ -958,6 +1197,37 @@ func TestTransferReflowCommand_FileMetadataSidecarDoesNotUseS3Budget(t *testing.
 	require.Equal(t, oversized, userMeta["oversized"])
 }
 
+func TestTransferReflowCommand_FileMetadataSidecarIncludesDerivedMetadata(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixtureWithMeta("source/file.xml", "payload", "src-etag", time.Time{}, provider.ObjectMeta{
+		ContentType: "application/xml",
+		Metadata: map[string]string{
+			"src":  "copy-me",
+			"blob": `{"site":"001","flag":true}`,
+		},
+	})
+	destDir := t.TempDir()
+
+	_, stderr, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""),
+		"--metadata-set-from-source-key", "source-copy=src",
+		"--metadata-set-from-source-derived", "site=meta.blob.site",
+		"--metadata-set-from-source-derived", "flag=meta.blob.flag",
+		"--preserve-content-type",
+	)
+	require.NoError(t, err, stderr)
+
+	sidecarPath := filepath.Join(destDir, "source", "file.xml"+providerfile.DefaultMetadataSidecarSuffix)
+	raw := mustReadFile(t, sidecarPath)
+	var sidecar map[string]any
+	require.NoError(t, json.Unmarshal(raw, &sidecar))
+	require.Equal(t, "application/xml", sidecar["content_type"])
+	userMeta, ok := sidecar["user_metadata"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "copy-me", userMeta["source-copy"])
+	require.Equal(t, "001", userMeta["site"])
+	require.Equal(t, "true", userMeta["flag"])
+}
+
 func TestTransferReflowCommand_MetadataCapabilityFailureEmitsConfigJSONLError(t *testing.T) {
 	withTransferReflowTestState(t)
 	src := newReflowMemoryProvider()
@@ -981,6 +1251,7 @@ func TestTransferReflowCommand_MetadataCapabilityFailureEmitsConfigJSONLError(t 
 		"--rewrite-from", "{key}",
 		"--rewrite-to", "{key}",
 		"--metadata-set", "owner=team",
+		"--metadata-set-from-source-derived", "source-etag=system.etag",
 	})
 
 	err := cmd.Execute()
@@ -990,6 +1261,7 @@ func TestTransferReflowCommand_MetadataCapabilityFailureEmitsConfigJSONLError(t 
 	require.Contains(t, errData.Message, "metadata-aware PUT")
 	require.Equal(t, "MetadataAwarePutter", errData.Details["missing_capability"])
 	require.Contains(t, errData.Details["flags"], "--metadata-set")
+	require.Contains(t, errData.Details["flags"], "--metadata-set-from-source-derived")
 }
 
 func TestTransferReflowMetadataConfigValidation(t *testing.T) {
@@ -1003,10 +1275,16 @@ func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testin
 	require.NoError(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear}))
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, Set: map[string]string{"owner": "team"}}), "metadata-aware PUT")
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyPreserve}), "--metadata-policy")
+	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
 }
 
 func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
 	require.Contains(t, transferReflowCmd.Long, "durable destination metadata")
+	require.Contains(t, transferReflowCmd.Long, "--metadata-set-from-source-key")
+	require.Contains(t, transferReflowCmd.Long, "--metadata-set-from-source-derived")
+	require.Contains(t, transferReflowCmd.Long, "not redacted at destination")
+	require.Contains(t, transferReflowCmd.Long, "explicit allow-list")
+	require.Contains(t, transferReflowCmd.Long, "Audit derivation expressions")
 	require.Contains(t, transferReflowCmd.Long, "cleartext JSON sidecars")
 	require.Contains(t, transferReflowCmd.Long, "--metadata-sidecar-suffix")
 }
@@ -1036,6 +1314,9 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&reflowProvUnsafe, "allow-unsafe-suffix", false, "")
 	cmd.Flags().StringVar(&reflowMetaPolicy, "metadata-policy", metadataPolicyClear, "")
 	cmd.Flags().StringArrayVar(&reflowMetaSets, "metadata-set", nil, "")
+	cmd.Flags().StringArrayVar(&reflowMetaSrcKeys, "metadata-set-from-source-key", nil, "")
+	cmd.Flags().StringArrayVar(&reflowMetaDerived, "metadata-set-from-source-derived", nil, "")
+	cmd.Flags().StringVar(&reflowMetaMissing, "metadata-on-missing-source", metadataMissingSkip, "")
 	cmd.Flags().BoolVar(&reflowMetaContent, "preserve-content-type", false, "")
 	cmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "")
 	cmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "")
@@ -1070,6 +1351,9 @@ func withTransferReflowTestState(t *testing.T) {
 	oldProvUnsafe := reflowProvUnsafe
 	oldMetaPolicy := reflowMetaPolicy
 	oldMetaSets := reflowMetaSets
+	oldMetaSrcKeys := reflowMetaSrcKeys
+	oldMetaDerived := reflowMetaDerived
+	oldMetaMissing := reflowMetaMissing
 	oldMetaContent := reflowMetaContent
 	oldMetaStorage := reflowMetaStorage
 	oldMetaSuffix := reflowMetaSuffix
@@ -1106,6 +1390,9 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowProvUnsafe = false
 	reflowMetaPolicy = metadataPolicyClear
 	reflowMetaSets = nil
+	reflowMetaSrcKeys = nil
+	reflowMetaDerived = nil
+	reflowMetaMissing = metadataMissingSkip
 	reflowMetaContent = false
 	reflowMetaStorage = ""
 	reflowMetaSuffix = providerfile.DefaultMetadataSidecarSuffix
@@ -1136,6 +1423,9 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowProvUnsafe = oldProvUnsafe
 		reflowMetaPolicy = oldMetaPolicy
 		reflowMetaSets = oldMetaSets
+		reflowMetaSrcKeys = oldMetaSrcKeys
+		reflowMetaDerived = oldMetaDerived
+		reflowMetaMissing = oldMetaMissing
 		reflowMetaContent = oldMetaContent
 		reflowMetaStorage = oldMetaStorage
 		reflowMetaSuffix = oldMetaSuffix
@@ -1795,6 +2085,22 @@ func readCheckpointErrorMessage(t *testing.T, path string) string {
 	var msg string
 	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT error_message FROM reflow_items WHERE status = 'failed' LIMIT 1`).Scan(&msg))
 	return msg
+}
+
+type testCheckpointItem struct {
+	Status       string
+	Reason       string
+	ErrorMessage string
+}
+
+func readCheckpointItem(t *testing.T, path string) testCheckpointItem {
+	t.Helper()
+	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: path})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	var item testCheckpointItem
+	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT status, COALESCE(reason, ''), COALESCE(error_message, '') FROM reflow_items LIMIT 1`).Scan(&item.Status, &item.Reason, &item.ErrorMessage))
+	return item
 }
 
 func requireErrorData(t *testing.T, stdout string) testErrorData {

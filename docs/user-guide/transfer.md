@@ -674,9 +674,30 @@ User metadata policy:
 
 `--metadata-set key=value` is repeatable. Keys are normalized to lower case when the command starts, and the last value wins for repeated keys. Values are not redacted at the destination.
 
+Per-object metadata derivation is also available when destination metadata must vary by source object:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  --metadata-policy clear \
+  --metadata-set source-system=example \
+  --metadata-set-from-source-key source-md5=md5 \
+  --metadata-set-from-source-derived source-etag='system.etag' \
+  --metadata-set-from-source-derived broker-device='urldecode(meta.payload).device' \
+  --metadata-on-missing-source skip
+```
+
+`--metadata-set-from-source-key dest=src` copies one source user-metadata key into one destination user-metadata key per object. `--metadata-set-from-source-derived dest=expr` evaluates a small per-object expression against the source object's metadata and system fields. Supported v1 expressions are JSON subfield access (`meta.payload.device`), URL-decoded JSON subfield access (`urldecode(meta.payload).device`), system fields (`system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`), and one string concatenation (`system.etag + "-src"`).
+
+`--metadata-on-missing-source` controls absent source keys, missing JSON subfields, invalid JSON, URL-decode failures, null values, and unsupported non-scalar results. The default `skip` omits only the affected destination key; `fail` emits a per-object `gonimbus.error.v1`; `empty` writes an empty string.
+
+Per-object derivation is an explicit allow-list. Gonimbus rejects wildcard destination keys and wildcard subfield projection; it never auto-projects all source subfields. Audit each `--metadata-set-from-source-derived` expression against the actual source-side subfield inventory before running against source buckets that may contain sensitive subfields.
+
 `--preserve-content-type` copies the source object's content type. `--destination-storage-class <class>` sets a storage class for destination PUTs; use `--destination-storage-class propagate` to copy the source storage class. Gonimbus accepts only PUT-target classes such as `STANDARD`, `INTELLIGENT_TIERING`, `STANDARD_IA`, `ONEZONE_IA`, `GLACIER_IR`, and `REDUCED_REDUNDANCY`; archive classes such as Glacier and Deep Archive are rejected as destination PUT targets.
 
-Metadata warning: values supplied via `--metadata-set` or carried by `--metadata-policy=preserve|merge`, `--preserve-content-type`, or `--destination-storage-class` are durable destination metadata and are not redacted at destination. Use `--metadata-policy clear --metadata-set ...` as an include-list pattern when source metadata might contain credential URIs, tokens, or other sensitive values.
+Metadata warning: values supplied via `--metadata-set`, `--metadata-set-from-source-key`, `--metadata-set-from-source-derived`, or carried by `--metadata-policy=preserve|merge`, `--preserve-content-type`, or `--destination-storage-class` are durable destination metadata visible to callers with destination HEAD/GET permission and are not redacted at destination. Use `--metadata-policy clear` plus explicit `--metadata-set` and per-object allow-list rules when source metadata might contain credential URIs, tokens, or other sensitive values.
 
 For local file destinations, Gonimbus stores destination metadata in a cleartext JSON sidecar next to the object. The default suffix is `.gnb-meta.json` and can be changed with `--metadata-sidecar-suffix`.
 
