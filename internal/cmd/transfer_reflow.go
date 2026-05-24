@@ -78,6 +78,8 @@ const (
 	reflowSourceBucketFile = "local"
 	reflowSymlinkSkip      = "skip"
 	reflowSymlinkFollow    = "follow"
+	reflowHiddenSkip       = "skip"
+	reflowHiddenInclude    = "include"
 	reflowSourceFailSkip   = "skip"
 	reflowSourceFailFail   = "fail"
 )
@@ -95,7 +97,7 @@ Notes:
 - v0.1.7 supports a single source bucket per reflow run.
 - Metadata values supplied via --metadata-set, --metadata-set-from-source-key, --metadata-set-from-source-derived, or carried by --metadata-policy=preserve|merge, --preserve-content-type, or --destination-storage-class are durable destination metadata and are not redacted at destination. For file destinations, metadata is written in cleartext JSON sidecars using --metadata-sidecar-suffix.
 - Per-object metadata derivation is an explicit allow-list: each destination key must be named. Audit derivation expressions against the source metadata inventory before running against buckets that may contain sensitive source subfields.
-- Local-tree reflow includes hidden files and dot-directories by default. Use --exclude patterns such as '.git/*', '.env', '.env.*', '.DS_Store', '__pycache__/*', '*.pyc', '.idea/*', '.vscode/*', and '*.swp' before first cloud write, and review --dry-run output.
+- Local-tree reflow skips hidden files and dot-directories by default. Use --hidden=include only after reviewing --dry-run output. Hidden filtering is not gitignore-aware; use --exclude for non-hidden generated paths such as node_modules/*, dist/*, target/*, and *.log.
 
 Output is JSONL on stdout.
 Errors are emitted on stdout as gonimbus.error.v1 records.
@@ -130,6 +132,7 @@ var (
 	reflowMetaStorage string
 	reflowMetaSuffix  string
 	reflowSymlinks    string
+	reflowHidden      string
 	reflowExcludes    []string
 	reflowPreserve    bool
 	reflowSrcFailure  string
@@ -193,7 +196,8 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "Destination storage class, or propagate to copy source storage class")
 	transferReflowCmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "File destination metadata sidecar suffix")
 	transferReflowCmd.Flags().StringVar(&reflowSymlinks, "symlinks", reflowSymlinkSkip, "File source symlink policy: skip|follow")
-	transferReflowCmd.Flags().StringArrayVar(&reflowExcludes, "exclude", nil, "File source exclusion glob relative to source root; repeatable. Local-tree reflow includes hidden files by default.")
+	transferReflowCmd.Flags().StringVar(&reflowHidden, "hidden", reflowHiddenSkip, "File source hidden path policy: skip|include")
+	transferReflowCmd.Flags().StringArrayVar(&reflowExcludes, "exclude", nil, "File source exclusion glob relative to source root; repeatable.")
 	transferReflowCmd.Flags().BoolVar(&reflowPreserve, "preserve-mode", false, "Preserve Unix mode bits for file:// source to file:// destination; warns and no-ops for other cells")
 	transferReflowCmd.Flags().StringVar(&reflowSrcFailure, "on-source-failure", reflowSourceFailSkip, "Source failure policy: skip|fail")
 
@@ -220,6 +224,7 @@ func init() {
 	_ = viper.BindPFlag("metadata.destination_storage_class", transferReflowCmd.Flags().Lookup("destination-storage-class"))
 	_ = viper.BindPFlag("metadata.sidecar_suffix", transferReflowCmd.Flags().Lookup("metadata-sidecar-suffix"))
 	_ = viper.BindPFlag("source.symlinks", transferReflowCmd.Flags().Lookup("symlinks"))
+	_ = viper.BindPFlag("source.hidden", transferReflowCmd.Flags().Lookup("hidden"))
 	_ = viper.BindPFlag("source.exclude", transferReflowCmd.Flags().Lookup("exclude"))
 	_ = viper.BindPFlag("source.preserve_mode", transferReflowCmd.Flags().Lookup("preserve-mode"))
 	_ = viper.BindPFlag("source.on_failure", transferReflowCmd.Flags().Lookup("on-source-failure"))
@@ -346,6 +351,7 @@ type reflowMetadataConfig struct {
 
 type reflowSourceConfig struct {
 	Symlinks        string
+	Hidden          string
 	Excludes        []string
 	PreserveMode    bool
 	OnSourceFailure string
@@ -962,12 +968,18 @@ func validateMetadataBudget(metadata map[string]string) error {
 func resolveSourceConfig(cmd *cobra.Command) (reflowSourceConfig, error) {
 	cfg := reflowSourceConfig{
 		Symlinks:        reflowSymlinkSkip,
+		Hidden:          reflowHiddenSkip,
 		OnSourceFailure: reflowSourceFailSkip,
 	}
 	if cmd != nil && cmd.Flags().Changed("symlinks") {
 		cfg.Symlinks = reflowSymlinks
 	} else if viper.IsSet("source.symlinks") {
 		cfg.Symlinks = viper.GetString("source.symlinks")
+	}
+	if cmd != nil && cmd.Flags().Changed("hidden") {
+		cfg.Hidden = reflowHidden
+	} else if viper.IsSet("source.hidden") {
+		cfg.Hidden = viper.GetString("source.hidden")
 	}
 	if cmd != nil && cmd.Flags().Changed("exclude") {
 		cfg.Excludes = append([]string(nil), reflowExcludes...)
@@ -985,6 +997,7 @@ func resolveSourceConfig(cmd *cobra.Command) (reflowSourceConfig, error) {
 		cfg.OnSourceFailure = viper.GetString("source.on_failure")
 	}
 	cfg.Symlinks = strings.TrimSpace(strings.ToLower(cfg.Symlinks))
+	cfg.Hidden = strings.TrimSpace(strings.ToLower(cfg.Hidden))
 	cfg.OnSourceFailure = strings.TrimSpace(strings.ToLower(cfg.OnSourceFailure))
 	for i := range cfg.Excludes {
 		cfg.Excludes[i] = filepath.ToSlash(strings.TrimSpace(cfg.Excludes[i]))
@@ -1000,6 +1013,11 @@ func validateSourceConfig(cfg reflowSourceConfig) error {
 			return fmt.Errorf("--symlinks=preserve is not supported in v1; deferred to follow-up brief covering symlink-aware provider capability + preserve-mode escape policy. Use --symlinks=skip or --symlinks=follow")
 		}
 		return fmt.Errorf("symlinks must be one of: skip, follow")
+	}
+	switch cfg.Hidden {
+	case "", reflowHiddenSkip, reflowHiddenInclude:
+	default:
+		return fmt.Errorf("hidden must be one of: skip, include")
 	}
 	switch cfg.OnSourceFailure {
 	case "", reflowSourceFailSkip, reflowSourceFailFail:
@@ -1702,7 +1720,7 @@ func summarizeFileSource(ctx context.Context, root string, srcCfg reflowSourceCo
 			return err
 		}
 		key := filepath.ToSlash(rel)
-		if fileSourceExcluded(key, srcCfg.Excludes) {
+		if fileSourceSkipped(key, srcCfg) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -2679,7 +2697,7 @@ func walkFileReflowDir(ctx context.Context, root string, dir string, canonicalRo
 			return err
 		}
 		key := filepath.ToSlash(rel)
-		if fileSourceExcluded(key, srcCfg.Excludes) {
+		if fileSourceSkipped(key, srcCfg) {
 			continue
 		}
 
@@ -2821,6 +2839,18 @@ func fileSourceExcluded(rel string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func fileSourceSkipped(rel string, cfg reflowSourceConfig) bool {
+	rel = filepath.ToSlash(strings.TrimPrefix(rel, "/"))
+	if cfg.Hidden == "" || cfg.Hidden == reflowHiddenSkip {
+		for _, segment := range strings.Split(rel, "/") {
+			if strings.HasPrefix(segment, ".") && segment != "." && segment != ".." {
+				return true
+			}
+		}
+	}
+	return fileSourceExcluded(rel, cfg.Excludes)
 }
 
 func cloneAncestorSet(in map[string]bool) map[string]bool {

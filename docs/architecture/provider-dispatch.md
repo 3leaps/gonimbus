@@ -53,7 +53,8 @@ cleanly to bucket/key objects plus the existing capability interfaces.
 ## Known Limits
 
 File-source traversal has filesystem-specific policy that object stores do not:
-symlink handling, hidden-file warnings, and local path disclosure controls.
+symlink handling, default hidden-path skipping, and local path disclosure
+controls.
 `--symlinks=preserve`, hardlink preservation, xattrs, and TOCTOU-resistant
 opens are intentionally outside the current provider interface and need their
 own capability design if they become required.

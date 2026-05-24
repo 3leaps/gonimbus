@@ -678,14 +678,16 @@ func TestTransferReflowCommand_FileSourceResumeUsesRelativeCheckpointIdentityAcr
 	require.Equal(t, fileURI(filepath.Join(srcRootB, "file.txt")), skipped.SourceURI)
 }
 
-func TestTransferReflowCommand_FileSourceExcludeSkipsHiddenJunk(t *testing.T) {
+func TestTransferReflowCommand_FileSourceSkipsHiddenPathsByDefault(t *testing.T) {
 	withTransferReflowTestState(t)
 
 	srcDir := t.TempDir()
 	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".secret"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "__pycache__"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "keep.txt"), []byte("keep"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".DS_Store"), []byte("junk"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".secret", "token"), []byte("secret"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "__pycache__", "foo.pyc"), []byte("junk"), 0o644))
 
 	var stdout bytes.Buffer
@@ -696,7 +698,6 @@ func TestTransferReflowCommand_FileSourceExcludeSkipsHiddenJunk(t *testing.T) {
 		"--dest", fileURI(destDir) + "/",
 		"--rewrite-from", "{file}",
 		"--rewrite-to", "{file}",
-		"--exclude", ".DS_Store",
 		"--exclude", "__pycache__/*",
 		"--parallel", "1",
 	})
@@ -704,8 +705,37 @@ func TestTransferReflowCommand_FileSourceExcludeSkipsHiddenJunk(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, "keep", string(mustReadFile(t, filepath.Join(destDir, "keep.txt"))))
 	require.NoFileExists(t, filepath.Join(destDir, ".DS_Store"))
+	require.NoFileExists(t, filepath.Join(destDir, ".secret", "token"))
 	require.NoFileExists(t, filepath.Join(destDir, "__pycache__", "foo.pyc"))
 	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 1)
+	preflight := requireRecord(t, stdout.String(), output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), "files=1")
+}
+
+func TestTransferReflowCommand_FileSourceHiddenIncludeCopiesHiddenPaths(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".secret"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".secret", "token"), []byte("secret"), 0o600))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", ".secret/{file}",
+		"--rewrite-to", ".secret/{file}",
+		"--hidden", "include",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "secret", string(mustReadFile(t, filepath.Join(destDir, ".secret", "token"))))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 1)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/.secret/token"`)
 }
 
 func TestTransferReflowCommand_FileSourcePreflightRejectsSelfCopy(t *testing.T) {
@@ -1623,7 +1653,9 @@ func TestTransferReflowMetadataConfigValidation(t *testing.T) {
 func TestTransferReflowSourceConfigValidation(t *testing.T) {
 	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}))
 	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkFollow, OnSourceFailure: reflowSourceFailFail}))
+	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, Hidden: reflowHiddenInclude, OnSourceFailure: reflowSourceFailSkip}))
 	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: "preserve", OnSourceFailure: reflowSourceFailSkip}), "--symlinks=preserve is not supported in v1")
+	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, Hidden: "warn", OnSourceFailure: reflowSourceFailSkip}), "hidden must be one of")
 	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: "quarantine"}), "--on-source-failure=quarantine is not supported in v1")
 	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip, Excludes: []string{"["}}), "invalid exclude glob")
 }
@@ -1644,19 +1676,21 @@ func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
 	require.Contains(t, transferReflowCmd.Long, "Audit derivation expressions")
 	require.Contains(t, transferReflowCmd.Long, "cleartext JSON sidecars")
 	require.Contains(t, transferReflowCmd.Long, "--metadata-sidecar-suffix")
-	require.Contains(t, transferReflowCmd.Long, "Local-tree reflow includes hidden files")
-	require.Contains(t, transferReflowCmd.Long, "--exclude patterns")
-	require.Contains(t, transferReflowCmd.Long, ".git/*")
+	require.Contains(t, transferReflowCmd.Long, "Local-tree reflow skips hidden files")
+	require.Contains(t, transferReflowCmd.Long, "--hidden=include")
+	require.Contains(t, transferReflowCmd.Long, "not gitignore-aware")
+	require.Contains(t, transferReflowCmd.Long, "node_modules/*")
 }
 
 func TestLocalTreeMigrationRunbookWarnsAboutHiddenFiles(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "user-guide", "local-tree-migration.md"))
 	require.NoError(t, err)
 	text := string(raw)
-	require.Contains(t, text, "Local-tree reflow includes hidden files")
+	require.Contains(t, text, "Local-tree reflow skips hidden files")
 	require.Contains(t, text, "--dry-run")
-	require.Contains(t, text, "--exclude '.git/*'")
-	require.Contains(t, text, "--exclude '.env'")
+	require.Contains(t, text, "--hidden=include")
+	require.Contains(t, text, "not gitignore-aware")
+	require.Contains(t, text, "--exclude 'node_modules/*'")
 	require.Contains(t, text, "absolute source root")
 	require.Contains(t, text, "aws s3 sync")
 }
@@ -1693,6 +1727,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "")
 	cmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "")
 	cmd.Flags().StringVar(&reflowSymlinks, "symlinks", reflowSymlinkSkip, "")
+	cmd.Flags().StringVar(&reflowHidden, "hidden", reflowHiddenSkip, "")
 	cmd.Flags().StringArrayVar(&reflowExcludes, "exclude", nil, "")
 	cmd.Flags().BoolVar(&reflowPreserve, "preserve-mode", false, "")
 	cmd.Flags().StringVar(&reflowSrcFailure, "on-source-failure", reflowSourceFailSkip, "")
@@ -1734,6 +1769,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldMetaStorage := reflowMetaStorage
 	oldMetaSuffix := reflowMetaSuffix
 	oldSymlinks := reflowSymlinks
+	oldHidden := reflowHidden
 	oldExcludes := reflowExcludes
 	oldPreserve := reflowPreserve
 	oldSrcFailure := reflowSrcFailure
@@ -1777,6 +1813,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowMetaStorage = ""
 	reflowMetaSuffix = providerfile.DefaultMetadataSidecarSuffix
 	reflowSymlinks = reflowSymlinkSkip
+	reflowHidden = reflowHiddenSkip
 	reflowExcludes = nil
 	reflowPreserve = false
 	reflowSrcFailure = reflowSourceFailSkip
@@ -1814,6 +1851,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowMetaStorage = oldMetaStorage
 		reflowMetaSuffix = oldMetaSuffix
 		reflowSymlinks = oldSymlinks
+		reflowHidden = oldHidden
 		reflowExcludes = oldExcludes
 		reflowPreserve = oldPreserve
 		reflowSrcFailure = oldSrcFailure

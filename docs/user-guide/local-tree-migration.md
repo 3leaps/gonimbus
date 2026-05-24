@@ -14,24 +14,34 @@ gonimbus transfer reflow 'file:///absolute/source-root/' \
 
 Review the dry-run JSONL first, then rerun without `--dry-run`.
 
-## Hidden-File Inventory
+## Hidden Paths
 
-Local-tree reflow includes hidden files and dot-directories by default. This is
-intentional for byte-faithful migration, but it can publish files that operators
-did not mean to send. Review dry-run output and add excludes before the first
-cloud write.
+Local-tree reflow skips hidden files and dot-directories by default. Any path
+segment beginning with `.` is omitted during directory traversal, including
+`.git/config`, `.env`, `.DS_Store`, and `nested/.cache/file`.
 
-Common excludes:
+Use `--hidden=include` only when the destination is expected to receive hidden
+paths:
 
 ```bash
---exclude '.git/*' \
---exclude '.env' \
---exclude '.env.*' \
---exclude '.DS_Store' \
+gonimbus transfer reflow 'file:///absolute/source-root/' \
+  --dest 's3://bucket/landing/' \
+  --rewrite-from '{path}/{file}' \
+  --rewrite-to '{path}/{file}' \
+  --hidden=include \
+  --dry-run
+```
+
+Hidden filtering is not gitignore-aware. Non-hidden generated paths still need
+explicit excludes before the first cloud write:
+
+```bash
+--exclude 'node_modules/*' \
+--exclude 'dist/*' \
+--exclude 'target/*' \
 --exclude '__pycache__/*' \
 --exclude '*.pyc' \
---exclude '.idea/*' \
---exclude '.vscode/*' \
+--exclude '*.log' \
 --exclude '*.swp'
 ```
 
