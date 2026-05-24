@@ -9,13 +9,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -39,6 +44,7 @@ import (
 const (
 	reflowRecordType       = "gonimbus.reflow.v1"
 	reflowRunRecordType    = "gonimbus.reflow.run.v1"
+	reflowSourceRecordType = "gonimbus.reflow.source.v1"
 	reflowWarningRecord    = "gonimbus.warning.v1"
 	provenanceSchema       = "gonimbus.provenance.v1"
 	provenanceSchemaVer    = "1.0.0"
@@ -69,6 +75,11 @@ const (
 	metadataMaxPairBytes   = 2 * 1024
 	metadataMaxTotalBytes  = 8 * 1024
 	storageClassPropagate  = "propagate"
+	reflowSourceBucketFile = "local"
+	reflowSymlinkSkip      = "skip"
+	reflowSymlinkFollow    = "follow"
+	reflowSourceFailSkip   = "skip"
+	reflowSourceFailFail   = "fail"
 )
 
 var transferReflowCmd = &cobra.Command{
@@ -84,6 +95,7 @@ Notes:
 - v0.1.7 supports a single source bucket per reflow run.
 - Metadata values supplied via --metadata-set, --metadata-set-from-source-key, --metadata-set-from-source-derived, or carried by --metadata-policy=preserve|merge, --preserve-content-type, or --destination-storage-class are durable destination metadata and are not redacted at destination. For file destinations, metadata is written in cleartext JSON sidecars using --metadata-sidecar-suffix.
 - Per-object metadata derivation is an explicit allow-list: each destination key must be named. Audit derivation expressions against the source metadata inventory before running against buckets that may contain sensitive source subfields.
+- Local-tree reflow includes hidden files and dot-directories by default. Use --exclude patterns such as '.git/*', '.env', '.env.*', '.DS_Store', '__pycache__/*', '*.pyc', '.idea/*', '.vscode/*', and '*.swp' before first cloud write, and review --dry-run output.
 
 Output is JSONL on stdout.
 Errors are emitted on stdout as gonimbus.error.v1 records.
@@ -117,6 +129,10 @@ var (
 	reflowMetaContent bool
 	reflowMetaStorage string
 	reflowMetaSuffix  string
+	reflowSymlinks    string
+	reflowExcludes    []string
+	reflowPreserve    bool
+	reflowSrcFailure  string
 
 	reflowSrcRegion   string
 	reflowSrcProfile  string
@@ -140,6 +156,7 @@ var (
 
 type reflowStateStore interface {
 	Close() error
+	SetSourceMetadata(ctx context.Context, provider, bucket, root, sourceURI string) error
 	ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error)
 	UpsertItem(ctx context.Context, p reflowstate.UpsertItemParams) error
 	NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error
@@ -175,6 +192,10 @@ func init() {
 	transferReflowCmd.Flags().BoolVar(&reflowMetaContent, "preserve-content-type", false, "Preserve the source Content-Type on destination objects")
 	transferReflowCmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "Destination storage class, or propagate to copy source storage class")
 	transferReflowCmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "File destination metadata sidecar suffix")
+	transferReflowCmd.Flags().StringVar(&reflowSymlinks, "symlinks", reflowSymlinkSkip, "File source symlink policy: skip|follow")
+	transferReflowCmd.Flags().StringArrayVar(&reflowExcludes, "exclude", nil, "File source exclusion glob relative to source root; repeatable. Local-tree reflow includes hidden files by default.")
+	transferReflowCmd.Flags().BoolVar(&reflowPreserve, "preserve-mode", false, "Preserve Unix mode bits for file:// source to file:// destination; warns and no-ops for other cells")
+	transferReflowCmd.Flags().StringVar(&reflowSrcFailure, "on-source-failure", reflowSourceFailSkip, "Source failure policy: skip|fail")
 
 	transferReflowCmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "Source AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "Source AWS profile")
@@ -198,6 +219,10 @@ func init() {
 	_ = viper.BindPFlag("metadata.preserve_content_type", transferReflowCmd.Flags().Lookup("preserve-content-type"))
 	_ = viper.BindPFlag("metadata.destination_storage_class", transferReflowCmd.Flags().Lookup("destination-storage-class"))
 	_ = viper.BindPFlag("metadata.sidecar_suffix", transferReflowCmd.Flags().Lookup("metadata-sidecar-suffix"))
+	_ = viper.BindPFlag("source.symlinks", transferReflowCmd.Flags().Lookup("symlinks"))
+	_ = viper.BindPFlag("source.exclude", transferReflowCmd.Flags().Lookup("exclude"))
+	_ = viper.BindPFlag("source.preserve_mode", transferReflowCmd.Flags().Lookup("preserve-mode"))
+	_ = viper.BindPFlag("source.on_failure", transferReflowCmd.Flags().Lookup("on-source-failure"))
 
 	_ = transferReflowCmd.MarkFlagRequired("dest")
 	_ = transferReflowCmd.MarkFlagRequired("rewrite-from")
@@ -219,12 +244,17 @@ func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
 }
 
 type reflowTask struct {
+	SourceProvider   string
 	SourceBucket     string
+	SourceRoot       string
 	SourceURI        string
+	SourceCheckpoint string
 	SourceKey        string
 	SourceETag       string
 	SourceSize       int64
 	SourceLastMod    time.Time
+	SourceMode       fs.FileMode
+	SourceFailure    string
 	Vars             map[string]string
 	Probe            *probe.ProbeAudit
 	DestRelKey       string
@@ -234,6 +264,8 @@ type reflowTask struct {
 
 type reflowRecord struct {
 	SourceURI    string         `json:"source_uri"`
+	SourceBucket string         `json:"source_bucket,omitempty"`
+	SourceRoot   string         `json:"source_root,omitempty"`
 	SourceKey    string         `json:"source_key"`
 	SourceETag   string         `json:"source_etag,omitempty"`
 	SourceSize   int64          `json:"source_size_bytes,omitempty"`
@@ -248,6 +280,22 @@ type reflowRecord struct {
 	Details      map[string]any `json:"details,omitempty"`
 }
 
+func (r reflowRecord) MarshalJSON() ([]byte, error) {
+	type alias reflowRecord
+	out := alias(r)
+	if out.SourceBucket == "" {
+		switch {
+		case strings.HasPrefix(out.SourceURI, "file://local/"):
+			out.SourceBucket = reflowSourceBucketFile
+		default:
+			if parsed, err := uri.ParseURI(out.SourceURI); err == nil {
+				out.SourceBucket = parsed.Bucket
+			}
+		}
+	}
+	return json.Marshal(out)
+}
+
 type reflowRunRecord struct {
 	DestURI        string               `json:"dest_uri"`
 	CheckpointPath string               `json:"checkpoint_path"`
@@ -256,6 +304,20 @@ type reflowRunRecord struct {
 	Parallel       int                  `json:"parallel"`
 	Provenance     *provenanceRunConfig `json:"provenance,omitempty"`
 	Metadata       *metadataRunConfig   `json:"metadata,omitempty"`
+}
+
+type reflowSourceRunRecord struct {
+	Provider   string `json:"provider"`
+	Bucket     string `json:"source_bucket,omitempty"`
+	Root       string `json:"source_root,omitempty"`
+	URI        string `json:"source_uri"`
+	OutputOnly bool   `json:"source_uri_output_only,omitempty"`
+}
+
+type reflowFilePreflightSummary struct {
+	SourceRoot string
+	FileCount  int64
+	TotalBytes int64
 }
 
 type collisionConfig struct {
@@ -280,6 +342,13 @@ type reflowMetadataConfig struct {
 	PreserveContentType     bool
 	DestinationStorageClass string
 	MetadataSidecarSuffix   string
+}
+
+type reflowSourceConfig struct {
+	Symlinks        string
+	Excludes        []string
+	PreserveMode    bool
+	OnSourceFailure string
 }
 
 type metadataRunConfig struct {
@@ -454,6 +523,54 @@ func (t reflowTask) withSourceMeta(etag string, size int64) reflowTask {
 	return t
 }
 
+func (t reflowTask) auditSourceURI() string {
+	if t.SourceProvider == string(provider.ProviderFile) && t.SourceRoot != "" {
+		return fileAuditSourceURI(t.SourceRoot, t.SourceKey)
+	}
+	return t.SourceURI
+}
+
+func (t reflowTask) checkpointSourceURI() string {
+	if t.SourceCheckpoint != "" {
+		return t.SourceCheckpoint
+	}
+	if t.SourceProvider == string(provider.ProviderFile) && t.SourceRoot != "" {
+		return fileCheckpointSourceURI(t.SourceKey)
+	}
+	return t.SourceURI
+}
+
+func (t reflowTask) sourceProviderURI() *uri.ObjectURI {
+	switch t.SourceProvider {
+	case string(provider.ProviderFile):
+		return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowSourceBucketFile, Key: t.SourceRoot}
+	default:
+		return &uri.ObjectURI{Provider: string(provider.ProviderS3), Bucket: t.SourceBucket}
+	}
+}
+
+func (t reflowTask) reflowRecord(destURI, destKey, status string) reflowRecord {
+	rec := reflowRecord{
+		SourceURI:  t.auditSourceURI(),
+		SourceKey:  t.SourceKey,
+		SourceETag: t.SourceETag,
+		SourceSize: t.SourceSize,
+		DestURI:    destURI,
+		DestKey:    destKey,
+		Status:     status,
+	}
+	switch t.SourceProvider {
+	case string(provider.ProviderFile):
+		rec.SourceBucket = reflowSourceBucketFile
+		if verbose {
+			rec.SourceRoot = t.SourceRoot
+		}
+	case string(provider.ProviderS3), "":
+		rec.SourceBucket = t.SourceBucket
+	}
+	return rec
+}
+
 func reflowActionForTask(task reflowTask) string {
 	if task.RoutingClass == "quarantine" {
 		return "quarantined"
@@ -560,13 +677,12 @@ func parseReflowDest(raw string) (*reflowDestSpec, error) {
 		return nil, fmt.Errorf("destination is required")
 	}
 
-	if strings.HasPrefix(strings.ToLower(raw), "file://") {
-		path := strings.TrimPrefix(raw, "file://")
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return nil, fmt.Errorf("file destination path is empty")
-		}
-		baseDir := filepath.Clean(path)
+	parsed, err := uri.ParseURI(raw)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Provider == string(provider.ProviderFile) {
+		baseDir := filepath.Clean(filepath.FromSlash(parsed.Key))
 		baseURI := fileURI(baseDir)
 		if !strings.HasSuffix(baseURI, "/") {
 			baseURI += "/"
@@ -574,10 +690,6 @@ func parseReflowDest(raw string) (*reflowDestSpec, error) {
 		return &reflowDestSpec{Provider: string(provider.ProviderFile), BaseURI: baseURI, BaseDir: baseDir}, nil
 	}
 
-	parsed, err := uri.ParseURI(raw)
-	if err != nil {
-		return nil, err
-	}
 	if parsed.Provider != string(provider.ProviderS3) {
 		return nil, fmt.Errorf("provider %q is not supported", parsed.Provider)
 	}
@@ -845,6 +957,71 @@ func validateMetadataBudget(metadata map[string]string) error {
 		TotalLimit:    metadataMaxTotalBytes,
 		Count:         len(metadata),
 	}
+}
+
+func resolveSourceConfig(cmd *cobra.Command) (reflowSourceConfig, error) {
+	cfg := reflowSourceConfig{
+		Symlinks:        reflowSymlinkSkip,
+		OnSourceFailure: reflowSourceFailSkip,
+	}
+	if cmd != nil && cmd.Flags().Changed("symlinks") {
+		cfg.Symlinks = reflowSymlinks
+	} else if viper.IsSet("source.symlinks") {
+		cfg.Symlinks = viper.GetString("source.symlinks")
+	}
+	if cmd != nil && cmd.Flags().Changed("exclude") {
+		cfg.Excludes = append([]string(nil), reflowExcludes...)
+	} else if viper.IsSet("source.exclude") {
+		cfg.Excludes = viper.GetStringSlice("source.exclude")
+	}
+	if cmd != nil && cmd.Flags().Changed("preserve-mode") {
+		cfg.PreserveMode = reflowPreserve
+	} else if viper.IsSet("source.preserve_mode") {
+		cfg.PreserveMode = viper.GetBool("source.preserve_mode")
+	}
+	if cmd != nil && cmd.Flags().Changed("on-source-failure") {
+		cfg.OnSourceFailure = reflowSrcFailure
+	} else if viper.IsSet("source.on_failure") {
+		cfg.OnSourceFailure = viper.GetString("source.on_failure")
+	}
+	cfg.Symlinks = strings.TrimSpace(strings.ToLower(cfg.Symlinks))
+	cfg.OnSourceFailure = strings.TrimSpace(strings.ToLower(cfg.OnSourceFailure))
+	for i := range cfg.Excludes {
+		cfg.Excludes[i] = filepath.ToSlash(strings.TrimSpace(cfg.Excludes[i]))
+	}
+	return cfg, validateSourceConfig(cfg)
+}
+
+func validateSourceConfig(cfg reflowSourceConfig) error {
+	switch cfg.Symlinks {
+	case "", reflowSymlinkSkip, reflowSymlinkFollow:
+	default:
+		if cfg.Symlinks == "preserve" {
+			return fmt.Errorf("--symlinks=preserve is not supported in v1; deferred to follow-up brief covering symlink-aware provider capability + preserve-mode escape policy. Use --symlinks=skip or --symlinks=follow")
+		}
+		return fmt.Errorf("symlinks must be one of: skip, follow")
+	}
+	switch cfg.OnSourceFailure {
+	case "", reflowSourceFailSkip, reflowSourceFailFail:
+	default:
+		if cfg.OnSourceFailure == "quarantine" {
+			return fmt.Errorf("--on-source-failure=quarantine is not supported in v1; source failures have no readable body to quarantine. Use --on-source-failure=skip|fail")
+		}
+		return fmt.Errorf("on-source-failure must be one of: skip, fail")
+	}
+	for _, pattern := range cfg.Excludes {
+		if pattern == "" {
+			continue
+		}
+		if _, err := pathMatch(pattern, "x"); err != nil {
+			return fmt.Errorf("invalid exclude glob %q: %w", pattern, err)
+		}
+	}
+	return nil
+}
+
+func pathMatch(pattern, name string) (bool, error) {
+	return filepath.Match(pattern, name)
 }
 
 func uniqueSortedStrings(values []string) []string {
@@ -1281,7 +1458,7 @@ func buildProvenanceSidecar(task reflowTask, destURI string, destMeta *provider.
 		Schema:        provenanceSchema,
 		SchemaVersion: provenanceSchemaVer,
 		Source: provenanceSource{
-			URI:          task.SourceURI,
+			URI:          task.auditSourceURI(),
 			ETag:         task.SourceETag,
 			Size:         task.SourceSize,
 			LastModified: lastModified,
@@ -1350,6 +1527,272 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 	}
 }
 
+func newSourceProvider(ctx context.Context, src *uri.ObjectURI) (provider.Provider, error) {
+	if src == nil {
+		return nil, fmt.Errorf("source URI is nil")
+	}
+	switch src.Provider {
+	case string(provider.ProviderS3):
+		return newReflowS3Provider(ctx, s3.Config{
+			Bucket:         src.Bucket,
+			Region:         reflowSrcRegion,
+			Endpoint:       reflowSrcEndpoint,
+			Profile:        reflowSrcProfile,
+			ForcePathStyle: reflowSrcEndpoint != "",
+		})
+	case string(provider.ProviderFile):
+		return newReflowFileProvider(providerfile.Config{BaseDir: src.Key, MetadataSidecarSuffix: reflowMetaSuffix})
+	default:
+		return nil, fmt.Errorf("unsupported source provider %q", src.Provider)
+	}
+}
+
+func reflowSourceIdentity(src *uri.ObjectURI) string {
+	if src == nil {
+		return ""
+	}
+	switch src.Provider {
+	case string(provider.ProviderFile):
+		return "file:" + filepath.Clean(src.Key)
+	case string(provider.ProviderS3):
+		return "s3:" + src.Bucket
+	default:
+		return src.Provider + ":" + src.Bucket + ":" + src.Key
+	}
+}
+
+func fileReflowInputRootAndKey(sourcePath string, sourceKey string) (string, string, error) {
+	cleanSourcePath := filepath.Clean(sourcePath)
+	key := strings.TrimSpace(sourceKey)
+	if key == "" {
+		return filepath.Dir(cleanSourcePath), filepath.ToSlash(filepath.Base(cleanSourcePath)), nil
+	}
+	key = strings.TrimPrefix(filepath.ToSlash(key), "/")
+	key = pathpkg.Clean(key)
+	if key == "." || key == ".." || strings.HasPrefix(key, "../") {
+		return "", "", fmt.Errorf("file reflow input source_key must be relative")
+	}
+
+	sourceSlash := filepath.ToSlash(cleanSourcePath)
+	suffix := "/" + key
+	if !strings.HasSuffix(sourceSlash, suffix) {
+		return "", "", fmt.Errorf("file reflow input source_key must match source_uri path suffix")
+	}
+	rootSlash := strings.TrimSuffix(sourceSlash, suffix)
+	if rootSlash == "" {
+		rootSlash = "/"
+	}
+	return filepath.Clean(filepath.FromSlash(rootSlash)), key, nil
+}
+
+func fileAuditSourceURI(root string, rel string) string {
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	if verbose {
+		return fileURI(filepath.Join(root, filepath.FromSlash(rel)))
+	}
+	if rel == "" {
+		return "file://local/"
+	}
+	return "file://local/" + rel
+}
+
+func fileCheckpointSourceURI(rel string) string {
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	if rel == "" {
+		return "file-checkpoint://local/"
+	}
+	return "file-checkpoint://local/" + rel
+}
+
+func redactedPathError(defaultMessage string, verboseMessage string) error {
+	if verbose && verboseMessage != "" {
+		return errors.New(verboseMessage)
+	}
+	return errors.New(defaultMessage)
+}
+
+func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.ObjectURI, dest *reflowDestSpec, srcCfg reflowSourceConfig) (reflowFilePreflightSummary, error) {
+	summary := reflowFilePreflightSummary{SourceRoot: filepath.Clean(parsed.Key)}
+	rec := &output.PreflightRecord{Mode: "reflow-file-source"}
+	add := func(capability string, allowed bool, method string, err error, detail string) {
+		result := output.PreflightCheckResult{Capability: capability, Allowed: allowed, Method: method, Detail: detail}
+		if err != nil {
+			result.ErrorCode = preflightErrorCode(err)
+			if result.Detail == "" {
+				result.Detail = err.Error()
+			}
+		}
+		rec.Results = append(rec.Results, result)
+	}
+
+	st, err := os.Stat(summary.SourceRoot)
+	if err != nil {
+		reportErr := redactedPathError("source root is not accessible", err.Error())
+		add("source.file.stat", false, "Stat(source_root)", reportErr, "")
+		_ = w.WritePreflight(ctx, rec)
+		return summary, reportErr
+	}
+	if !st.IsDir() {
+		reportErr := redactedPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", summary.SourceRoot))
+		add("source.file.stat", false, "Stat(source_root)", reportErr, "")
+		_ = w.WritePreflight(ctx, rec)
+		return summary, reportErr
+	}
+	add("source.file.stat", true, "Stat(source_root)", nil, "")
+
+	if err := summarizeFileSource(ctx, summary.SourceRoot, srcCfg, &summary); err != nil {
+		reportErr := redactedPathError("source root could not be enumerated", err.Error())
+		add("source.file.enumerate", false, "Walk(source_root)", reportErr, "")
+		_ = w.WritePreflight(ctx, rec)
+		return summary, reportErr
+	}
+	add("source.file.enumerate", true, "Walk(source_root)", nil, fmt.Sprintf("files=%d bytes=%d", summary.FileCount, summary.TotalBytes))
+
+	if dest.Provider == string(provider.ProviderFile) {
+		destRoot := filepath.Clean(dest.BaseDir)
+		if pathWithinRoot(summary.SourceRoot, destRoot) || pathWithinRoot(destRoot, summary.SourceRoot) {
+			err := redactedPathError("file source and destination paths overlap", fmt.Sprintf("file source and destination paths overlap: source=%s dest=%s", summary.SourceRoot, destRoot))
+			add("destination.file.self_copy", false, "Compare(source_root,dest_root)", err, "")
+			_ = w.WritePreflight(ctx, rec)
+			return summary, err
+		}
+		add("destination.file.self_copy", true, "Compare(source_root,dest_root)", nil, "")
+
+		if err := ensureDirWritable(destRoot); err != nil {
+			reportErr := redactedPathError("file destination is not writable", err.Error())
+			add("destination.file.write", false, "CreateTemp(dest_root)", reportErr, "")
+			_ = w.WritePreflight(ctx, rec)
+			return summary, reportErr
+		}
+		add("destination.file.write", true, "CreateTemp(dest_root)", nil, "")
+
+		free, err := availableBytes(destRoot)
+		if err != nil {
+			reportErr := redactedPathError("file destination space could not be checked", err.Error())
+			add("destination.file.space", false, "Statfs(dest_root)", reportErr, "")
+			_ = w.WritePreflight(ctx, rec)
+			return summary, reportErr
+		}
+		if summary.TotalBytes > free {
+			err := fmt.Errorf("insufficient destination free space: source_bytes=%d free_bytes=%d", summary.TotalBytes, free)
+			add("destination.file.space", false, "Statfs(dest_root)", err, "")
+			_ = w.WritePreflight(ctx, rec)
+			return summary, err
+		}
+		add("destination.file.space", true, "Statfs(dest_root)", nil, fmt.Sprintf("source_bytes=%d free_bytes=%d", summary.TotalBytes, free))
+	}
+
+	_ = w.WritePreflight(ctx, rec)
+	return summary, nil
+}
+
+func summarizeFileSource(ctx context.Context, root string, srcCfg reflowSourceConfig, summary *reflowFilePreflightSummary) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if fileSourceExcluded(key, srcCfg.Excludes) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if srcCfg.Symlinks == reflowSymlinkSkip || srcCfg.Symlinks == "" {
+				return nil
+			}
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			summary.FileCount++
+			summary.TotalBytes += info.Size()
+		}
+		return nil
+	})
+}
+
+func ensureDirWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".gonimbus-preflight-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	if cerr := f.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if rerr := os.Remove(name); rerr != nil && err == nil {
+		err = rerr
+	}
+	return err
+}
+
+func availableBytes(path string) (int64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	blockSize := uint64(stat.Bsize)
+	if blockSize != 0 && stat.Bavail > uint64(math.MaxInt64)/blockSize {
+		return 0, fmt.Errorf("available filesystem bytes exceed int64 range")
+	}
+	return strconv.ParseInt(strconv.FormatUint(stat.Bavail*blockSize, 10), 10, 64)
+}
+
+func emitReflowSourceRunRecord(ctx context.Context, w interface {
+	WriteAny(context.Context, string, any) error
+}, state reflowStateStore, parsed *uri.ObjectURI) {
+	if parsed == nil {
+		return
+	}
+	rec := reflowSourceRunRecord{Provider: parsed.Provider, Bucket: parsed.Bucket, URI: parsed.String()}
+	if parsed.Provider == string(provider.ProviderFile) {
+		rec.Bucket = reflowSourceBucketFile
+		rec.Root = filepath.Clean(parsed.Key)
+		rec.URI = "file://local/"
+		rec.OutputOnly = true
+	}
+	_ = w.WriteAny(ctx, reflowSourceRecordType, rec)
+	if err := state.SetSourceMetadata(ctx, rec.Provider, rec.Bucket, rec.Root, parsed.String()); err != nil {
+		observability.CLILogger.Debug("Checkpoint source metadata write failed", zap.Error(err))
+	}
+}
+
+func emitPreserveModeWarning(w io.Writer, srcProvider string, destProvider string) {
+	if srcProvider == string(provider.ProviderFile) && destProvider == string(provider.ProviderFile) {
+		return
+	}
+	switch {
+	case srcProvider != string(provider.ProviderFile) && destProvider != string(provider.ProviderFile):
+		_, _ = fmt.Fprintln(w, "warning: --preserve-mode has no effect unless both source and destination are file:// (S3 has no Unix mode bits to read or preserve).")
+	case srcProvider != string(provider.ProviderFile):
+		_, _ = fmt.Fprintln(w, "warning: --preserve-mode has no effect unless the source is file:// (S3 has no Unix mode bits to preserve).")
+	case destProvider != string(provider.ProviderFile):
+		_, _ = fmt.Fprintln(w, "warning: --preserve-mode has no effect unless the destination is file:// (S3 has no Unix mode-bits concept).")
+	default:
+		_, _ = fmt.Fprintln(w, "warning: --preserve-mode has no effect for this provider combination.")
+	}
+}
+
 func runTransferReflow(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if reflowParallel < 1 {
@@ -1384,6 +1827,10 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid metadata configuration", err)
 	}
+	srcCfg, err := resolveSourceConfig(cmd)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid source configuration", err)
+	}
 
 	provCfg, err := resolveProvenanceConfig(cmd, destSpec)
 	if err != nil {
@@ -1415,11 +1862,12 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	defer func() { _ = state.Close() }()
 
 	var (
-		srcProv     provider.Provider
-		dstProv     provider.Provider
-		sidecarProv provider.Provider
-		srcBucket   string
-		provMu      sync.Mutex
+		srcProv        provider.Provider
+		dstProv        provider.Provider
+		sidecarProv    provider.Provider
+		srcIdentity    string
+		preserveWarned bool
+		provMu         sync.Mutex
 	)
 	dstProv, err = newDestProvider(ctx, destSpec, metaCfg)
 	if err != nil {
@@ -1442,8 +1890,19 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		Metadata:       metaCfg.runConfig(),
 	})
 
-	// Source providers are created after we discover the source bucket.
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, provider.Provider, error) {
+	if !reflowStdin {
+		if parsed, parseErr := uri.ParseURI(args[0]); parseErr == nil {
+			emitReflowSourceRunRecord(ctx, w, state, parsed)
+			if parsed.Provider == string(provider.ProviderFile) {
+				if _, pfErr := runFileReflowPreflight(ctx, w, parsed, destSpec, srcCfg); pfErr != nil {
+					return exitError(foundry.ExitInvalidArgument, "File source preflight failed", pfErr)
+				}
+			}
+		}
+	}
+
+	// Source providers are created after we discover the source URI shape.
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, provider.Provider, error) {
 		provMu.Lock()
 		defer provMu.Unlock()
 
@@ -1468,26 +1927,25 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				sidecarProv = dstProv
 			}
 		}
+		identity := reflowSourceIdentity(srcURI)
+		if srcCfg.PreserveMode && !preserveWarned {
+			emitPreserveModeWarning(cmd.ErrOrStderr(), srcURI.Provider, destSpec.Provider)
+			preserveWarned = true
+		}
 		if srcProv == nil {
-			pNew, err := newReflowS3Provider(ctx, s3.Config{
-				Bucket:         bucket,
-				Region:         reflowSrcRegion,
-				Endpoint:       reflowSrcEndpoint,
-				Profile:        reflowSrcProfile,
-				ForcePathStyle: reflowSrcEndpoint != "",
-			})
+			pNew, err := newSourceProvider(ctx, srcURI)
 			if err != nil {
 				return nil, nil, nil, err
 			}
 			srcProv = pNew
-			srcBucket = bucket
-		} else if srcBucket != "" && bucket != "" && srcBucket != bucket {
-			return nil, nil, nil, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", bucket, srcBucket)
+			srcIdentity = identity
+		} else if srcIdentity != "" && identity != "" && srcIdentity != identity {
+			return nil, nil, nil, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcIdentity)
 		}
 		return srcProv, dstProv, sidecarProv, nil
 	}
-	getInputProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
-		src, dst, _, err := getProviders(bucket)
+	getInputProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
+		src, dst, _, err := getProviders(srcURI)
 		return src, dst, err
 	}
 	defer func() {
@@ -1523,11 +1981,25 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				if ctx.Err() != nil {
 					return
 				}
+				srcAuditURI := task.auditSourceURI()
+				srcCheckpointURI := task.checkpointSourceURI()
+				if task.SourceFailure != "" {
+					rec := task.reflowRecord("", "", "skipped")
+					rec.Reason = task.SourceFailure
+					if srcCfg.OnSourceFailure == reflowSourceFailFail {
+						errorCount.Add(1)
+						err := errors.New(task.SourceFailure)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source failure", err, map[string]any{"source_uri": srcAuditURI})
+						rec.Status = "failed"
+					}
+					_ = w.WriteAny(ctx, reflowRecordType, rec)
+					continue
+				}
 
-				src, dst, sidecarDst, err := getProviders(task.SourceBucket)
+				src, dst, sidecarDst, err := getProviders(task.sourceProviderURI())
 				if err != nil {
 					errorCount.Add(1)
-					_ = emitReflowError(context.Background(), w, task.SourceKey, "failed to connect to provider", err, map[string]any{"source_uri": task.SourceURI})
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "failed to connect to provider", err, map[string]any{"source_uri": srcAuditURI})
 					continue
 				}
 
@@ -1540,8 +2012,8 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					mapped, _, err := rewrite.ApplyWithVars(task.SourceKey, task.Vars)
 					if err != nil {
 						invalidCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "rewrite failed", err, map[string]any{"source_uri": task.SourceURI})
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: "", SourceKey: task.SourceKey, DestKey: "", SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: err.Error()}); werr != nil {
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "rewrite failed", err, map[string]any{"source_uri": srcAuditURI})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: "", SourceKey: task.SourceKey, DestKey: "", SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: err.Error()}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 						continue
@@ -1553,15 +2025,17 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				dstURI := buildReflowDestURI(destSpec, dstKey)
 
 				if reflowResume {
-					done, status, err := state.ItemDone(ctx, task.SourceURI, dstURI)
+					done, status, err := state.ItemDone(ctx, srcCheckpointURI, dstURI)
 					if err != nil {
 						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint read failed", err, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint read failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						continue
 					}
 					if done {
-						_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, DestURI: dstURI, DestKey: dstKey, Status: "skipped", Reason: "resume." + status})
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "skipped", Reason: "resume." + status}); werr != nil {
+						rec := task.reflowRecord(dstURI, dstKey, "skipped")
+						rec.Reason = "resume." + status
+						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "skipped", Reason: "resume." + status}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 						continue
@@ -1569,11 +2043,11 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				}
 
 				if reflowDryRun {
-					_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, DestURI: dstURI, DestKey: dstKey, Status: "planned"})
+					_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "planned"))
 					continue
 				}
 
-				_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, DestURI: dstURI, DestKey: dstKey, Status: "in_progress"})
+				_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "in_progress"))
 
 				srcETag := task.SourceETag
 				srcSize := task.SourceSize
@@ -1589,7 +2063,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						}
 					} else if metaCfg.needsSourceHead() {
 						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": task.SourceURI})
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI})
 						continue
 					}
 				}
@@ -1598,7 +2072,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 					err = validateMetadataBudget(putOptions.UserMetadata)
 				}
 				if err != nil {
-					details := map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI}
+					details := map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI}
 					var budgetErr *metadataBudgetError
 					if errors.As(err, &budgetErr) {
 						for key, value := range budgetErr.details() {
@@ -1620,34 +2094,47 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						if qerr != nil {
 							errorCount.Add(1)
 							code := reflowErrCode(qerr)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": task.SourceURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
-							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
-							_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "metadata.quarantine_copy_failed", RoutingClass: "quarantine"})
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+							rec.Reason = "metadata.quarantine_copy_failed"
+							rec.RoutingClass = "quarantine"
+							_ = w.WriteAny(ctx, reflowRecordType, rec)
 							continue
 						}
-						if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, task.SourceURI, srcETag, srcSize); werr != nil {
+						if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 						destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
 						sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, nil)
 						if sidecarFatal {
 							errorCount.Add(1)
-							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
-							_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "provenance.write_failed", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef})
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+							rec.Reason = "provenance.write_failed"
+							rec.Bytes = bytes
+							rec.RoutingClass = "quarantine"
+							rec.Provenance = sidecarRef
+							_ = w.WriteAny(ctx, reflowRecordType, rec)
 							continue
 						}
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes}); werr != nil {
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
-						_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef})
+						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
+						rec.Reason = "metadata.derivation.quarantined"
+						rec.Bytes = bytes
+						rec.RoutingClass = "quarantine"
+						rec.Provenance = sidecarRef
+						_ = w.WriteAny(ctx, reflowRecordType, rec)
 						continue
 					}
 					errorCount.Add(1)
-					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
 						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 					}
 					continue
@@ -1664,12 +2151,12 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							kind = collisionDuplicate
 						}
 						collision = newCollisionInfo(kind, dstMeta, decisionOverwrite)
-						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionOverwrite, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionOverwrite, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 					} else if !provider.IsNotFound(headErr) {
 						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						continue
 					}
 					bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, putOptions)
@@ -1684,7 +2171,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						if observedErr != nil {
 							releaseGate()
 							errorCount.Add(1)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
 						if observed {
@@ -1700,7 +2187,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 										Code:    "REFLOW_ARBITRATION_STATE_WRITE_FAILED",
 										Message: fmt.Sprintf("destination arbitration state write failed: %s", markErr.Error()),
 										Key:     dstKey,
-										Details: map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI},
+										Details: map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI},
 									})
 								}
 							}
@@ -1711,50 +2198,58 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						dstMeta, headErr := dst.Head(ctx, dstKey)
 						if headErr != nil {
 							errorCount.Add(1)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
 						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, destSpec.Provider, srcETag, srcSize, dstMeta)
 						if dupErr != nil {
 							errorCount.Add(1)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
 						if dup {
 							collision = newCollisionInfo(collisionDuplicate, dstMeta, decisionIfAbsentHead)
-							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
 							if collCfg.Mode == reflowCollisionSkip || collCfg.Mode == reflowCollisionQuar {
 								sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID, collision)
 								if sidecarFatal {
 									errorCount.Add(1)
-									if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+									if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
 										observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 									}
-									_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: "provenance.write_failed", Provenance: sidecarRef}, collision))
+									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+									rec.Reason = "provenance.write_failed"
+									rec.Provenance = sidecarRef
+									_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 									continue
 								}
-								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.duplicate"}); werr != nil {
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.duplicate"}); werr != nil {
 									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 								}
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "skipped", Reason: "collision.duplicate", Provenance: sidecarRef}, collision))
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
+								rec.Reason = "collision.duplicate"
+								rec.Provenance = sidecarRef
+								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 								continue
 							}
 
 							err := fmt.Errorf("destination key exists with identical content: %s", dstKey)
 							errorCount.Add(1)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "collision duplicate", err, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI, "collision": collision})
-							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "collision duplicate", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
-							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: "collision.exists.duplicate"}, collision))
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = "collision.exists.duplicate"
+							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 							continue
 						}
 
 						if collCfg.Mode == reflowCollisionQuar {
 							collision = newCollisionInfo(collisionQuarantined, dstMeta, decisionQuarantine)
-							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
 							quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
@@ -1764,35 +2259,48 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							if err != nil {
 								errorCount.Add(1)
 								code := reflowErrCode(err)
-								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": task.SourceURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision})
-								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision})
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
 									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 								}
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "collision.quarantine_copy_failed", RoutingClass: "quarantine"}, collision))
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+								rec.Reason = "collision.quarantine_copy_failed"
+								rec.RoutingClass = "quarantine"
+								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 								continue
 							}
-							if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, task.SourceURI, srcETag, srcSize); werr != nil {
+							if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
 							destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
 							sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, collision)
 							if sidecarFatal {
 								errorCount.Add(1)
-								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
 									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 								}
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "failed", Reason: "provenance.write_failed", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef}, collision))
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+								rec.Reason = "provenance.write_failed"
+								rec.Bytes = bytes
+								rec.RoutingClass = "quarantine"
+								rec.Provenance = sidecarRef
+								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 								continue
 							}
-							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "collision.conflict.quarantined", Bytes: bytes}); werr != nil {
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "collision.conflict.quarantined", Bytes: bytes}); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
-							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: quarantineDstURI, DestKey: quarantineDstKey, Status: "quarantined", Reason: "collision.conflict.quarantined", Bytes: bytes, RoutingClass: "quarantine", Provenance: sidecarRef}, collision))
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
+							rec.Reason = "collision.conflict.quarantined"
+							rec.Bytes = bytes
+							rec.RoutingClass = "quarantine"
+							rec.Provenance = sidecarRef
+							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 							continue
 						}
 
 						collision = newCollisionInfo(collisionConflict, dstMeta, decisionIfAbsentHead)
-						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, task.SourceURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 						reason := "collision.conflict"
@@ -1801,42 +2309,61 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						}
 						err := fmt.Errorf("destination key exists with different content: %s", dstKey)
 						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "collision", err, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI, "collision": collision})
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "collision", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
-						_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: reason}, collision))
+						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = reason
+						_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 						continue
 					}
 				}
 				if err != nil {
 					errorCount.Add(1)
 					code := reflowErrCode(err)
-					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": task.SourceURI, "dest_uri": dstURI})
-					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
 						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 					}
-					_ = w.WriteAny(ctx, reflowRecordType, reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed"})
+					_ = w.WriteAny(ctx, reflowRecordType, task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed"))
 					continue
 				}
+				if srcCfg.PreserveMode && task.SourceProvider == string(provider.ProviderFile) && destSpec.Provider == string(provider.ProviderFile) {
+					if chmodErr := os.Chmod(filepath.Join(destSpec.BaseDir, filepath.FromSlash(dstKey)), task.SourceMode.Perm()); chmodErr != nil {
+						_ = w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
+							Code:    "DESTINATION_MODE_UNREPRESENTABLE",
+							Message: fmt.Sprintf("destination mode could not be preserved: %s", chmodErr.Error()),
+							Key:     dstKey,
+							Details: map[string]any{"reason": "destination.mode.unrepresentable", "source_uri": srcAuditURI, "dest_uri": dstURI},
+						})
+					}
+				}
 
-				if werr := state.NoteDestKeySource(context.Background(), dstKey, task.SourceURI, srcETag, srcSize); werr != nil {
+				if werr := state.NoteDestKeySource(context.Background(), dstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
 					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 				}
 				destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: dstKey, Size: bytes, ETag: putResult.ETag}}
 				sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, destMeta, reflowRewriteTo, reflowActionForTask(task), jobID, collision)
 				if sidecarFatal {
 					errorCount.Add(1)
-					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
 						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 					}
-					_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "failed", Reason: "provenance.write_failed", Bytes: bytes, Provenance: sidecarRef}, collision))
+					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+					rec.Reason = "provenance.write_failed"
+					rec.Bytes = bytes
+					rec.Provenance = sidecarRef
+					_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 					continue
 				}
-				if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: task.SourceURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "complete", Bytes: bytes}); werr != nil {
+				if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "complete", Bytes: bytes}); werr != nil {
 					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 				}
-				_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(reflowRecord{SourceURI: task.SourceURI, SourceKey: task.SourceKey, SourceETag: srcETag, SourceSize: srcSize, DestURI: dstURI, DestKey: dstKey, Status: "complete", Bytes: bytes, Provenance: sidecarRef}, collision))
+				rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "complete")
+				rec.Bytes = bytes
+				rec.Provenance = sidecarRef
+				_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 			}
 		}()
 	}
@@ -1851,7 +2378,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			if line == "" {
 				continue
 			}
-			srcBucket, inputErr = enqueueReflowLine(ctx, line, srcBucket, getInputProviders, tasks)
+			srcIdentity, inputErr = enqueueReflowLine(ctx, line, srcIdentity, srcCfg, getInputProviders, tasks)
 			if inputErr != nil {
 				invalidCount.Add(1)
 				_ = emitReflowError(context.Background(), w, "", "invalid input", inputErr, map[string]any{"input": line})
@@ -1863,7 +2390,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			inputErr = err
 		}
 	} else {
-		srcBucket, inputErr = enqueueReflowLine(ctx, args[0], srcBucket, getInputProviders, tasks)
+		srcIdentity, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)
 	}
 	close(tasks)
 	wg.Wait()
@@ -1892,7 +2419,7 @@ func resolveReflowCheckpointPath(jobID string) (string, error) {
 	return filepath.Join(root, "reflow", "runs", jobID, "state.db"), nil
 }
 
-func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getProviders func(bucket string) (provider.Provider, provider.Provider, error), out chan<- reflowTask) (string, error) {
+func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, srcCfg reflowSourceConfig, getProviders func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error), out chan<- reflowTask) (string, error) {
 	// JSONL: index object record.
 	if strings.HasPrefix(line, "{") {
 		var env struct {
@@ -1900,7 +2427,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			Data json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(line), &env); err != nil {
-			return srcBucket, err
+			return srcIdentity, err
 		}
 		switch env.Type {
 		case "gonimbus.index.object.v1":
@@ -1913,40 +2440,50 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 				DeletedAt *string `json:"deleted_at"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil {
-				return srcBucket, err
+				return srcIdentity, err
 			}
 			if data.DeletedAt != nil {
-				return srcBucket, fmt.Errorf("deleted objects are not supported in reflow input")
+				return srcIdentity, fmt.Errorf("deleted objects are not supported in reflow input")
 			}
 			base, err := uri.ParseURI(data.BaseURI)
 			if err != nil {
-				return srcBucket, fmt.Errorf("invalid base_uri: %w", err)
+				return srcIdentity, fmt.Errorf("invalid base_uri: %w", err)
 			}
-			if base.Provider != string(provider.ProviderS3) {
-				return srcBucket, fmt.Errorf("unsupported provider %q", base.Provider)
+			if base.Provider != string(provider.ProviderS3) && base.Provider != string(provider.ProviderFile) {
+				return srcIdentity, fmt.Errorf("unsupported provider %q", base.Provider)
 			}
-			if srcBucket == "" {
-				srcBucket = base.Bucket
-			} else if srcBucket != base.Bucket {
-				return srcBucket, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", base.Bucket, srcBucket)
+			identity := reflowSourceIdentity(base)
+			if srcIdentity == "" {
+				srcIdentity = identity
+			} else if srcIdentity != identity {
+				return srcIdentity, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcIdentity)
 			}
-			_, _, err = getProviders(srcBucket)
+			_, _, err = getProviders(base)
 			if err != nil {
-				return srcBucket, err
+				return srcIdentity, err
 			}
 			key := strings.TrimPrefix(data.Key, "/")
 			if key == "" {
 				key = strings.TrimPrefix(data.RelKey, "/")
 			}
 			if key == "" {
-				return srcBucket, fmt.Errorf("missing key in index record")
+				return srcIdentity, fmt.Errorf("missing key in index record")
 			}
-			uri := fmt.Sprintf("%s://%s/%s", base.Provider, base.Bucket, key)
+			srcURI := fmt.Sprintf("%s://%s/%s", base.Provider, base.Bucket, key)
+			sourceBucket := base.Bucket
+			sourceRoot := ""
+			sourceCheckpoint := srcURI
+			if base.Provider == string(provider.ProviderFile) {
+				sourceBucket = reflowSourceBucketFile
+				sourceRoot = base.Key
+				sourceCheckpoint = fileCheckpointSourceURI(key)
+				srcURI = fileURI(filepath.Join(sourceRoot, filepath.FromSlash(key)))
+			}
 			select {
-			case out <- reflowTask{SourceBucket: base.Bucket, SourceURI: uri, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes}:
-				return srcBucket, nil
+			case out <- reflowTask{SourceProvider: base.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes}:
+				return srcIdentity, nil
 			case <-ctx.Done():
-				return srcBucket, ctx.Err()
+				return srcIdentity, ctx.Err()
 			}
 		case "gonimbus.reflow.input.v1":
 			var data struct {
@@ -1962,33 +2499,50 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 				QuarantinePrefix string            `json:"quarantine_prefix"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil {
-				return srcBucket, err
+				return srcIdentity, err
 			}
 			if strings.TrimSpace(data.SourceURI) == "" {
-				return srcBucket, fmt.Errorf("missing data.source_uri")
+				return srcIdentity, fmt.Errorf("missing data.source_uri")
 			}
 			u, err := uri.ParseURI(data.SourceURI)
 			if err != nil {
-				return srcBucket, err
+				return srcIdentity, err
 			}
-			if u.Provider != string(provider.ProviderS3) {
-				return srcBucket, fmt.Errorf("unsupported provider %q", u.Provider)
+			if u.Provider != string(provider.ProviderS3) && u.Provider != string(provider.ProviderFile) {
+				return srcIdentity, fmt.Errorf("unsupported provider %q", u.Provider)
 			}
 			if u.IsPrefix() || u.IsPattern() {
-				return srcBucket, fmt.Errorf("reflow input source_uri must be an exact object URI")
+				return srcIdentity, fmt.Errorf("reflow input source_uri must be an exact object URI")
 			}
-			if srcBucket == "" {
-				srcBucket = u.Bucket
-			} else if srcBucket != u.Bucket {
-				return srcBucket, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", u.Bucket, srcBucket)
-			}
-			_, _, err = getProviders(srcBucket)
-			if err != nil {
-				return srcBucket, err
-			}
+			sourceProviderURI := u
 			key := u.Key
-			if strings.TrimSpace(data.SourceKey) != "" {
+			srcURI := fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key)
+			sourceBucket := u.Bucket
+			sourceRoot := ""
+			sourceCheckpoint := srcURI
+			if u.Provider == string(provider.ProviderFile) {
+				sourceBucket = reflowSourceBucketFile
+				sourceRoot, key, err = fileReflowInputRootAndKey(u.Key, data.SourceKey)
+				if err != nil {
+					return srcIdentity, err
+				}
+				sourceCheckpoint = fileCheckpointSourceURI(key)
+				srcURI = fileURI(filepath.Join(sourceRoot, filepath.FromSlash(key)))
+				sourceProviderURI = &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowSourceBucketFile, Key: sourceRoot}
+			} else if strings.TrimSpace(data.SourceKey) != "" {
 				key = strings.TrimPrefix(strings.TrimSpace(data.SourceKey), "/")
+				srcURI = fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key)
+				sourceCheckpoint = srcURI
+			}
+			identity := reflowSourceIdentity(sourceProviderURI)
+			if srcIdentity == "" {
+				srcIdentity = identity
+			} else if srcIdentity != identity {
+				return srcIdentity, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcIdentity)
+			}
+			_, _, err = getProviders(sourceProviderURI)
+			if err != nil {
+				return srcIdentity, err
 			}
 			destRel := strings.Trim(strings.TrimSpace(data.DestRelKey), "/")
 			routingClass := strings.TrimSpace(data.RoutingClass)
@@ -1999,50 +2553,54 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			case "normal", "quarantine":
 				// ok
 			default:
-				return srcBucket, fmt.Errorf("unsupported routing_class %q", data.RoutingClass)
+				return srcIdentity, fmt.Errorf("unsupported routing_class %q", data.RoutingClass)
 			}
 			quarantinePrefix := strings.Trim(strings.TrimSpace(data.QuarantinePrefix), "/")
 			if routingClass == "quarantine" && quarantinePrefix == "" {
-				return srcBucket, fmt.Errorf("quarantine_prefix is required when routing_class=quarantine")
+				return srcIdentity, fmt.Errorf("quarantine_prefix is required when routing_class=quarantine")
 			}
 			if routingClass == "quarantine" && !isRelativeQuarantinePrefix(data.QuarantinePrefix) {
-				return srcBucket, fmt.Errorf("quarantine_prefix must be a relative destination prefix")
+				return srcIdentity, fmt.Errorf("quarantine_prefix must be a relative destination prefix")
 			}
-			srcURI := fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key)
 			select {
-			case out <- reflowTask{SourceBucket: u.Bucket, SourceURI: srcURI, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
-				return srcBucket, nil
+			case out <- reflowTask{SourceProvider: u.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
+				return srcIdentity, nil
 			case <-ctx.Done():
-				return srcBucket, ctx.Err()
+				return srcIdentity, ctx.Err()
 			}
 		default:
-			return srcBucket, fmt.Errorf("unsupported json record type %q", env.Type)
+			return srcIdentity, fmt.Errorf("unsupported json record type %q", env.Type)
 		}
 	}
 
 	parsed, err := uri.ParseURI(line)
 	if err != nil {
-		return srcBucket, err
+		return srcIdentity, err
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		return srcBucket, fmt.Errorf("unsupported provider %q", parsed.Provider)
+	if parsed.Provider != string(provider.ProviderS3) && parsed.Provider != string(provider.ProviderFile) {
+		return srcIdentity, fmt.Errorf("unsupported provider %q", parsed.Provider)
 	}
-	if srcBucket == "" {
-		srcBucket = parsed.Bucket
-	} else if srcBucket != parsed.Bucket {
-		return srcBucket, fmt.Errorf("multiple source buckets are not supported: got %q expected %q", parsed.Bucket, srcBucket)
+	identity := reflowSourceIdentity(parsed)
+	if srcIdentity == "" {
+		srcIdentity = identity
+	} else if srcIdentity != identity {
+		return srcIdentity, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcIdentity)
 	}
-	prov, _, err := getProviders(srcBucket)
+	prov, _, err := getProviders(parsed)
 	if err != nil {
-		return srcBucket, err
+		return srcIdentity, err
+	}
+
+	if parsed.Provider == string(provider.ProviderFile) {
+		return enqueueFileReflowSource(ctx, parsed, srcCfg, srcIdentity, out)
 	}
 
 	if !parsed.IsPrefix() && !parsed.IsPattern() {
 		select {
-		case out <- reflowTask{SourceBucket: parsed.Bucket, SourceURI: parsed.String(), SourceKey: parsed.Key}:
-			return srcBucket, nil
+		case out <- reflowTask{SourceProvider: parsed.Provider, SourceBucket: parsed.Bucket, SourceURI: parsed.String(), SourceKey: parsed.Key}:
+			return srcIdentity, nil
 		case <-ctx.Done():
-			return srcBucket, ctx.Err()
+			return srcIdentity, ctx.Err()
 		}
 	}
 
@@ -2050,7 +2608,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 	if parsed.IsPattern() {
 		matcher, err := match.New(match.Config{Includes: []string{parsed.Pattern}})
 		if err != nil {
-			return srcBucket, err
+			return srcIdentity, err
 		}
 		m = matcher
 	}
@@ -2059,7 +2617,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 	for {
 		res, err := prov.List(ctx, provider.ListOptions{Prefix: parsed.Key, ContinuationToken: token})
 		if err != nil {
-			return srcBucket, err
+			return srcIdentity, err
 		}
 		for _, obj := range res.Objects {
 			if m != nil && !m.Match(obj.Key) {
@@ -2067,10 +2625,10 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 			}
 			uri := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, obj.Key)
 			select {
-			case out <- reflowTask{SourceBucket: parsed.Bucket, SourceURI: uri, SourceKey: obj.Key, SourceETag: obj.ETag, SourceSize: obj.Size, SourceLastMod: obj.LastModified}:
+			case out <- reflowTask{SourceProvider: parsed.Provider, SourceBucket: parsed.Bucket, SourceURI: uri, SourceKey: obj.Key, SourceETag: obj.ETag, SourceSize: obj.Size, SourceLastMod: obj.LastModified}:
 				// ok
 			case <-ctx.Done():
-				return srcBucket, ctx.Err()
+				return srcIdentity, ctx.Err()
 			}
 		}
 		if !res.IsTruncated || res.ContinuationToken == "" {
@@ -2078,7 +2636,209 @@ func enqueueReflowLine(ctx context.Context, line string, srcBucket string, getPr
 		}
 		token = res.ContinuationToken
 	}
-	return srcBucket, nil
+	return srcIdentity, nil
+}
+
+func enqueueFileReflowSource(ctx context.Context, parsed *uri.ObjectURI, srcCfg reflowSourceConfig, srcIdentity string, out chan<- reflowTask) (string, error) {
+	st, err := os.Stat(parsed.Key)
+	if err != nil {
+		return srcIdentity, redactedPathError("source root is not accessible", err.Error())
+	}
+	if !st.IsDir() {
+		return srcIdentity, redactedPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", parsed.Key))
+	}
+
+	root := filepath.Clean(parsed.Key)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		canonicalRoot = root
+	}
+	ancestors := map[string]bool{filepath.Clean(canonicalRoot): true}
+	err = walkFileReflowDir(ctx, root, root, canonicalRoot, ancestors, srcCfg, out)
+	if err != nil {
+		return srcIdentity, err
+	}
+	return srcIdentity, nil
+}
+
+func walkFileReflowDir(ctx context.Context, root string, dir string, canonicalRoot string, ancestors map[string]bool, srcCfg reflowSourceConfig, out chan<- reflowTask) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsPermission(err) {
+			return enqueueFileSourceFailure(ctx, out, root, dir, "source.read.permission_denied", srcCfg)
+		}
+		return enqueueFileSourceFailure(ctx, out, root, dir, "source.read.io_error", srcCfg)
+	}
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		path := filepath.Join(dir, entry.Name())
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if fileSourceExcluded(key, srcCfg.Excludes) {
+			continue
+		}
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			if srcCfg.Symlinks == reflowSymlinkSkip || srcCfg.Symlinks == "" {
+				if err := enqueueFileSourceFailure(ctx, out, root, path, "source.symlink.skipped", srcCfg); err != nil {
+					return err
+				}
+				continue
+			}
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				if err := enqueueFileSourceFailure(ctx, out, root, path, "source.read.io_error", srcCfg); err != nil {
+					return err
+				}
+				continue
+			}
+			resolved = filepath.Clean(resolved)
+			if !pathWithinRoot(canonicalRoot, resolved) {
+				if err := enqueueFileSourceFailure(ctx, out, root, path, "source.symlink.escapes_root", srcCfg); err != nil {
+					return err
+				}
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsPermission(err) {
+					return enqueueFileSourceFailure(ctx, out, root, path, "source.read.permission_denied", srcCfg)
+				}
+				return enqueueFileSourceFailure(ctx, out, root, path, "source.read.io_error", srcCfg)
+			}
+			if info.IsDir() {
+				if ancestors[resolved] {
+					if err := enqueueFileSourceFailure(ctx, out, root, path, "source.symlink.cycle", srcCfg); err != nil {
+						return err
+					}
+					continue
+				}
+				nextAncestors := cloneAncestorSet(ancestors)
+				nextAncestors[resolved] = true
+				if err := walkFileReflowDir(ctx, root, path, canonicalRoot, nextAncestors, srcCfg, out); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := enqueueFileReflowTask(ctx, out, root, key, info); err != nil {
+				return err
+			}
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsPermission(err) {
+				return enqueueFileSourceFailure(ctx, out, root, path, "source.read.permission_denied", srcCfg)
+			}
+			return enqueueFileSourceFailure(ctx, out, root, path, "source.read.io_error", srcCfg)
+		}
+		if info.IsDir() {
+			resolved := path
+			if eval, err := filepath.EvalSymlinks(path); err == nil {
+				resolved = eval
+			}
+			nextAncestors := cloneAncestorSet(ancestors)
+			nextAncestors[filepath.Clean(resolved)] = true
+			if err := walkFileReflowDir(ctx, root, path, canonicalRoot, nextAncestors, srcCfg, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			if err := enqueueFileSourceFailure(ctx, out, root, path, "source.unsupported_type", srcCfg); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := enqueueFileReflowTask(ctx, out, root, key, info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enqueueFileReflowTask(ctx context.Context, out chan<- reflowTask, root string, key string, info fs.FileInfo) error {
+	select {
+	case out <- reflowTask{
+		SourceProvider:   string(provider.ProviderFile),
+		SourceBucket:     reflowSourceBucketFile,
+		SourceRoot:       root,
+		SourceURI:        fileURI(filepath.Join(root, filepath.FromSlash(key))),
+		SourceCheckpoint: fileCheckpointSourceURI(key),
+		SourceKey:        key,
+		SourceSize:       info.Size(),
+		SourceLastMod:    info.ModTime(),
+		SourceMode:       info.Mode(),
+	}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func enqueueFileSourceFailure(ctx context.Context, out chan<- reflowTask, root string, path string, reason string, srcCfg reflowSourceConfig) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = filepath.Base(path)
+	}
+	key := filepath.ToSlash(rel)
+	select {
+	case out <- reflowTask{
+		SourceProvider:   string(provider.ProviderFile),
+		SourceBucket:     reflowSourceBucketFile,
+		SourceRoot:       root,
+		SourceURI:        fileURI(filepath.Join(root, filepath.FromSlash(key))),
+		SourceCheckpoint: fileCheckpointSourceURI(key),
+		SourceKey:        key,
+		SourceFailure:    reason,
+	}:
+		if srcCfg.OnSourceFailure == reflowSourceFailFail {
+			return errors.New(reason)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func fileSourceExcluded(rel string, patterns []string) bool {
+	rel = filepath.ToSlash(strings.TrimPrefix(rel, "/"))
+	for _, pattern := range patterns {
+		if pattern == "" {
+			continue
+		}
+		if strings.HasSuffix(pattern, "/*") && strings.TrimSuffix(pattern, "/*") == rel {
+			return true
+		}
+		if ok, _ := filepath.Match(pattern, rel); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneAncestorSet(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func pathWithinRoot(root string, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func buildQuarantineDestRel(prefix string, sourceKey string) string {

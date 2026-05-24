@@ -112,6 +112,33 @@ func TestParseURI(t *testing.T) {
 			},
 		},
 		{
+			name: "file absolute path",
+			uri:  "file:///foo/bar",
+			want: &ObjectURI{
+				Provider: "file",
+				Bucket:   "local",
+				Key:      "/foo/bar",
+			},
+		},
+		{
+			name: "file apple absolute path",
+			uri:  "file:///Users/operator/tree",
+			want: &ObjectURI{
+				Provider: "file",
+				Bucket:   "local",
+				Key:      "/Users/operator/tree",
+			},
+		},
+		{
+			name: "file absolute prefix preserves trailing slash",
+			uri:  "file:///foo/bar/",
+			want: &ObjectURI{
+				Provider: "file",
+				Bucket:   "local",
+				Key:      "/foo/bar/",
+			},
+		},
+		{
 			name:        "empty URI",
 			uri:         "",
 			wantErr:     ErrInvalidURI,
@@ -128,6 +155,24 @@ func TestParseURI(t *testing.T) {
 			uri:         "gcs://my-bucket/path",
 			wantErr:     ErrUnsupportedProvider,
 			errContains: "gcs",
+		},
+		{
+			name:        "file relative path rejected",
+			uri:         "file://relative/path",
+			wantErr:     ErrInvalidFileURI,
+			errContains: "absolute local path",
+		},
+		{
+			name:        "file remote host rejected",
+			uri:         "file://host.example/path",
+			wantErr:     ErrInvalidFileURI,
+			errContains: "absolute local path",
+		},
+		{
+			name:        "file local audit form rejected",
+			uri:         "file://local/path",
+			wantErr:     ErrInvalidFileURI,
+			errContains: "absolute local path",
 		},
 		{
 			name:        "missing bucket",
@@ -187,6 +232,21 @@ func TestObjectURI_String(t *testing.T) {
 			uri:  &ObjectURI{Provider: "s3", Bucket: "bucket", Key: "data/", Pattern: "data/**/*.csv"},
 			want: "s3://bucket/data/**/*.csv",
 		},
+		{
+			name: "file absolute path",
+			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/foo/bar"},
+			want: "file:///foo/bar",
+		},
+		{
+			name: "file absolute prefix",
+			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/foo/bar/"},
+			want: "file:///foo/bar/",
+		},
+		{
+			name: "file root",
+			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/"},
+			want: "file:///",
+		},
 	}
 
 	for _, tt := range tests {
@@ -244,6 +304,16 @@ func TestObjectURI_IsPrefix(t *testing.T) {
 			uri:  &ObjectURI{Provider: "s3", Bucket: "bucket", Key: "path/file.txt"},
 			want: false,
 		},
+		{
+			name: "file trailing slash is prefix",
+			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/tmp/source/"},
+			want: true,
+		},
+		{
+			name: "file path without trailing slash is not prefix",
+			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/tmp/source/file.txt"},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -252,6 +322,23 @@ func TestObjectURI_IsPrefix(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestParseURI_FileRoundTrip(t *testing.T) {
+	got, err := ParseURI("file:///foo/bar")
+	require.NoError(t, err)
+	require.Equal(t, "file", got.Provider)
+	require.Equal(t, "local", got.Bucket)
+	require.Equal(t, "/foo/bar", got.Key)
+	require.Equal(t, "file:///foo/bar", got.String())
+}
+
+func TestParseURI_FilePrefixRoundTrip(t *testing.T) {
+	got, err := ParseURI("file:///foo/bar/")
+	require.NoError(t, err)
+	require.True(t, got.IsPrefix())
+	require.Equal(t, "/foo/bar/", got.Key)
+	require.Equal(t, "file:///foo/bar/", got.String())
 }
 
 func TestParseURI_EscapeAware(t *testing.T) {
