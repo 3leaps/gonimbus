@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -49,7 +50,11 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS reflow_meta (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			schema_version INTEGER NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			source_provider TEXT,
+			source_bucket TEXT,
+			source_root TEXT,
+			source_uri TEXT
 		);`,
 		`INSERT OR IGNORE INTO reflow_meta (id, schema_version, created_at) VALUES (1, ?, ?);`,
 		`CREATE TABLE IF NOT EXISTS reflow_items (
@@ -110,7 +115,26 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			return fmt.Errorf("init schema: %w", err)
 		}
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE reflow_meta ADD COLUMN source_provider TEXT;`,
+		`ALTER TABLE reflow_meta ADD COLUMN source_bucket TEXT;`,
+		`ALTER TABLE reflow_meta ADD COLUMN source_root TEXT;`,
+		`ALTER TABLE reflow_meta ADD COLUMN source_uri TEXT;`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("migrate schema: %w", err)
+		}
+	}
 	return nil
+}
+
+func (s *Store) SetSourceMetadata(ctx context.Context, provider, bucket, root, sourceURI string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE reflow_meta
+		SET source_provider = ?, source_bucket = ?, source_root = ?, source_uri = ?
+		WHERE id = 1
+	`, provider, bucket, root, sourceURI)
+	return err
 }
 
 func (s *Store) ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error) {

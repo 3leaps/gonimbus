@@ -24,6 +24,26 @@ Gonimbus is pre-v1.0. The packages above are intended for library use, but
 breaking changes can still happen across minor versions. Pin consumers to a
 specific gonimbus release.
 
+## URI Contract
+
+`pkg/uri.ParseURI` accepts `s3://` object URIs and local `file://` URIs.
+S3 URIs keep the historical shape:
+
+- `Provider`: `s3`
+- `Bucket`: bucket name
+- `Key`: object key or listing prefix
+
+File URIs are additive in v0.2.2 and use a sentinel bucket:
+
+- `Provider`: `file`
+- `Bucket`: `local`
+- `Key`: absolute local filesystem path
+
+Only local absolute file paths are accepted. `file:///absolute/path` is the
+canonical form. Relative forms and remote-host forms such as
+`file://host/path` are rejected. `file://local/<relative-path>` is reserved for
+redacted audit output from `transfer reflow`; it is not an accepted input URI.
+
 ## Credential Injection
 
 Use each provider package's explicit config type. For S3, construct

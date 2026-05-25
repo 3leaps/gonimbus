@@ -1,7 +1,7 @@
 // Package uri provides parsing of cloud object-storage URIs in the
 // scheme-bucket-key/prefix/pattern shape used throughout gonimbus.
 //
-// Supported schemes as of v0.2.x: s3.
+// Supported schemes as of v0.2.x: s3, file.
 //
 // Glob pattern characters in the key, including *, ?, [, ], {, }, and **, are
 // recognized and surface via ObjectURI.IsPattern. The original pattern is
@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/3leaps/gonimbus/pkg/match"
@@ -35,23 +36,27 @@ var (
 
 	// ErrMissingBucket indicates the URI is missing a bucket name.
 	ErrMissingBucket = errors.New("missing bucket name")
+
+	// ErrInvalidFileURI indicates a file:// URI is not a supported local absolute path.
+	ErrInvalidFileURI = errors.New("invalid file URI")
 )
 
-// ObjectURI represents a parsed cloud storage URI.
+// ObjectURI represents a parsed object URI.
 //
 // Example URIs:
 //   - s3://bucket/key/path.txt
 //   - s3://bucket/prefix/
 //   - s3://bucket/prefix/**/*.parquet
+//   - file:///absolute/path
 type ObjectURI struct {
-	// Provider is the storage provider (e.g., "s3").
+	// Provider is the storage provider (e.g., "s3" or "file").
 	Provider string
 
-	// Bucket is the bucket name.
+	// Bucket is the bucket name. For file:// URIs this is the sentinel "local".
 	Bucket string
 
-	// Key is the object key or prefix.
-	// May be empty for bucket root.
+	// Key is the object key or prefix. For file:// URIs this is the absolute
+	// local filesystem path.
 	Key string
 
 	// Pattern is set if Key contains glob characters.
@@ -61,6 +66,16 @@ type ObjectURI struct {
 
 // String returns the URI in canonical form.
 func (u *ObjectURI) String() string {
+	if u.Provider == "file" {
+		key := filepath.ToSlash(u.Key)
+		if key == "" {
+			key = "/"
+		}
+		if !strings.HasPrefix(key, "/") {
+			key = "/" + key
+		}
+		return "file://" + key
+	}
 	if u.Pattern != "" {
 		return fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, u.Pattern)
 	}
@@ -88,6 +103,8 @@ func (u *ObjectURI) IsPrefix() bool {
 //   - s3://bucket/key
 //   - s3://bucket/prefix/
 //   - s3://bucket/prefix/**/*.parquet
+//   - file:///absolute/path
+//   - file:///absolute/path/
 //
 // Returns an error if the URI is malformed or uses an unsupported provider.
 func ParseURI(uri string) (*ObjectURI, error) {
@@ -103,8 +120,11 @@ func ParseURI(uri string) (*ObjectURI, error) {
 	}
 
 	provider := strings.ToLower(uri[:schemeEnd])
+	if provider == "file" {
+		return parseFileURI(uri, schemeEnd)
+	}
 	if provider != "s3" {
-		return nil, fmt.Errorf("%w: %s (supported: s3)", ErrUnsupportedProvider, provider)
+		return nil, fmt.Errorf("%w: %s (supported: s3, file)", ErrUnsupportedProvider, provider)
 	}
 
 	// Everything after ://
@@ -151,4 +171,27 @@ func ParseURI(uri string) (*ObjectURI, error) {
 	}
 
 	return result, nil
+}
+
+func parseFileURI(raw string, schemeEnd int) (*ObjectURI, error) {
+	remainder := raw[schemeEnd+3:]
+	if remainder == "" {
+		return nil, fmt.Errorf("%w: empty path in %s", ErrInvalidFileURI, raw)
+	}
+	if !strings.HasPrefix(remainder, "/") {
+		return nil, fmt.Errorf("%w: file URI must use an absolute local path", ErrInvalidFileURI)
+	}
+
+	// file:///abs/path parses as remainder "/abs/path". A non-empty hostname
+	// form such as file://host/path parses as remainder "host/path" and is
+	// rejected above. The output-only audit form file://local/path is also
+	// intentionally rejected here.
+	path := filepath.Clean(remainder)
+	if strings.HasSuffix(remainder, "/") && path != string(filepath.Separator) {
+		path += string(filepath.Separator)
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("%w: file URI must use an absolute local path", ErrInvalidFileURI)
+	}
+	return &ObjectURI{Provider: "file", Bucket: "local", Key: filepath.ToSlash(path)}, nil
 }

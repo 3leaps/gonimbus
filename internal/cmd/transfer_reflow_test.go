@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 func TestValidateTransferReflowArgs(t *testing.T) {
@@ -524,6 +526,383 @@ func TestTransferReflowCommand_ParallelDuplicateRaceWithRealFileProviderAndProve
 	var sidecar map[string]any
 	require.NoError(t, json.Unmarshal(mustReadFile(t, sidecarPath), &sidecar))
 	require.Contains(t, []string{"landed", "skipped.duplicate"}, sidecar["action"])
+}
+
+func TestTransferReflowCommand_FileSourceToFileDestCopiesTreeWithRedactedSourceURI(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "nested", "file.txt"), []byte("payload"), 0o644))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "nested/{file}",
+		"--rewrite-to", "nested/{file}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.NoError(t, err, stderr.String())
+	require.Equal(t, "payload", string(mustReadFile(t, filepath.Join(destDir, "nested", "file.txt"))))
+
+	complete := requireRecord(t, stdout.String(), reflowRecordType, "complete")
+	require.Contains(t, string(complete.Data), `"source_uri":"file://local/nested/file.txt"`)
+	require.Contains(t, string(complete.Data), `"source_bucket":"local"`)
+	require.NotContains(t, string(complete.Data), srcDir)
+
+	source := requireRecord(t, stdout.String(), reflowSourceRecordType, "")
+	require.Contains(t, string(source.Data), `"source_root":"`+srcDir+`"`)
+	preflight := requireRecord(t, stdout.String(), output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), `"capability":"source.file.enumerate"`)
+	require.Contains(t, string(preflight.Data), `"files=1 bytes=7"`)
+}
+
+func TestTransferReflowCommand_FileSourceVerboseEmitsAbsoluteSourceRootOnlyWhenOptedIn(t *testing.T) {
+	withTransferReflowTestState(t)
+	oldVerbose := verbose
+	verbose = true
+	t.Cleanup(func() { verbose = oldVerbose })
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("payload"), 0o644))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	complete := requireReflowData(t, stdout.String(), "complete")
+	require.Equal(t, fileURI(filepath.Join(srcDir, "file.txt")), complete.SourceURI)
+	require.Equal(t, srcDir, complete.SourceRoot)
+}
+
+func TestTransferReflowCommand_FileReflowInputAcceptsMultipleExactRecordsFromSameRoot(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("alpha"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte("bravo"), 0o644))
+
+	line := func(name string, size int64) string {
+		data := map[string]any{
+			"source_uri":           fileURI(filepath.Join(srcDir, name)),
+			"source_size_bytes":    size,
+			"source_last_modified": "2026-01-15T20:53:44Z",
+		}
+		b, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+		require.NoError(t, err)
+		return string(b)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(line("a.txt", 5) + "\n" + line("b.txt", 5) + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.NoError(t, err, stderr.String())
+	require.Equal(t, "alpha", string(mustReadFile(t, filepath.Join(destDir, "a.txt"))))
+	require.Equal(t, "bravo", string(mustReadFile(t, filepath.Join(destDir, "b.txt"))))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 2)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/a.txt"`)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/b.txt"`)
+	require.NotContains(t, stdout.String(), srcDir)
+}
+
+func TestTransferReflowCommand_FileSourceResumeUsesRelativeCheckpointIdentityAcrossVerboseAndMovedRoot(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcRootA := t.TempDir()
+	srcRootB := t.TempDir()
+	destDir := t.TempDir()
+	checkpoint := filepath.Join(t.TempDir(), "state.db")
+	require.NoError(t, os.WriteFile(filepath.Join(srcRootA, "file.txt"), []byte("payload"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcRootB, "file.txt"), []byte("payload"), 0o644))
+
+	run := func(srcDir string, verboseMode bool, resume bool) (string, error) {
+		oldVerbose := verbose
+		verbose = verboseMode
+		defer func() { verbose = oldVerbose }()
+
+		var stdout bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetOut(&stdout)
+		args := []string{
+			fileURI(srcDir) + "/",
+			"--dest", fileURI(destDir) + "/",
+			"--rewrite-from", "{file}",
+			"--rewrite-to", "{file}",
+			"--checkpoint", checkpoint,
+			"--parallel", "1",
+		}
+		if resume {
+			args = append(args, "--resume")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		return stdout.String(), err
+	}
+
+	_, err := run(srcRootA, false, false)
+	require.NoError(t, err)
+	stdout, err := run(srcRootB, true, true)
+	require.NoError(t, err)
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "resume.complete", skipped.Reason)
+	require.Equal(t, fileURI(filepath.Join(srcRootB, "file.txt")), skipped.SourceURI)
+}
+
+func TestTransferReflowCommand_FileSourceSkipsHiddenPathsByDefault(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".secret"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "__pycache__"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "keep.txt"), []byte("keep"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".DS_Store"), []byte("junk"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".secret", "token"), []byte("secret"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "__pycache__", "foo.pyc"), []byte("junk"), 0o644))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--exclude", "__pycache__/*",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "keep", string(mustReadFile(t, filepath.Join(destDir, "keep.txt"))))
+	require.NoFileExists(t, filepath.Join(destDir, ".DS_Store"))
+	require.NoFileExists(t, filepath.Join(destDir, ".secret", "token"))
+	require.NoFileExists(t, filepath.Join(destDir, "__pycache__", "foo.pyc"))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 1)
+	preflight := requireRecord(t, stdout.String(), output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), "files=1")
+}
+
+func TestTransferReflowCommand_FileSourceHiddenIncludeCopiesHiddenPaths(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".secret"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".secret", "token"), []byte("secret"), 0o600))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", ".secret/{file}",
+		"--rewrite-to", ".secret/{file}",
+		"--hidden", "include",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "secret", string(mustReadFile(t, filepath.Join(destDir, ".secret", "token"))))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 1)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/.secret/token"`)
+}
+
+func TestTransferReflowCommand_FileSourcePreflightRejectsSelfCopy(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := filepath.Join(srcDir, "out")
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("payload"), 0o644))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "File source preflight failed")
+	require.NotContains(t, err.Error(), srcDir)
+	require.NotContains(t, err.Error(), destDir)
+	preflight := requireRecord(t, stdout.String(), output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), `"capability":"destination.file.self_copy"`)
+	require.Contains(t, string(preflight.Data), `"allowed":false`)
+	require.NotContains(t, string(preflight.Data), srcDir)
+	require.NotContains(t, string(preflight.Data), destDir)
+	require.NotContains(t, stdout.String(), `"status":"in_progress"`)
+}
+
+func TestTransferReflowCommand_FileSourceSymlinkSkipEmitsSkippedRecord(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "target.txt"), []byte("target"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(srcDir, "target.txt"), filepath.Join(srcDir, "link.txt")))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	records := requireReflowRecords(t, stdout.String())
+	requireReflowStatusReasonCount(t, records, "complete", "", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "source.symlink.skipped", 1)
+	require.NoFileExists(t, filepath.Join(destDir, "link.txt"))
+}
+
+func TestTransferReflowCommand_FileSourceSymlinkFollowTraversesDirectory(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "real"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "real", "inside.txt"), []byte("target"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(srcDir, "real"), filepath.Join(srcDir, "alias")))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{dir}/{file}",
+		"--rewrite-to", "{dir}/{file}",
+		"--symlinks", "follow",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "target", string(mustReadFile(t, filepath.Join(destDir, "alias", "inside.txt"))))
+	require.Equal(t, "target", string(mustReadFile(t, filepath.Join(destDir, "real", "inside.txt"))))
+	records := requireReflowRecords(t, stdout.String())
+	requireReflowStatusReasonCount(t, records, "complete", "", 2)
+	requireReflowStatusReasonCount(t, records, "skipped", "source.symlink.skipped", 0)
+}
+
+func TestTransferReflowCommand_FileSourcePreserveModeCopiesPermissions(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+	sourcePath := filepath.Join(srcDir, "script.sh")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("#!/bin/sh\n"), 0o755))
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		fileURI(srcDir) + "/",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{file}",
+		"--rewrite-to", "{file}",
+		"--preserve-mode",
+		"--parallel", "1",
+	})
+
+	require.NoError(t, cmd.Execute())
+	info, err := os.Stat(filepath.Join(destDir, "script.sh"))
+	require.NoError(t, err)
+	require.Equal(t, fs.FileMode(0o755), info.Mode().Perm())
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout.String()), "complete", "", 1)
+}
+
+func TestTransferReflowCommand_PreserveModeWarnsForNonFileToFileCells(t *testing.T) {
+	t.Run("s3 to file", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		src.putFixture("source/file.txt", "payload", "etag", time.Time{})
+		_, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowInputLine("source/file.txt", "etag", int64(len("payload")), "", ""), "--preserve-mode")
+		require.NoError(t, err)
+		require.Contains(t, stderr, "--preserve-mode has no effect unless the source is file://")
+	})
+
+	t.Run("s3 to s3", func(t *testing.T) {
+		src := newReflowMemoryProvider()
+		dst := newReflowMemoryProvider()
+		src.putFixture("source/file.txt", "payload", "etag", time.Time{})
+		_, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.txt", "etag", int64(len("payload")), "", ""),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--rewrite-from", "{key}",
+			"--rewrite-to", "{key}",
+			"--parallel", "1",
+			"--preserve-mode",
+		)
+		require.NoError(t, err)
+		require.Contains(t, stderr, "--preserve-mode has no effect unless both source and destination are file://")
+		require.Contains(t, stderr, "S3 has no Unix mode bits to read or preserve")
+	})
+
+	t.Run("file to s3", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		srcDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("payload"), 0o644))
+		dst := newReflowMemoryProvider()
+		newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+			return dst, nil
+		}
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{
+			fileURI(srcDir) + "/",
+			"--dest", "s3://dest-bucket/data/",
+			"--rewrite-from", "{file}",
+			"--rewrite-to", "{file}",
+			"--parallel", "1",
+			"--preserve-mode",
+		})
+		require.NoError(t, cmd.Execute())
+		require.Contains(t, stderr.String(), "--preserve-mode has no effect unless the destination is file://")
+	})
 }
 
 func TestTransferReflowCommand_ParallelDuplicateRaceWithProvenanceWritesSidecarEvents(t *testing.T) {
@@ -1271,6 +1650,16 @@ func TestTransferReflowMetadataConfigValidation(t *testing.T) {
 	require.NoError(t, validateMetadataConfig(reflowMetadataConfig{Policy: metadataPolicyClear, MetadataSidecarSuffix: providerfile.DefaultMetadataSidecarSuffix, DestinationStorageClass: storageClassPropagate}))
 }
 
+func TestTransferReflowSourceConfigValidation(t *testing.T) {
+	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}))
+	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkFollow, OnSourceFailure: reflowSourceFailFail}))
+	require.NoError(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, Hidden: reflowHiddenInclude, OnSourceFailure: reflowSourceFailSkip}))
+	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: "preserve", OnSourceFailure: reflowSourceFailSkip}), "--symlinks=preserve is not supported in v1")
+	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, Hidden: "warn", OnSourceFailure: reflowSourceFailSkip}), "hidden must be one of")
+	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: "quarantine"}), "--on-source-failure=quarantine is not supported in v1")
+	require.ErrorContains(t, validateSourceConfig(reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip, Excludes: []string{"["}}), "invalid exclude glob")
+}
+
 func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testing.T) {
 	require.NoError(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear}))
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, Set: map[string]string{"owner": "team"}}), "metadata-aware PUT")
@@ -1287,6 +1676,23 @@ func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
 	require.Contains(t, transferReflowCmd.Long, "Audit derivation expressions")
 	require.Contains(t, transferReflowCmd.Long, "cleartext JSON sidecars")
 	require.Contains(t, transferReflowCmd.Long, "--metadata-sidecar-suffix")
+	require.Contains(t, transferReflowCmd.Long, "Local-tree reflow skips hidden files")
+	require.Contains(t, transferReflowCmd.Long, "--hidden=include")
+	require.Contains(t, transferReflowCmd.Long, "not gitignore-aware")
+	require.Contains(t, transferReflowCmd.Long, "node_modules/*")
+}
+
+func TestLocalTreeMigrationRunbookWarnsAboutHiddenFiles(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "user-guide", "local-tree-migration.md"))
+	require.NoError(t, err)
+	text := string(raw)
+	require.Contains(t, text, "Local-tree reflow skips hidden files")
+	require.Contains(t, text, "--dry-run")
+	require.Contains(t, text, "--hidden=include")
+	require.Contains(t, text, "not gitignore-aware")
+	require.Contains(t, text, "--exclude 'node_modules/*'")
+	require.Contains(t, text, "absolute source root")
+	require.Contains(t, text, "aws s3 sync")
 }
 
 func newTransferReflowTestCommand() *cobra.Command {
@@ -1320,6 +1726,11 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&reflowMetaContent, "preserve-content-type", false, "")
 	cmd.Flags().StringVar(&reflowMetaStorage, "destination-storage-class", "", "")
 	cmd.Flags().StringVar(&reflowMetaSuffix, "metadata-sidecar-suffix", providerfile.DefaultMetadataSidecarSuffix, "")
+	cmd.Flags().StringVar(&reflowSymlinks, "symlinks", reflowSymlinkSkip, "")
+	cmd.Flags().StringVar(&reflowHidden, "hidden", reflowHiddenSkip, "")
+	cmd.Flags().StringArrayVar(&reflowExcludes, "exclude", nil, "")
+	cmd.Flags().BoolVar(&reflowPreserve, "preserve-mode", false, "")
+	cmd.Flags().StringVar(&reflowSrcFailure, "on-source-failure", reflowSourceFailSkip, "")
 	cmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "")
 	cmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "")
 	cmd.Flags().StringVar(&reflowSrcEndpoint, "src-endpoint", "", "")
@@ -1357,6 +1768,11 @@ func withTransferReflowTestState(t *testing.T) {
 	oldMetaContent := reflowMetaContent
 	oldMetaStorage := reflowMetaStorage
 	oldMetaSuffix := reflowMetaSuffix
+	oldSymlinks := reflowSymlinks
+	oldHidden := reflowHidden
+	oldExcludes := reflowExcludes
+	oldPreserve := reflowPreserve
+	oldSrcFailure := reflowSrcFailure
 	oldSrcRegion := reflowSrcRegion
 	oldSrcProfile := reflowSrcProfile
 	oldSrcEndpoint := reflowSrcEndpoint
@@ -1396,6 +1812,11 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowMetaContent = false
 	reflowMetaStorage = ""
 	reflowMetaSuffix = providerfile.DefaultMetadataSidecarSuffix
+	reflowSymlinks = reflowSymlinkSkip
+	reflowHidden = reflowHiddenSkip
+	reflowExcludes = nil
+	reflowPreserve = false
+	reflowSrcFailure = reflowSourceFailSkip
 	reflowSrcRegion = ""
 	reflowSrcProfile = ""
 	reflowSrcEndpoint = ""
@@ -1429,6 +1850,11 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowMetaContent = oldMetaContent
 		reflowMetaStorage = oldMetaStorage
 		reflowMetaSuffix = oldMetaSuffix
+		reflowSymlinks = oldSymlinks
+		reflowHidden = oldHidden
+		reflowExcludes = oldExcludes
+		reflowPreserve = oldPreserve
+		reflowSrcFailure = oldSrcFailure
 		reflowSrcRegion = oldSrcRegion
 		reflowSrcProfile = oldSrcProfile
 		reflowSrcEndpoint = oldSrcEndpoint
@@ -1444,15 +1870,15 @@ func withTransferReflowTestState(t *testing.T) {
 func TestEnqueueReflowLine_ReflowInputRecord(t *testing.T) {
 	out := make(chan reflowTask, 1)
 	var providerBuckets []string
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
-		providerBuckets = append(providerBuckets, bucket)
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
+		providerBuckets = append(providerBuckets, srcURI.Bucket)
 		return &mockProvider{}, &mockProvider{}, nil
 	}
 
 	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","source_etag":"abc123","source_size_bytes":42,"source_last_modified":"2026-01-15T20:53:44Z","vars":{"site":"001"},"probe":{"extractors":[{"name":"site","type":"regex","resolved":true,"required":true,"bytes_at_resolution":128}],"bytes_read":128,"termination_reason":"all_required_resolved"},"dest_rel_key":"dest/file.xml"}}`
-	srcBucket, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	srcBucket, err := enqueueReflowLine(context.Background(), line, "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
 	require.NoError(t, err)
-	require.Equal(t, "bucket", srcBucket)
+	require.Equal(t, "s3:bucket", srcBucket)
 	require.Equal(t, []string{"bucket"}, providerBuckets)
 
 	task := <-out
@@ -1472,15 +1898,15 @@ func TestEnqueueReflowLine_ReflowInputRecord(t *testing.T) {
 func TestEnqueueReflowLine_ReflowInputRecordQuarantine(t *testing.T) {
 	out := make(chan reflowTask, 1)
 	var providerBuckets []string
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
-		providerBuckets = append(providerBuckets, bucket)
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
+		providerBuckets = append(providerBuckets, srcURI.Bucket)
 		return &mockProvider{}, &mockProvider{}, nil
 	}
 
 	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine","quarantine_prefix":"_unresolved/","vars":{"date":"_unresolved"}}}`
-	srcBucket, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	srcBucket, err := enqueueReflowLine(context.Background(), line, "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
 	require.NoError(t, err)
-	require.Equal(t, "bucket", srcBucket)
+	require.Equal(t, "s3:bucket", srcBucket)
 	require.Equal(t, []string{"bucket"}, providerBuckets)
 
 	task := <-out
@@ -1492,12 +1918,12 @@ func TestEnqueueReflowLine_ReflowInputRecordQuarantine(t *testing.T) {
 
 func TestEnqueueReflowLine_ReflowInputRecordQuarantineRequiresPrefix(t *testing.T) {
 	out := make(chan reflowTask, 1)
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
 		return &mockProvider{}, &mockProvider{}, nil
 	}
 
 	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine"}}`
-	_, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	_, err := enqueueReflowLine(context.Background(), line, "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "quarantine_prefix is required")
@@ -1506,12 +1932,12 @@ func TestEnqueueReflowLine_ReflowInputRecordQuarantineRequiresPrefix(t *testing.
 
 func TestEnqueueReflowLine_ReflowInputRecordQuarantineRejectsAbsolutePrefix(t *testing.T) {
 	out := make(chan reflowTask, 1)
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
 		return &mockProvider{}, &mockProvider{}, nil
 	}
 
 	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/file.xml","source_key":"source/file.xml","routing_class":"quarantine","quarantine_prefix":"s3://other/prefix"}}`
-	_, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	_, err := enqueueReflowLine(context.Background(), line, "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "quarantine_prefix must be a relative destination prefix")
@@ -1520,13 +1946,13 @@ func TestEnqueueReflowLine_ReflowInputRecordQuarantineRejectsAbsolutePrefix(t *t
 
 func TestEnqueueReflowLine_ReflowInputRecordRejectsPrefixURI(t *testing.T) {
 	out := make(chan reflowTask, 1)
-	getProviders := func(bucket string) (provider.Provider, provider.Provider, error) {
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
 		t.Fatalf("getProviders should not be called for invalid exact-object input")
 		return nil, nil, nil
 	}
 
 	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://bucket/source/","source_key":"source/"}}`
-	_, err := enqueueReflowLine(context.Background(), line, "", getProviders, out)
+	_, err := enqueueReflowLine(context.Background(), line, "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must be an exact object URI")
 	require.Empty(t, out)
@@ -1550,6 +1976,12 @@ func TestResolveProvenanceConfig(t *testing.T) {
 	require.Equal(t, ".audit.json", cfg.Suffix)
 	require.Equal(t, provenanceErrorFail, cfg.OnWriteError)
 	require.False(t, cfg.AllowUnsafeSuffix)
+}
+
+func TestParseReflowDestRejectsOutputOnlyFileLocalURI(t *testing.T) {
+	_, err := parseReflowDest("file://local/path")
+	require.Error(t, err)
+	require.ErrorIs(t, err, uri.ErrInvalidFileURI)
 }
 
 func TestValidateProvenanceConfigRejectsUnsafeSuffix(t *testing.T) {
@@ -1972,6 +2404,7 @@ type testRecordEnvelope struct {
 
 type testReflowData struct {
 	SourceURI    string         `json:"source_uri"`
+	SourceRoot   string         `json:"source_root"`
 	SourceKey    string         `json:"source_key"`
 	SourceETag   string         `json:"source_etag"`
 	SourceSize   int64          `json:"source_size_bytes"`
