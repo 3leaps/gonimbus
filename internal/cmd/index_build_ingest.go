@@ -113,6 +113,14 @@ func newIndexIngestWriter(
 	}
 }
 
+func nonEmptyStringPtr(value string) *string {
+	if value == "" {
+		return nil
+	}
+	out := value
+	return &out
+}
+
 // WriteObject converts and batches an object record, flushing when batch is full.
 func (w *indexIngestWriter) WriteObject(ctx context.Context, obj *output.ObjectRecord) error {
 	w.mu.Lock()
@@ -143,6 +151,7 @@ func (w *indexIngestWriter) WriteObject(ctx context.Context, obj *output.ObjectR
 		SizeBytes:     obj.Size,
 		LastModified:  &obj.LastModified,
 		ETag:          obj.ETag,
+		StorageClass:  nonEmptyStringPtr(obj.StorageClass),
 		LastSeenRunID: w.run.RunID,
 		LastSeenAt:    w.run.StartedAt,
 	}

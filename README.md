@@ -126,7 +126,7 @@ gonimbus crawl --job <path>    # Full crawl to JSONL
 gonimbus index init            # Initialize local index database
 gonimbus index build --job <path>  # Build index from crawl
 gonimbus index build --background --job <path>  # Background build with job tracking
-gonimbus index query <uri>     # Query indexed objects by pattern
+gonimbus index query <uri>     # Query indexed objects by pattern/storage class
 gonimbus index list            # List local indexes
 gonimbus index doctor          # Validate index integrity
 gonimbus index gc              # Clean up old indexes

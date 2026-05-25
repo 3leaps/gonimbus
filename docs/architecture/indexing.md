@@ -31,6 +31,11 @@ Index building is designed around a small set of provider capabilities.
 
 - **Prefix listing**: list objects under a literal `prefix` with pagination.
   - Must return at least: object `key`, `size`, `last_modified`.
+  - Should preserve provider-native LIST fields when available. S3-family
+    providers carry `StorageClass` through `provider.ObjectSummary` into
+    `objects_current.storage_class`; providers without a LIST-time storage
+    class leave it unset, which persists as SQL `NULL` and is omitted from
+    JSONL output.
 
 ### Required for path-based scope compilation
 
@@ -57,6 +62,8 @@ Index builds separate concerns:
 
 - **Scoping** decides _what we list_ (provider-cost lever).
 - **Matching/filtering** decides _what we ingest_ (index size / relevance lever).
+- **Ingest mapping** carries LIST-derived object attributes into
+  `objects_current` without issuing HEAD requests.
 
 ### Build match (ingest predicates)
 
@@ -67,6 +74,17 @@ Index builds separate concerns:
 - build-time metadata filters (`size`, `modified`, `key_regex`)
 
 These reduce ingest volume and query cost, but do not inherently reduce provider listing cost.
+
+### LIST-derived storage class
+
+`storage_class` is a LIST-derived scalar. It is stored exactly as the provider
+returns it, with no normalization. Missing or empty provider values are stored
+as SQL `NULL`; query JSONL omits the field rather than emitting `""` or
+explicit `null`.
+
+`index query --storage-class` performs exact, case-sensitive matching against
+non-null values. The filter is pushed into SQL using bound parameters, including
+canonical-by-ETag mode where filtering happens before ETag grouping.
 
 ### Build scope (provider-cost lever)
 

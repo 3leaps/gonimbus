@@ -46,6 +46,9 @@ Examples:
   # Find files larger than 1MB modified in last 30 days
   gonimbus index query s3://bucket/ --min-size 1MB --after 2025-01-01
 
+  # Find files in known storage classes
+  gonimbus index query s3://bucket/ --storage-class GLACIER,DEEP_ARCHIVE
+
   # Write results to a local file
   gonimbus index query s3://bucket/prefix/ --pattern "**/*.xml" \
     --output file:///tmp/results.jsonl
@@ -83,6 +86,7 @@ func init() {
 	// Date filters
 	indexQueryCmd.Flags().String("after", "", "Objects modified after this date (YYYY-MM-DD or RFC3339)")
 	indexQueryCmd.Flags().String("before", "", "Objects modified before this date (YYYY-MM-DD or RFC3339)")
+	indexQueryCmd.Flags().StringArray("storage-class", nil, "Storage class filter (exact, case-sensitive); comma-separated and repeatable")
 
 	// Output options
 	indexQueryCmd.Flags().Int("limit", 0, "Maximum number of results (0 = no limit)")
@@ -116,6 +120,7 @@ type indexQueryRecordData struct {
 	SizeBytes    int64   `json:"size_bytes"`
 	LastModified *string `json:"last_modified,omitempty"`
 	ETag         string  `json:"etag,omitempty"`
+	StorageClass *string `json:"storage_class,omitempty"`
 	DeletedAt    *string `json:"deleted_at,omitempty"`
 }
 
@@ -139,6 +144,7 @@ type indexCanonicalObjectData struct {
 	Key          string  `json:"key"`
 	SizeBytes    int64   `json:"size_bytes"`
 	LastModified *string `json:"last_modified,omitempty"`
+	StorageClass *string `json:"storage_class,omitempty"`
 	DeletedAt    *string `json:"deleted_at"`
 }
 
@@ -146,6 +152,7 @@ type indexCanonicalAlternateData struct {
 	RelKey       string  `json:"rel_key"`
 	SizeBytes    int64   `json:"size_bytes"`
 	LastModified *string `json:"last_modified,omitempty"`
+	StorageClass *string `json:"storage_class,omitempty"`
 	DeletedAt    *string `json:"deleted_at"`
 }
 
@@ -168,6 +175,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	maxSizeStr, _ := cmd.Flags().GetString("max-size")
 	afterStr, _ := cmd.Flags().GetString("after")
 	beforeStr, _ := cmd.Flags().GetString("before")
+	storageClassRaw, _ := cmd.Flags().GetStringArray("storage-class")
 	limit, _ := cmd.Flags().GetInt("limit")
 	includeDeleted, _ := cmd.Flags().GetBool("include-deleted")
 	countOnly, _ := cmd.Flags().GetBool("count")
@@ -213,6 +221,11 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		Limit:          limit,
 	}
 	params.CanonicalTieBreak = indexstore.CanonicalTieBreak(canonicalTieBreakRaw)
+	storageClasses, err := parseStorageClassFilterValues(storageClassRaw)
+	if err != nil {
+		return err
+	}
+	params.StorageClasses = storageClasses
 
 	// Parse size filters using match package
 	if minSizeStr != "" {
@@ -390,16 +403,34 @@ func outputRecordCount(results []indexstore.QueryResult, canonicalResults []inde
 	return len(results)
 }
 
+func parseStorageClassFilterValues(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	values := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		for _, part := range strings.Split(entry, ",") {
+			value := strings.TrimSpace(part)
+			if value == "" {
+				return nil, fmt.Errorf("--storage-class contains an empty value")
+			}
+			values = append(values, value)
+		}
+	}
+	return values, nil
+}
+
 func newIndexQueryRecord(baseURI string, ts string, r indexstore.QueryResult) indexQueryRecord {
 	record := indexQueryRecord{
 		Type: "gonimbus.index.object.v1",
 		TS:   ts,
 		Data: indexQueryRecordData{
-			BaseURI:   baseURI,
-			RelKey:    r.RelKey,
-			Key:       reconstructFullKey(baseURI, r.RelKey),
-			SizeBytes: r.SizeBytes,
-			ETag:      r.ETag,
+			BaseURI:      baseURI,
+			RelKey:       r.RelKey,
+			Key:          reconstructFullKey(baseURI, r.RelKey),
+			SizeBytes:    r.SizeBytes,
+			ETag:         r.ETag,
+			StorageClass: r.StorageClass,
 		},
 	}
 
@@ -437,9 +468,10 @@ func newIndexCanonicalQueryRecord(baseURI string, ts string, group indexstore.Ca
 
 func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) indexCanonicalObjectData {
 	record := indexCanonicalObjectData{
-		RelKey:    r.RelKey,
-		Key:       reconstructFullKey(baseURI, r.RelKey),
-		SizeBytes: r.SizeBytes,
+		RelKey:       r.RelKey,
+		Key:          reconstructFullKey(baseURI, r.RelKey),
+		SizeBytes:    r.SizeBytes,
+		StorageClass: r.StorageClass,
 	}
 	if r.LastModified != nil {
 		lastModified := r.LastModified.Format(time.RFC3339)
@@ -454,8 +486,9 @@ func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) index
 
 func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlternateData {
 	record := indexCanonicalAlternateData{
-		RelKey:    r.RelKey,
-		SizeBytes: r.SizeBytes,
+		RelKey:       r.RelKey,
+		SizeBytes:    r.SizeBytes,
+		StorageClass: r.StorageClass,
 	}
 	if r.LastModified != nil {
 		lastModified := r.LastModified.Format(time.RFC3339)

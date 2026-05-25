@@ -79,6 +79,7 @@ func runStreamHead(cmd *cobra.Command, args []string) error {
 		Size:         meta.Size,
 		LastModified: meta.LastModified,
 		ETag:         meta.ETag,
+		StorageClass: meta.StorageClass,
 		ContentType:  meta.ContentType,
 		Metadata:     meta.Metadata,
 	}

@@ -201,6 +201,7 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 			SizeBytes:    123,
 			LastModified: &lastModified,
 			ETag:         "etag-shared",
+			StorageClass: stringPtr("GLACIER"),
 		},
 		Alternates: []indexstore.QueryResult{{
 			RelKey:       "alternate.xml",
@@ -208,6 +209,7 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 			LastModified: &lastModified,
 			ETag:         "etag-shared",
 			DeletedAt:    &deletedAt,
+			StorageClass: stringPtr("STANDARD"),
 		}},
 	}
 
@@ -217,8 +219,10 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 
 	require.Contains(t, string(b), `"type":"gonimbus.index.object.canonical.v1"`)
 	require.Contains(t, string(b), `"key":"prefix/canonical.xml"`)
+	require.Contains(t, string(b), `"storage_class":"GLACIER"`)
 	require.Contains(t, string(b), `"alternates_count":1`)
 	require.Contains(t, string(b), `"size_bytes":456`)
+	require.Contains(t, string(b), `"storage_class":"STANDARD"`)
 	require.Contains(t, string(b), `"deleted_at":"2026-05-20T12:00:00Z"`)
 
 	withoutAlternates := newIndexCanonicalQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", group, indexstore.CanonicalTieBreakMinKey, false)
@@ -235,4 +239,39 @@ func TestIndexQueryHelpDocumentsCanonicalETagCaveat(t *testing.T) {
 	require.Contains(t, help, "ETag is a provider version/fingerprint hint")
 	require.Contains(t, help, "not a universal content hash")
 	require.Contains(t, help, "docs/user-guide/index-build-mental-model.md")
+}
+
+func TestParseStorageClassFilterValues(t *testing.T) {
+	values, err := parseStorageClassFilterValues([]string{"STANDARD, GLACIER", "DEEP_ARCHIVE"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"STANDARD", "GLACIER", "DEEP_ARCHIVE"}, values)
+
+	_, err = parseStorageClassFilterValues([]string{"STANDARD,,GLACIER"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty value")
+}
+
+func TestIndexQueryRecordOmitEmptyStorageClass(t *testing.T) {
+	record := newIndexQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", indexstore.QueryResult{
+		RelKey:    "missing.txt",
+		SizeBytes: 1,
+	})
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.NotContains(t, string(b), "storage_class")
+}
+
+func TestIndexQueryRecordIncludesStorageClass(t *testing.T) {
+	record := newIndexQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", indexstore.QueryResult{
+		RelKey:       "archive.txt",
+		SizeBytes:    1,
+		StorageClass: stringPtr("DEEP_ARCHIVE"),
+	})
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"storage_class":"DEEP_ARCHIVE"`)
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

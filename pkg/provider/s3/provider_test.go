@@ -296,12 +296,67 @@ func TestObjectSummary_Fields(t *testing.T) {
 		Size:         1024,
 		ETag:         "abc123",
 		LastModified: now,
+		StorageClass: "STANDARD_IA",
 	}
 
 	assert.Equal(t, "path/to/file.txt", obj.Key)
 	assert.Equal(t, int64(1024), obj.Size)
 	assert.Equal(t, "abc123", obj.ETag)
 	assert.Equal(t, now, obj.LastModified)
+	assert.Equal(t, "STANDARD_IA", obj.StorageClass)
+}
+
+func TestProviderListCapturesStorageClass(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "2", r.URL.Query().Get("list-type"))
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>test-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>2</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>archive/object.txt</Key>
+    <LastModified>2026-05-25T12:00:00.000Z</LastModified>
+    <ETag>&quot;etag-1&quot;</ETag>
+    <Size>10</Size>
+    <StorageClass>GLACIER</StorageClass>
+  </Contents>
+  <Contents>
+    <Key>standard/object.txt</Key>
+    <LastModified>2026-05-25T12:00:00.000Z</LastModified>
+    <ETag>&quot;etag-2&quot;</ETag>
+    <Size>20</Size>
+  </Contents>
+</ListBucketResult>`))
+	}))
+	defer server.Close()
+
+	p, err := New(ctx, Config{
+		Bucket:          "test-bucket",
+		Endpoint:        server.URL,
+		Region:          "us-east-1",
+		AccessKeyID:     "AKIATEST0000000001",
+		SecretAccessKey: "test-secret",
+		ForcePathStyle:  true,
+	})
+	require.NoError(t, err)
+	defer func() { _ = p.Close() }()
+
+	result, err := p.List(ctx, provider.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Objects, 2)
+	require.Equal(t, "GLACIER", result.Objects[0].StorageClass)
+	require.Empty(t, result.Objects[1].StorageClass)
+
+	delimited, err := p.ListWithDelimiter(ctx, provider.ListWithDelimiterOptions{Delimiter: "/"})
+	require.NoError(t, err)
+	require.Len(t, delimited.Objects, 2)
+	require.Equal(t, "GLACIER", delimited.Objects[0].StorageClass)
+	require.Empty(t, delimited.Objects[1].StorageClass)
 }
 
 func TestObjectMeta_Embedding(t *testing.T) {

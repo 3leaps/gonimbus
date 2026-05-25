@@ -857,6 +857,109 @@ func TestQueryCanonicalObjects_IncludeDeletedParticipatesInGrouping(t *testing.T
 	}
 }
 
+func TestQueryObjects_StorageClassFilter(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "storage-class-filter")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "active/standard.txt", 10, "2025-01-01T00:00:00Z", "etag-standard", "", "STANDARD")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "active/glacier.txt", 20, "2025-01-02T00:00:00Z", "etag-glacier", "", "GLACIER")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "active/no-class.txt", 30, "2025-01-03T00:00:00Z", "etag-missing", "", "")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "deleted/glacier.txt", 40, "2025-01-04T00:00:00Z", "etag-deleted", "2026-05-19T12:00:00Z", "GLACIER")
+
+	results, _, err := QueryObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"GLACIER"},
+	})
+	if err != nil {
+		t.Fatalf("QueryObjects: %v", err)
+	}
+	if len(results) != 1 || results[0].RelKey != "active/glacier.txt" {
+		t.Fatalf("expected only active GLACIER row, got %+v", results)
+	}
+	if results[0].StorageClass == nil || *results[0].StorageClass != "GLACIER" {
+		t.Fatalf("storage class not populated: %+v", results[0])
+	}
+
+	multi, _, err := QueryObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"STANDARD", "GLACIER"},
+	})
+	if err != nil {
+		t.Fatalf("QueryObjects multi: %v", err)
+	}
+	if len(multi) != 2 {
+		t.Fatalf("expected two active non-null storage class rows, got %+v", multi)
+	}
+
+	withDeleted, _, err := QueryObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"GLACIER"},
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("QueryObjects include deleted: %v", err)
+	}
+	if len(withDeleted) != 2 {
+		t.Fatalf("expected active and deleted GLACIER rows, got %+v", withDeleted)
+	}
+
+	hostile, _, err := QueryObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"STANDARD' OR 1=1 --"},
+	})
+	if err != nil {
+		t.Fatalf("QueryObjects hostile literal: %v", err)
+	}
+	if len(hostile) != 0 {
+		t.Fatalf("hostile literal broadened result set: %+v", hostile)
+	}
+
+	count, err := QueryObjectCount(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"GLACIER"},
+	})
+	if err != nil {
+		t.Fatalf("QueryObjectCount: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected count 1, got %d", count)
+	}
+}
+
+func TestQueryCanonicalObjects_StorageClassPreservedAfterTieBreak(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "canonical-storage-class")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "group/b.xml", 20, "2025-01-02T00:00:00Z", "etag-group", "", "GLACIER")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "group/a.xml", 10, "2025-01-01T00:00:00Z", "etag-group", "", "STANDARD")
+
+	out, _, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects: %v", err)
+	}
+	if len(out) != 1 || out[0].Group == nil {
+		t.Fatalf("expected one canonical group, got %+v", out)
+	}
+	canonical := out[0].Group.Canonical
+	if canonical.RelKey != "group/a.xml" {
+		t.Fatalf("canonical rel_key = %s", canonical.RelKey)
+	}
+	if canonical.StorageClass == nil || *canonical.StorageClass != "STANDARD" {
+		t.Fatalf("canonical storage_class not preserved: %+v", canonical)
+	}
+
+	hostile, _, err := QueryCanonicalObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"STANDARD' OR 1=1 --"},
+	})
+	if err != nil {
+		t.Fatalf("QueryCanonicalObjects hostile literal: %v", err)
+	}
+	if len(hostile) != 0 {
+		t.Fatalf("hostile literal broadened canonical result set: %+v", hostile)
+	}
+}
+
 func setupQueryTestDB(t *testing.T, indexSetID string) (context.Context, *sql.DB, string, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -887,18 +990,27 @@ func setupQueryTestDB(t *testing.T, indexSetID string) (context.Context, *sql.DB
 
 func insertQueryTestObject(t *testing.T, ctx context.Context, db *sql.DB, indexSetID string, runID string, relKey string, sizeBytes int64, lastModified string, etag string, deletedAt string) {
 	t.Helper()
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, relKey, sizeBytes, lastModified, etag, deletedAt, "")
+}
+
+func insertQueryTestObjectWithStorageClass(t *testing.T, ctx context.Context, db *sql.DB, indexSetID string, runID string, relKey string, sizeBytes int64, lastModified string, etag string, deletedAt string, storageClass string) {
+	t.Helper()
 	var lastModifiedArg any
 	if lastModified != "" {
 		lastModifiedArg = lastModified
+	}
+	var storageClassArg any
+	if storageClass != "" {
+		storageClassArg = storageClass
 	}
 	var deletedAtArg any
 	if deletedAt != "" {
 		deletedAtArg = deletedAt
 	}
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO objects_current (index_set_id, rel_key, size_bytes, last_modified, etag, last_seen_run_id, last_seen_at, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
-	`, indexSetID, relKey, sizeBytes, lastModifiedArg, etag, runID, deletedAtArg)
+		INSERT INTO objects_current (index_set_id, rel_key, size_bytes, last_modified, etag, storage_class, last_seen_run_id, last_seen_at, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+	`, indexSetID, relKey, sizeBytes, lastModifiedArg, etag, storageClassArg, runID, deletedAtArg)
 	if err != nil {
 		t.Fatalf("insert object %s: %v", relKey, err)
 	}

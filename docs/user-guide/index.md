@@ -238,6 +238,10 @@ gonimbus index query 's3://bucket/prefix/' \
   --before 2026-01-01 \
   --min-size 1KB
 
+# With LIST-derived storage class filters
+gonimbus index query 's3://bucket/prefix/' \
+  --storage-class GLACIER,DEEP_ARCHIVE
+
 # Count only (no output records)
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
 
@@ -270,8 +274,8 @@ When `--output` is set, stdout is silent and results are written to the destinat
 missing ETag are emitted unchanged as standard `gonimbus.index.object.v1`
 records, so consumers should branch on the JSONL `type` field when using this
 mode. Existing filters apply before grouping: a row excluded by `--pattern`,
-`--key-regex`, size, or date filters cannot become canonical and cannot appear
-as an alternate.
+`--key-regex`, size, date, or `--storage-class` filters cannot become
+canonical and cannot appear as an alternate.
 
 Canonical selection defaults to `--canonical-tie-break min-key`, which chooses
 the lexicographically smallest `rel_key`. `min-modified` and `max-modified`
@@ -451,16 +455,22 @@ Job records are stored under the app data directory:
 
 ## Query Filters
 
-Index queries support the same filters as `inspect`:
+Index queries support pattern, metadata, storage-class, and output filters:
 
-| Filter      | Flag         | Example                          |
-| ----------- | ------------ | -------------------------------- |
-| Pattern     | `--pattern`  | `**/data/*.parquet`              |
-| Min size    | `--min-size` | `1KB`, `100MiB`                  |
-| Max size    | `--max-size` | `1GB`                            |
-| After date  | `--after`    | `2025-12-01`                     |
-| Before date | `--before`   | `2026-01-01`                     |
-| Count only  | `--count`    | Returns count instead of records |
+| Filter        | Flag              | Example                            |
+| ------------- | ----------------- | ---------------------------------- |
+| Pattern       | `--pattern`       | `**/data/*.parquet`                |
+| Min size      | `--min-size`      | `1KB`, `100MiB`                    |
+| Max size      | `--max-size`      | `1GB`                              |
+| After date    | `--after`         | `2025-12-01`                       |
+| Before date   | `--before`        | `2026-01-01`                       |
+| Storage class | `--storage-class` | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
+| Count only    | `--count`         | Returns count instead of records   |
+
+`--storage-class` matches the raw provider value captured from LIST responses.
+The flag is repeatable and accepts comma-separated values. Matching is exact and
+case-sensitive. Objects whose provider did not return a storage class have no
+`storage_class` JSONL field and are not matched by `--storage-class`.
 
 | Canonical Option   | Flag                    | Behavior                                       |
 | ------------------ | ----------------------- | ---------------------------------------------- |
