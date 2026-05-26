@@ -87,6 +87,7 @@ func init() {
 	indexQueryCmd.Flags().String("after", "", "Objects modified after this date (YYYY-MM-DD or RFC3339)")
 	indexQueryCmd.Flags().String("before", "", "Objects modified before this date (YYYY-MM-DD or RFC3339)")
 	indexQueryCmd.Flags().StringArray("storage-class", nil, "Storage class filter (exact, case-sensitive); comma-separated and repeatable")
+	indexQueryCmd.Flags().String("enriched-after", "", "Objects HEAD-enriched after this date (YYYY-MM-DD or RFC3339)")
 
 	// Output options
 	indexQueryCmd.Flags().Int("limit", 0, "Maximum number of results (0 = no limit)")
@@ -114,14 +115,19 @@ type indexQueryRecord struct {
 }
 
 type indexQueryRecordData struct {
-	BaseURI      string  `json:"base_uri"`
-	RelKey       string  `json:"rel_key"`
-	Key          string  `json:"key"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LastModified *string `json:"last_modified,omitempty"`
-	ETag         string  `json:"etag,omitempty"`
-	StorageClass *string `json:"storage_class,omitempty"`
-	DeletedAt    *string `json:"deleted_at,omitempty"`
+	BaseURI        string  `json:"base_uri"`
+	RelKey         string  `json:"rel_key"`
+	Key            string  `json:"key"`
+	SizeBytes      int64   `json:"size_bytes"`
+	LastModified   *string `json:"last_modified,omitempty"`
+	ETag           string  `json:"etag,omitempty"`
+	StorageClass   *string `json:"storage_class,omitempty"`
+	ArchiveStatus  *string `json:"archive_status,omitempty"`
+	RestoreState   *string `json:"restore_state,omitempty"`
+	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
+	ContentType    *string `json:"content_type,omitempty"`
+	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
+	DeletedAt      *string `json:"deleted_at,omitempty"`
 }
 
 type indexCanonicalQueryRecord struct {
@@ -140,20 +146,30 @@ type indexCanonicalQueryRecordData struct {
 }
 
 type indexCanonicalObjectData struct {
-	RelKey       string  `json:"rel_key"`
-	Key          string  `json:"key"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LastModified *string `json:"last_modified,omitempty"`
-	StorageClass *string `json:"storage_class,omitempty"`
-	DeletedAt    *string `json:"deleted_at"`
+	RelKey         string  `json:"rel_key"`
+	Key            string  `json:"key"`
+	SizeBytes      int64   `json:"size_bytes"`
+	LastModified   *string `json:"last_modified,omitempty"`
+	StorageClass   *string `json:"storage_class,omitempty"`
+	ArchiveStatus  *string `json:"archive_status,omitempty"`
+	RestoreState   *string `json:"restore_state,omitempty"`
+	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
+	ContentType    *string `json:"content_type,omitempty"`
+	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
+	DeletedAt      *string `json:"deleted_at"`
 }
 
 type indexCanonicalAlternateData struct {
-	RelKey       string  `json:"rel_key"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LastModified *string `json:"last_modified,omitempty"`
-	StorageClass *string `json:"storage_class,omitempty"`
-	DeletedAt    *string `json:"deleted_at"`
+	RelKey         string  `json:"rel_key"`
+	SizeBytes      int64   `json:"size_bytes"`
+	LastModified   *string `json:"last_modified,omitempty"`
+	StorageClass   *string `json:"storage_class,omitempty"`
+	ArchiveStatus  *string `json:"archive_status,omitempty"`
+	RestoreState   *string `json:"restore_state,omitempty"`
+	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
+	ContentType    *string `json:"content_type,omitempty"`
+	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
+	DeletedAt      *string `json:"deleted_at"`
 }
 
 func runIndexQuery(cmd *cobra.Command, args []string) error {
@@ -175,6 +191,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	maxSizeStr, _ := cmd.Flags().GetString("max-size")
 	afterStr, _ := cmd.Flags().GetString("after")
 	beforeStr, _ := cmd.Flags().GetString("before")
+	enrichedAfterStr, _ := cmd.Flags().GetString("enriched-after")
 	storageClassRaw, _ := cmd.Flags().GetStringArray("storage-class")
 	limit, _ := cmd.Flags().GetInt("limit")
 	includeDeleted, _ := cmd.Flags().GetBool("include-deleted")
@@ -257,6 +274,13 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid --before: %w", err)
 		}
 		params.ModifiedBefore = t
+	}
+	if enrichedAfterStr != "" {
+		t, err := match.ParseDate(enrichedAfterStr)
+		if err != nil {
+			return fmt.Errorf("invalid --enriched-after: %w", err)
+		}
+		params.EnrichedAfter = t
 	}
 
 	// Handle count-only mode with optimized path
@@ -425,12 +449,15 @@ func newIndexQueryRecord(baseURI string, ts string, r indexstore.QueryResult) in
 		Type: "gonimbus.index.object.v1",
 		TS:   ts,
 		Data: indexQueryRecordData{
-			BaseURI:      baseURI,
-			RelKey:       r.RelKey,
-			Key:          reconstructFullKey(baseURI, r.RelKey),
-			SizeBytes:    r.SizeBytes,
-			ETag:         r.ETag,
-			StorageClass: r.StorageClass,
+			BaseURI:       baseURI,
+			RelKey:        r.RelKey,
+			Key:           reconstructFullKey(baseURI, r.RelKey),
+			SizeBytes:     r.SizeBytes,
+			ETag:          r.ETag,
+			StorageClass:  r.StorageClass,
+			ArchiveStatus: r.ArchiveStatus,
+			RestoreState:  r.RestoreState,
+			ContentType:   r.ContentType,
 		},
 	}
 
@@ -441,6 +468,14 @@ func newIndexQueryRecord(baseURI string, ts string, r indexstore.QueryResult) in
 	if r.DeletedAt != nil {
 		deletedAt := r.DeletedAt.Format(time.RFC3339)
 		record.Data.DeletedAt = &deletedAt
+	}
+	if r.RestoreExpiry != nil {
+		restoreExpiry := r.RestoreExpiry.Format(time.RFC3339)
+		record.Data.RestoreExpiry = &restoreExpiry
+	}
+	if r.HeadEnrichedAt != nil {
+		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
+		record.Data.HeadEnrichedAt = &headEnrichedAt
 	}
 	return record
 }
@@ -468,10 +503,13 @@ func newIndexCanonicalQueryRecord(baseURI string, ts string, group indexstore.Ca
 
 func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) indexCanonicalObjectData {
 	record := indexCanonicalObjectData{
-		RelKey:       r.RelKey,
-		Key:          reconstructFullKey(baseURI, r.RelKey),
-		SizeBytes:    r.SizeBytes,
-		StorageClass: r.StorageClass,
+		RelKey:        r.RelKey,
+		Key:           reconstructFullKey(baseURI, r.RelKey),
+		SizeBytes:     r.SizeBytes,
+		StorageClass:  r.StorageClass,
+		ArchiveStatus: r.ArchiveStatus,
+		RestoreState:  r.RestoreState,
+		ContentType:   r.ContentType,
 	}
 	if r.LastModified != nil {
 		lastModified := r.LastModified.Format(time.RFC3339)
@@ -480,15 +518,26 @@ func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) index
 	if r.DeletedAt != nil {
 		deletedAt := r.DeletedAt.Format(time.RFC3339)
 		record.DeletedAt = &deletedAt
+	}
+	if r.RestoreExpiry != nil {
+		restoreExpiry := r.RestoreExpiry.Format(time.RFC3339)
+		record.RestoreExpiry = &restoreExpiry
+	}
+	if r.HeadEnrichedAt != nil {
+		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
+		record.HeadEnrichedAt = &headEnrichedAt
 	}
 	return record
 }
 
 func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlternateData {
 	record := indexCanonicalAlternateData{
-		RelKey:       r.RelKey,
-		SizeBytes:    r.SizeBytes,
-		StorageClass: r.StorageClass,
+		RelKey:        r.RelKey,
+		SizeBytes:     r.SizeBytes,
+		StorageClass:  r.StorageClass,
+		ArchiveStatus: r.ArchiveStatus,
+		RestoreState:  r.RestoreState,
+		ContentType:   r.ContentType,
 	}
 	if r.LastModified != nil {
 		lastModified := r.LastModified.Format(time.RFC3339)
@@ -497,6 +546,14 @@ func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlte
 	if r.DeletedAt != nil {
 		deletedAt := r.DeletedAt.Format(time.RFC3339)
 		record.DeletedAt = &deletedAt
+	}
+	if r.RestoreExpiry != nil {
+		restoreExpiry := r.RestoreExpiry.Format(time.RFC3339)
+		record.RestoreExpiry = &restoreExpiry
+	}
+	if r.HeadEnrichedAt != nil {
+		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
+		record.HeadEnrichedAt = &headEnrichedAt
 	}
 	return record
 }

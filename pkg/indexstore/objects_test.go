@@ -124,6 +124,74 @@ func TestBatchUpsertObjects(t *testing.T) {
 	assert.Equal(t, int64(3), count)
 }
 
+func TestBatchUpdateHeadEnrichmentPreservesListFields(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Path: ":memory:"})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.NoError(t, Migrate(ctx, db))
+
+	params := IndexSetParams{
+		BaseURI:  "s3://test-bucket/data/",
+		Provider: "s3",
+		BuildParams: BuildParams{
+			SourceType:    "crawl",
+			SchemaVersion: SchemaVersion,
+		},
+	}
+	indexSet, _, err := FindOrCreateIndexSet(ctx, db, params)
+	require.NoError(t, err)
+	run, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+
+	lastModified := time.Date(2026, 5, 25, 10, 0, 0, 0, time.UTC)
+	storageClass := "GLACIER"
+	require.NoError(t, UpsertObject(ctx, db, ObjectRow{
+		IndexSetID:    indexSet.IndexSetID,
+		RelKey:        "file.txt",
+		SizeBytes:     123,
+		LastModified:  &lastModified,
+		ETag:          "etag-list",
+		StorageClass:  &storageClass,
+		LastSeenRunID: run.RunID,
+		LastSeenAt:    run.StartedAt,
+	}))
+
+	archiveStatus := "DEEP_ARCHIVE_ACCESS"
+	restoreState := "completed"
+	contentType := "application/xml"
+	restoreExpiry := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	enrichedAt := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, BatchUpdateHeadEnrichment(ctx, db, []HeadEnrichmentUpdate{{
+		IndexSetID:     indexSet.IndexSetID,
+		RelKey:         "file.txt",
+		ArchiveStatus:  &archiveStatus,
+		RestoreState:   &restoreState,
+		RestoreExpiry:  &restoreExpiry,
+		ContentType:    &contentType,
+		HeadEnrichedAt: enrichedAt,
+	}}))
+
+	retrieved, err := GetObject(ctx, db, indexSet.IndexSetID, "file.txt")
+	require.NoError(t, err)
+	require.NotNil(t, retrieved)
+	require.Equal(t, int64(123), retrieved.SizeBytes)
+	require.Equal(t, "etag-list", retrieved.ETag)
+	require.NotNil(t, retrieved.StorageClass)
+	require.Equal(t, "GLACIER", *retrieved.StorageClass)
+	require.NotNil(t, retrieved.ArchiveStatus)
+	require.Equal(t, "DEEP_ARCHIVE_ACCESS", *retrieved.ArchiveStatus)
+	require.NotNil(t, retrieved.RestoreState)
+	require.Equal(t, "completed", *retrieved.RestoreState)
+	require.NotNil(t, retrieved.RestoreExpiry)
+	require.Equal(t, restoreExpiry, *retrieved.RestoreExpiry)
+	require.NotNil(t, retrieved.ContentType)
+	require.Equal(t, "application/xml", *retrieved.ContentType)
+	require.NotNil(t, retrieved.HeadEnrichedAt)
+	require.Equal(t, enrichedAt, *retrieved.HeadEnrichedAt)
+}
+
 func TestCountObjects(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Path: ":memory:"})

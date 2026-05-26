@@ -32,6 +32,27 @@ func TestMigrateAddsStorageClassColumnAndIndex(t *testing.T) {
 	require.Equal(t, SchemaVersion, version)
 }
 
+func TestMigrateAddsHeadEnrichmentColumnsAndIndex(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("libsql", ":memory:")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.NoError(t, Migrate(ctx, db))
+
+	for _, column := range []string{"archive_status", "restore_state", "restore_expiry", "content_type", "head_enriched_at"} {
+		var columnCount int
+		err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('objects_current') WHERE name = ?`, column).Scan(&columnCount)
+		require.NoError(t, err)
+		require.Equal(t, 1, columnCount, column)
+	}
+
+	var indexCount int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_objects_current_head_enriched_at'`).Scan(&indexCount)
+	require.NoError(t, err)
+	require.Equal(t, 1, indexCount)
+}
+
 func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("libsql", ":memory:")

@@ -381,6 +381,23 @@ func TestObjectMeta_Embedding(t *testing.T) {
 	assert.Equal(t, "test", meta.Metadata["author"])
 }
 
+func TestParseRestoreHeader(t *testing.T) {
+	now := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	future := `ongoing-request="false", expiry-date="Wed, 03 Jun 2026 00:00:00 GMT"`
+	past := `ongoing-request="false", expiry-date="Wed, 01 Apr 2026 00:00:00 GMT"`
+
+	require.Equal(t, "ongoing", parseRestoreState(`ongoing-request="true"`, now))
+	require.Equal(t, "completed", parseRestoreState(future, now))
+	require.Equal(t, "expired", parseRestoreState(past, now))
+	require.Equal(t, "unknown", parseRestoreState(`provider-specific-garbage`, now))
+	require.Empty(t, parseRestoreState("", now))
+
+	expiry := parseRestoreExpiry(future)
+	require.NotNil(t, expiry)
+	require.Equal(t, time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), *expiry)
+	require.Nil(t, parseRestoreExpiry(`ongoing-request="true"`))
+}
+
 func TestListOptions_Defaults(t *testing.T) {
 	opts := provider.ListOptions{}
 	assert.Empty(t, opts.Prefix)

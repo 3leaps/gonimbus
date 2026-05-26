@@ -44,8 +44,10 @@ Index building is designed around a small set of provider capabilities.
 
 ### Optional
 
-- **Enrichment** (`Head` / metadata) for content-type/tags.
-  - Deferred until an enrichment stage exists.
+- **HEAD enrichment**: `gonimbus index enrich-with-head` reconstructs a
+  provider from index metadata plus runtime credentials/config flags and calls
+  `Head` only for post-filter candidate rows. v1 supports S3-family indexes and
+  rejects unsupported providers explicitly.
 
 ### Error classification
 
@@ -85,6 +87,29 @@ explicit `null`.
 `index query --storage-class` performs exact, case-sensitive matching against
 non-null values. The filter is pushed into SQL using bound parameters, including
 canonical-by-ETag mode where filtering happens before ETag grouping.
+
+### HEAD-derived enrichment
+
+`archive_status`, `restore_state`, `restore_expiry`, `content_type`, and
+`head_enriched_at` are HEAD-derived fields. They are written only by
+`index enrich-with-head`; normal LIST-backed `index build` does not populate
+them.
+
+Mutation scope is intentionally narrow: enrichment updates only the
+HEAD-derived columns and `head_enriched_at`. It must not overwrite
+LIST-derived `storage_class`, size, ETag, `last_modified`, `last_seen_run_id`,
+or `deleted_at`.
+
+For S3-family providers, `ArchiveStatus` is stored as the raw provider value
+(`ARCHIVE_ACCESS` or `DEEP_ARCHIVE_ACCESS`) when present. Restore headers are
+normalized to `ongoing`, `completed`, `expired`, or `unknown`; absent values
+persist as SQL `NULL` and are omitted from query JSONL. HEAD-observed
+`StorageClass` is not persisted in v1.
+
+Candidate filters (`--storage-class`, `--pattern`, `--key-regex`,
+`--min-size`, `--max-size`, `--include-deleted`) are applied before HEAD calls.
+Storage-class filtering uses the same exact, case-sensitive, parameterized SQL
+semantics as `index query`.
 
 ### Build scope (provider-cost lever)
 

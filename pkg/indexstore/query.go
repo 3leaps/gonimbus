@@ -49,6 +49,10 @@ type QueryParams struct {
 	// Empty means no storage class filter. Values match non-null rows only.
 	StorageClasses []string
 
+	// EnrichedAfter filters objects whose head_enriched_at is at or after this time.
+	// Optional. Zero time means no enrichment timestamp lower bound.
+	EnrichedAfter time.Time
+
 	// IncludeDeleted includes soft-deleted objects in results.
 	// Default: false (only non-deleted objects).
 	IncludeDeleted bool
@@ -73,12 +77,17 @@ const (
 
 // QueryResult holds a single object from the query.
 type QueryResult struct {
-	RelKey       string
-	SizeBytes    int64
-	LastModified *time.Time
-	ETag         string
-	StorageClass *string
-	DeletedAt    *time.Time
+	RelKey         string
+	SizeBytes      int64
+	LastModified   *time.Time
+	ETag           string
+	StorageClass   *string
+	ArchiveStatus  *string
+	RestoreState   *string
+	RestoreExpiry  *time.Time
+	ContentType    *string
+	HeadEnrichedAt *time.Time
+	DeletedAt      *time.Time
 }
 
 // CanonicalObjectGroup holds one ETag group after canonical selection.
@@ -108,6 +117,14 @@ type QueryStats struct {
 	// TimestampParseErrors is the count of rows with unparseable timestamps.
 	// These rows are included in results but with nil timestamp fields.
 	TimestampParseErrors int64
+}
+
+// HeadEnrichmentCandidate is an object row selected for HEAD enrichment.
+type HeadEnrichmentCandidate struct {
+	RelKey         string
+	SizeBytes      int64
+	StorageClass   *string
+	HeadEnrichedAt *time.Time
 }
 
 // QueryObjects queries the objects_current table with the given filters.
@@ -147,7 +164,9 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	needsClientFilter := params.Pattern != "" || keyRe != nil
 
 	// Build SQL query with filters that can be pushed to DB
-	query := `SELECT rel_key, size_bytes, last_modified, etag, storage_class, deleted_at
+	query := `SELECT rel_key, size_bytes, last_modified, etag, storage_class,
+		       archive_status, restore_state, restore_expiry, content_type, head_enriched_at,
+		       deleted_at
 		FROM objects_current
 		WHERE index_set_id = ?`
 	args := []interface{}{params.IndexSetID}
@@ -189,6 +208,10 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
+	if !params.EnrichedAfter.IsZero() {
+		query += ` AND head_enriched_at >= ?`
+		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+	}
 
 	query += ` ORDER BY rel_key`
 
@@ -207,15 +230,21 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	var results []QueryResult
 	for rows.Next() {
 		var (
-			relKey       string
-			sizeBytes    int64
-			lastModified sql.NullString
-			etag         sql.NullString
-			storageClass sql.NullString
-			deletedAt    sql.NullString
+			relKey         string
+			sizeBytes      int64
+			lastModified   sql.NullString
+			etag           sql.NullString
+			storageClass   sql.NullString
+			archiveStatus  sql.NullString
+			restoreState   sql.NullString
+			restoreExpiry  sql.NullString
+			contentType    sql.NullString
+			headEnrichedAt sql.NullString
+			deletedAt      sql.NullString
 		)
 
-		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &storageClass, &deletedAt); err != nil {
+		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &storageClass,
+			&archiveStatus, &restoreState, &restoreExpiry, &contentType, &headEnrichedAt, &deletedAt); err != nil {
 			return nil, stats, fmt.Errorf("scan row: %w", err)
 		}
 
@@ -254,6 +283,23 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 			result.ETag = etag.String
 		}
 		result.StorageClass = nullStringPtr(storageClass)
+		result.ArchiveStatus = nullStringPtr(archiveStatus)
+		result.RestoreState = nullStringPtr(restoreState)
+		result.ContentType = nullStringPtr(contentType)
+		if restoreExpiry.Valid {
+			if t, err := parseTimestamp(restoreExpiry.String); err == nil {
+				result.RestoreExpiry = &t
+			} else {
+				stats.TimestampParseErrors++
+			}
+		}
+		if headEnrichedAt.Valid {
+			if t, err := parseTimestamp(headEnrichedAt.String); err == nil {
+				result.HeadEnrichedAt = &t
+			} else {
+				stats.TimestampParseErrors++
+			}
+		}
 
 		if deletedAt.Valid {
 			if t, err := parseTimestamp(deletedAt.String); err == nil {
@@ -276,6 +322,102 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	}
 
 	return results, stats, nil
+}
+
+// QueryHeadEnrichmentCandidates returns post-filter rows that are eligible for
+// HEAD enrichment. Storage class, size, deleted, glob, and regex semantics match
+// QueryObjects; rows are returned in rel_key order.
+func QueryHeadEnrichmentCandidates(ctx context.Context, db *sql.DB, params QueryParams) ([]HeadEnrichmentCandidate, QueryStats, error) {
+	var stats QueryStats
+	if params.IndexSetID == "" {
+		return nil, stats, fmt.Errorf("index_set_id is required")
+	}
+
+	var keyRe *regexp.Regexp
+	if params.KeyRegex != "" {
+		var err error
+		keyRe, err = regexp.Compile(params.KeyRegex)
+		if err != nil {
+			return nil, stats, fmt.Errorf("invalid key regex: %w", err)
+		}
+	}
+	if params.Pattern != "" && !doublestar.ValidatePattern(params.Pattern) {
+		return nil, stats, fmt.Errorf("invalid glob pattern: %s", params.Pattern)
+	}
+
+	query := `SELECT rel_key, size_bytes, storage_class, head_enriched_at
+		FROM objects_current
+		WHERE index_set_id = ?`
+	args := []interface{}{params.IndexSetID}
+
+	if !params.IncludeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	if params.Pattern != "" {
+		prefix := match.DerivePrefix(params.Pattern)
+		if prefix != "" {
+			query += ` AND rel_key LIKE ? ESCAPE '\'`
+			args = append(args, escapeLikePrefix(prefix)+"%")
+		}
+	}
+	if params.MinSize > 0 {
+		query += ` AND size_bytes >= ?`
+		args = append(args, params.MinSize)
+	}
+	if params.MaxSize > 0 {
+		query += ` AND size_bytes <= ?`
+		args = append(args, params.MaxSize)
+	}
+	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
+	query += ` ORDER BY rel_key`
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, stats, fmt.Errorf("query head enrichment candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var candidates []HeadEnrichmentCandidate
+	for rows.Next() {
+		var (
+			relKey         string
+			sizeBytes      int64
+			storageClass   sql.NullString
+			headEnrichedAt sql.NullString
+		)
+		if err := rows.Scan(&relKey, &sizeBytes, &storageClass, &headEnrichedAt); err != nil {
+			return nil, stats, fmt.Errorf("scan candidate: %w", err)
+		}
+		if params.Pattern != "" {
+			matched, err := doublestar.Match(params.Pattern, relKey)
+			if err != nil {
+				return nil, stats, fmt.Errorf("match pattern: %w", err)
+			}
+			if !matched {
+				continue
+			}
+		}
+		if keyRe != nil && !keyRe.MatchString(relKey) {
+			continue
+		}
+		candidate := HeadEnrichmentCandidate{
+			RelKey:       relKey,
+			SizeBytes:    sizeBytes,
+			StorageClass: nullStringPtr(storageClass),
+		}
+		if headEnrichedAt.Valid {
+			if t, err := parseTimestamp(headEnrichedAt.String); err == nil {
+				candidate.HeadEnrichedAt = &t
+			} else {
+				stats.TimestampParseErrors++
+			}
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, stats, fmt.Errorf("iterate candidates: %w", err)
+	}
+	return candidates, stats, nil
 }
 
 // QueryCanonicalObjects returns canonical-by-ETag output over the same filtered
@@ -549,6 +691,10 @@ func queryCountFast(ctx context.Context, db *sql.DB, params QueryParams) (int64,
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
+	if !params.EnrichedAfter.IsZero() {
+		query += ` AND head_enriched_at >= ?`
+		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+	}
 
 	var count int64
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
@@ -595,6 +741,10 @@ func queryCountStreaming(ctx context.Context, db *sql.DB, params QueryParams, ke
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
+	if !params.EnrichedAfter.IsZero() {
+		query += ` AND head_enriched_at >= ?`
+		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+	}
 
 	// No ORDER BY for counting - unnecessary overhead at scale
 

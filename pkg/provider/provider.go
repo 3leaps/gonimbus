@@ -95,6 +95,19 @@ type ObjectMeta struct {
 	// StorageClass is the provider-native object storage class. Providers may
 	// leave it empty when the concept is unsupported or unknown.
 	StorageClass string
+
+	// ArchiveStatus is the provider-native archive access status observed via
+	// HEAD, when supplied. For S3 this is typically ARCHIVE_ACCESS or
+	// DEEP_ARCHIVE_ACCESS.
+	ArchiveStatus string
+
+	// RestoreState is the normalized restore state observed via HEAD. Supported
+	// values are ongoing, completed, expired, and unknown.
+	RestoreState string
+
+	// RestoreExpiry is the provider-reported restore expiry timestamp, when
+	// available.
+	RestoreExpiry *time.Time
 }
 
 // ProviderType identifies a cloud storage provider.
