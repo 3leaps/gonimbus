@@ -516,6 +516,20 @@ func openIndexDB(ctx context.Context, path string) (*sql.DB, error) {
 	return indexstore.Open(ctx, cfg)
 }
 
+// openMigratedIndexDB opens the selected query database and upgrades its schema
+// before callers issue current-version SELECT statements.
+func openMigratedIndexDB(ctx context.Context, path string) (*sql.DB, error) {
+	db, err := openIndexDB(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := indexstore.Migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate index schema: %w", err)
+	}
+	return db, nil
+}
+
 func indexDataDir() (string, error) {
 	identity := GetAppIdentity()
 	if identity == nil || strings.TrimSpace(identity.ConfigName) == "" {
@@ -683,7 +697,7 @@ func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *i
 		return nil, nil, err
 	}
 
-	db, err := openIndexDB(ctx, match.DBPath)
+	db, err := openMigratedIndexDB(ctx, match.DBPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open index database: %w", err)
 	}
@@ -739,7 +753,7 @@ func openIndexDBForBaseURI(ctx context.Context, baseURI string) (*sql.DB, *index
 		warnIndexSelection(baseURI, best, candidates, reason)
 	}
 
-	db, err := openIndexDB(ctx, best.Path)
+	db, err := openMigratedIndexDB(ctx, best.Path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open index database: %w", err)
 	}
