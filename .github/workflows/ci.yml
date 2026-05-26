@@ -77,7 +77,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.3"
       - name: Verify runner + Go toolchain
         run: |
           set -euo pipefail
@@ -98,7 +98,7 @@ jobs:
         # goneat-tools-runner does not ship golangci-lint yet.
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.4.0
+          version: v2.11.2
           args: --help
       - name: Verify golangci-lint
         run: |
@@ -150,7 +150,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.3"
       - name: Build binary
         run: |
           set -euo pipefail
