@@ -4,6 +4,87 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.2.2 (2026-05-26)
+
+**Index Archive Operations and Local-Tree Reflow**
+
+v0.2.2 improves two operator paths: using `transfer reflow` with local
+directory sources, and using indexes to plan work around storage class,
+archive, restore, and content-type state. It also moves CI and release builds
+to Go `1.26.3` with updated lint tooling.
+
+### Local-Tree Reflow
+
+`transfer reflow` now accepts `file://` sources and routes them through the
+same rewrite, collision, metadata, checkpoint, dry-run, and JSONL audit path
+used for object-store sources:
+
+```bash
+gonimbus transfer reflow 'file:///absolute/source-root/' \
+  --dest 's3://bucket/landing/' \
+  --rewrite-from '{path}/{file}' \
+  --rewrite-to '{path}/{file}' \
+  --dry-run
+```
+
+Local-tree reflow skips hidden files and dot-directories by default. Use
+`--hidden=include` only when those paths are expected at the destination, and
+pair dry-run review with explicit `--exclude` rules for non-hidden generated
+paths such as `node_modules/*`, `dist/*`, `target/*`, and log files.
+
+### Storage-Class Querying
+
+Index builds now retain LIST-derived provider storage class. Query JSONL emits
+`storage_class` when present, and `index query --storage-class` filters exact,
+case-sensitive values:
+
+```bash
+gonimbus index query 's3://bucket/prefix/' \
+  --storage-class GLACIER,DEEP_ARCHIVE
+```
+
+The flag is repeatable, accepts comma-separated values, and composes with
+canonical-by-ETag query mode.
+
+### HEAD Enrichment
+
+`index enrich-with-head` caches HEAD-derived archive and restore metadata on an
+existing index after applying candidate filters:
+
+```bash
+gonimbus index enrich-with-head idx_da038d8171b4a9ba \
+  --storage-class GLACIER,DEEP_ARCHIVE \
+  --pattern "**/*.xml" \
+  --parallel 32
+```
+
+The command writes `archive_status`, `restore_state`, `restore_expiry`,
+`content_type`, and `head_enriched_at`. It does not overwrite LIST-derived
+storage class, size, ETag, last-modified, or deleted-state fields. `index query`
+can emit the enriched fields and filter by `--enriched-after`.
+
+### Release Toolchain
+
+- CI and release workflows pin Go `1.26.3`.
+- CI uses `golangci-lint-action` v2.11.2 for the Go 1.26 lane.
+- Version identity is stamped as `0.2.2` across the repository and embedded
+  build identity.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.2
+```
+
+Existing object-store reflow and index query workflows remain compatible. For
+local-tree reflow, run `--dry-run` before the first write and review hidden path
+and exclude policy explicitly.
+
+See [docs/releases/v0.2.2.md](docs/releases/v0.2.2.md) for the complete
+release notes.
+
+---
+
 ## v0.2.1 (2026-05-22)
 
 **Reflow Destination Metadata — Explicit Control, Explicit Disclosure Discipline**
@@ -173,91 +254,7 @@ See [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md) for the complete release 
 
 ---
 
-## v0.1.8 (2026-05-05)
+For v0.1.8 and earlier release notes, see [docs/releases/](docs/releases/) or
+the [CHANGELOG](CHANGELOG.md).
 
-**Index Hub + Workspace Pattern + DX Hardening — Final v0.1.x Release**
-
-This release closes out the v0.1.x line by delivering the publishable / consumable index lifecycle: build an index locally, **publish** it to a hub, **consume** it on another host, and manage hub contents over time. Paired with a documented workspace convention and DX hardening, this is the operational toolchain that production data-acquisition pipelines need.
-
-### Index Hub
-
-Publish (`export`) and consume (`hydrate`) index runs against `file://` and `s3://` hubs, with full CRUD:
-
-```bash
-# Initialize a hub root
-gonimbus index hub init --hub s3://my-hub/
-
-# Publish a run
-gonimbus index hub init --hub s3://my-hub/
-gonimbus index export --index-set idx_<sha256> --hub s3://my-hub/
-
-# Consume on another host
-gonimbus index hydrate --index-set idx_<sha256> --hub s3://my-hub/
-
-# Manage hub contents
-gonimbus index hub ls --hub s3://my-hub/
-gonimbus index hub show --hub s3://my-hub/ --index-set idx_<sha256>
-gonimbus index hub set-latest --hub s3://my-hub/ --index-set idx_<sha256> --run-id run_<id>
-gonimbus index hub rm-run --hub s3://my-hub/ --index-set idx_<sha256> --run-id run_<id>
-gonimbus index hub gc --hub s3://my-hub/ --keep 5 --json
-```
-
-#### Publish Sequence (atomic-ish)
-
-`index.db` → `identity.json` → `complete.json` (commit marker) → `latest.json`. Hydrate verifies SHA-256 + size against the integrity manifest in `complete.json` and rejects uncommitted runs.
-
-#### latest.json Pointer
-
-`latest.json` updates use plain `PutObject` — best-effort, last-writer-wins. CAS / fail-closed semantics (If-Match / If-None-Match, etag plumbing) are tracked for v0.2.x.
-
-### Index Query Flags
-
-```bash
-# Explicit index-set selection (resolves prefix or full idx_<64hex>)
-gonimbus index query 's3://bucket/prefix/' --index-set idx_da038d8
-
-# Stream results to S3 / file destinations
-gonimbus index query 's3://bucket/prefix/' --output 's3://results/query.jsonl'
-gonimbus index query 's3://bucket/prefix/' --output 'file:///tmp/query.jsonl'
-```
-
-### Workspace Pattern
-
-`workspace.yaml` convention with documented layout, shard strategies, and operational flows:
-
-- Build + publish (crawl → index → export)
-- Hydrate + query (consume on remote host)
-- Extract + reflow (probe → transfer reflow with content-aware routing)
-- Hub maintenance (set-latest, rm-run, gc)
-
-See [`docs/user-guide/workspace.md`](docs/user-guide/workspace.md) for the full pattern.
-
-### DX Hardening
-
-- Pre-push hook scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
-- Pre-existing high-severity gosec / golangci-lint findings annotated with rationale or fixed
-- Guardian browser-intercept hooks removed; the team is on a feature-branch workflow
-
-### Bug Fixes
-
-- `gonimbus index hub gc --json` (without `--dry-run`) silently no-oped deletions; fixed to honor `--dry-run` correctly and emit per-run outcomes in the JSON envelope
-
-### Upgrade Notes
-
-No breaking changes from v0.1.7. Upgrade with:
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.1.8
-```
-
-### What's Next
-
-v0.1.x is complete. v0.2.x will introduce control-plane capabilities: managed runner, queue consumer, job lifecycle, and conditional-update (CAS / fail-closed) semantics for `latest.json`. GCS provider also lands in v0.2.x.
-
-See [docs/releases/v0.1.8.md](docs/releases/v0.1.8.md) for complete release notes.
-
----
-
-For v0.1.7 and earlier release notes, see [docs/releases/](docs/releases/) or the [CHANGELOG](CHANGELOG.md).
-
-<!-- v0.1.7 entry removed when v0.2.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.7.md -->
+<!-- v0.1.8 entry removed when v0.2.2 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.8.md -->

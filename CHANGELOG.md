@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-26
+
+**Index archive operations and local-tree reflow — richer indexed state with safer local-source defaults.**
+
+v0.2.2 improves the operator path for two common workflows: migrating local
+trees through `transfer reflow`, and using indexes to plan work around object
+storage class, archive, restore, and content-type state. It also moves CI and
+release builds to Go `1.26.3` so release evidence uses the current patched
+toolchain. See [`docs/releases/v0.2.2.md`](docs/releases/v0.2.2.md) for the
+narrative walkthrough.
+
+### Added
+
+#### Local-tree reflow
+
+- **File source provider parity** — `transfer reflow` now accepts
+  `file:///absolute/source-root/` sources and routes them through the same
+  rewrite, collision, metadata, checkpoint, dry-run, and audit machinery used
+  for object-store sources (GON-035).
+- **Safe hidden-path default** — local-tree reflow skips hidden files and
+  dot-directories by default. Use `--hidden=include` only after reviewing
+  `--dry-run` output and adding explicit excludes for non-hidden generated
+  paths that should not be copied (GON-035).
+- **Local-source disclosure controls** — per-object output uses
+  `file://local/<relative-path>` rather than absolute source roots; checkpoint
+  files and run metadata remain local operational artifacts and should be
+  treated accordingly (GON-035).
+
+#### Index metadata
+
+- **LIST-derived storage class** — index builds now persist provider storage
+  class values returned during listing and emit `storage_class` in query JSONL
+  when present (GON-036).
+- **Storage-class query filter** — `index query --storage-class` filters exact,
+  case-sensitive storage class values. The flag is repeatable and accepts
+  comma-separated values, including canonical-by-ETag mode (GON-036).
+- **HEAD enrichment command** — `index enrich-with-head <index-set-id>` caches
+  HEAD-derived archive status, restore state, restore expiry, content type, and
+  `head_enriched_at` for filtered candidate rows in an existing index
+  (GON-037).
+- **Enrichment-aware query output** — `index query` can emit the enriched
+  archive/restore/content-type fields and filter by `--enriched-after`
+  (GON-037).
+
+### Changed
+
+- **Bumped version to `0.2.2`** for this release. Version stamping continues
+  through `VERSION`, `.fulmen/app.yaml`, the embedded app identity mirror, and
+  `internal/buildinfo/VERSION`.
+- **CI and release workflows pin Go `1.26.3`** and use
+  `golangci-lint-action` v2.11.2 so builds, scans, and release artifacts run
+  on a patched Go 1.26 lane (PR #53).
+- **Provider dispatch docs expanded** to document file source URI handling and
+  future provider extension points for reflow (GON-035).
+
+### Security
+
+- **Local hidden paths are excluded unless requested.** This reduces accidental
+  publication of dotfiles such as `.env`, `.git/*`, `.DS_Store`, and cache
+  directories when using a local directory as a reflow source. The hidden
+  filter is intentionally not gitignore-aware; use explicit `--exclude` rules
+  for generated non-hidden paths.
+- **HEAD enrichment stores only selected metadata.** Credentials are never
+  stored in the index; provider access is reconstructed from index identity and
+  runtime flags or the normal SDK credential chain. Enrichment mutates only
+  HEAD-derived fields and does not overwrite LIST-derived object identity.
+
 ## [0.2.1] - 2026-05-22
 
 **Reflow destination metadata — explicit operator control with explicit disclosure discipline.**
@@ -172,7 +239,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Changed
 
 - **Pre-push hook** (`.goneat/hooks.yaml`) — assess gate scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
-- **AGENTS.md** — `.plans/` references retired; planning artifacts now live in the productbook (private) and the OOB workspace (client-confidential, private)
+- **AGENTS.md** — `.plans/` references retired; planning artifacts now live outside this public repository
 - **AGENTS.md DO NOT list** — replaced narrow `.plans/` rule with broader prohibition on referencing client data, paths, or identifiers in repo content
 
 ### Fixed
@@ -622,7 +689,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/3leaps/gonimbus/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/3leaps/gonimbus/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/3leaps/gonimbus/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/3leaps/gonimbus/compare/v0.1.7...v0.1.8
