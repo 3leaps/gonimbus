@@ -38,12 +38,14 @@ func TestUpsertObject(t *testing.T) {
 	lastMod := now.Add(-24 * time.Hour)
 
 	t.Run("insert new object", func(t *testing.T) {
+		storageClass := "STANDARD_IA"
 		obj := ObjectRow{
 			IndexSetID:    indexSet.IndexSetID,
 			RelKey:        "path/to/file.txt",
 			SizeBytes:     1024,
 			LastModified:  &lastMod,
 			ETag:          "abc123",
+			StorageClass:  &storageClass,
 			LastSeenRunID: run.RunID,
 			LastSeenAt:    run.StartedAt,
 		}
@@ -57,6 +59,8 @@ func TestUpsertObject(t *testing.T) {
 		require.NotNil(t, retrieved)
 		assert.Equal(t, int64(1024), retrieved.SizeBytes)
 		assert.Equal(t, "abc123", retrieved.ETag)
+		require.NotNil(t, retrieved.StorageClass)
+		assert.Equal(t, "STANDARD_IA", *retrieved.StorageClass)
 		assert.Nil(t, retrieved.DeletedAt)
 	})
 
@@ -80,6 +84,7 @@ func TestUpsertObject(t *testing.T) {
 		require.NotNil(t, retrieved)
 		assert.Equal(t, int64(2048), retrieved.SizeBytes)
 		assert.Equal(t, "def456", retrieved.ETag)
+		assert.Nil(t, retrieved.StorageClass)
 	})
 }
 

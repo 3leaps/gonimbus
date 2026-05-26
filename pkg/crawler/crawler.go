@@ -499,6 +499,7 @@ func (c *Crawler) runWriter(ctx context.Context, in <-chan objectItem) error {
 				Size:         item.summary.Size,
 				ETag:         item.summary.ETag,
 				LastModified: item.summary.LastModified,
+				StorageClass: item.summary.StorageClass,
 			}
 			if err := c.writer.WriteObject(ctx, obj); err != nil {
 				return err

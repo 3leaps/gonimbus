@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // Migrate creates (or upgrades) the index schema in-place.
 //
@@ -77,6 +77,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			size_bytes INTEGER NOT NULL,
 			last_modified TEXT,
 			etag TEXT,
+			storage_class TEXT,
 			last_seen_run_id TEXT NOT NULL,
 			last_seen_at TEXT NOT NULL,
 			deleted_at TEXT,
@@ -130,6 +131,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := tx.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id=1`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema_version: %w", err)
 	}
+	if current > SchemaVersion {
+		return fmt.Errorf("index schema version %d is newer than supported version %d; upgrade gonimbus before using this index", current, SchemaVersion)
+	}
 
 	// v2: add provider identity columns for capability-aware indexing.
 	if current < 2 {
@@ -163,6 +167,16 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// v5: add LIST-derived storage class to current object rows.
+	if current < 5 {
+		if err := addObjectsCurrentStorageClass(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := ensureObjectsCurrentStorageClassIndex(ctx, tx); err != nil {
+		return err
+	}
+
 	if current != SchemaVersion {
 		if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=? WHERE id=1`, SchemaVersion); err != nil {
 			return fmt.Errorf("update schema_version: %w", err)
@@ -171,6 +185,29 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema tx: %w", err)
+	}
+	return nil
+}
+
+func addObjectsCurrentStorageClass(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE objects_current ADD COLUMN storage_class TEXT;`); err != nil {
+		msg := err.Error()
+		if !strings.Contains(msg, "duplicate column name") && !strings.Contains(msg, "already exists") {
+			return fmt.Errorf("exec migration statement: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureObjectsCurrentStorageClassIndex(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_objects_current_storage_class ON objects_current(index_set_id, storage_class);`); err != nil {
+		return fmt.Errorf("exec migration statement: %w", err)
 	}
 	return nil
 }

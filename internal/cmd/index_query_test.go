@@ -60,6 +60,145 @@ func createTestIndexWithIncludes(t *testing.T, root string, baseURI string, incl
 	return identity
 }
 
+func createLegacyV4TestIndex(t *testing.T, root string, baseURI string) *indexstore.IndexSetIdentityResult {
+	t.Helper()
+
+	params := indexstore.IndexSetParams{
+		BaseURI:         baseURI,
+		Provider:        "s3",
+		StorageProvider: "aws_s3",
+		CloudProvider:   "aws",
+		RegionKind:      "aws",
+		Region:          "us-east-1",
+		BuildParams: indexstore.BuildParams{
+			SourceType:      "crawl",
+			SchemaVersion:   4,
+			GonimbusVersion: "legacy-test",
+			Includes:        []string{"**"},
+		},
+	}
+
+	identity, err := indexstore.ComputeIndexSetID(params)
+	require.NoError(t, err)
+
+	idxDir := filepath.Join(root, identity.DirName)
+	require.NoError(t, os.MkdirAll(idxDir, 0755))
+
+	db, err := indexstore.Open(context.Background(), indexstore.Config{
+		Path: filepath.Join(idxDir, "index.db"),
+	})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	legacySchema := []string{
+		`CREATE TABLE schema_meta (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			schema_version INTEGER NOT NULL
+		);`,
+		`INSERT INTO schema_meta (id, schema_version) VALUES (1, 4);`,
+		`CREATE TABLE index_sets (
+			index_set_id TEXT PRIMARY KEY,
+			base_uri TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			storage_provider TEXT,
+			cloud_provider TEXT,
+			region_kind TEXT,
+			region TEXT,
+			endpoint TEXT,
+			endpoint_host TEXT,
+			index_build_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE index_runs (
+			run_id TEXT PRIMARY KEY,
+			index_set_id TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			acquired_at TEXT NOT NULL,
+			source_type TEXT NOT NULL,
+			source_snapshot_at TEXT,
+			status TEXT NOT NULL,
+			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id)
+		);`,
+		`CREATE TABLE objects_current (
+			index_set_id TEXT NOT NULL,
+			rel_key TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			last_modified TEXT,
+			etag TEXT,
+			last_seen_run_id TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			deleted_at TEXT,
+			PRIMARY KEY(index_set_id, rel_key),
+			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id),
+			FOREIGN KEY(last_seen_run_id) REFERENCES index_runs(run_id)
+		);`,
+		`CREATE TABLE prefix_stats (
+			index_set_id TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			prefix TEXT NOT NULL,
+			depth INTEGER NOT NULL,
+			objects_direct INTEGER NOT NULL,
+			bytes_direct INTEGER NOT NULL,
+			common_prefixes INTEGER NOT NULL,
+			truncated INTEGER NOT NULL,
+			truncated_reason TEXT,
+			PRIMARY KEY(index_set_id, run_id, prefix),
+			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id),
+			FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
+		);`,
+		`CREATE TABLE index_run_events (
+			event_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			event_category TEXT NOT NULL,
+			detail TEXT,
+			key TEXT,
+			prefix TEXT,
+			error_code TEXT,
+			FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
+		);`,
+	}
+	for _, stmt := range legacySchema {
+		_, err = db.ExecContext(context.Background(), stmt)
+		require.NoError(t, err)
+	}
+
+	now := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	_, err = db.ExecContext(context.Background(), `
+		INSERT INTO index_sets (
+			index_set_id, base_uri, provider, storage_provider, cloud_provider,
+			region_kind, region, endpoint, endpoint_host, index_build_hash, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		identity.IndexSetID, baseURI, "s3", "aws_s3", "aws",
+		"aws", "us-east-1", "", "", "legacy-hash", now.Format(time.RFC3339),
+	)
+	require.NoError(t, err)
+	_, err = db.ExecContext(context.Background(), `
+		INSERT INTO index_runs (
+			run_id, index_set_id, started_at, ended_at, acquired_at,
+			source_type, source_snapshot_at, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+		"run_legacy", identity.IndexSetID, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Format(time.RFC3339),
+		"crawl", nil, string(indexstore.RunStatusSuccess),
+	)
+	require.NoError(t, err)
+	_, err = db.ExecContext(context.Background(), `
+		INSERT INTO objects_current (
+			index_set_id, rel_key, size_bytes, last_modified, etag,
+			last_seen_run_id, last_seen_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL);
+	`,
+		identity.IndexSetID, "legacy-object.xml", int64(123), now.Format(time.RFC3339), "etag-legacy",
+		"run_legacy", now.Format(time.RFC3339),
+	)
+	require.NoError(t, err)
+
+	_, _ = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return identity
+}
+
 func TestOpenIndexDBByIDInRoot_ExactDirName(t *testing.T) {
 	root := t.TempDir()
 	identity := createTestIndex(t, root, "s3://bucket/prefix/")
@@ -191,6 +330,36 @@ func TestOpenIndexDBByIDInRoot_BaseURIFromIndex(t *testing.T) {
 	require.Equal(t, "s3://my-bucket/data/", indexSet.BaseURI)
 }
 
+func TestOpenIndexDBByIDInRoot_MigratesLegacyV4ForQuery(t *testing.T) {
+	root := t.TempDir()
+	identity := createLegacyV4TestIndex(t, root, "s3://bucket/prefix/")
+
+	db, indexSet, err := openIndexDBByIDInRoot(context.Background(), root, identity.DirName)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.Equal(t, identity.IndexSetID, indexSet.IndexSetID)
+
+	var version int
+	err = db.QueryRowContext(context.Background(), `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version)
+	require.NoError(t, err)
+	require.Equal(t, indexstore.SchemaVersion, version)
+
+	var columnCount int
+	err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('objects_current') WHERE name = 'storage_class'`).Scan(&columnCount)
+	require.NoError(t, err)
+	require.Equal(t, 1, columnCount)
+
+	results, _, err := indexstore.QueryObjects(context.Background(), db, indexstore.QueryParams{
+		IndexSetID: indexSet.IndexSetID,
+		Limit:      1,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "legacy-object.xml", results[0].RelKey)
+	require.Nil(t, results[0].StorageClass)
+}
+
 func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) {
 	lastModified := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	deletedAt := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
@@ -201,6 +370,7 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 			SizeBytes:    123,
 			LastModified: &lastModified,
 			ETag:         "etag-shared",
+			StorageClass: stringPtr("GLACIER"),
 		},
 		Alternates: []indexstore.QueryResult{{
 			RelKey:       "alternate.xml",
@@ -208,6 +378,7 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 			LastModified: &lastModified,
 			ETag:         "etag-shared",
 			DeletedAt:    &deletedAt,
+			StorageClass: stringPtr("STANDARD"),
 		}},
 	}
 
@@ -217,8 +388,10 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 
 	require.Contains(t, string(b), `"type":"gonimbus.index.object.canonical.v1"`)
 	require.Contains(t, string(b), `"key":"prefix/canonical.xml"`)
+	require.Contains(t, string(b), `"storage_class":"GLACIER"`)
 	require.Contains(t, string(b), `"alternates_count":1`)
 	require.Contains(t, string(b), `"size_bytes":456`)
+	require.Contains(t, string(b), `"storage_class":"STANDARD"`)
 	require.Contains(t, string(b), `"deleted_at":"2026-05-20T12:00:00Z"`)
 
 	withoutAlternates := newIndexCanonicalQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", group, indexstore.CanonicalTieBreakMinKey, false)
@@ -235,4 +408,39 @@ func TestIndexQueryHelpDocumentsCanonicalETagCaveat(t *testing.T) {
 	require.Contains(t, help, "ETag is a provider version/fingerprint hint")
 	require.Contains(t, help, "not a universal content hash")
 	require.Contains(t, help, "docs/user-guide/index-build-mental-model.md")
+}
+
+func TestParseStorageClassFilterValues(t *testing.T) {
+	values, err := parseStorageClassFilterValues([]string{"STANDARD, GLACIER", "DEEP_ARCHIVE"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"STANDARD", "GLACIER", "DEEP_ARCHIVE"}, values)
+
+	_, err = parseStorageClassFilterValues([]string{"STANDARD,,GLACIER"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty value")
+}
+
+func TestIndexQueryRecordOmitEmptyStorageClass(t *testing.T) {
+	record := newIndexQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", indexstore.QueryResult{
+		RelKey:    "missing.txt",
+		SizeBytes: 1,
+	})
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.NotContains(t, string(b), "storage_class")
+}
+
+func TestIndexQueryRecordIncludesStorageClass(t *testing.T) {
+	record := newIndexQueryRecord("s3://bucket/prefix/", "2026-05-19T12:00:00Z", indexstore.QueryResult{
+		RelKey:       "archive.txt",
+		SizeBytes:    1,
+		StorageClass: stringPtr("DEEP_ARCHIVE"),
+	})
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"storage_class":"DEEP_ARCHIVE"`)
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

@@ -157,6 +157,7 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 			Size:         aws.ToInt64(obj.Size),
 			ETag:         cleanETag(aws.ToString(obj.ETag)),
 			LastModified: aws.ToTime(obj.LastModified),
+			StorageClass: string(obj.StorageClass),
 		})
 	}
 
@@ -201,6 +202,7 @@ func (p *Provider) ListWithDelimiter(ctx context.Context, opts provider.ListWith
 			Size:         aws.ToInt64(obj.Size),
 			ETag:         cleanETag(aws.ToString(obj.ETag)),
 			LastModified: aws.ToTime(obj.LastModified),
+			StorageClass: string(obj.StorageClass),
 		})
 	}
 

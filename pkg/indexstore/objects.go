@@ -15,6 +15,7 @@ type ObjectRow struct {
 	SizeBytes     int64
 	LastModified  *time.Time
 	ETag          string
+	StorageClass  *string
 	LastSeenRunID string
 	LastSeenAt    time.Time
 	DeletedAt     *time.Time
@@ -31,18 +32,19 @@ func UpsertObject(ctx context.Context, db *sql.DB, obj ObjectRow) error {
 
 	_, err := db.ExecContext(ctx,
 		`INSERT INTO objects_current
-		 (index_set_id, rel_key, size_bytes, last_modified, etag,
+		 (index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
 		  last_seen_run_id, last_seen_at, deleted_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		 ON CONFLICT(index_set_id, rel_key) DO UPDATE SET
 		   size_bytes = excluded.size_bytes,
 		   last_modified = excluded.last_modified,
 		   etag = excluded.etag,
+		   storage_class = excluded.storage_class,
 		   last_seen_run_id = excluded.last_seen_run_id,
 		   last_seen_at = excluded.last_seen_at,
 		   deleted_at = NULL`,
 		obj.IndexSetID, obj.RelKey, obj.SizeBytes, obj.LastModified,
-		obj.ETag, obj.LastSeenRunID, obj.LastSeenAt)
+		obj.ETag, obj.StorageClass, obj.LastSeenRunID, obj.LastSeenAt)
 
 	if err != nil {
 		return fmt.Errorf("upsert object: %w", err)
@@ -70,13 +72,14 @@ func BatchUpsertObjects(ctx context.Context, db *sql.DB, objects []ObjectRow) er
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO objects_current
-		 (index_set_id, rel_key, size_bytes, last_modified, etag,
+		 (index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
 		  last_seen_run_id, last_seen_at, deleted_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		 ON CONFLICT(index_set_id, rel_key) DO UPDATE SET
 		   size_bytes = excluded.size_bytes,
 		   last_modified = excluded.last_modified,
 		   etag = excluded.etag,
+		   storage_class = excluded.storage_class,
 		   last_seen_run_id = excluded.last_seen_run_id,
 		   last_seen_at = excluded.last_seen_at,
 		   deleted_at = NULL`)
@@ -88,7 +91,7 @@ func BatchUpsertObjects(ctx context.Context, db *sql.DB, objects []ObjectRow) er
 	for _, obj := range objects {
 		_, err := stmt.ExecContext(ctx,
 			obj.IndexSetID, obj.RelKey, obj.SizeBytes, obj.LastModified,
-			obj.ETag, obj.LastSeenRunID, obj.LastSeenAt)
+			obj.ETag, obj.StorageClass, obj.LastSeenRunID, obj.LastSeenAt)
 		if err != nil {
 			return fmt.Errorf("exec upsert for %s: %w", obj.RelKey, err)
 		}
@@ -109,17 +112,18 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 
 	var obj ObjectRow
 	var lastModifiedRaw any
+	var storageClass sql.NullString
 	var lastSeenAtRaw any
 	var deletedAtRaw any
 
 	err := db.QueryRowContext(ctx,
-		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag,
+		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
 		        last_seen_run_id, last_seen_at, deleted_at
 		 FROM objects_current
 		 WHERE index_set_id = ? AND rel_key = ?`,
 		indexSetID, relKey).Scan(
 		&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
-		&obj.ETag, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
+		&obj.ETag, &storageClass, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -133,6 +137,7 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 		return nil, fmt.Errorf("parse last_modified: %w", err)
 	}
 	obj.LastModified = lastModified
+	obj.StorageClass = nullStringPtr(storageClass)
 
 	lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
 	if err != nil {
@@ -225,4 +230,12 @@ func DeriveRelKey(baseURI, fullKey string) string {
 // normalizeRelKey ensures rel_key never starts with "/".
 func normalizeRelKey(key string) string {
 	return strings.TrimPrefix(key, "/")
+}
+
+func nullStringPtr(value sql.NullString) *string {
+	if !value.Valid || value.String == "" {
+		return nil
+	}
+	out := value.String
+	return &out
 }

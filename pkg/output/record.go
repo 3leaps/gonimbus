@@ -99,6 +99,9 @@ type ObjectRecord struct {
 	// LastModified is when the object was last modified.
 	LastModified time.Time `json:"last_modified"`
 
+	// StorageClass is the provider-native storage class when supplied.
+	StorageClass string `json:"storage_class,omitempty"`
+
 	// ContentType is the MIME type of the object.
 	// Only populated if metadata enrichment is enabled.
 	ContentType string `json:"content_type,omitempty"`

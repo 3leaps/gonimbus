@@ -45,6 +45,10 @@ type QueryParams struct {
 	// Optional. Zero time means no upper bound.
 	ModifiedBefore time.Time
 
+	// StorageClasses filters objects by exact, provider-raw storage_class values.
+	// Empty means no storage class filter. Values match non-null rows only.
+	StorageClasses []string
+
 	// IncludeDeleted includes soft-deleted objects in results.
 	// Default: false (only non-deleted objects).
 	IncludeDeleted bool
@@ -73,6 +77,7 @@ type QueryResult struct {
 	SizeBytes    int64
 	LastModified *time.Time
 	ETag         string
+	StorageClass *string
 	DeletedAt    *time.Time
 }
 
@@ -142,7 +147,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	needsClientFilter := params.Pattern != "" || keyRe != nil
 
 	// Build SQL query with filters that can be pushed to DB
-	query := `SELECT rel_key, size_bytes, last_modified, etag, deleted_at
+	query := `SELECT rel_key, size_bytes, last_modified, etag, storage_class, deleted_at
 		FROM objects_current
 		WHERE index_set_id = ?`
 	args := []interface{}{params.IndexSetID}
@@ -183,6 +188,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		query += ` AND last_modified <= ?`
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
+	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 
 	query += ` ORDER BY rel_key`
 
@@ -205,10 +211,11 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 			sizeBytes    int64
 			lastModified sql.NullString
 			etag         sql.NullString
+			storageClass sql.NullString
 			deletedAt    sql.NullString
 		)
 
-		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &deletedAt); err != nil {
+		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &storageClass, &deletedAt); err != nil {
 			return nil, stats, fmt.Errorf("scan row: %w", err)
 		}
 
@@ -246,6 +253,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		if etag.Valid {
 			result.ETag = etag.String
 		}
+		result.StorageClass = nullStringPtr(storageClass)
 
 		if deletedAt.Valid {
 			if t, err := parseTimestamp(deletedAt.String); err == nil {
@@ -431,7 +439,7 @@ func ListObjectsForRun(ctx context.Context, db *sql.DB, indexSetID, runID string
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag,
+		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
 		        last_seen_run_id, last_seen_at, deleted_at
 		 FROM objects_current
 		 WHERE index_set_id = ? AND last_seen_run_id = ? AND deleted_at IS NULL
@@ -446,11 +454,12 @@ func ListObjectsForRun(ctx context.Context, db *sql.DB, indexSetID, runID string
 	for rows.Next() {
 		var obj ObjectRow
 		var lastModifiedRaw any
+		var storageClass sql.NullString
 		var lastSeenAtRaw any
 		var deletedAtRaw any
 		if err := rows.Scan(
 			&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
-			&obj.ETag, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw,
+			&obj.ETag, &storageClass, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan object for run: %w", err)
 		}
@@ -459,6 +468,7 @@ func ListObjectsForRun(ctx context.Context, db *sql.DB, indexSetID, runID string
 			return nil, fmt.Errorf("parse last_modified: %w", err)
 		}
 		obj.LastModified = lastModified
+		obj.StorageClass = nullStringPtr(storageClass)
 		lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
 		if err != nil {
 			return nil, fmt.Errorf("parse last_seen_at: %w", err)
@@ -538,6 +548,7 @@ func queryCountFast(ctx context.Context, db *sql.DB, params QueryParams) (int64,
 		query += ` AND last_modified <= ?`
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
+	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 
 	var count int64
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
@@ -583,6 +594,7 @@ func queryCountStreaming(ctx context.Context, db *sql.DB, params QueryParams, ke
 		query += ` AND last_modified <= ?`
 		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
 	}
+	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 
 	// No ORDER BY for counting - unnecessary overhead at scale
 
@@ -635,6 +647,26 @@ func escapeLikePrefix(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+func appendStorageClassFilterSQL(query string, args *[]interface{}, values []string) string {
+	filterValues := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		filterValues = append(filterValues, value)
+	}
+	if len(filterValues) == 0 {
+		return query
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(filterValues)), ",")
+	query += ` AND storage_class IN (` + placeholders + `)`
+	for _, value := range filterValues {
+		*args = append(*args, value)
+	}
+	return query
 }
 
 // parseTimestamp parses a timestamp string with RFC3339Nano fallback.

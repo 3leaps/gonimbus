@@ -70,6 +70,10 @@ type ObjectSummary struct {
 
 	// LastModified is when the object was last modified.
 	LastModified time.Time
+
+	// StorageClass is the provider-native storage class returned by LIST, when
+	// available. Providers may leave it empty when unsupported or omitted.
+	StorageClass string
 }
 
 // ObjectMeta contains full metadata for a single object.

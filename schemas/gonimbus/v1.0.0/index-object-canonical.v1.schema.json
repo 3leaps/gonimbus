@@ -83,6 +83,10 @@
           "type": "string",
           "format": "date-time"
         },
+        "storage_class": {
+          "type": "string",
+          "minLength": 1
+        },
         "deleted_at": {
           "type": [
             "string",
@@ -111,6 +115,10 @@
         "last_modified": {
           "type": "string",
           "format": "date-time"
+        },
+        "storage_class": {
+          "type": "string",
+          "minLength": 1
         },
         "deleted_at": {
           "type": [
