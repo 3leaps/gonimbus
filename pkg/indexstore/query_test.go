@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestQueryObjects(t *testing.T) {
@@ -924,6 +926,86 @@ func TestQueryObjects_StorageClassFilter(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected count 1, got %d", count)
 	}
+}
+
+func TestQueryObjects_HeadEnrichmentFieldsAndFilter(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "head-enrichment-query")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "old.xml", 10, "2025-01-01T00:00:00Z", "etag-old", "", "GLACIER")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "new.xml", 20, "2025-01-02T00:00:00Z", "etag-new", "", "GLACIER")
+	archiveStatus := "ARCHIVE_ACCESS"
+	restoreState := "completed"
+	contentType := "application/xml"
+	restoreExpiry := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	oldEnriched := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	newEnriched := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, BatchUpdateHeadEnrichment(ctx, db, []HeadEnrichmentUpdate{
+		{
+			IndexSetID:     indexSetID,
+			RelKey:         "old.xml",
+			ArchiveStatus:  &archiveStatus,
+			RestoreState:   &restoreState,
+			ContentType:    &contentType,
+			HeadEnrichedAt: oldEnriched,
+		},
+		{
+			IndexSetID:     indexSetID,
+			RelKey:         "new.xml",
+			ArchiveStatus:  &archiveStatus,
+			RestoreState:   &restoreState,
+			RestoreExpiry:  &restoreExpiry,
+			ContentType:    &contentType,
+			HeadEnrichedAt: newEnriched,
+		},
+	}))
+
+	results, _, err := QueryObjects(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		EnrichedAfter:  time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC),
+		StorageClasses: []string{"GLACIER"},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	got := results[0]
+	require.Equal(t, "new.xml", got.RelKey)
+	require.NotNil(t, got.ArchiveStatus)
+	require.Equal(t, "ARCHIVE_ACCESS", *got.ArchiveStatus)
+	require.NotNil(t, got.RestoreState)
+	require.Equal(t, "completed", *got.RestoreState)
+	require.NotNil(t, got.RestoreExpiry)
+	require.Equal(t, restoreExpiry, *got.RestoreExpiry)
+	require.NotNil(t, got.ContentType)
+	require.Equal(t, "application/xml", *got.ContentType)
+	require.NotNil(t, got.HeadEnrichedAt)
+	require.Equal(t, newEnriched, *got.HeadEnrichedAt)
+}
+
+func TestQueryHeadEnrichmentCandidates_UsesStorageClassFilter(t *testing.T) {
+	ctx, db, indexSetID, runID := setupQueryTestDB(t, "head-enrichment-candidates")
+	defer func() { _ = db.Close() }()
+
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "archive/one.xml", 10, "2025-01-01T00:00:00Z", "etag-one", "", "GLACIER")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "archive/two.xml", 20, "2025-01-02T00:00:00Z", "etag-two", "", "DEEP_ARCHIVE")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "standard/skip.xml", 30, "2025-01-03T00:00:00Z", "etag-skip", "", "STANDARD")
+	insertQueryTestObjectWithStorageClass(t, ctx, db, indexSetID, runID, "archive/no-class.xml", 40, "2025-01-04T00:00:00Z", "etag-null", "", "")
+
+	candidates, _, err := QueryHeadEnrichmentCandidates(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		Pattern:        "archive/**",
+		StorageClasses: []string{"GLACIER", "DEEP_ARCHIVE"},
+	})
+	require.NoError(t, err)
+	require.Len(t, candidates, 2)
+	require.Equal(t, "archive/one.xml", candidates[0].RelKey)
+	require.Equal(t, "archive/two.xml", candidates[1].RelKey)
+
+	hostile, _, err := QueryHeadEnrichmentCandidates(ctx, db, QueryParams{
+		IndexSetID:     indexSetID,
+		StorageClasses: []string{"GLACIER' OR 1=1 --"},
+	})
+	require.NoError(t, err)
+	require.Empty(t, hostile)
 }
 
 func TestQueryCanonicalObjects_StorageClassPreservedAfterTieBreak(t *testing.T) {

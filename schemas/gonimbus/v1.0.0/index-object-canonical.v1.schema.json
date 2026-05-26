@@ -87,6 +87,30 @@
           "type": "string",
           "minLength": 1
         },
+        "archive_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "restore_state": {
+          "enum": [
+            "ongoing",
+            "completed",
+            "expired",
+            "unknown"
+          ]
+        },
+        "restore_expiry": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_enriched_at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "deleted_at": {
           "type": [
             "string",
@@ -119,6 +143,30 @@
         "storage_class": {
           "type": "string",
           "minLength": 1
+        },
+        "archive_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "restore_state": {
+          "enum": [
+            "ongoing",
+            "completed",
+            "expired",
+            "unknown"
+          ]
+        },
+        "restore_expiry": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_enriched_at": {
+          "type": "string",
+          "format": "date-time"
         },
         "deleted_at": {
           "type": [

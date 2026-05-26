@@ -127,6 +127,7 @@ gonimbus index init            # Initialize local index database
 gonimbus index build --job <path>  # Build index from crawl
 gonimbus index build --background --job <path>  # Background build with job tracking
 gonimbus index query <uri>     # Query indexed objects by pattern/storage class
+gonimbus index enrich-with-head <index-set-id>  # Cache HEAD-derived archive/restore metadata
 gonimbus index list            # List local indexes
 gonimbus index doctor          # Validate index integrity
 gonimbus index gc              # Clean up old indexes

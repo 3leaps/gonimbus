@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -278,9 +279,12 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 			ETag:         cleanETag(aws.ToString(output.ETag)),
 			LastModified: aws.ToTime(output.LastModified),
 		},
-		ContentType:  aws.ToString(output.ContentType),
-		Metadata:     output.Metadata,
-		StorageClass: normalizeStorageClassString(string(output.StorageClass)),
+		ContentType:   aws.ToString(output.ContentType),
+		Metadata:      output.Metadata,
+		StorageClass:  normalizeStorageClassString(string(output.StorageClass)),
+		ArchiveStatus: string(output.ArchiveStatus),
+		RestoreState:  parseRestoreState(aws.ToString(output.Restore), time.Now().UTC()),
+		RestoreExpiry: parseRestoreExpiry(aws.ToString(output.Restore)),
 	}
 
 	return meta, nil
@@ -568,6 +572,51 @@ func normalizeStorageClassString(storageClass string) string {
 		return "STANDARD"
 	}
 	return storageClass
+}
+
+func parseRestoreState(restoreHeader string, now time.Time) string {
+	restoreHeader = strings.TrimSpace(restoreHeader)
+	if restoreHeader == "" {
+		return ""
+	}
+	lower := strings.ToLower(restoreHeader)
+	switch {
+	case strings.Contains(lower, `ongoing-request="true"`):
+		return "ongoing"
+	case strings.Contains(lower, `ongoing-request="false"`):
+		expiry := parseRestoreExpiry(restoreHeader)
+		if expiry != nil && !expiry.After(now) {
+			return "expired"
+		}
+		return "completed"
+	default:
+		return "unknown"
+	}
+}
+
+func parseRestoreExpiry(restoreHeader string) *time.Time {
+	restoreHeader = strings.TrimSpace(restoreHeader)
+	if restoreHeader == "" {
+		return nil
+	}
+	const marker = `expiry-date="`
+	start := strings.Index(strings.ToLower(restoreHeader), marker)
+	if start < 0 {
+		return nil
+	}
+	start += len(marker)
+	end := strings.Index(restoreHeader[start:], `"`)
+	if end < 0 {
+		return nil
+	}
+	raw := restoreHeader[start : start+end]
+	for _, layout := range []string{time.RFC1123, time.RFC1123Z, time.RFC850} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			utc := parsed.UTC()
+			return &utc
+		}
+	}
+	return nil
 }
 
 func conditionETag(etag string) string {

@@ -10,15 +10,33 @@ import (
 
 // ObjectRow represents a row in the objects_current table.
 type ObjectRow struct {
-	IndexSetID    string
-	RelKey        string
-	SizeBytes     int64
-	LastModified  *time.Time
-	ETag          string
-	StorageClass  *string
-	LastSeenRunID string
-	LastSeenAt    time.Time
-	DeletedAt     *time.Time
+	IndexSetID     string
+	RelKey         string
+	SizeBytes      int64
+	LastModified   *time.Time
+	ETag           string
+	StorageClass   *string
+	ArchiveStatus  *string
+	RestoreState   *string
+	RestoreExpiry  *time.Time
+	ContentType    *string
+	HeadEnrichedAt *time.Time
+	LastSeenRunID  string
+	LastSeenAt     time.Time
+	DeletedAt      *time.Time
+}
+
+// HeadEnrichmentUpdate contains HEAD-derived fields that may be written by
+// enrichment. It intentionally excludes LIST-derived fields such as
+// storage_class, size, ETag, and last_modified.
+type HeadEnrichmentUpdate struct {
+	IndexSetID     string
+	RelKey         string
+	ArchiveStatus  *string
+	RestoreState   *string
+	RestoreExpiry  *time.Time
+	ContentType    *string
+	HeadEnrichedAt time.Time
 }
 
 // UpsertObject inserts or updates an object in objects_current.
@@ -113,17 +131,24 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 	var obj ObjectRow
 	var lastModifiedRaw any
 	var storageClass sql.NullString
+	var archiveStatus sql.NullString
+	var restoreState sql.NullString
+	var restoreExpiryRaw any
+	var contentType sql.NullString
+	var headEnrichedAtRaw any
 	var lastSeenAtRaw any
 	var deletedAtRaw any
 
 	err := db.QueryRowContext(ctx,
 		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
+		        archive_status, restore_state, restore_expiry, content_type, head_enriched_at,
 		        last_seen_run_id, last_seen_at, deleted_at
 		 FROM objects_current
 		 WHERE index_set_id = ? AND rel_key = ?`,
 		indexSetID, relKey).Scan(
 		&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
-		&obj.ETag, &storageClass, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
+		&obj.ETag, &storageClass, &archiveStatus, &restoreState, &restoreExpiryRaw,
+		&contentType, &headEnrichedAtRaw, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -138,6 +163,19 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 	}
 	obj.LastModified = lastModified
 	obj.StorageClass = nullStringPtr(storageClass)
+	obj.ArchiveStatus = nullStringPtr(archiveStatus)
+	obj.RestoreState = nullStringPtr(restoreState)
+	obj.ContentType = nullStringPtr(contentType)
+	restoreExpiry, err := parseOptionalDBTime(restoreExpiryRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse restore_expiry: %w", err)
+	}
+	obj.RestoreExpiry = restoreExpiry
+	headEnrichedAt, err := parseOptionalDBTime(headEnrichedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse head_enriched_at: %w", err)
+	}
+	obj.HeadEnrichedAt = headEnrichedAt
 
 	lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
 	if err != nil {
@@ -152,6 +190,56 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 	obj.DeletedAt = deletedAt
 
 	return &obj, nil
+}
+
+// BatchUpdateHeadEnrichment updates only HEAD-derived enrichment columns.
+func BatchUpdateHeadEnrichment(ctx context.Context, db *sql.DB, updates []HeadEnrichmentUpdate) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE objects_current
+		 SET archive_status = ?, restore_state = ?, restore_expiry = ?,
+		     content_type = ?, head_enriched_at = ?
+		 WHERE index_set_id = ? AND rel_key = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare stmt: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, update := range updates {
+		if strings.TrimSpace(update.IndexSetID) == "" {
+			return fmt.Errorf("index_set_id is required")
+		}
+		if strings.TrimSpace(update.RelKey) == "" {
+			return fmt.Errorf("rel_key is required")
+		}
+		if update.HeadEnrichedAt.IsZero() {
+			return fmt.Errorf("head_enriched_at is required")
+		}
+		_, err := stmt.ExecContext(ctx,
+			update.ArchiveStatus, update.RestoreState, optionalTimeString(update.RestoreExpiry),
+			update.ContentType, update.HeadEnrichedAt.UTC().Format(time.RFC3339),
+			update.IndexSetID, update.RelKey)
+		if err != nil {
+			return fmt.Errorf("update head enrichment for %s: %w", update.RelKey, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
 }
 
 // CountObjects returns the count of objects in an index set.
@@ -237,5 +325,13 @@ func nullStringPtr(value sql.NullString) *string {
 		return nil
 	}
 	out := value.String
+	return &out
+}
+
+func optionalTimeString(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	out := value.UTC().Format(time.RFC3339)
 	return &out
 }

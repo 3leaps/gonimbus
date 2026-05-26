@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // Migrate creates (or upgrades) the index schema in-place.
 //
@@ -78,6 +78,11 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			last_modified TEXT,
 			etag TEXT,
 			storage_class TEXT,
+			archive_status TEXT,
+			restore_state TEXT,
+			restore_expiry TEXT,
+			content_type TEXT,
+			head_enriched_at TEXT,
 			last_seen_run_id TEXT NOT NULL,
 			last_seen_at TEXT NOT NULL,
 			deleted_at TEXT,
@@ -176,6 +181,15 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := ensureObjectsCurrentStorageClassIndex(ctx, tx); err != nil {
 		return err
 	}
+	// v6: add HEAD-derived enrichment columns.
+	if current < 6 {
+		if err := addObjectsCurrentHeadEnrichment(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := ensureObjectsCurrentHeadEnrichmentIndex(ctx, tx); err != nil {
+		return err
+	}
 
 	if current != SchemaVersion {
 		if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=? WHERE id=1`, SchemaVersion); err != nil {
@@ -207,6 +221,37 @@ func ensureObjectsCurrentStorageClassIndex(ctx context.Context, tx *sql.Tx) erro
 		return fmt.Errorf("tx is nil")
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_objects_current_storage_class ON objects_current(index_set_id, storage_class);`); err != nil {
+		return fmt.Errorf("exec migration statement: %w", err)
+	}
+	return nil
+}
+
+func addObjectsCurrentHeadEnrichment(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE objects_current ADD COLUMN archive_status TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN restore_state TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN restore_expiry TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN content_type TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN head_enriched_at TEXT;`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if !strings.Contains(msg, "duplicate column name") && !strings.Contains(msg, "already exists") {
+				return fmt.Errorf("exec migration statement: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func ensureObjectsCurrentHeadEnrichmentIndex(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_objects_current_head_enriched_at ON objects_current(index_set_id, head_enriched_at);`); err != nil {
 		return fmt.Errorf("exec migration statement: %w", err)
 	}
 	return nil

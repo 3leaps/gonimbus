@@ -457,20 +457,62 @@ Job records are stored under the app data directory:
 
 Index queries support pattern, metadata, storage-class, and output filters:
 
-| Filter        | Flag              | Example                            |
-| ------------- | ----------------- | ---------------------------------- |
-| Pattern       | `--pattern`       | `**/data/*.parquet`                |
-| Min size      | `--min-size`      | `1KB`, `100MiB`                    |
-| Max size      | `--max-size`      | `1GB`                              |
-| After date    | `--after`         | `2025-12-01`                       |
-| Before date   | `--before`        | `2026-01-01`                       |
-| Storage class | `--storage-class` | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
-| Count only    | `--count`         | Returns count instead of records   |
+| Filter         | Flag               | Example                            |
+| -------------- | ------------------ | ---------------------------------- |
+| Pattern        | `--pattern`        | `**/data/*.parquet`                |
+| Min size       | `--min-size`       | `1KB`, `100MiB`                    |
+| Max size       | `--max-size`       | `1GB`                              |
+| After date     | `--after`          | `2025-12-01`                       |
+| Before date    | `--before`         | `2026-01-01`                       |
+| Storage class  | `--storage-class`  | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
+| Enriched after | `--enriched-after` | `2026-05-25T00:00:00Z`             |
+| Count only     | `--count`          | Returns count instead of records   |
 
 `--storage-class` matches the raw provider value captured from LIST responses.
 The flag is repeatable and accepts comma-separated values. Matching is exact and
 case-sensitive. Objects whose provider did not return a storage class have no
 `storage_class` JSONL field and are not matched by `--storage-class`.
+
+## HEAD Enrichment
+
+Use `index enrich-with-head` to cache expensive HEAD-only metadata on an
+existing index:
+
+```bash
+gonimbus index enrich-with-head idx_da038d8171b4a9ba \
+  --storage-class GLACIER,DEEP_ARCHIVE \
+  --pattern "**/*.xml" \
+  --parallel 32 \
+  --state-out enrich-state.jsonl
+```
+
+Supported v1 candidate filters are `--storage-class`, `--pattern`,
+`--key-regex`, `--min-size`, `--max-size`, and `--include-deleted`. Filters are
+applied before HEAD calls, so rows excluded by storage class or key/size filters
+do not incur provider HEAD cost.
+
+Provider reconstruction uses index metadata plus runtime inputs such as
+`--profile`, `--region`, `--endpoint`, and the normal SDK credential chain.
+Credentials are never stored in the index. v1 supports S3-family indexes and
+rejects unsupported providers.
+
+The command writes only HEAD-derived fields:
+
+- `archive_status`
+- `restore_state`
+- `restore_expiry`
+- `content_type`
+- `head_enriched_at`
+
+It does not overwrite LIST-derived `storage_class`, size, ETag,
+`last_modified`, `last_seen_run_id`, or `deleted_at`. `--resume` skips rows
+whose `head_enriched_at` is already set. A full run re-HEADs all candidate rows
+and overwrites the HEAD-derived fields only on successful HEAD responses.
+
+`--state-out` is audit/debug JSONL for post-filter candidate rows, including
+rows skipped by `--resume`. Durable state lives in the index. The command exits
+non-zero on any permanent per-object failure, unsupported provider, invalid
+filter, provider reconstruction failure, or interruption.
 
 | Canonical Option   | Flag                    | Behavior                                       |
 | ------------------ | ----------------------- | ---------------------------------------------- |
