@@ -98,7 +98,7 @@ jobs:
         # goneat-tools-runner does not ship golangci-lint yet.
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.4.0
+          version: v2.11.2
           args: --help
       - name: Verify golangci-lint
         run: |
