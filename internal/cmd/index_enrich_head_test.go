@@ -82,8 +82,8 @@ func TestExecuteEnrichHeadFiltersResumeAndUpdatesState(t *testing.T) {
 	stateFile, err := os.OpenFile(statePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	require.NoError(t, err)
 	cmd := indexEnrichWithHeadCmd
-	cmd.Flags().Set("resume", "true")
-	cmd.Flags().Set("parallel", "2")
+	require.NoError(t, cmd.Flags().Set("resume", "true"))
+	require.NoError(t, cmd.Flags().Set("parallel", "2"))
 	summary, err := executeEnrichHead(ctx, db, prov, indexSet, candidates, cmd, stateFile, true)
 	require.NoError(t, err)
 	require.NoError(t, stateFile.Close())
@@ -139,8 +139,8 @@ func TestExecuteEnrichHeadFailureDoesNotMutateHeadEnrichedAt(t *testing.T) {
 		},
 	}
 	cmd := indexEnrichWithHeadCmd
-	cmd.Flags().Set("resume", "false")
-	cmd.Flags().Set("parallel", "1")
+	require.NoError(t, cmd.Flags().Set("resume", "false"))
+	require.NoError(t, cmd.Flags().Set("parallel", "1"))
 	summary, err := executeEnrichHead(ctx, db, prov, indexSet, candidates, cmd, nil, false)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), summary.Failed)
@@ -176,8 +176,8 @@ func TestExecuteEnrichHeadCountsRetryHeadCalls(t *testing.T) {
 	stateFile, err := os.OpenFile(statePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	require.NoError(t, err)
 	cmd := indexEnrichWithHeadCmd
-	cmd.Flags().Set("resume", "false")
-	cmd.Flags().Set("parallel", "1")
+	require.NoError(t, cmd.Flags().Set("resume", "false"))
+	require.NoError(t, cmd.Flags().Set("parallel", "1"))
 	summary, err := executeEnrichHead(ctx, db, prov, indexSet, candidates, cmd, stateFile, false)
 	require.NoError(t, err)
 	require.NoError(t, stateFile.Close())

@@ -2,11 +2,12 @@ package cmd
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"os"
 	"strings"
 	"sync"
@@ -385,7 +386,7 @@ func enrichOneHead(ctx context.Context, prov provider.Provider, indexSet *indexs
 			}
 		}
 		sleep := time.Duration(100*(1<<(attempt-1))) * time.Millisecond
-		sleep += time.Duration(rand.Intn(50)) * time.Millisecond
+		sleep += enrichHeadRetryJitter()
 		select {
 		case <-ctx.Done():
 			return enrichHeadResult{candidate: candidate, status: "failed", attempts: attempt, headCalls: int64(attempt), errCode: "interrupted", err: ctx.Err()}
@@ -393,6 +394,14 @@ func enrichOneHead(ctx context.Context, prov provider.Provider, indexSet *indexs
 		}
 	}
 	return enrichHeadResult{candidate: candidate, status: "failed", attempts: enrichHeadMaxRetries, headCalls: enrichHeadMaxRetries, errCode: "unknown", err: sanitizeProviderError(lastErr)}
+}
+
+func enrichHeadRetryJitter() time.Duration {
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(50))
+	if err != nil {
+		return 0
+	}
+	return time.Duration(n.Int64()) * time.Millisecond
 }
 
 func classifyEnrichHeadError(err error) (string, bool) {
@@ -429,7 +438,7 @@ func openEnrichHeadStateOut(cmd *cobra.Command) (*os.File, error) {
 	if path == "" {
 		return nil, nil
 	}
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) // #nosec G304 -- state-out is an explicit operator CLI output path.
 }
 
 func writeEnrichHeadState(file *os.File, indexSet *indexstore.IndexSet, result enrichHeadResult) error {

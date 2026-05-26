@@ -457,16 +457,16 @@ Job records are stored under the app data directory:
 
 Index queries support pattern, metadata, storage-class, and output filters:
 
-| Filter        | Flag              | Example                            |
-| ------------- | ----------------- | ---------------------------------- |
-| Pattern       | `--pattern`       | `**/data/*.parquet`                |
-| Min size      | `--min-size`      | `1KB`, `100MiB`                    |
-| Max size      | `--max-size`      | `1GB`                              |
-| After date    | `--after`         | `2025-12-01`                       |
-| Before date   | `--before`        | `2026-01-01`                       |
-| Storage class | `--storage-class` | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
-| Enriched after | `--enriched-after` | `2026-05-25T00:00:00Z` |
-| Count only    | `--count`         | Returns count instead of records   |
+| Filter         | Flag               | Example                            |
+| -------------- | ------------------ | ---------------------------------- |
+| Pattern        | `--pattern`        | `**/data/*.parquet`                |
+| Min size       | `--min-size`       | `1KB`, `100MiB`                    |
+| Max size       | `--max-size`       | `1GB`                              |
+| After date     | `--after`          | `2025-12-01`                       |
+| Before date    | `--before`         | `2026-01-01`                       |
+| Storage class  | `--storage-class`  | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
+| Enriched after | `--enriched-after` | `2026-05-25T00:00:00Z`             |
+| Count only     | `--count`          | Returns count instead of records   |
 
 `--storage-class` matches the raw provider value captured from LIST responses.
 The flag is repeatable and accepts comma-separated values. Matching is exact and
