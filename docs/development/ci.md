@@ -33,7 +33,11 @@ This eliminates tool installation friction in CI - no package manager setup, no 
 
 **gonimbus uses `-glibc`** because the cgo path pulls in `github.com/tursodatabase/go-libsql/lib/linux_amd64/libsql_experimental.a`, which is a glibc-compiled `.a`. Under musl it fails to link with "undefined reference to `lseek64` / `open64` / `pread64` / `mmap64` / `sendfile64` / `gnu_get_libc_version` / `__res_init`" and similar glibc-specific symbols (musl is natively 64-bit-clean and does not emit the `64`-suffixed LFS symbols).
 
-Once [GON-023](https://github.com/3leaps/3leaps-productbook-internal/blob/main/content/projmgmt/gonimbus/GON-023-indexstore-substrate-evaluation.md) lands the pure-Go `modernc.org/sqlite` default (libsql becomes opt-in via `-tags gonimbus_libsql`), the default CI build will be CGO-free and the standard musl image will work for the default lane. The `-glibc` variant remains the right choice for any release-lane or CI run that explicitly enables the libsql build tag.
+Once the pure-Go `modernc.org/sqlite` default lands and libsql becomes opt-in
+via `-tags gonimbus_libsql`, the default CI build will be CGO-free and the
+standard musl image will work for the default lane. The `-glibc` variant remains
+the right choice for any release-lane or CI run that explicitly enables the
+libsql build tag.
 
 ### Container Permissions (`--user 1001`)
 
@@ -71,20 +75,21 @@ jobs:
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.3"
 ```
 
-The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is in use across `fulmenhq/limensafe`, `fulmenhq/idpbolt`, `fulmenhq/dimlox`, and the `fixture-server-proving-*` repos.
+The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is used
+across sibling projects that run as non-root users in containerized CI jobs.
 
 Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which only uses foundation tools) do not need this workaround.
 
 ### Pin Go to an exact patch release
 
-CI and release workflows pin `actions/setup-go` to `1.25.10` rather than the
-floating `1.25.x` selector. Vulnerability scans report standard-library CVEs
+CI and release workflows pin `actions/setup-go` to `1.26.3` rather than the
+floating `1.26.x` selector. Vulnerability scans report standard-library CVEs
 against the Go toolchain used to build or scan the repo, so release builds and
 SBOM/vulnerability reports need a fixed patched toolchain for attributable
-results. Local scans should use Go `1.25.10` or newer on the 1.25 lane.
+results. Local scans should use Go `1.26.3` or newer on the 1.26 lane.
 
 ### Bash shell required for `run:` steps
 
@@ -141,7 +146,10 @@ jobs:
       CGO_ENABLED: "0"
 ```
 
-Released binaries use `modernc.org/sqlite` for the index store, which is the same shape v0.1.x released as. Consumers who need libsql build from source with `CGO_ENABLED=1` (and, post-[GON-023](https://github.com/3leaps/3leaps-productbook-internal/blob/main/content/projmgmt/gonimbus/GON-023-indexstore-substrate-evaluation.md), with `-tags gonimbus_libsql`).
+Released binaries use `modernc.org/sqlite` for the index store, which is the
+same shape v0.1.x released as. Consumers who need libsql should build from
+source with `CGO_ENABLED=1`; after libsql becomes opt-in, also use
+`-tags gonimbus_libsql`.
 
 The `build-test` job is the opposite case — it intentionally runs with cgo enabled to exercise libsql against the test suite, which is why the `-glibc` image is required there. The `cloud-integration` job inherits the same image and the same image-wide `CGO_ENABLED=1` default, and that is correct for its scope.
 
