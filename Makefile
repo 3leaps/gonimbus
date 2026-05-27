@@ -2,7 +2,7 @@
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
 .PHONY: test-cloud moto-start moto-stop moto-status
-.PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version
+.PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
 # Binary and version information
@@ -162,13 +162,14 @@ release-prepare:  ## Prepare for release (tests, version bump)
 # - Generates SHA256SUMS and SHA512SUMS manifests
 # - Signs manifests only (do not sign each artifact)
 # - Env vars (all GONIMBUS_ prefixed):
+#     GONIMBUS_RELEASE_TAG  - release tag being signed/uploaded, e.g. v0.2.2
 #     GONIMBUS_MINISIGN_KEY - path to minisign secret key
 #     GONIMBUS_MINISIGN_PUB - path to minisign public key (optional)
 #     GONIMBUS_PGP_KEY_ID   - gpg key for PGP signing (optional)
 #     GONIMBUS_GPG_HOMEDIR  - isolated gpg homedir (required if PGP_KEY_ID set)
 # ─────────────────────────────────────────────────────────────────────────────
 
-RELEASE_TAG ?= v$(shell cat VERSION 2>/dev/null || echo "0.0.0")
+RELEASE_TAG ?= $(if $(GONIMBUS_RELEASE_TAG),$(GONIMBUS_RELEASE_TAG),v$(shell cat VERSION 2>/dev/null || echo "0.0.0"))
 DIST_RELEASE ?= dist/release
 
 sync-app-version: ## Sync .fulmen/app.yaml + internal/buildinfo/VERSION from VERSION
@@ -237,10 +238,14 @@ release-guard-tag-version: ## Guard: ensure RELEASE_TAG matches VERSION + app id
 	fi; \
 	echo "✅ RELEASE_TAG matches VERSION ($$TAG) and app identity ($$APP_VERSION)"
 
+release-guard-signing-tag: ## Guard: ensure GONIMBUS_RELEASE_TAG matches VERSION before signing
+	@if [ -z "$(GONIMBUS_RELEASE_TAG)" ]; then echo "❌ GONIMBUS_RELEASE_TAG required (example: v$(VERSION))" >&2; exit 1; fi
+	@$(MAKE) release-guard-tag-version RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)"
+
 release-download: release-guard-tag-version ## Download GitHub release assets (RELEASE_TAG=vX.Y.Z)
 	@./scripts/release-download.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-sign: ## Sign checksum manifests (minisign required; PGP optional)
+release-sign: release-guard-signing-tag ## Sign checksum manifests (minisign required; PGP optional)
 	@./scripts/sign-release-manifests.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-export-keys: ## Export public signing keys into dist/release
