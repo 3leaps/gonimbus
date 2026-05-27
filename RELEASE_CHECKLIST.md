@@ -46,7 +46,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] Update VERSION file
 - [ ] Update `.fulmen/app.yaml` version
 - [ ] Sync embedded identity: `make sync-embedded-identity`
-- [ ] Version sanity check: `make release-guard-tag-version RELEASE_TAG=v<version>`
+- [ ] Version sanity check: `GONIMBUS_RELEASE_TAG=v<version> make release-guard-signing-tag`
 - [ ] Search for hardcoded version references
 
 ### Git Hygiene
@@ -76,8 +76,10 @@ Follow the Fulmen "manifest-only" provenance pattern:
 - [ ] Download CI-built artifacts and generate manifests:
 
   ```bash
+  export GONIMBUS_RELEASE_TAG=v<version>
+
   make release-clean
-  make release-download RELEASE_TAG=v<version>
+  make release-download
   make release-checksums
   make release-verify-checksums
   ```
@@ -85,13 +87,13 @@ Follow the Fulmen "manifest-only" provenance pattern:
 - [ ] Sign manifests (minisign required; PGP optional):
 
   ```bash
-  export RELEASE_TAG=v<version>
+  export GONIMBUS_RELEASE_TAG=v<version>
   export GONIMBUS_MINISIGN_KEY=/path/to/gonimbus.key
   export GONIMBUS_MINISIGN_PUB=/path/to/gonimbus.pub
   export GONIMBUS_PGP_KEY_ID="security@fulmenhq.dev"   # optional
   export GONIMBUS_GPG_HOMEDIR=/path/to/gnupg-fulmenhq # required if PGP_KEY_ID set
 
-  make release-sign RELEASE_TAG=$RELEASE_TAG
+  make release-sign
   ```
 
 - [ ] Export public keys: `make release-export-keys`
@@ -102,6 +104,7 @@ Follow the Fulmen "manifest-only" provenance pattern:
 
 ### Tagging
 
+- [ ] Confirm tag/version match: `GONIMBUS_RELEASE_TAG=v<version> make release-guard-signing-tag`
 - [ ] Create annotated git tag: `git tag -a v<version> -m "Release v<version>"`
 - [ ] Tag message includes brief release summary
 

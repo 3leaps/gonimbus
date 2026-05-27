@@ -48,15 +48,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          FILE_VERSION=$(cat VERSION)
-          TAG_VERSION=${GITHUB_REF_NAME#v}
-          echo "VERSION file: $FILE_VERSION"
-          echo "Git tag: $TAG_VERSION"
-          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
-            MSG="VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"
-            echo "::error::$MSG"
-            exit 1
-          fi
+          GONIMBUS_RELEASE_TAG="${GITHUB_REF_NAME}" make release-guard-signing-tag
       - name: Verify toolchain
         shell: bash
         run: |
