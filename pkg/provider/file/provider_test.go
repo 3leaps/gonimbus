@@ -117,6 +117,27 @@ func TestGetObjectVersionedReturnsOpaqueLocalVersion(t *testing.T) {
 	require.NotEmpty(t, meta.ETag)
 }
 
+func TestHeadReturnsIfMatchVersionToken(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "object.txt"), []byte("first"), 0o600))
+
+	meta, err := p.Head(ctx, "object.txt")
+	require.NoError(t, err)
+	require.NotEmpty(t, meta.ETag)
+
+	result, err := p.PutObjectConditional(ctx, "object.txt", strings.NewReader("second"), int64(len("second")), provider.PutPrecondition{IfMatchETag: &meta.ETag})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.ETag)
+	require.NotEqual(t, meta.ETag, result.ETag)
+
+	got, err := os.ReadFile(filepath.Join(baseDir, "object.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "second", string(got))
+}
+
 func TestPutObjectConditionalIfMatch(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()

@@ -20,7 +20,10 @@ type ObjectPutter interface {
 }
 
 // ConditionalPutter can create/replace objects only when a write precondition
-// holds atomically at the provider.
+// holds atomically at the provider. Implementations that expose this capability
+// must honor every validated PutPrecondition predicate, including IfAbsent and
+// IfMatchETag; unsupported predicates must fail explicitly rather than falling
+// back to an unconditional write.
 type ConditionalPutter interface {
 	PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond PutPrecondition) (PutResult, error)
 }

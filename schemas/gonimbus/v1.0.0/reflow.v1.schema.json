@@ -98,7 +98,10 @@
           "enum": [
             "duplicate",
             "conflict",
-            "conflict_quarantined"
+            "conflict_quarantined",
+            "overwritten",
+            "skipped_src_older",
+            "skipped_concurrent_mutation"
           ]
         },
         "dest_etag_observed": {
@@ -108,13 +111,31 @@
           "type": "integer",
           "minimum": 0
         },
+        "src_last_modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dest_last_modified_observed": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_reason": {
+          "type": "string",
+          "enum": [
+            "src_newer",
+            "src_older",
+            "equal_time_size_differs",
+            "concurrent_mutation"
+          ]
+        },
         "decision_path": {
           "type": "string",
           "enum": [
             "ifabsent_succeeded",
             "ifabsent_then_head",
             "unconditional_overwrite",
-            "quarantine_routed"
+            "quarantine_routed",
+            "head_compare_then_conditional_overwrite"
           ],
           "description": "ifabsent_succeeded is reserved and not emitted by the MVP happy path."
         }
