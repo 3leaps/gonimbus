@@ -57,12 +57,21 @@ const (
 	reflowCollisionFail    = "fail"
 	reflowCollisionOver    = "overwrite"
 	reflowCollisionQuar    = "quarantine"
+	reflowCollisionSrcNew  = "overwrite-if-source-newer"
 	collisionDuplicate     = "duplicate"
 	collisionConflict      = "conflict"
 	collisionQuarantined   = "conflict_quarantined"
+	collisionOverwritten   = "overwritten"
+	collisionSrcOlder      = "skipped_src_older"
+	collisionConcurrentMut = "skipped_concurrent_mutation"
 	decisionIfAbsentHead   = "ifabsent_then_head"
 	decisionOverwrite      = "unconditional_overwrite"
 	decisionQuarantine     = "quarantine_routed"
+	decisionHeadCompare    = "head_compare_then_conditional_overwrite"
+	reasonSrcNewer         = "src_newer"
+	reasonSrcOlder         = "src_older"
+	reasonEqualSizeDiffers = "equal_time_size_differs"
+	reasonConcurrentMut    = "concurrent_mutation"
 	metadataPolicyClear    = "clear"
 	metadataPolicyPreserve = "preserve"
 	metadataPolicyMerge    = "merge"
@@ -177,7 +186,7 @@ func init() {
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
 	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Checkpoint DB path (sqlite)")
 	transferReflowCmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "Allow overwriting destination objects")
-	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine (log is a deprecated alias)")
+	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer (log is a deprecated alias)")
 	transferReflowCmd.Flags().StringVar(&reflowCollQuar, "collision-quarantine-prefix", "", "Relative destination prefix for --on-collision=quarantine")
 	transferReflowCmd.Flags().StringVar(&reflowProvenance, "provenance", provenanceModeNone, "Provenance mode: none|sidecar")
 	transferReflowCmd.Flags().StringVar(&reflowProvRoot, "provenance-sidecar-root", "", "Sidecar root URI for mirrored-root provenance placement (must end in /)")
@@ -329,10 +338,13 @@ type collisionConfig struct {
 }
 
 type collisionInfo struct {
-	Kind             string `json:"kind"`
-	DestETagObserved string `json:"dest_etag_observed,omitempty"`
-	DestSizeObserved *int64 `json:"dest_size_observed,omitempty"`
-	DecisionPath     string `json:"decision_path"`
+	Kind                     string     `json:"kind"`
+	DestETagObserved         string     `json:"dest_etag_observed,omitempty"`
+	DestSizeObserved         *int64     `json:"dest_size_observed,omitempty"`
+	SrcLastModified          *time.Time `json:"src_last_modified,omitempty"`
+	DestLastModifiedObserved *time.Time `json:"dest_last_modified_observed,omitempty"`
+	DecisionReason           string     `json:"decision_reason,omitempty"`
+	DecisionPath             string     `json:"decision_path"`
 }
 
 type reflowMetadataConfig struct {
@@ -591,6 +603,20 @@ func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath s
 	return info
 }
 
+func newSourceNewerCollisionInfo(kind string, destMeta *provider.ObjectMeta, srcLastModified time.Time, decisionReason string) *collisionInfo {
+	info := newCollisionInfo(kind, destMeta, decisionHeadCompare)
+	if !srcLastModified.IsZero() {
+		t := srcLastModified.UTC()
+		info.SrcLastModified = &t
+	}
+	if destMeta != nil && !destMeta.LastModified.IsZero() {
+		t := destMeta.LastModified.UTC()
+		info.DestLastModifiedObserved = &t
+	}
+	info.DecisionReason = decisionReason
+	return info
+}
+
 func recordWithCollision(rec reflowRecord, collision *collisionInfo) reflowRecord {
 	if collision == nil {
 		return rec
@@ -773,10 +799,10 @@ func resolveCollisionConfig(cmd *cobra.Command) (collisionConfig, error) {
 
 func validateCollisionConfig(cfg collisionConfig) error {
 	switch cfg.Mode {
-	case reflowCollisionSkip, reflowCollisionFail, reflowCollisionOver, reflowCollisionQuar:
+	case reflowCollisionSkip, reflowCollisionFail, reflowCollisionOver, reflowCollisionQuar, reflowCollisionSrcNew:
 		// ok
 	default:
-		return fmt.Errorf("on-collision must be one of: skip-if-duplicate, fail, overwrite, quarantine")
+		return fmt.Errorf("on-collision must be one of: skip-if-duplicate, fail, overwrite, quarantine, overwrite-if-source-newer")
 	}
 	if cfg.Mode == reflowCollisionQuar {
 		if cfg.QuarantinePrefix == "" {
@@ -1061,6 +1087,19 @@ func ensureMetadataCapability(dst provider.Provider, cfg reflowMetadataConfig) e
 		return nil
 	}
 	return fmt.Errorf("destination provider does not support metadata-aware PUT required by %s", strings.Join(cfg.capabilityFlags(), ", "))
+}
+
+func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg collisionConfig) error {
+	if cfg.Mode != reflowCollisionSrcNew {
+		return nil
+	}
+	if _, ok := dst.(provider.ConditionalPutter); ok {
+		return nil
+	}
+	if destProvider == "" {
+		destProvider = "destination"
+	}
+	return fmt.Errorf("destination provider %q does not support conditional PUT with IfMatchETag required by --on-collision=%s", destProvider, reflowCollisionSrcNew)
 }
 
 func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err error, details map[string]any) error {
@@ -1882,6 +1921,13 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 			"flags":              metaCfg.capabilityFlags(),
 		})
 	}
+	if err := ensureCollisionCapability(dstProv, destSpec.Provider, collCfg); err != nil {
+		return emitReflowConfigError(ctx, w, "Invalid collision configuration", err, map[string]any{
+			"missing_capability": "ConditionalPutter.IfMatchETag",
+			"on_collision":       collCfg.Mode,
+			"provider":           destSpec.Provider,
+		})
+	}
 
 	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
 		DestURI:        destURI,
@@ -1915,6 +1961,9 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				return nil, nil, nil, err
 			}
 			if err := ensureMetadataCapability(pNew, metaCfg); err != nil {
+				return nil, nil, nil, err
+			}
+			if err := ensureCollisionCapability(pNew, destSpec.Provider, collCfg); err != nil {
 				return nil, nil, nil, err
 			}
 			dstProv = pNew
@@ -2055,7 +2104,8 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 				srcETag := task.SourceETag
 				srcSize := task.SourceSize
 				var sourceMeta *provider.ObjectMeta
-				if metaCfg.needsSourceHead() || srcETag == "" || srcSize == 0 {
+				needsSourceHeadForCollision := collCfg.Mode == reflowCollisionSrcNew && task.SourceLastMod.IsZero()
+				if metaCfg.needsSourceHead() || srcETag == "" || srcSize == 0 || needsSourceHeadForCollision {
 					meta, err := src.Head(ctx, task.SourceKey)
 					if err == nil {
 						sourceMeta = meta
@@ -2064,11 +2114,17 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 						if !meta.LastModified.IsZero() {
 							task.SourceLastMod = meta.LastModified
 						}
-					} else if metaCfg.needsSourceHead() {
+					} else if metaCfg.needsSourceHead() || needsSourceHeadForCollision {
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI})
 						continue
 					}
+				}
+				if collCfg.Mode == reflowCollisionSrcNew && task.SourceLastMod.IsZero() {
+					errorCount.Add(1)
+					err := fmt.Errorf("source LastModified is required for --on-collision=%s", reflowCollisionSrcNew)
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+					continue
 				}
 				putOptions, err := metaCfg.putOptions(sourceMeta)
 				if err == nil && destSpec.Provider == string(provider.ProviderS3) {
@@ -2215,7 +2271,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
-							if collCfg.Mode == reflowCollisionSkip || collCfg.Mode == reflowCollisionQuar {
+							if collCfg.Mode == reflowCollisionSkip || collCfg.Mode == reflowCollisionQuar || collCfg.Mode == reflowCollisionSrcNew {
 								sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID, collision)
 								if sidecarFatal {
 									errorCount.Add(1)
@@ -2250,7 +2306,64 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							continue
 						}
 
-						if collCfg.Mode == reflowCollisionQuar {
+						if collCfg.Mode == reflowCollisionSrcNew {
+							if dstMeta.LastModified.IsZero() {
+								errorCount.Add(1)
+								err := fmt.Errorf("destination LastModified is required for --on-collision=%s: %s", reflowCollisionSrcNew, dstKey)
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "destination metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+								rec.Reason = "collision.missing_dest_last_modified"
+								_ = w.WriteAny(ctx, reflowRecordType, rec)
+								continue
+							}
+
+							decisionReason := reasonSrcOlder
+							shouldOverwrite := false
+							if task.SourceLastMod.After(dstMeta.LastModified) {
+								decisionReason = reasonSrcNewer
+								shouldOverwrite = true
+							} else if task.SourceLastMod.Equal(dstMeta.LastModified) && srcSize != dstMeta.Size {
+								decisionReason = reasonEqualSizeDiffers
+								shouldOverwrite = true
+							}
+							if !shouldOverwrite {
+								collision = newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, task.SourceLastMod, decisionReason)
+								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.skipped_src_older"}); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
+								rec.Reason = "collision.skipped_src_older"
+								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								continue
+							}
+
+							collision = newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, task.SourceLastMod, decisionReason)
+							bytes, putResult, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions)
+							if err != nil && isConditionalExists(err) {
+								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, reasonConcurrentMut)
+								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.skipped_concurrent_mutation"}); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
+								rec.Reason = "collision.skipped_concurrent_mutation"
+								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								continue
+							}
+							if err == nil {
+								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionOverwrite, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								}
+							}
+						} else if collCfg.Mode == reflowCollisionQuar {
 							collision = newCollisionInfo(collisionQuarantined, dstMeta, decisionQuarantine)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
@@ -2300,26 +2413,26 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 							rec.Provenance = sidecarRef
 							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
 							continue
+						} else {
+							collision = newCollisionInfo(collisionConflict, dstMeta, decisionIfAbsentHead)
+							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
+								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							}
+							reason := "collision.conflict"
+							if collCfg.Mode == reflowCollisionFail {
+								reason = "collision.exists.conflict"
+							}
+							err := fmt.Errorf("destination key exists with different content: %s", dstKey)
+							errorCount.Add(1)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "collision", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
+								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							}
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = reason
+							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+							continue
 						}
-
-						collision = newCollisionInfo(collisionConflict, dstMeta, decisionIfAbsentHead)
-						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
-						}
-						reason := "collision.conflict"
-						if collCfg.Mode == reflowCollisionFail {
-							reason = "collision.exists.conflict"
-						}
-						err := fmt.Errorf("destination key exists with different content: %s", dstKey)
-						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "collision", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
-						}
-						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
-						rec.Reason = reason
-						_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
-						continue
 					}
 				}
 				if err != nil {
@@ -2435,12 +2548,13 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 		switch env.Type {
 		case "gonimbus.index.object.v1":
 			var data struct {
-				BaseURI   string  `json:"base_uri"`
-				Key       string  `json:"key"`
-				ETag      string  `json:"etag"`
-				SizeBytes int64   `json:"size_bytes"`
-				RelKey    string  `json:"rel_key"`
-				DeletedAt *string `json:"deleted_at"`
+				BaseURI      string    `json:"base_uri"`
+				Key          string    `json:"key"`
+				ETag         string    `json:"etag"`
+				SizeBytes    int64     `json:"size_bytes"`
+				LastModified time.Time `json:"last_modified"`
+				RelKey       string    `json:"rel_key"`
+				DeletedAt    *string   `json:"deleted_at"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil {
 				return srcIdentity, err
@@ -2483,7 +2597,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 				srcURI = fileURI(filepath.Join(sourceRoot, filepath.FromSlash(key)))
 			}
 			select {
-			case out <- reflowTask{SourceProvider: base.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes}:
+			case out <- reflowTask{SourceProvider: base.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes, SourceLastMod: data.LastModified}:
 				return srcIdentity, nil
 			case <-ctx.Done():
 				return srcIdentity, ctx.Err()

@@ -1196,6 +1196,165 @@ func TestTransferReflowCommand_CollisionOverwriteEmitsNestedCollision(t *testing
 	requireCollisionEqual(t, complete, collisionConflict, decisionOverwrite, "dest-etag", int64(len("old payload")))
 }
 
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerReplacesWithIfMatch(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err)
+	require.Equal(t, "new payload", string(dst.mustObject("source/file.xml")))
+	require.Equal(t, []string{"source/file.xml", "source/file.xml"}, dst.conditionalPutCallsSnapshot())
+	preconds := dst.conditionalPutPreconditionsSnapshot()
+	require.Len(t, preconds, 2)
+	require.True(t, preconds[0].IfAbsent)
+	require.NotNil(t, preconds[1].IfMatchETag)
+	require.Equal(t, "dest-etag", *preconds[1].IfMatchETag)
+
+	complete := requireReflowData(t, stdout, "complete")
+	requireCollisionEqual(t, complete, collisionOverwritten, decisionHeadCompare, "dest-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, complete, reasonSrcNewer, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerFileDestUsesHeadToken(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "file.xml")
+	require.NoError(t, os.WriteFile(destPath, []byte("old payload"), 0o600))
+	destLastMod := time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC)
+	require.NoError(t, os.Chtimes(destPath, destLastMod, destLastMod))
+
+	stdout, stderr, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, reflowInputLine("file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err, stdout+stderr)
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	require.Equal(t, "new payload", string(got))
+
+	complete := requireReflowData(t, stdout, "complete")
+	require.NotNil(t, complete.Collision)
+	require.Equal(t, collisionOverwritten, complete.Collision.Kind)
+	require.Equal(t, decisionHeadCompare, complete.Collision.DecisionPath)
+	require.NotEmpty(t, complete.Collision.DestETagObserved)
+	require.NotNil(t, complete.Collision.DestSizeObserved)
+	require.Equal(t, int64(len("old payload")), *complete.Collision.DestSizeObserved)
+	requireSourceNewerCollisionEqual(t, complete, reasonSrcNewer, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerUsesSourceHeadWhenInputLastModifiedMissing(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLineWithoutLastModified("source/file.xml", "src-etag", int64(len("new payload"))), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err)
+	require.Equal(t, []string{"source/file.xml"}, src.headCallsSnapshot())
+
+	complete := requireReflowData(t, stdout, "complete")
+	requireCollisionEqual(t, complete, collisionOverwritten, decisionHeadCompare, "dest-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, complete, reasonSrcNewer, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerUsesIndexLastModifiedWithoutSourceHead(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("file.xml", "new payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.putFixture("file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+
+	stdout, stderr, err := runTransferReflowWithProvidersAndErr(t, src, dst, reflowIndexObjectInputLine("file.xml", "src-etag", int64(len("new payload")), "2026-01-15T20:53:44Z"), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err, stdout+stderr)
+	require.Empty(t, src.headCallsSnapshot())
+	require.Equal(t, "new payload", string(dst.mustObject("file.xml")))
+
+	complete := requireReflowData(t, stdout, "complete")
+	requireCollisionEqual(t, complete, collisionOverwritten, decisionHeadCompare, "dest-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, complete, reasonSrcNewer, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerEqualTimeSizeDiffers(t *testing.T) {
+	lm := time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC)
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", lm)
+	dst := newReflowMemoryProvider()
+	dst.putFixture("source/file.xml", "old", "dest-etag", lm)
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err)
+	require.Equal(t, "new payload", string(dst.mustObject("source/file.xml")))
+
+	complete := requireReflowData(t, stdout, "complete")
+	requireCollisionEqual(t, complete, collisionOverwritten, decisionHeadCompare, "dest-etag", int64(len("old")))
+	requireSourceNewerCollisionEqual(t, complete, reasonEqualSizeDiffers, "2026-01-15T20:53:44Z", "2026-01-15T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerSkipsOlderSource(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err)
+	require.Equal(t, "old payload", string(dst.mustObject("source/file.xml")))
+	require.Equal(t, []string{"source/file.xml"}, dst.conditionalPutCallsSnapshot())
+
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.skipped_src_older", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionSrcOlder, decisionHeadCompare, "dest-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, skipped, reasonSrcOlder, "2026-01-15T20:53:44Z", "2026-01-16T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerSkipsConcurrentMutation(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+	dst.mutateBeforeIfMatch = true
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite-if-source-newer")
+	require.NoError(t, err)
+	require.Equal(t, "concurrent mutation", string(dst.mustObject("source/file.xml")))
+
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.skipped_concurrent_mutation", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionConcurrentMut, decisionHeadCompare, "dest-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, skipped, reasonConcurrentMut, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+}
+
+func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerRequiresConditionalPutter(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+		return src, nil
+	}
+	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
+		return &reflowNoConditionalProvider{p: dst}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", "") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "overwrite-if-source-newer",
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "IfMatchETag")
+	require.Contains(t, stdout.String(), `"missing_capability":"ConditionalPutter.IfMatchETag"`)
+	require.False(t, dst.hasObject("source/file.xml"))
+}
+
 func TestTransferReflowCommand_CollisionLogAliasWarns(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
@@ -1895,6 +2054,28 @@ func TestEnqueueReflowLine_ReflowInputRecord(t *testing.T) {
 	require.Equal(t, "normal", task.RoutingClass)
 }
 
+func TestEnqueueReflowLine_IndexObjectRecordPreservesLastModified(t *testing.T) {
+	out := make(chan reflowTask, 1)
+	var providerBuckets []string
+	getProviders := func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error) {
+		providerBuckets = append(providerBuckets, srcURI.Bucket)
+		return &mockProvider{}, &mockProvider{}, nil
+	}
+
+	srcBucket, err := enqueueReflowLine(context.Background(), reflowIndexObjectInputLine("source/file.xml", "abc123", 42, "2026-01-15T20:53:44Z"), "", reflowSourceConfig{Symlinks: reflowSymlinkSkip, OnSourceFailure: reflowSourceFailSkip}, getProviders, out)
+	require.NoError(t, err)
+	require.Equal(t, "s3:source-bucket", srcBucket)
+	require.Equal(t, []string{"source-bucket"}, providerBuckets)
+
+	task := <-out
+	require.Equal(t, "source-bucket", task.SourceBucket)
+	require.Equal(t, "s3://source-bucket/source/file.xml", task.SourceURI)
+	require.Equal(t, "source/file.xml", task.SourceKey)
+	require.Equal(t, "abc123", task.SourceETag)
+	require.Equal(t, int64(42), task.SourceSize)
+	require.Equal(t, time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC), task.SourceLastMod)
+}
+
 func TestEnqueueReflowLine_ReflowInputRecordQuarantine(t *testing.T) {
 	out := make(chan reflowTask, 1)
 	var providerBuckets []string
@@ -2397,6 +2578,39 @@ func reflowInputLineNoDestRel(key string, etag string, size int64) string {
 	return string(line)
 }
 
+func reflowInputLineWithoutLastModified(key string, etag string, size int64) string {
+	data := map[string]any{
+		"source_uri":        "s3://source-bucket/" + key,
+		"source_key":        key,
+		"source_etag":       etag,
+		"source_size_bytes": size,
+		"dest_rel_key":      key,
+		"vars": map[string]string{
+			"key": key,
+		},
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
+
+func reflowIndexObjectInputLine(key string, etag string, size int64, lastModified string) string {
+	data := map[string]any{
+		"base_uri":      "s3://source-bucket/",
+		"key":           key,
+		"etag":          etag,
+		"size_bytes":    size,
+		"last_modified": lastModified,
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.index.object.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
+
 type testRecordEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -2554,6 +2768,16 @@ func requireCollisionEqual(t *testing.T, data testReflowData, kind string, decis
 	require.Equal(t, size, *data.Collision.DestSizeObserved)
 }
 
+func requireSourceNewerCollisionEqual(t *testing.T, data testReflowData, reason string, srcLastModified string, destLastModified string) {
+	t.Helper()
+	require.NotNil(t, data.Collision)
+	require.Equal(t, reason, data.Collision.DecisionReason)
+	require.NotNil(t, data.Collision.SrcLastModified)
+	require.Equal(t, srcLastModified, data.Collision.SrcLastModified.Format(time.RFC3339))
+	require.NotNil(t, data.Collision.DestLastModifiedObserved)
+	require.Equal(t, destLastModified, data.Collision.DestLastModifiedObserved.Format(time.RFC3339))
+}
+
 func requireNoLegacyCollisionKeys(t *testing.T, data json.RawMessage) {
 	t.Helper()
 	raw := string(data)
@@ -2581,8 +2805,10 @@ type reflowMemoryProvider struct {
 	headCalls           []string
 	putCalls            []string
 	conditionalPutCalls []string
+	conditionalPreconds []provider.PutPrecondition
 	ifAbsentErr         error
 	ignoreIfAbsent      bool
+	mutateBeforeIfMatch bool
 	failSidecars        bool
 }
 
@@ -2643,6 +2869,12 @@ func (p *reflowMemoryProvider) conditionalPutCallsSnapshot() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.conditionalPutCalls...)
+}
+
+func (p *reflowMemoryProvider) conditionalPutPreconditionsSnapshot() []provider.PutPrecondition {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]provider.PutPrecondition(nil), p.conditionalPreconds...)
 }
 
 func (p *reflowMemoryProvider) metaSnapshot(key string) provider.ObjectMeta {
@@ -2707,9 +2939,6 @@ func (p *reflowMemoryProvider) PutObjectConditional(_ context.Context, key strin
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, err
 	}
-	if !precond.IfAbsent {
-		return provider.PutResult{}, errors.New("test provider only supports IfAbsent")
-	}
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return provider.PutResult{}, err
@@ -2720,17 +2949,41 @@ func (p *reflowMemoryProvider) PutObjectConditional(_ context.Context, key strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.conditionalPutCalls = append(p.conditionalPutCalls, key)
-	if _, ok := p.objects[key]; ok && !p.ignoreIfAbsent {
-		err := p.ifAbsentErr
-		if err == nil {
-			err = provider.ErrAlreadyExists
+	p.conditionalPreconds = append(p.conditionalPreconds, precond)
+	if precond.IfAbsent {
+		if _, ok := p.objects[key]; ok && !p.ignoreIfAbsent {
+			err := p.ifAbsentErr
+			if err == nil {
+				err = provider.ErrAlreadyExists
+			}
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: err}
 		}
-		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: err}
+		etag := "dest-" + key
+		p.objects[key] = data
+		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag}}
+		return provider.PutResult{ETag: etag}, nil
 	}
-	etag := "dest-" + key
-	p.objects[key] = data
-	p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag}}
-	return provider.PutResult{ETag: etag}, nil
+	if precond.IfMatchETag != nil {
+		if p.mutateBeforeIfMatch {
+			p.objects[key] = []byte("concurrent mutation")
+			p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{
+				Key:          key,
+				Size:         int64(len("concurrent mutation")),
+				ETag:         "mutated-" + key,
+				LastModified: time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC),
+			}}
+			p.mutateBeforeIfMatch = false
+		}
+		meta, ok := p.meta[key]
+		if !ok || meta.ETag != *precond.IfMatchETag {
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderFile, Key: key, Err: provider.ErrPreconditionFailed}
+		}
+		etag := "dest-" + key
+		p.objects[key] = data
+		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag, LastModified: time.Now().UTC()}}
+		return provider.PutResult{ETag: etag}, nil
+	}
+	return provider.PutResult{}, errors.New("unsupported test precondition")
 }
 
 func (p *reflowMemoryProvider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
@@ -2781,5 +3034,29 @@ func (p *reflowBareProvider) PutObjectConditional(ctx context.Context, key strin
 }
 
 func (p *reflowBareProvider) Close() error {
+	return nil
+}
+
+type reflowNoConditionalProvider struct {
+	p *reflowMemoryProvider
+}
+
+func (p *reflowNoConditionalProvider) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	return p.p.List(ctx, opts)
+}
+
+func (p *reflowNoConditionalProvider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	return p.p.Head(ctx, key)
+}
+
+func (p *reflowNoConditionalProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	return p.p.GetObject(ctx, key)
+}
+
+func (p *reflowNoConditionalProvider) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	return p.p.PutObject(ctx, key, body, contentLength)
+}
+
+func (p *reflowNoConditionalProvider) Close() error {
 	return nil
 }

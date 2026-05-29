@@ -148,7 +148,7 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 	}
 
 	out := &provider.ObjectMeta{
-		ObjectSummary: provider.ObjectSummary{Key: strings.TrimPrefix(key, "/"), Size: st.Size(), LastModified: st.ModTime()},
+		ObjectSummary: provider.ObjectSummary{Key: strings.TrimPrefix(key, "/"), Size: st.Size(), ETag: fileVersionToken(st), LastModified: st.ModTime()},
 		ContentType:   "",
 		Metadata:      nil,
 	}

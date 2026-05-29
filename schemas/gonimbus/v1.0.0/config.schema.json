@@ -97,7 +97,8 @@
         "log",
         "fail",
         "overwrite",
-        "quarantine"
+        "quarantine",
+        "overwrite-if-source-newer"
       ],
       "default": "skip-if-duplicate"
     },

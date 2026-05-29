@@ -586,12 +586,13 @@ Reflow supports multiple destination types:
 
 Control behavior when destination objects already exist:
 
-| Option                                       | Behavior                                                                                                                        |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--on-collision skip-if-duplicate` (default) | Atomically write only if absent; if the destination exists, skip byte-identical duplicates and fail non-identical conflicts     |
-| `--on-collision fail`                        | Atomically write only if absent; if the destination exists, mark the object failed whether it is duplicate or conflicting       |
-| `--on-collision overwrite --overwrite`       | Replace the destination object unconditionally                                                                                  |
-| `--on-collision quarantine`                  | Atomically write only if absent; route non-identical conflicts to `--collision-quarantine-prefix` and leave the original intact |
+| Option                                       | Behavior                                                                                                                            |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--on-collision skip-if-duplicate` (default) | Atomically write only if absent; if the destination exists, skip byte-identical duplicates and fail non-identical conflicts         |
+| `--on-collision fail`                        | Atomically write only if absent; if the destination exists, mark the object failed whether it is duplicate or conflicting           |
+| `--on-collision overwrite --overwrite`       | Replace the destination object unconditionally                                                                                      |
+| `--on-collision overwrite-if-source-newer`   | On non-identical conflicts, replace the destination only when the source LastModified is newer, or equal-time with a different size |
+| `--on-collision quarantine`                  | Atomically write only if absent; route non-identical conflicts to `--collision-quarantine-prefix` and leave the original intact     |
 
 `--on-collision log` remains a deprecated alias for `skip-if-duplicate` for one minor-version cycle.
 
@@ -623,7 +624,21 @@ Collision records include a nested `collision` object when a collision was actua
 
 The nested `collision` field is omitted on the no-collision happy path. Older audit logs from the GON-020 Phase A migration window may also include legacy flat collision fields; current GON-026 Phase B output uses only the nested object.
 
-`decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, and `quarantine_routed`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
+`overwrite-if-source-newer` first attempts the same atomic IfAbsent write as the default mode. If a non-identical destination already exists, Gonimbus HEADs the destination, compares source and destination `LastModified`, and overwrites only when the source is newer or when both timestamps are equal but sizes differ. The overwrite PUT is guarded with the observed destination ETag (`IfMatch`), so a destination mutation between HEAD and PUT is reported as a deterministic skip with `reason: "collision.skipped_concurrent_mutation"` rather than retried as an unconditional overwrite.
+
+This mode uses object-store `LastModified`, which is a provider write timestamp, not a business/content timestamp. A later but smaller source object can replace an earlier larger destination object; that is intentional newest-wins mirror semantics. The `IfMatch` guard protects against concurrent mutation of the destination object that was HEADed, but it does not correct LastModified skew between buckets, accounts, or providers.
+
+`overwrite-if-source-newer` adds collision outcomes:
+
+| Outcome                         | Record fields                                                                                                           |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Source replaces destination     | `status: "complete"`, `collision.kind: "overwritten"`, `decision_reason: "src_newer"` or `equal_time_size_differs`      |
+| Destination is newer/equivalent | `status: "skipped"`, `reason: "collision.skipped_src_older"`, `collision.kind: "skipped_src_older"`                     |
+| Destination changed after HEAD  | `status: "skipped"`, `reason: "collision.skipped_concurrent_mutation"`, `collision.kind: "skipped_concurrent_mutation"` |
+
+The `collision` object also includes `src_last_modified`, `dest_last_modified_observed`, and `decision_reason` for this mode. Existing modes omit those fields.
+
+`decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, `quarantine_routed`, and `head_compare_then_conditional_overwrite`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
 
 #### Reconciling Quarantined Conflicts
 
