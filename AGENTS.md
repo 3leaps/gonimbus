@@ -17,7 +17,7 @@ See [3leaps-crucible agent-identity standard](https://crucible.3leaps.dev/reposi
 ## Read First
 
 1. **Confirm your role.** Roles are defined in [`config/agentic/roles/`](config/agentic/roles/). Default to `devlead` if unspecified.
-2. **Check `../AGENTS.gonimbus.local.md`** (one level _above_ the repo root) if present, for machine-specific instructions, credential guidance, and tactical session overrides. It is the final authority on local environment configuration. It lives outside the repository tree on purpose — local context never sits inside the working tree (a `.gitignore` entry is a convenience filter, not a security boundary), so it cannot be committed by accident.
+2. **Check `../AGENTS.gonimbus.local.md`** (one level _above_ the repo root) if present, for machine-specific instructions, credential guidance, and tactical session overrides. It is the final authority on local environment configuration. It lives outside the repository tree on purpose — local context never sits inside the working tree (a `.gitignore` entry is a convenience filter, not a security boundary), so it cannot be committed to this repository by accident.
 3. **Follow the 3 Leaps OSS policies.** This repository conforms to the policies published at [`github.com/3leaps/oss-policies`](https://github.com/3leaps/oss-policies/). Read the policy named by an instruction — or the policy relevant to your task — by URL and follow it here. See **Confidentiality & OSS Surface** below.
 4. **Read `MAINTAINERS.md`** for human maintainer contacts.
 5. **Read files before editing them.**

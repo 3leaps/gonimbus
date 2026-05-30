@@ -226,7 +226,7 @@ See [docs/development/](docs/development/) for detailed development guides inclu
 
 ### Contributing
 
-Contributions are welcome — see [`AGENTS.md`](AGENTS.md) for the role model, commit-attribution format, and quality gates. Gonimbus is open source and conforms to the [3 Leaps OSS policies](https://github.com/3leaps/oss-policies): keep the repository free of proprietary or client-specific material (client/product names, account or bucket identifiers, internal paths), and keep any sensitive local data outside the repository tree per [ADR-0005](docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md).
+Contributions are welcome — see [`AGENTS.md`](AGENTS.md) for the role model, commit-attribution format, and quality gates. Gonimbus is open source and conforms to the [3 Leaps OSS policies](https://github.com/3leaps/oss-policies): keep the repository free of proprietary or client-specific material (client names, proprietary product or brand names, account or bucket identifiers, internal paths), and keep any sensitive local data outside the repository tree per [ADR-0005](docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md).
 
 ## Architecture
 
