@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Library API Section Convention
+
+Use a `### Library API` subsection under `## [Unreleased]` only when a release
+changes the Stable embedded library API listed in `docs/api-stability.md`.
+For a Stable break, include the break, the migration path, and the
+advance-notice status. Omit the subsection when there are no Stable API
+changes.
+
 ## [Unreleased]
 
 ## [0.2.2] - 2026-05-26
@@ -239,8 +247,8 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Changed
 
 - **Pre-push hook** (`.goneat/hooks.yaml`) — assess gate scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
-- **AGENTS.md** — `.plans/` references retired; planning artifacts now live outside this public repository
-- **AGENTS.md DO NOT list** — replaced narrow `.plans/` rule with broader prohibition on referencing client data, paths, or identifiers in repo content
+- **AGENTS.md** — local planning-directory references retired; planning artifacts now live outside this public repository
+- **AGENTS.md DO NOT list** — replaced narrow planning-directory guidance with broader prohibition on referencing client data, paths, or identifiers in repo content
 
 ### Fixed
 

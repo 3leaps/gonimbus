@@ -13,4 +13,7 @@
 // either pass a non-empty Config.Endpoint or set
 // AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true in their own process. See
 // docs/library-consumers.md for the full embedded-use contract.
+//
+// API stability: Stable. Breaking changes to exported symbols or documented
+// behavior follow the Library API protocol in docs/api-stability.md.
 package s3

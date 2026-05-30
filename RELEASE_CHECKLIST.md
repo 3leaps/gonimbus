@@ -6,7 +6,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 
 ### Version Planning
 
-- [ ] Feature briefs in productbook gonimbus stream (`3leaps-productbook-internal/content/projmgmt/gonimbus/`) marked done
+- [ ] Feature briefs in the private release planning board marked done
 - [ ] All planned features implemented and tested
 - [ ] Breaking changes documented
 - [ ] Migration guide written (if applicable)
@@ -17,6 +17,8 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] All tests passing: `make test`
 - [ ] Code formatted: `make fmt`
 - [ ] Lint checks clean: `make lint`
+- [ ] Library API stability gate passing: `make api-stability`
+- [ ] Sensitive local data reviewed against `docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md` and the [3 Leaps Sensitive Local Data Policy](https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md); none is stored inside the repo tree relying only on `.gitignore`.
 - [ ] Application builds: `make build`
 - [ ] Manual smoke tests completed:
   - [ ] `./bin/gonimbus version`
@@ -124,13 +126,13 @@ Follow the Fulmen "manifest-only" provenance pattern:
 
 ### Communication
 
-- [ ] Announce release in Mattermost `#repo-gonimbus`
+- [ ] Announce release in the relevant maintainer release channel
 - [ ] Notify gofulmen team if integration patterns changed
 
 ### Housekeeping
 
-- [ ] Update productbook gonimbus stream (`content/projmgmt/gonimbus/index.md`) — mark shipped GON-NNN briefs as ✅ done
-- [ ] Plan next version features in productbook
+- [ ] Update the private release planning board for shipped briefs
+- [ ] Plan next version features in the private planning system
 
 ### Monitoring
 

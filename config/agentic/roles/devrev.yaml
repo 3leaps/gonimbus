@@ -57,6 +57,7 @@ responsibilities:
   - Check error handling completeness
   - Assess code maintainability and readability
   - Confirm consistency with existing patterns
+  - Verify sensitive local data stays outside the repo tree per ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md
   - Provide actionable feedback with specific suggestions
   - Verify contract parity for public APIs (types, fields, enums, defaults)
   - Verify strict-mode behavior and malformed-input paths are covered by tests
@@ -75,6 +76,7 @@ does_not:
   - Ignore test coverage gaps
   - Skip reviewing error handling paths
   - Rubber-stamp changes from senior contributors
+  - Approve sensitive local data inside the repo tree, even if gitignored
   - Rewrite the implementation (suggest changes instead)
   - Block on style preferences (focus on correctness)
   - Approve on green CI alone when contract-parity checks are missing
@@ -120,3 +122,4 @@ checklists:
     - "Strict-mode behavior: Do strict settings reject malformed input as required? (missing test: strict-mode rejection cases)"
     - "Fixture parity: Are canonical fixture cases wired and passing? (missing test: fixture case not yet implemented)"
     - "Deferred scope handling: Are out-of-phase features explicitly and canonically rejected? (missing test: explicit rejection assertions)"
+    - "Sensitive local data: Is repo content compliant with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md?"

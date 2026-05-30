@@ -21,6 +21,7 @@ This directory collects focused guides for Gonimbus development. Start with `REA
 
 ## Planning Artifacts
 
-Feature briefs and implementation plans are maintained in `.plans/active/` (gitignored).
+Feature briefs and implementation plans are maintained in the private planning
+system, not in this repository.
 
 As new processes stabilize, add additional guides here so the index stays the single stop for topic-specific references.

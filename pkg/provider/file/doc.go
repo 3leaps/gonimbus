@@ -7,4 +7,7 @@
 //
 // See docs/library-consumers.md for the embedded-use contract shared by the
 // supported library packages.
+//
+// API stability: Stable. Breaking changes to exported symbols or documented
+// behavior follow the Library API protocol in docs/api-stability.md.
 package file

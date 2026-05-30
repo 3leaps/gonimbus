@@ -1,4 +1,4 @@
-.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version check-all precommit prepush run install test-cov
+.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
 .PHONY: test-cloud moto-start moto-stop moto-status
@@ -70,7 +70,7 @@ GONEAT_RESOLVE = \
 all: fmt test
 
 help:  ## Show this help message
-	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run pre-push hooks (check-all)' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
+	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  api-stability   - Verify library API stability manifest and soft diff gate' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, api-stability, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run pre-push hooks (check-all)' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
 
 bootstrap:  ## Install external tools (sfetch, goneat) and dependencies
 	@echo "Installing external tools..."
@@ -390,7 +390,12 @@ fmt:  ## Format code with goneat
 	@$(MAKE) sync-embedded-identity
 	@echo "✅ Formatting completed"
 
-check-all: fmt verify-embedded-identity lint test test-nocgo  ## Run all quality checks (ensures fmt, lint, test)
+api-stability: ## Verify library API stability manifest and soft diff gate
+	@echo "Running API stability checks..."
+	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
+	@echo "✅ API stability checks passed"
+
+check-all: fmt verify-embedded-identity api-stability lint test test-nocgo  ## Run all quality checks (ensures fmt, API stability, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks
