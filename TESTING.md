@@ -216,5 +216,5 @@ When CI/CD is added, all tests will run on:
 
 For detailed test results and verification, see:
 
-- `.plans/gofulmen-integration-test-results.md` - Gofulmen v0.1.7 verification
 - Individual test files for inline documentation
+- Private planning artifacts for release-specific verification notes

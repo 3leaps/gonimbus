@@ -38,7 +38,7 @@ scope:
   - Schema conformance testing (Layer 0 SSOT)
   - Cross-language parity validation (*fulmen libraries)
   - CRDL workflow validation (templates)
-  - Tool integration testing (goneat, fulward, sumpter)
+  - Tool integration testing (goneat, fulward, downstream processors)
   # Enterprise validation
   - API contract validation (OpenAPI, JSON Schema)
   - Spec-default and strict-mode behavior validation

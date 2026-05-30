@@ -94,6 +94,10 @@ jobs:
           set -euo pipefail
           make fmt
           git diff --exit-code
+      - name: API stability
+        run: |
+          set -euo pipefail
+          make api-stability
       - name: Install golangci-lint (v2)
         # goneat-tools-runner does not ship golangci-lint yet.
         uses: golangci/golangci-lint-action@v7

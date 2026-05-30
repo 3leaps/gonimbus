@@ -3,6 +3,8 @@
 Gonimbus exposes a small Go library surface for applications that want the
 same object-storage parsing, matching, and provider behavior used by the CLI.
 This page is the supported embedded-use contract for that surface.
+See [`docs/api-stability.md`](api-stability.md) for stability tiers and the
+breakage-notification protocol for Stable packages.
 
 ## Supported Import Surface
 
@@ -20,9 +22,10 @@ Discouraged surfaces:
 - CLI command packages and server packages are not part of the library contract
 - Index-store packages are internal product substrate, not a stable embedding API
 
-Gonimbus is pre-v1.0. The packages above are intended for library use, but
-breaking changes can still happen across minor versions. Pin consumers to a
-specific gonimbus release.
+Gonimbus is pre-v1.0. The packages above are Stable for embedded use, but
+breaking changes can still happen across minor versions with the notification
+protocol documented in [`docs/api-stability.md`](api-stability.md). Pin
+consumers to a specific gonimbus release.
 
 ## URI Contract
 

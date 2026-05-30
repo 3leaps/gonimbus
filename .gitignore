@@ -33,8 +33,7 @@ go.work.sum
 *~
 .DS_Store
 
-# Planning files (local only)
-.plans/
+# Local agent overrides
 AGENTS.local.md
 
 # Claude Code local settings

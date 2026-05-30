@@ -3,6 +3,9 @@
 // Providers implement a minimal surface area focused on listing and metadata
 // retrieval. Authentication uses SDK default credential chains - providers
 // should not implement custom auth logic.
+//
+// API stability: Stable. Breaking changes to exported symbols or documented
+// behavior follow the Library API protocol in docs/api-stability.md.
 package provider
 
 import (

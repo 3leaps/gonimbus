@@ -52,6 +52,7 @@ responsibilities:
   - Verify cryptographic practices
   - Check input validation and output encoding
   - Review secrets management
+  - Verify sensitive local data stays outside the repo tree per ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md
   - Identify supply chain risks
   - Ensure compliance with data protection requirements
   - Provide security-focused remediation guidance
@@ -69,6 +70,7 @@ does_not:
   - Ignore minor security issues (they compound)
   - Skip review of third-party dependencies
   - Assume internal code is trusted
+  - Treat `.gitignore` as sufficient protection for sensitive local data
   - Provide security guarantees (identify risks, don't certify)
   - Block on non-security style issues
 examples:
@@ -101,4 +103,5 @@ checklists:
     - "Using established crypto libraries, not custom"
     - "Appropriate algorithms (no MD5, SHA1 for security)"
     - "Secrets not hardcoded"
+    - "Sensitive local data: repo content complies with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md"
     - "No known vulnerable dependencies"

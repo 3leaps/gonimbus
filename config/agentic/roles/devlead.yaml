@@ -51,6 +51,7 @@ responsibilities:
   - Maintain code quality and consistency
   - Run quality gates before commits (make check-all)
   - Document architectural decisions in code and ADRs
+  - Keep sensitive local data out of the repo tree per ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md
   - Coordinate with other roles on cross-cutting concerns
   - Ensure API consistency with ecosystem patterns
   - Validate public API shape and defaults against synced schemas and standards
@@ -70,6 +71,7 @@ does_not:
   - Skip quality gates
   - Make breaking changes without escalation
   - Commit secrets or credentials
+  - Create sensitive local data inside the repo tree, even if gitignored
   - Modify files outside task scope without justification
   - Assume defaults; all defaults must be sourced from spec/schema
   - Treat passing happy-path tests as sufficient for contract correctness
@@ -81,6 +83,7 @@ checklists:
     - "Deferred scope: Are unsupported features returning canonical explicit errors? (missing test: explicit error assertions)"
     - "Fixture parity: Are canonical fixtures wired and passing? (missing test: fixture case not yet implemented)"
     - "Ecosystem parity: Does behavior align with gofulmen conventions? (missing test: ecosystem equivalence)"
+    - "Sensitive local data: Is repo content compliant with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md?"
     - "Quality gates: Has make check-all passed locally? (missing test: any new lint/type failures)"
 examples:
   - type: commit

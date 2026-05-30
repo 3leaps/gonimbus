@@ -18,8 +18,9 @@ See [3leaps-crucible agent-identity standard](https://crucible.3leaps.dev/reposi
 
 1. **Confirm your role.** Roles are defined in [`config/agentic/roles/`](config/agentic/roles/). Default to `devlead` if unspecified.
 2. **Check `AGENTS.local.md`** if it exists (gitignored) for machine-specific instructions, credential guidance, and tactical session overrides. This file is the final authority on local environment configuration.
-3. **Read `MAINTAINERS.md`** for human maintainer contacts.
-4. **Read files before editing them.**
+3. **Review named OSS policies.** If this file or another repo instruction names a policy under `https://github.com/3leaps/oss-policies/`, read that policy by URL and follow it for this repository.
+4. **Read `MAINTAINERS.md`** for human maintainer contacts.
+5. **Read files before editing them.**
 
 ## Quick Reference
 
@@ -165,6 +166,10 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 - Skip quality gates
 - Commit secrets or credentials
 - Reference client data, paths, or identifiers in repo content
+- Create sensitive local data files inside the repo tree, even gitignored. This
+  repo conforms to
+  [`ADR-0005`](docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md)
+  and the [3 Leaps Sensitive Local Data Policy](https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md).
 - Create unnecessary files
 - Touch code outside your task scope
 
@@ -177,11 +182,12 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 - `docs/architecture.md` - Component design
 - `config/agentic/roles/` - Role catalog (YAML definitions with schemas, checklists, examples)
 
-### Planning artifacts (no longer in this repo)
+### Planning Artifacts
 
-- **Feature briefs / stream board**: `~/dev/3leaps/3leaps-productbook-internal/content/projmgmt/gonimbus/` (private; GON-NNN board + briefs)
-- **Client-touching dogfood narrative**: see Lead Maintainer for path (never referenced from this repo)
-- The previous `.plans/` convention has been retired
+- Feature briefs, stream boards, and operational notes live in the private
+  maintainer-managed planning system, not in this repository.
+- Do not add local paths, planning-board names, or client-facing narrative
+  locations to tracked repo content.
 
 ### Upstream
 

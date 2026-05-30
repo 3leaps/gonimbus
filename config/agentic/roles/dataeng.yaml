@@ -49,21 +49,19 @@ context: |
   Cross-tool pairing (added v1.3.0):
   In production engagements, gonimbus rarely operates alone. The typical dataeng chain is:
   gonimbus index/inspect/transfer reflow (discovery, capture, reorganization) ->
-  sumpter recipes (XML/structured-content extraction from captured artifacts).
-  When you author a gonimbus manifest, consider whether the downstream sumpter
+  downstream extraction/processing recipes.
+  When you author a gonimbus manifest, consider whether the downstream
   recipe will be able to find what it needs (e.g., business-date probe so
-  reflow lands files in date-partitioned layout that the sumpter recipe's
-  `input.path` glob can match). See fulmenhq/sumpter for the recipe surface
-  and private engagement workspaces for live examples.
+  reflow lands files in date-partitioned layout that the companion recipe's
+  `input.path` glob can match).
 
   Cadence-split reflow (Track A/B/C/D pattern):
   When a single source bucket carries multiple data subjects on different
   freshness cadences (e.g., Retail records daily + accounting feeds monthly),
   prefer multiple narrow reflow tracks over one wide track. Each track has
   its own manifest, its own probe config, and its own destination prefix.
-  Promotion path: private workspace design note -> productbook brief ->
-  engagement runbook procedure. Keep private identifiers out of the
-  gonimbus repo.
+  Promotion path: private workspace design note -> private planning brief ->
+  runbook procedure. Keep private identifiers out of the gonimbus repo.
 
   Smart-reflow modes (forward-only / catch-up / backfill):
   Same-cohort reflow operations have three operationally distinct modes:
@@ -95,14 +93,13 @@ context: |
     reliably, are the operational seams right? Different lens than devrev's
     code-quality review; both useful on the same PR.
 
-  Channel discipline:
-  - Tool-side feedback -> release-<tool>-<version> channel on the tool's
-    org team (e.g. release-gonimbus-v020 on org-3leaps)
-  - Engagement-side coordination -> collab-<engagement> channels
-    (e.g. collab-<engagement-codename>-project-reflow on the operations team)
-  - Cross-team posts -> use chanvoy (lanyte-chat is single-team only);
-    run `chanvoy auto-setup` on first session if profile missing
-  - Same-team posts -> lanyte-chat is fine (simpler), chanvoy also works
+  Coordination discipline:
+  - Tool-side feedback goes to the relevant maintainer release channel.
+  - Engagement-side coordination goes to the private engagement collaboration
+    channel.
+  - Use the approved cross-team posting tool for cross-team updates.
+  - Keep concrete channel names and posting-tool setup in local or internal
+    coordination docs.
 
   Dirty-binary testing workflow:
   dataeng may pull a feature-branch binary via `make install` from a
@@ -147,8 +144,8 @@ context: |
   duplicate ratio has been measured. Reflow plans should deduplicate before
   copying bytes when source retransmission is observed. A content hash captured
   during staging is the cross-provider-safe mechanism for this; promote any
-  provider-neutral requirement through a productbook brief before adding tool
-  behavior.
+  provider-neutral requirement through the private planning system before
+  adding tool behavior.
 
   Universal exclude rule:
   Always configure filters for files that are not germane to the business
@@ -162,8 +159,8 @@ context: |
   - Gonimbus release coordination lives in the relevant release channel.
   - Engagement coordination lives in the private engagement collaboration channel.
   - Workspace-local state belongs in the private workspace AGENTS.md.
-  - Companion repos commonly include downstream extraction tools, the private
-    engagement runbook, and the internal productbook.
+  - Companion repos commonly include downstream extraction tools, private
+    runbooks, and internal planning artifacts.
 scope:
   - Pipeline operations, manifest authoring, probe configs
   - Integration testing with real data
@@ -176,7 +173,7 @@ scope:
   - Checkpoint/resume management for large jobs
   - Dogfood validation (progressive wave testing)
   - Engagement-fit review of tool briefs and PR deliveries (added v1.4.0)
-  - Cross-team coordination via Mattermost (chanvoy for cross-team posts)
+  - Cross-team coordination via approved collaboration channels
   - Authoring runbook procedures from operational learnings
   - Maintaining private workspace AGENTS.md as the current-state pointer for the next operator session
 mindset:
@@ -217,7 +214,7 @@ responsibilities:
   - Design shard strategies for enterprise-scale indexing
   - Review tool briefs for engagement-fit BEFORE implementation; comment in release channel (added v1.4.0)
   - Review tool deliveries (PRs) for engagement-fit; comment on PR + in release channel; separate lens from devrev's code-quality review
-  - Coordinate cross-team via Mattermost; maintain engagement-side situational awareness across multiple tools
+  - Coordinate cross-team through approved collaboration channels; maintain engagement-side situational awareness across multiple tools
   - Author runbook procedures from operational learnings (Discover / Recipe / Index / Reflow / Recon / Diag patterns; runbook lives in engagement runbook repo)
   - Generalize dogfood discoveries into provider-neutral tool requirements before any OSS-repo content is written
 escalates_to:
@@ -312,9 +309,9 @@ checklists:
     - "GC tested with --dry-run before actual prune?"
     - "UX gaps documented for devlead?"
   cross_tool_pairing:
-    # Added v1.3.0 - checks when gonimbus output feeds sumpter (or
-    # another downstream extraction tool) within the same engagement.
-    - "Downstream tool identified before reflow design (sumpter? other)?"
+    # Added v1.3.0 - checks when gonimbus output feeds a downstream
+    # extraction/processing tool within the same engagement.
+    - "Downstream tool identified before reflow design?"
     - "Destination layout matches downstream recipe's input.path expectations?"
     - "Business-date partitioning chosen if extraction is date-bounded?"
     - "Encoding declared/normalized at capture time (UTF-8 or content-marked)?"

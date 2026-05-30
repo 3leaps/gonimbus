@@ -10,10 +10,8 @@
 // literal key characters, and non-pattern keys are unescaped for object-store
 // lookup.
 //
-// API stability: gonimbus is pre-v1.0. Breaking changes are possible across
-// minor versions and will be telegraphed in release-channel coordination for
-// known embedded library consumers. Pin to specific release tags for embedded
-// use.
+// API stability: Stable. Breaking changes to exported symbols or documented
+// behavior follow the Library API protocol in docs/api-stability.md.
 package uri
 
 import (
