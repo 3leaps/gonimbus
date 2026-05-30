@@ -640,6 +640,95 @@ The `collision` object also includes `src_last_modified`, `dest_last_modified_ob
 
 `decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, `quarantine_routed`, and `head_compare_then_conditional_overwrite`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
 
+### Post-Reflow Verification
+
+Use `inspect-pair` after a reflow run to verify the destination objects claimed
+by the reflow audit stream:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{business_date}/{key}' \
+  < reflow-input.jsonl > reflow-output.jsonl
+
+gonimbus inspect-pair \
+  --from-reflow reflow-output.jsonl \
+  --expected-dest-prefix 's3://dest/landing/'
+```
+
+`inspect-pair` is audit-driven. It reads `gonimbus.reflow.v1` records,
+ignoring other envelope records in complete reflow stdout, validates each
+`dest_uri` against the operator-supplied
+`--expected-dest-prefix`, and then HEADs only in-scope destination objects. The
+expected destination prefix is required and repeatable. A record outside every
+declared scope emits `verdict: "invalid_dest"` before any provider is
+constructed or any HEAD/stat-like operation is issued.
+
+The destination scope prevents an untrusted or mixed audit stream from choosing
+arbitrary HEAD targets. Scope matching requires the same provider scheme,
+bucket, and prefix root. For `file://` destinations, paths are canonicalized
+under the declared root and symlink escapes are rejected before HEAD.
+
+`inspect-pair` verifies terminal write claims:
+
+- `status: "complete"`
+- `status: "quarantined"` against the quarantine `dest_uri`
+- records with `collision.kind: "overwritten"`
+
+`status: "skipped"` and `status: "failed"` emit `verdict: "not_verified"` and
+do not HEAD the destination. `status: "in_progress"` and `status: "planned"`
+are ignored before scope checks, provider construction, or HEAD; they emit no
+per-object record and are counted only in the summary's
+`ignored_nonterminal`.
+
+Records use the standard JSONL envelope:
+
+```json
+{
+  "type": "gonimbus.inspect.pair.v1",
+  "data": {
+    "source_uri": "s3://source/path/object.json",
+    "dest_uri": "s3://dest/landing/2026-05-30/object.json",
+    "verdict": "verified",
+    "source_size_bytes": 1048576,
+    "dest_size_bytes": 1048576,
+    "source_etag": "abc123",
+    "dest_etag_observed": "abc123",
+    "etag_comparable": true
+  }
+}
+```
+
+The stream ends with `gonimbus.inspect.pair.summary.v1`. `total` is the number
+of terminal records considered, not raw input lines. `ignored_nonterminal`
+counts `planned` and `in_progress` reflow records that were dropped before any
+handling.
+
+Verdicts are size-authoritative and ETag-confirming:
+
+| Verdict                      | Meaning                                                                                                    |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `verified`                   | Destination exists, sizes match, and ETags are equal or at least one ETag is absent                        |
+| `verified_size_etag_differs` | Destination exists, sizes match, and both ETags are present but differ; advisory, not an integrity failure |
+| `size_mismatch`              | Destination exists but size differs; hard verification failure                                             |
+| `missing`                    | Destination HEAD returned not-found                                                                        |
+| `error`                      | Destination HEAD failed for another reason                                                                 |
+| `invalid_dest`               | Destination URI is outside every declared expected destination prefix; no HEAD issued                      |
+| `not_verified`               | Upstream record did not claim a write (`skipped` or `failed`)                                              |
+
+`etag_comparable` is true only when both ETags are present and plain
+non-multipart ETags. It is false when either ETag is absent or multipart-form.
+At equal size, differing present ETags always produce
+`verified_size_etag_differs`, even when one or both ETags are multipart-form.
+Equal multipart ETags still produce `verified`, with `etag_comparable: false`.
+
+The process exits non-zero when any `size_mismatch`, `missing`, `error`, or
+`invalid_dest` verdict occurs. `verified_size_etag_differs` is advisory and
+does not fail the process by itself, which makes the command suitable as a CI
+or batch gate without treating multipart ETag differences as content
+corruption.
+
 #### Reconciling Quarantined Conflicts
 
 When collision quarantine triggers, the destination keeps two versions: the original object at the normal key and the incoming source object under `<dest>/<collision_quarantine_prefix>/<source-key>`. A typical reconciliation pass is:

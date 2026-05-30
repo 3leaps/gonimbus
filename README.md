@@ -155,6 +155,7 @@ gonimbus stream get <uri>      # Stream full content (JSONL + raw bytes)
 
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets
+gonimbus inspect-pair --from-reflow <path> --expected-dest-prefix <uri> # Verify reflow writes
 gonimbus preflight --job <path> # Verify permissions before transfer
 gonimbus doctor                # Environment/auth checks
 gonimbus serve                 # Run server mode
