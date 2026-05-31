@@ -17,10 +17,33 @@ See [3leaps-crucible agent-identity standard](https://crucible.3leaps.dev/reposi
 ## Read First
 
 1. **Confirm your role.** Roles are defined in [`config/agentic/roles/`](config/agentic/roles/). Default to `devlead` if unspecified.
-2. **Check `AGENTS.local.md`** if it exists (gitignored) for machine-specific instructions, credential guidance, and tactical session overrides. This file is the final authority on local environment configuration.
-3. **Review named OSS policies.** If this file or another repo instruction names a policy under `https://github.com/3leaps/oss-policies/`, read that policy by URL and follow it for this repository.
+2. **Check `../AGENTS.gonimbus.local.md`** (one level _above_ the repo root) if present, for machine-specific instructions, credential guidance, and tactical session overrides. It is the final authority on local environment configuration. It lives outside the repository tree on purpose — local context never sits inside the working tree (a `.gitignore` entry is a convenience filter, not a security boundary), so it cannot be committed to this repository by accident.
+3. **Follow the 3 Leaps OSS policies.** This repository conforms to the policies published at [`github.com/3leaps/oss-policies`](https://github.com/3leaps/oss-policies/). Read the policy named by an instruction — or the policy relevant to your task — by URL and follow it here. See **Confidentiality & OSS Surface** below.
 4. **Read `MAINTAINERS.md`** for human maintainer contacts.
 5. **Read files before editing them.**
+
+## Confidentiality & OSS Surface
+
+Gonimbus is open source. Everything in this repository — code, docs, schemas,
+examples, fixtures, tests, commit messages, PR titles and bodies, and issue
+text — is a public surface and must stay free of proprietary or client-specific
+material.
+
+- **No proprietary identifiers.** Do not name or telegraph specific clients,
+  engagements, customer-facing product brands, account or bucket names, or
+  internal paths in tracked content. Generic, provider-neutral framing is the
+  norm (for example, "an S3-compatible bucket with 10M+ objects" or "a date
+  buried below a site prefix"). When a real-world need motivates a change,
+  generalize it into product-safe language before it lands in the repo.
+- **Proprietary data stays out of the tree.** Sensitive or client data lives
+  outside the repository working tree — not in-tree behind `.gitignore`, which
+  is a convenience filter, not a security boundary. This repo conforms to
+  [`ADR-0005`](docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md)
+  and the [3 Leaps Sensitive Local Data Policy](https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md).
+- **No deny-lists in the repo.** State the principle and point to the canonical
+  policy rather than publishing lists of specific terms to avoid — an in-repo
+  deny-list is itself a disclosure. Machine-local, environment-specific detail
+  belongs in `../AGENTS.gonimbus.local.md`, outside the tree.
 
 ## Quick Reference
 
@@ -75,7 +98,7 @@ These roles are specific to the gonimbus domain and defined here rather than in 
 
 ### Startup
 
-1. Read `AGENTS.local.md` if it exists (gitignored; machine-specific instructions, credential guidance, local overrides)
+1. Read `../AGENTS.gonimbus.local.md` if present (outside the repo tree; machine-specific instructions, credential guidance, local overrides)
 2. Identify your role from context or request assignment; read the role YAML from `config/agentic/roles/`
 3. Scan relevant code before making changes
 
@@ -175,7 +198,7 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 
 ## References
 
-- `AGENTS.local.md` - Machine-specific instructions (gitignored; read if present)
+- `../AGENTS.gonimbus.local.md` - Machine-specific instructions (outside the repo tree; read if present)
 - `MAINTAINERS.md` - Human maintainers
 - `README.md` - Project overview
 - `docs/provenance.md` - Ecosystem heritage
