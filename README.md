@@ -152,6 +152,7 @@ gonimbus content head <uri>    # Read first N bytes (base64 in JSONL)
 # Content streaming (for pipeline integration)
 gonimbus stream head <uri>     # Object metadata (JSONL)
 gonimbus stream get <uri>      # Stream full content (JSONL + raw bytes)
+gonimbus stream put <uri>      # Upload raw/framed stdin, multipart for large objects
 
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets

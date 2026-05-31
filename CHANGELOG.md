@@ -15,6 +15,19 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- **Breaking:** `provider.MultipartUploader` now requires implementers to add
+  `UploadPart` and `CompleteMultipartUpload`, and the package adds `PartETag`
+  plus optional conditional multipart completion for streaming writes.
+  Migration path: provider implementations that advertise multipart capability
+  must implement the full create/upload-part/complete/abort lifecycle, or stop
+  advertising `MultipartUploader` until they can support it. The bundled S3
+  provider implements the expanded interface and conditional completion used to
+  preserve no-overwrite semantics. Advance-notice status: this break is staged
+  in `Unreleased` for the next release tag and known embedders must be notified
+  before release per `docs/api-stability.md`.
+
 ## [0.2.2] - 2026-05-26
 
 **Index archive operations and local-tree reflow — richer indexed state with safer local-source defaults.**

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"testing"
 
+	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/stream"
@@ -102,4 +103,66 @@ func TestStreamGetCommand_CloudIntegration(t *testing.T) {
 	ev, err = dec.Next()
 	require.ErrorIs(t, err, io.EOF)
 
+}
+
+func TestStreamGetToStreamPutS3FramedIdentity_CloudIntegration(t *testing.T) {
+	cloudtest.SkipIfUnavailable(t)
+	ctx := context.Background()
+	binary := findBinary(t)
+
+	bucket := cloudtest.CreateBucket(t, ctx)
+	srcKey := "source/data.bin"
+	dstKey := "dest/data-copy.bin"
+	content := []byte("s3 framed identity smoke")
+	cloudtest.PutObject(t, ctx, bucket, srcKey, content)
+
+	getCmd := exec.Command(binary, "stream", "get",
+		"s3://"+bucket+"/"+srcKey,
+		"--endpoint", cloudtest.Endpoint,
+		"--chunk-bytes", "8",
+	)
+	getCmd.Env = append(os.Environ(),
+		"AWS_ACCESS_KEY_ID="+cloudtest.TestAccessKeyID,
+		"AWS_SECRET_ACCESS_KEY="+cloudtest.TestSecretAccessKey,
+		"AWS_REGION="+cloudtest.Region,
+	)
+	var getOut, getErr bytes.Buffer
+	getCmd.Stdout = &getOut
+	getCmd.Stderr = &getErr
+	require.NoError(t, getCmd.Run(), "stderr: %s", getErr.String())
+
+	putCmd := exec.Command(binary, "stream", "put",
+		"--framing", "jsonl",
+		"s3://"+bucket+"/"+dstKey,
+		"--endpoint", cloudtest.Endpoint,
+	)
+	putCmd.Env = append(os.Environ(),
+		"AWS_ACCESS_KEY_ID="+cloudtest.TestAccessKeyID,
+		"AWS_SECRET_ACCESS_KEY="+cloudtest.TestSecretAccessKey,
+		"AWS_REGION="+cloudtest.Region,
+	)
+	putCmd.Stdin = bytes.NewReader(getOut.Bytes())
+	var putOut, putErr bytes.Buffer
+	putCmd.Stdout = &putOut
+	putCmd.Stderr = &putErr
+	require.NoError(t, putCmd.Run(), "stderr: %s stdout: %s", putErr.String(), putOut.String())
+
+	prov, err := s3.New(ctx, s3.Config{
+		Bucket:          bucket,
+		Region:          cloudtest.Region,
+		Endpoint:        cloudtest.Endpoint,
+		ForcePathStyle:  true,
+		AccessKeyID:     cloudtest.TestAccessKeyID,
+		SecretAccessKey: cloudtest.TestSecretAccessKey,
+	})
+	require.NoError(t, err)
+	defer func() { _ = prov.Close() }()
+
+	body, size, err := prov.GetObject(ctx, dstKey)
+	require.NoError(t, err)
+	defer func() { _ = body.Close() }()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(content)), size)
+	require.Equal(t, content, got)
 }

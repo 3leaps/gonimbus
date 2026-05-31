@@ -97,12 +97,27 @@ type ObjectDeleter interface {
 	DeleteObject(ctx context.Context, key string) error
 }
 
-// MultipartUploader can create and abort multipart uploads.
+// PartETag identifies one successfully uploaded multipart part.
+type PartETag struct {
+	PartNumber int32
+	ETag       string
+}
+
+// MultipartUploader can create, upload, complete, and abort multipart uploads.
 //
-// This provides a low-side-effect write probe when supported.
+// CreateMultipartUpload+AbortMultipartUpload also provide a low-side-effect
+// write probe when supported.
 type MultipartUploader interface {
 	CreateMultipartUpload(ctx context.Context, key string) (uploadID string, err error)
+	UploadPart(ctx context.Context, key, uploadID string, partNumber int32, body io.Reader, size int64) (PartETag, error)
+	CompleteMultipartUpload(ctx context.Context, key, uploadID string, parts []PartETag) (PutResult, error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
+}
+
+// ConditionalMultipartCompleter can complete multipart uploads only when a
+// write precondition holds atomically at the provider.
+type ConditionalMultipartCompleter interface {
+	CompleteMultipartUploadConditional(ctx context.Context, key, uploadID string, parts []PartETag, precond PutPrecondition) (PutResult, error)
 }
 
 // MetadataAwareMultipartUploader can start multipart uploads with the same

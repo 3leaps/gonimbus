@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/stream"
 )
 
@@ -87,13 +89,34 @@ func TestStreamPutCommand_OverwriteReplacesExistingDestination(t *testing.T) {
 	require.Equal(t, "success", put.Status)
 }
 
+func TestStreamPutCommand_RawFileDestinationIgnoresMultipartThreshold(t *testing.T) {
+	resetStreamPutTestState(t)
+
+	destPath := filepath.Join(t.TempDir(), "object.bin")
+	stdout, stderr, err := runStreamPutTestCommand(t, []string{"--multipart-threshold", "2", "--part-size", "2", "file://" + destPath}, "abc")
+	require.NoError(t, err, "stderr: %s", stderr)
+	require.Empty(t, stderr)
+
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(got))
+
+	rec := decodeSingleOutputRecord(t, stdout)
+	require.Equal(t, streamPutRecordType, rec.Type)
+
+	var put streamPutRecord
+	require.NoError(t, json.Unmarshal(rec.Data, &put))
+	require.Equal(t, "single", put.UploadMode)
+	require.Equal(t, int64(3), put.Bytes)
+}
+
 func TestStreamPutCommand_JSONLFramingWritesFileDestination(t *testing.T) {
 	resetStreamPutTestState(t)
 
 	destPath := filepath.Join(t.TempDir(), "object.bin")
 	stdout, stderr, err := runStreamPutTestCommandBytes(t,
 		[]string{"--framing", "jsonl", "file://" + destPath},
-		buildStreamPutFramedInput(t, "stream-1", "s3://source/object.bin", [][]byte{[]byte("hello "), []byte("framed")}),
+		buildStreamPutFramedInput(t, "stream-1", "s3://source/original.bin", [][]byte{[]byte("hello "), []byte("framed")}),
 	)
 	require.NoError(t, err, "stderr: %s", stderr)
 	require.Empty(t, stderr)
@@ -111,15 +134,158 @@ func TestStreamPutCommand_JSONLFramingWritesFileDestination(t *testing.T) {
 	require.Equal(t, "object.bin", put.DestKey)
 	require.Equal(t, int64(len("hello framed")), put.Bytes)
 	require.Equal(t, "success", put.Status)
-	require.Equal(t, "s3://source/object.bin", put.SourceURI)
+	require.Equal(t, "s3://source/original.bin", put.SourceURI)
 	require.Equal(t, "stream-1", put.SourceStreamID)
+}
+
+func TestStreamPutCommand_JSONLFramingWritesMultipleObjectsUnderRoot(t *testing.T) {
+	resetStreamPutTestState(t)
+
+	root := t.TempDir()
+	var input bytes.Buffer
+	input.Write(buildStreamPutFramedInput(t, "stream-1", "s3://source/a.bin", [][]byte{[]byte("alpha")}))
+	input.Write(buildStreamPutFramedInput(t, "stream-2", "s3://source/nested/b.bin", [][]byte{[]byte("bravo")}))
+
+	stdout, stderr, err := runStreamPutTestCommandBytes(t, []string{"--framing", "jsonl", "file://" + root + "/"}, input.Bytes())
+	require.NoError(t, err, "stderr: %s", stderr)
+	require.Empty(t, stderr)
+
+	gotA, err := os.ReadFile(filepath.Join(root, "a.bin"))
+	require.NoError(t, err)
+	require.Equal(t, "alpha", string(gotA))
+	gotB, err := os.ReadFile(filepath.Join(root, "nested", "b.bin"))
+	require.NoError(t, err)
+	require.Equal(t, "bravo", string(gotB))
+
+	records := decodeOutputRecords(t, stdout)
+	require.Len(t, records, 2)
+	for _, rec := range records {
+		require.Equal(t, streamPutRecordType, rec.Type)
+	}
+}
+
+func TestStreamPutFramedObjectUsesResolvedProviderKey(t *testing.T) {
+	resetStreamPutTestState(t)
+
+	input := buildStreamPutFramedInput(t, "stream-1", "s3://source/original.bin", [][]byte{[]byte("payload")})
+	root := streamPutDestRoot{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "bucket",
+		Prefix:   "dest/",
+		ExactKey: "data-copy.bin",
+	}
+	mock := &streamPutKeyCaptureMock{}
+	var stdout bytes.Buffer
+	w := output.NewJSONLWriter(&stdout, "job-test", "s3")
+
+	rec, err := readStreamPutFramedObject(context.Background(), stream.NewDecoder(bytes.NewReader(input)), root, mock, streamPutUploadOptions{}, w, 0)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	require.Equal(t, "dest/data-copy.bin", mock.key)
+	require.Equal(t, "dest/data-copy.bin", rec.DestKey)
+	require.Equal(t, "s3://bucket/dest/data-copy.bin", rec.DestURI)
+	require.Equal(t, []byte("payload"), mock.body)
+}
+
+func TestStreamPutCommand_JSONLFramingRejectsMultipleObjectsForExactDestination(t *testing.T) {
+	resetStreamPutTestState(t)
+
+	destPath := filepath.Join(t.TempDir(), "copy.bin")
+	var input bytes.Buffer
+	input.Write(buildStreamPutFramedInput(t, "stream-1", "s3://source/original.bin", [][]byte{[]byte("alpha")}))
+	input.Write(buildStreamPutFramedInput(t, "stream-2", "s3://source/second.bin", [][]byte{[]byte("bravo")}))
+
+	stdout, _, err := runStreamPutTestCommandBytes(t, []string{"--framing", "jsonl", "file://" + destPath}, input.Bytes())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exact destination accepts only one framed object")
+
+	got, readErr := os.ReadFile(destPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "alpha", string(got))
+
+	records := decodeOutputRecords(t, stdout)
+	require.Len(t, records, 2)
+	require.Equal(t, streamPutRecordType, records[0].Type)
+	require.Equal(t, output.TypeError, records[1].Type)
+}
+
+func TestStreamPutCommand_JSONLFramingDestKeyRequiresOptInAndStaysUnderRoot(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		destKey string
+		wantErr string
+	}{
+		{name: "requires opt in", args: nil, destKey: "chosen.bin", wantErr: "frame dest_key requires --dest-from-frame"},
+		{name: "rejects absolute uri", args: []string{"--dest-from-frame"}, destKey: "s3://other/key", wantErr: "dest_key must be relative"},
+		{name: "rejects traversal", args: []string{"--dest-from-frame"}, destKey: "../escape.bin", wantErr: "dest_key escapes destination root"},
+		{name: "rejects scheme prefix", args: []string{"--dest-from-frame"}, destKey: "s3:escape.bin", wantErr: "dest_key must not start with a URI scheme"},
+		{name: "rejects file scheme path", args: []string{"--dest-from-frame"}, destKey: "file:/tmp/escape.bin", wantErr: "dest_key must not start with a URI scheme"},
+		{name: "rejects windows drive path", args: []string{"--dest-from-frame"}, destKey: "C:/escape.bin", wantErr: "dest_key must not start with a URI scheme"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetStreamPutTestState(t)
+			root := t.TempDir()
+			input := buildStreamPutFramedInputWithOpen(t, stream.Open{StreamID: "stream-1", URI: "s3://source/a.bin", DestKey: tt.destKey}, [][]byte{[]byte("payload")})
+			args := append([]string{"--framing", "jsonl"}, tt.args...)
+			args = append(args, "file://"+root+"/")
+			stdout, _, err := runStreamPutTestCommandBytes(t, args, input)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+			rec := decodeSingleOutputRecord(t, stdout)
+			require.Equal(t, output.TypeError, rec.Type)
+		})
+	}
+}
+
+func TestStreamPutCommand_JSONLFramingDestKeyOptInWritesRelativeKey(t *testing.T) {
+	resetStreamPutTestState(t)
+	root := t.TempDir()
+	input := buildStreamPutFramedInputWithOpen(t, stream.Open{StreamID: "stream-1", URI: "s3://source/a.bin", DestKey: "chosen/out.bin"}, [][]byte{[]byte("payload")})
+
+	stdout, stderr, err := runStreamPutTestCommandBytes(t, []string{"--framing", "jsonl", "--dest-from-frame", "file://" + root + "/"}, input)
+	require.NoError(t, err, "stderr: %s", stderr)
+	got, err := os.ReadFile(filepath.Join(root, "chosen", "out.bin"))
+	require.NoError(t, err)
+	require.Equal(t, "payload", string(got))
+
+	rec := decodeSingleOutputRecord(t, stdout)
+	require.Equal(t, streamPutRecordType, rec.Type)
+}
+
+func TestStreamPutUploadReaderUsesMultipartAfterThreshold(t *testing.T) {
+	resetStreamPutTestState(t)
+	mock := &streamPutMultipartMock{}
+	var stdout bytes.Buffer
+	w := output.NewJSONLWriter(&stdout, "job-test", "s3")
+
+	result, err := uploadStreamPutReader(context.Background(), mock, "s3://dst/object.bin", "object.bin", strings.NewReader("abcdefghijkl"), streamPutUploadOptions{
+		PartSize:           5,
+		MultipartThreshold: 6,
+		Overwrite:          false,
+	}, w)
+	require.NoError(t, err)
+	require.Equal(t, int64(12), result.Bytes)
+	require.Equal(t, "multipart", result.Mode)
+	require.False(t, mock.putCalled)
+	require.Equal(t, [][]byte{[]byte("abcde"), []byte("fghij"), []byte("kl")}, mock.parts)
+	require.True(t, mock.completeConditional)
+
+	records := decodeOutputRecords(t, stdout.String())
+	require.Len(t, records, 3)
+	for _, rec := range records {
+		require.Equal(t, streamPutProgressType, rec.Type)
+	}
 }
 
 func TestStreamPutCommand_JSONLFramingRejectsMalformedInput(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   func(t *testing.T) []byte
-		wantErr string
+		name           string
+		input          func(t *testing.T) []byte
+		wantErr        string
+		wantDestExists bool
+		skipDestCheck  bool
 	}{
 		{
 			name: "missing open",
@@ -219,7 +385,8 @@ func TestStreamPutCommand_JSONLFramingRejectsMalformedInput(t *testing.T) {
 				writeStreamRecord(t, &buf, stream.TypeStreamClose, &stream.Close{StreamID: "stream-1", Status: "success"})
 				return buf.Bytes()
 			},
-			wantErr: "trailing stream data after close record",
+			wantErr:       "trailing stream data after close record",
+			skipDestCheck: true,
 		},
 	}
 
@@ -231,9 +398,17 @@ func TestStreamPutCommand_JSONLFramingRejectsMalformedInput(t *testing.T) {
 			stdout, _, err := runStreamPutTestCommandBytes(t, []string{"--framing", "jsonl", "file://" + destPath}, tt.input(t))
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
-			require.NoFileExists(t, destPath)
+			if tt.skipDestCheck {
+				// Multi-object framed mode commits a completed object before
+				// detecting a trailing record that starts the next object.
+			} else if tt.wantDestExists {
+				require.FileExists(t, destPath)
+			} else {
+				require.NoFileExists(t, destPath)
+			}
 
-			rec := decodeSingleOutputRecord(t, stdout)
+			records := decodeOutputRecords(t, stdout)
+			rec := records[len(records)-1]
 			require.Equal(t, output.TypeError, rec.Type)
 
 			var errRec output.ErrorRecord
@@ -369,19 +544,28 @@ func runStreamPutTestCommandBytes(t *testing.T, args []string, stdin []byte) (st
 
 func buildStreamPutFramedInput(t *testing.T, streamID string, uri string, chunks [][]byte) []byte {
 	t.Helper()
+	return buildStreamPutFramedInputWithOpen(t, stream.Open{StreamID: streamID, URI: uri}, chunks)
+}
+
+func buildStreamPutFramedInputWithOpen(t *testing.T, open stream.Open, chunks [][]byte) []byte {
+	t.Helper()
 	var total int64
 	for _, chunk := range chunks {
 		total += int64(len(chunk))
 	}
-	return buildStreamPutFramedInputWithClose(t, streamID, uri, chunks, stream.Close{
-		StreamID: streamID,
+	return buildStreamPutFramedInputWithCloseAndOpen(t, open.StreamID, open.URI, chunks, stream.Close{
+		StreamID: open.StreamID,
 		Status:   "success",
 		Chunks:   int64(len(chunks)),
 		Bytes:    total,
-	})
+	}, open)
 }
 
 func buildStreamPutFramedInputWithClose(t *testing.T, streamID string, uri string, chunks [][]byte, closeRec stream.Close) []byte {
+	return buildStreamPutFramedInputWithCloseAndOpen(t, streamID, uri, chunks, closeRec, stream.Open{StreamID: streamID, URI: uri})
+}
+
+func buildStreamPutFramedInputWithCloseAndOpen(t *testing.T, streamID string, uri string, chunks [][]byte, closeRec stream.Close, open stream.Open) []byte {
 	t.Helper()
 
 	var buf bytes.Buffer
@@ -393,7 +577,8 @@ func buildStreamPutFramedInputWithClose(t *testing.T, streamID string, uri strin
 
 	ctx := context.Background()
 	sw := stream.NewWriter(&buf, "job-test", "s3")
-	require.NoError(t, sw.WriteOpen(ctx, &stream.Open{StreamID: streamID, URI: uri, Size: &size}))
+	open.Size = &size
+	require.NoError(t, sw.WriteOpen(ctx, &open))
 	for seq, chunk := range chunks {
 		offset := totalBytesBefore(chunks, seq)
 		require.NoError(t, sw.WriteChunk(ctx, &stream.Chunk{
@@ -424,12 +609,26 @@ func writeStreamRecord(t *testing.T, buf *bytes.Buffer, recordType string, data 
 func decodeSingleOutputRecord(t *testing.T, stdout string) output.Record {
 	t.Helper()
 
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	require.Len(t, lines, 1, "stdout: %s", stdout)
+	records := decodeOutputRecords(t, stdout)
+	require.Len(t, records, 1, "stdout: %s", stdout)
+	return records[0]
+}
 
-	var rec output.Record
-	require.NoError(t, json.Unmarshal([]byte(lines[0]), &rec))
-	return rec
+func decodeOutputRecords(t *testing.T, stdout string) []output.Record {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	records := make([]output.Record, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec output.Record
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+		records = append(records, rec)
+	}
+	require.NotEmpty(t, records, "stdout: %s", stdout)
+	return records
 }
 
 func resetStreamPutTestState(t *testing.T) {
@@ -440,12 +639,20 @@ func resetStreamPutTestState(t *testing.T) {
 	oldEndpoint := streamPutEndpoint
 	oldFraming := streamPutFraming
 	oldOverwrite := streamPutOverwrite
+	oldDestFrame := streamPutDestFrame
+	oldFailFast := streamPutFailFast
+	oldPartSize := streamPutPartSize
+	oldThreshold := streamPutThreshold
 
 	streamPutRegion = ""
 	streamPutProfile = ""
 	streamPutEndpoint = ""
 	streamPutFraming = streamPutFramingRaw
 	streamPutOverwrite = false
+	streamPutDestFrame = false
+	streamPutFailFast = false
+	streamPutPartSize = "8MiB"
+	streamPutThreshold = "64MiB"
 
 	t.Cleanup(func() {
 		streamPutRegion = oldRegion
@@ -453,5 +660,75 @@ func resetStreamPutTestState(t *testing.T) {
 		streamPutEndpoint = oldEndpoint
 		streamPutFraming = oldFraming
 		streamPutOverwrite = oldOverwrite
+		streamPutDestFrame = oldDestFrame
+		streamPutFailFast = oldFailFast
+		streamPutPartSize = oldPartSize
+		streamPutThreshold = oldThreshold
 	})
+}
+
+type streamPutMultipartMock struct {
+	putCalled           bool
+	completeConditional bool
+	parts               [][]byte
+}
+
+func (m *streamPutMultipartMock) PutObject(context.Context, string, io.Reader, int64) error {
+	m.putCalled = true
+	return nil
+}
+
+func (m *streamPutMultipartMock) PutObjectConditional(context.Context, string, io.Reader, int64, provider.PutPrecondition) (provider.PutResult, error) {
+	m.putCalled = true
+	return provider.PutResult{}, nil
+}
+
+func (m *streamPutMultipartMock) CreateMultipartUpload(context.Context, string) (string, error) {
+	return "upload-1", nil
+}
+
+func (m *streamPutMultipartMock) UploadPart(_ context.Context, _ string, _ string, partNumber int32, body io.Reader, size int64) (provider.PartETag, error) {
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return provider.PartETag{}, err
+	}
+	m.parts = append(m.parts, b)
+	return provider.PartETag{PartNumber: partNumber, ETag: "etag"}, nil
+}
+
+func (m *streamPutMultipartMock) CompleteMultipartUpload(context.Context, string, string, []provider.PartETag) (provider.PutResult, error) {
+	return provider.PutResult{ETag: "complete"}, nil
+}
+
+func (m *streamPutMultipartMock) CompleteMultipartUploadConditional(context.Context, string, string, []provider.PartETag, provider.PutPrecondition) (provider.PutResult, error) {
+	m.completeConditional = true
+	return provider.PutResult{ETag: "complete"}, nil
+}
+
+func (m *streamPutMultipartMock) AbortMultipartUpload(context.Context, string, string) error {
+	return nil
+}
+
+type streamPutKeyCaptureMock struct {
+	key  string
+	body []byte
+}
+
+func (m *streamPutKeyCaptureMock) PutObject(ctx context.Context, key string, body io.Reader, size int64) error {
+	result, err := m.PutObjectConditional(ctx, key, body, size, provider.PutPrecondition{})
+	if err != nil {
+		return err
+	}
+	_ = result
+	return nil
+}
+
+func (m *streamPutKeyCaptureMock) PutObjectConditional(_ context.Context, key string, body io.Reader, size int64, _ provider.PutPrecondition) (provider.PutResult, error) {
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return provider.PutResult{}, err
+	}
+	m.key = key
+	m.body = b
+	return provider.PutResult{}, nil
 }
