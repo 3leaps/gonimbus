@@ -17,6 +17,29 @@ changes.
 
 ### Library API
 
+- **Release-gate notice for v0.2.3:** `provider.MultipartUploader` now
+  requires implementers to add `UploadPart` and `CompleteMultipartUpload`, and
+  the package adds `PartETag` plus optional conditional multipart completion
+  for streaming writes. Migration path: provider implementations that advertise
+  multipart capability must implement the full create/upload-part/complete/abort
+  lifecycle, or stop advertising `MultipartUploader` until they can support it.
+  The bundled S3 provider implements the expanded interface and conditional
+  completion used to preserve no-overwrite semantics. Advance-notice status:
+  staged for the v0.2.3 release tag; known embedders must be notified before
+  release per `docs/api-stability.md`.
+
+## [0.2.3] - 2026-05-31
+
+**Stream put completion, reflow freshness arbitration, and release-surface guardrails.**
+
+v0.2.3 completes the stream write path, adds destination verification for
+reflow outputs, adds a newest-wins collision mode for mirror-style reflow, and
+formalizes Stable API and public-repository hygiene guardrails. See
+[`docs/releases/v0.2.3.md`](docs/releases/v0.2.3.md) for the narrative
+walkthrough.
+
+### Library API
+
 - **Breaking:** `provider.MultipartUploader` now requires implementers to add
   `UploadPart` and `CompleteMultipartUpload`, and the package adds `PartETag`
   plus optional conditional multipart completion for streaming writes.
@@ -24,9 +47,62 @@ changes.
   must implement the full create/upload-part/complete/abort lifecycle, or stop
   advertising `MultipartUploader` until they can support it. The bundled S3
   provider implements the expanded interface and conditional completion used to
-  preserve no-overwrite semantics. Advance-notice status: this break is staged
-  in `Unreleased` for the next release tag and known embedders must be notified
-  before release per `docs/api-stability.md`.
+  preserve no-overwrite semantics. Advance-notice status: documented for
+  v0.2.3; known embedders must be notified before release per
+  `docs/api-stability.md`.
+
+### Added
+
+#### Stream writes
+
+- **`stream put` upload path** — `gonimbus stream put` now uploads stdin to a
+  destination object, including both raw single-object mode and framed JSONL
+  batches produced by `stream get`.
+- **Destination authority for framed uploads** — the CLI destination remains
+  authoritative. Exact destinations write one framed object; trailing-slash
+  destinations act as roots for multi-object batches. Frame `dest_key` values
+  are ignored unless `--dest-from-frame` is explicitly enabled.
+- **Multipart streaming writes** — S3 uploads switch to multipart at the
+  configured threshold, emit `gonimbus.stream.progress.v1` progress records,
+  and avoid full-object buffering once multipart upload begins.
+
+#### Reflow and verification
+
+- **Freshness-based collision mode** —
+  `transfer reflow --on-collision overwrite-if-source-newer` overwrites an
+  existing destination only when the observed source `LastModified` is newer, or
+  when timestamps are equal but sizes differ. Destination overwrite is guarded
+  with the observed destination ETag so concurrent mutation yields a
+  deterministic skipped record.
+- **Pair verification command** — `gonimbus inspect-pair` reads reflow JSONL and
+  verifies terminal write claims against destination HEAD results, emitting
+  per-object `gonimbus.inspect.pair.v1` records plus a summary record.
+
+#### API and repository guardrails
+
+- **Stable API manifest and soft diff gate** — `docs/api-stability.md`,
+  `docs/development/api-stability.md`, and `make api-stability` now define and
+  check the Stable embedded library surface before release.
+- **Public-surface policy conformance** — repository-facing agent and
+  contributor guidance now points to the canonical 3leaps OSS policy and keeps
+  sensitive local data structurally outside the repository working tree.
+
+### Changed
+
+- **Bumped version to `0.2.3`** for this release. Version stamping continues
+  through `VERSION`, `.fulmen/app.yaml`, the embedded app identity mirror, and
+  `internal/buildinfo/VERSION`.
+
+### Security
+
+- **Framed destination keys are constrained under the CLI destination root.**
+  `stream put --dest-from-frame` rejects absolute paths, URI-like prefixes,
+  root-anchored paths, and `..` traversal before writing destination objects.
+- **Conditional multipart completion preserves no-overwrite semantics** for S3
+  destinations that support the expanded multipart interface.
+- **Sensitive local data policy is explicit.** Public docs state the principle
+  that sensitive or proprietary data belongs outside repository working trees,
+  rather than relying on `.gitignore` as a security boundary.
 
 ## [0.2.2] - 2026-05-26
 
@@ -260,8 +336,11 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Changed
 
 - **Pre-push hook** (`.goneat/hooks.yaml`) — assess gate scoped to `--new-issues-only --new-issues-base origin/main` so unrelated changes don't pay for legacy lint debt
-- **AGENTS.md** — local planning-directory references retired; planning artifacts now live outside this public repository
-- **AGENTS.md DO NOT list** — replaced narrow planning-directory guidance with broader prohibition on referencing client data, paths, or identifiers in repo content
+- **AGENTS.md** — repository-local workflow references retired; sensitive
+  local context now stays outside this public repository
+- **AGENTS.md DO NOT list** — replaced narrow local-workflow guidance with a
+  broader prohibition on referencing client data, paths, or identifiers in repo
+  content
 
 ### Fixed
 
@@ -285,7 +364,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Supports probe-derived variables (e.g., `{business_date}` from content)
   - Parallel copy with configurable workers (`--parallel`, default 16)
   - Checkpoint/resume with SQLite state (`--checkpoint`, `--resume`)
-  - Dry-run mode for planning (`--dry-run`)
+  - Dry-run mode for previewing writes (`--dry-run`)
   - Collision detection and handling (`--on-collision log|fail|overwrite`)
 
 - **Reflow Package** (`pkg/transfer/`)
@@ -710,7 +789,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/3leaps/gonimbus/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/3leaps/gonimbus/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/3leaps/gonimbus/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/3leaps/gonimbus/compare/v0.1.8...v0.2.0
