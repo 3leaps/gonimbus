@@ -86,20 +86,34 @@ Example output structure:
 
 ### `stream put`
 
-Writes stdin to one exact destination object.
+Writes stdin to one destination object in raw mode.
 
 ```bash
 cat output.xml | gonimbus stream put file:///tmp/output.xml
 cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --profile my-profile
 ```
 
-It can also consume one framed `stream get` object and write it to an explicit
-destination:
+It can also consume framed `stream get` objects. The CLI destination is
+authoritative: framed input is treated as source identity, not write authority.
+An exact CLI destination writes a single framed object to that exact object;
+trailing-slash destinations are roots/prefixes for one or more framed objects:
 
 ```bash
 gonimbus stream get s3://bucket/path/to/input.xml --profile my-profile \
   | gonimbus stream put --framing jsonl file:///tmp/input.xml
+
+gonimbus stream get s3://source/path/to/object.xml --profile my-profile \
+  | gonimbus stream put --framing jsonl s3://dest/landing/ --profile my-profile
 ```
+
+In framed mode, `open.dest_key` is optional and ignored unless
+`--dest-from-frame` is set. When enabled, `dest_key` must be relative under the
+CLI destination root; absolute URIs, root-anchored paths, scheme prefixes, and
+`..` traversal are rejected before writing. Without `dest_key`, root/prefix
+destinations derive the destination key from the source URI key. Use
+`--fail-fast` to
+stop framed batch processing after the first per-object failure; otherwise later
+objects continue and the process exits non-zero if any object failed.
 
 `stream put` refuses to replace an existing object by default. For `file://`
 and S3-compatible destinations this default uses provider-level conditional
@@ -111,6 +125,12 @@ the command fails closed rather than falling back to a non-atomic write. Use
 ```bash
 cat output.xml | gonimbus stream put s3://bucket/path/to/output.xml --overwrite
 ```
+
+Large objects switch to multipart upload after `--multipart-threshold`
+(default `64MiB`) and stream parts of `--part-size` (default `8MiB`) without
+buffering the full object. Each uploaded multipart part emits
+`gonimbus.stream.progress.v1`; completion returns the final provider ETag when
+available.
 
 Output is a `gonimbus.stream.put.v1` JSONL record on success:
 

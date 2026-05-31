@@ -36,6 +36,7 @@ var (
 	_ provider.MetadataAwarePutter            = (*Provider)(nil)
 	_ provider.ObjectDeleter                  = (*Provider)(nil)
 	_ provider.MultipartUploader              = (*Provider)(nil)
+	_ provider.ConditionalMultipartCompleter  = (*Provider)(nil)
 	_ provider.MetadataAwareMultipartUploader = (*Provider)(nil)
 	_ provider.PrefixLister                   = (*Provider)(nil)
 	_ provider.DelimiterLister                = (*Provider)(nil)
@@ -416,6 +417,66 @@ func (p *Provider) CreateMultipartUploadWithOptions(ctx context.Context, key str
 		return "", p.wrapError("CreateMultipartUpload", key, err)
 	}
 	return aws.ToString(out.UploadId), nil
+}
+
+func (p *Provider) UploadPart(ctx context.Context, key, uploadID string, partNumber int32, body io.Reader, size int64) (provider.PartETag, error) {
+	out, err := p.client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        aws.String(p.bucket),
+		Key:           aws.String(key),
+		UploadId:      aws.String(uploadID),
+		PartNumber:    aws.Int32(partNumber),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		return provider.PartETag{}, p.wrapError("UploadPart", key, err)
+	}
+	return provider.PartETag{PartNumber: partNumber, ETag: cleanETag(aws.ToString(out.ETag))}, nil
+}
+
+func (p *Provider) CompleteMultipartUpload(ctx context.Context, key, uploadID string, parts []provider.PartETag) (provider.PutResult, error) {
+	return p.completeMultipartUpload(ctx, key, uploadID, parts, provider.PutPrecondition{})
+}
+
+func (p *Provider) CompleteMultipartUploadConditional(ctx context.Context, key, uploadID string, parts []provider.PartETag, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if err := precond.Validate(); err != nil {
+		return provider.PutResult{}, p.wrapError("CompleteMultipartUpload", key, err)
+	}
+	return p.completeMultipartUpload(ctx, key, uploadID, parts, precond)
+}
+
+func (p *Provider) completeMultipartUpload(ctx context.Context, key, uploadID string, parts []provider.PartETag, precond provider.PutPrecondition) (provider.PutResult, error) {
+	input := &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(p.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: make([]types.CompletedPart, 0, len(parts)),
+		},
+	}
+	for _, part := range parts {
+		input.MultipartUpload.Parts = append(input.MultipartUpload.Parts, types.CompletedPart{
+			ETag:       aws.String(conditionETag(part.ETag)),
+			PartNumber: aws.Int32(part.PartNumber),
+		})
+	}
+	if precond.IfAbsent {
+		input.IfNoneMatch = aws.String("*")
+	} else if precond.IfMatchETag != nil {
+		input.IfMatch = aws.String(conditionETag(*precond.IfMatchETag))
+	}
+
+	out, err := p.client.CompleteMultipartUpload(ctx, input)
+	if err != nil {
+		if precond.IfAbsent || precond.IfMatchETag != nil {
+			return provider.PutResult{}, p.wrapConditionalPutError(key, precond, err)
+		}
+		return provider.PutResult{}, p.wrapError("CompleteMultipartUpload", key, err)
+	}
+	return provider.PutResult{
+		ETag:    cleanETag(aws.ToString(out.ETag)),
+		Version: aws.ToString(out.VersionId),
+	}, nil
 }
 
 // AbortMultipartUpload aborts a multipart upload.

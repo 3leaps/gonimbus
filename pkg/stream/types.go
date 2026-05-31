@@ -11,6 +11,7 @@ const (
 type Open struct {
 	StreamID string `json:"stream_id"`
 	URI      string `json:"uri"`
+	DestKey  string `json:"dest_key,omitempty"`
 
 	ETag         string     `json:"etag,omitempty"`
 	Size         *int64     `json:"size,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -660,6 +661,53 @@ func TestCreateMultipartUploadWithOptionsSendsMetadataHeaders(t *testing.T) {
 	require.Equal(t, "team-a", req.Header.Get("X-Amz-Meta-Owner"))
 	require.Equal(t, "text/plain", req.Header.Get("Content-Type"))
 	require.Equal(t, "STANDARD_IA", req.Header.Get("X-Amz-Storage-Class"))
+}
+
+func TestMultipartUploadPartAndConditionalComplete(t *testing.T) {
+	reqs := make(chan *http.Request, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs <- r.Clone(context.Background())
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == "PUT" && strings.Contains(r.URL.RawQuery, "partNumber=1"):
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.Equal(t, "part-body", string(body))
+			w.Header().Set("ETag", `"part-etag"`)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && strings.Contains(r.URL.RawQuery, "uploadId=upload-123"):
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>object.txt</Key><ETag>"complete-etag"</ETag></CompleteMultipartUploadResult>`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        server.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIAFIRST000000001",
+		SecretAccessKey: "first-secret",
+	})
+	require.NoError(t, err)
+
+	part, err := p.UploadPart(context.Background(), "object.txt", "upload-123", 1, strings.NewReader("part-body"), int64(len("part-body")))
+	require.NoError(t, err)
+	require.Equal(t, provider.PartETag{PartNumber: 1, ETag: "part-etag"}, part)
+	partReq := receiveRequest(t, reqs, "multipart part")
+	require.Equal(t, "PUT", partReq.Method)
+	require.Contains(t, partReq.URL.RawQuery, "partNumber=1")
+	require.Contains(t, partReq.URL.RawQuery, "uploadId=upload-123")
+
+	result, err := p.CompleteMultipartUploadConditional(context.Background(), "object.txt", "upload-123", []provider.PartETag{part}, provider.PutPrecondition{IfAbsent: true})
+	require.NoError(t, err)
+	require.Equal(t, "complete-etag", result.ETag)
+	completeReq := receiveRequest(t, reqs, "multipart complete")
+	require.Equal(t, "POST", completeReq.Method)
+	require.Contains(t, completeReq.URL.RawQuery, "uploadId=upload-123")
+	require.Equal(t, "*", completeReq.Header.Get("If-None-Match"))
 }
 
 func receiveObservedRequest(t *testing.T, ch <-chan observedS3Request, label string) observedS3Request {

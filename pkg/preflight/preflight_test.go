@@ -2,6 +2,7 @@ package preflight_test
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,14 @@ func (p *denyMultipartProvider) Close() error {
 
 func (p *denyMultipartProvider) CreateMultipartUpload(ctx context.Context, key string) (string, error) {
 	return "", provider.ErrAccessDenied
+}
+
+func (p *denyMultipartProvider) UploadPart(ctx context.Context, key, uploadID string, partNumber int32, body io.Reader, size int64) (provider.PartETag, error) {
+	return provider.PartETag{}, provider.ErrAccessDenied
+}
+
+func (p *denyMultipartProvider) CompleteMultipartUpload(ctx context.Context, key, uploadID string, parts []provider.PartETag) (provider.PutResult, error) {
+	return provider.PutResult{}, provider.ErrAccessDenied
 }
 
 func (p *denyMultipartProvider) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {

@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -20,9 +23,13 @@ import (
 )
 
 const (
-	streamPutRecordType  = "gonimbus.stream.put.v1"
-	streamPutFramingRaw  = "raw"
-	streamPutFramingJSON = "jsonl"
+	streamPutRecordType     = "gonimbus.stream.put.v1"
+	streamPutProgressType   = "gonimbus.stream.progress.v1"
+	streamPutFramingRaw     = "raw"
+	streamPutFramingJSON    = "jsonl"
+	streamPutDefaultPart    = int64(8 * 1024 * 1024)
+	streamPutDefaultTrigger = int64(64 * 1024 * 1024)
+	streamPutMultipartNever = int64(1<<63 - 1)
 )
 
 var streamPutCmd = newStreamPutCommand()
@@ -33,6 +40,10 @@ var (
 	streamPutEndpoint  string
 	streamPutFraming   string
 	streamPutOverwrite bool
+	streamPutDestFrame bool
+	streamPutFailFast  bool
+	streamPutPartSize  string
+	streamPutThreshold string
 )
 
 func init() {
@@ -63,6 +74,10 @@ Framing modes:
 	cmd.Flags().StringVar(&streamPutEndpoint, "endpoint", "", "Custom S3 endpoint")
 	cmd.Flags().StringVar(&streamPutFraming, "framing", streamPutFramingRaw, "Input framing (raw or jsonl)")
 	cmd.Flags().BoolVar(&streamPutOverwrite, "overwrite", false, "Allow overwriting an existing destination object")
+	cmd.Flags().BoolVar(&streamPutDestFrame, "dest-from-frame", false, "Allow framed dest_key values under the CLI destination root")
+	cmd.Flags().BoolVar(&streamPutFailFast, "fail-fast", false, "Stop framed batch processing after the first per-object failure")
+	cmd.Flags().StringVar(&streamPutPartSize, "part-size", "8MiB", "Multipart upload part size in bytes or KiB/MiB/GiB")
+	cmd.Flags().StringVar(&streamPutThreshold, "multipart-threshold", "64MiB", "Size threshold for switching to multipart upload")
 
 	return cmd
 }
@@ -74,6 +89,19 @@ type streamPutRecord struct {
 	Status         string `json:"status"`
 	SourceURI      string `json:"source_uri,omitempty"`
 	SourceStreamID string `json:"source_stream_id,omitempty"`
+	ETag           string `json:"etag,omitempty"`
+	UploadMode     string `json:"upload_mode,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type streamPutProgressRecord struct {
+	DestURI    string `json:"dest_uri"`
+	DestKey    string `json:"dest_key"`
+	UploadID   string `json:"upload_id,omitempty"`
+	PartNumber int32  `json:"part_number"`
+	PartBytes  int64  `json:"part_bytes"`
+	Bytes      int64  `json:"bytes"`
+	Status     string `json:"status"`
 }
 
 func runStreamPut(cmd *cobra.Command, args []string) error {
@@ -87,19 +115,39 @@ func runStreamPut(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --framing value", fmt.Errorf("stream put supports raw or jsonl framing"))
 	}
 
-	dest, err := parseOutputDest(args[0])
+	jobID := uuid.New().String()
+	providerName := streamPutOutputProviderName(args[0])
+	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, providerName)
+	defer func() { _ = w.Close() }()
+
+	partSize, err := parseStreamPutSize(streamPutPartSize, streamPutDefaultPart)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --part-size value", err)
+	}
+	threshold, err := parseStreamPutSize(streamPutThreshold, streamPutDefaultTrigger)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --multipart-threshold value", err)
+	}
+	if partSize <= 0 {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --part-size value", errors.New("part size must be > 0"))
+	}
+	if threshold < 0 {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --multipart-threshold value", errors.New("multipart threshold must be >= 0"))
+	}
+
+	opts := streamPutUploadOptions{PartSize: partSize, MultipartThreshold: threshold, Overwrite: streamPutOverwrite}
+	if framing == streamPutFramingRaw {
+		return runStreamPutRaw(ctx, cmd, args[0], w, opts)
+	}
+	return runStreamPutFramed(ctx, cmd, args[0], w, opts)
+}
+
+func runStreamPutRaw(ctx context.Context, cmd *cobra.Command, rawDest string, w *output.JSONLWriter, opts streamPutUploadOptions) error {
+	dest, err := parseOutputDest(rawDest)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid destination URI", err)
 	}
-	dest.Region = streamPutRegion
-	dest.Profile = streamPutProfile
-	dest.Endpoint = streamPutEndpoint
-	dest.ForcePathStyle = streamPutEndpoint != ""
-
-	jobID := uuid.New().String()
-	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, dest.Provider)
-	defer func() { _ = w.Close() }()
-
+	applyStreamPutProviderFlags(dest)
 	putter, err := newOutputProvider(ctx, dest)
 	if err != nil {
 		_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeProviderUnavailable, "Failed to connect to storage provider", err, nil)
@@ -109,52 +157,685 @@ func runStreamPut(cmd *cobra.Command, args []string) error {
 		defer func() { _ = closer.Close() }()
 	}
 
+	result, err := uploadStreamPutReader(ctx, putter, outputDestURI(dest), dest.Key, cmd.InOrStdin(), opts, w)
+	if err != nil {
+		return streamPutUploadExit(ctx, w, dest, err)
+	}
+	return w.WriteAny(ctx, streamPutRecordType, &streamPutRecord{
+		DestURI:    outputDestURI(dest),
+		DestKey:    dest.Key,
+		Bytes:      result.Bytes,
+		Status:     "success",
+		ETag:       result.ETag,
+		UploadMode: result.Mode,
+	})
+}
+
+type streamPutUploadOptions struct {
+	PartSize           int64
+	MultipartThreshold int64
+	Overwrite          bool
+}
+
+type streamPutUploadResult struct {
+	Bytes int64
+	ETag  string
+	Mode  string
+}
+
+func uploadStreamPutReader(ctx context.Context, putter provider.ObjectPutter, destURI string, key string, r io.Reader, opts streamPutUploadOptions, w *output.JSONLWriter) (streamPutUploadResult, error) {
+	session, err := newStreamPutUploadSession(ctx, putter, destURI, key, opts, w)
+	if err != nil {
+		return streamPutUploadResult{}, err
+	}
+	if _, err := io.Copy(session, r); err != nil {
+		_ = session.Abort(ctx)
+		return streamPutUploadResult{}, err
+	}
+	result, err := session.Close(ctx)
+	if err != nil {
+		_ = session.Abort(ctx)
+		return streamPutUploadResult{}, err
+	}
+	return result, nil
+}
+
+type streamPutUploadSession struct {
+	ctx     context.Context
+	putter  provider.ObjectPutter
+	destURI string
+	key     string
+	opts    streamPutUploadOptions
+	w       *output.JSONLWriter
+
+	spoolPath string
+	spool     *os.File
+
+	multipart bool
+	uploadID  string
+	parts     []provider.PartETag
+	partNum   int32
+	partBuf   bytes.Buffer
+	bytes     int64
+	closed    bool
+}
+
+func newStreamPutUploadSession(ctx context.Context, putter provider.ObjectPutter, destURI string, key string, opts streamPutUploadOptions, w *output.JSONLWriter) (*streamPutUploadSession, error) {
+	if opts.PartSize <= 0 {
+		opts.PartSize = streamPutDefaultPart
+	}
+	if opts.MultipartThreshold < 0 {
+		opts.MultipartThreshold = streamPutDefaultTrigger
+	}
+	if _, ok := putter.(provider.MultipartUploader); !ok {
+		opts.MultipartThreshold = streamPutMultipartNever
+	}
+	tmp, err := os.CreateTemp("", "gonimbus-stream-put-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp spool: %w", err)
+	}
+	return &streamPutUploadSession{ctx: ctx, putter: putter, destURI: destURI, key: key, opts: opts, w: w, spool: tmp, spoolPath: tmp.Name(), partNum: 1}, nil
+}
+
+func (s *streamPutUploadSession) Write(p []byte) (int, error) {
+	if s.closed {
+		return 0, output.ErrWriterClosed
+	}
+	written := 0
+	for len(p) > 0 {
+		if !s.multipart {
+			n, err := s.spool.Write(p)
+			if n > 0 {
+				s.bytes += int64(n)
+				written += n
+				p = p[n:]
+			}
+			if err != nil {
+				return written, err
+			}
+			if s.bytes > s.opts.MultipartThreshold {
+				if err := s.startMultipart(s.ctx); err != nil {
+					return written, err
+				}
+			}
+			continue
+		}
+		space := int(s.opts.PartSize) - s.partBuf.Len()
+		if space <= 0 {
+			if err := s.flushPart(s.ctx, false); err != nil {
+				return written, err
+			}
+			continue
+		}
+		if space > len(p) {
+			space = len(p)
+		}
+		n, err := s.partBuf.Write(p[:space])
+		s.bytes += int64(n)
+		written += n
+		p = p[n:]
+		if err != nil {
+			return written, err
+		}
+		if int64(s.partBuf.Len()) == s.opts.PartSize {
+			if err := s.flushPart(s.ctx, false); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
+}
+
+func (s *streamPutUploadSession) Close(ctx context.Context) (streamPutUploadResult, error) {
+	if s.closed {
+		return streamPutUploadResult{}, output.ErrWriterClosed
+	}
+	s.closed = true
+	if !s.multipart {
+		if err := s.spool.Close(); err != nil {
+			_ = os.Remove(s.spoolPath)
+			return streamPutUploadResult{}, fmt.Errorf("close temp spool: %w", err)
+		}
+		defer func() { _ = os.Remove(s.spoolPath) }()
+		if err := uploadStreamPutOutput(ctx, s.putter, s.key, s.spoolPath, s.opts.Overwrite); err != nil {
+			return streamPutUploadResult{}, err
+		}
+		return streamPutUploadResult{Bytes: s.bytes, Mode: "single"}, nil
+	}
+	if s.partBuf.Len() > 0 || len(s.parts) == 0 {
+		if err := s.flushPart(ctx, true); err != nil {
+			return streamPutUploadResult{}, err
+		}
+	}
 	var (
-		tempPath       string
-		bytesWritten   int64
-		sourceURI      string
-		sourceStreamID string
+		result provider.PutResult
+		err    error
 	)
-	switch framing {
-	case streamPutFramingRaw:
-		tempPath, bytesWritten, err = spoolStreamPutInput(cmd.InOrStdin())
-	case streamPutFramingJSON:
-		tempPath, bytesWritten, sourceURI, sourceStreamID, err = spoolStreamPutFramedInput(cmd.InOrStdin())
-	default:
-		err = fmt.Errorf("unsupported framing %q", framing)
+	if s.opts.Overwrite {
+		result, err = s.multipartUploader().CompleteMultipartUpload(ctx, s.key, s.uploadID, s.parts)
+	} else {
+		conditional, ok := s.putter.(provider.ConditionalMultipartCompleter)
+		if !ok {
+			return streamPutUploadResult{}, fmt.Errorf("destination provider does not support conditional multipart completion")
+		}
+		result, err = conditional.CompleteMultipartUploadConditional(ctx, s.key, s.uploadID, s.parts, provider.PutPrecondition{IfAbsent: true})
 	}
 	if err != nil {
-		code := output.ErrCodeInternal
-		msg := "Failed to read stdin"
-		exitCode := foundry.ExitFileReadError
-		if framing == streamPutFramingJSON {
-			code = output.ErrCodeInvalidInput
-			msg = "Invalid stream input"
-			exitCode = foundry.ExitInvalidArgument
-		}
-		_ = emitStreamPutError(ctx, w, dest.Key, code, msg, err, map[string]any{"framing": framing})
-		return exitError(exitCode, msg, err)
+		return streamPutUploadResult{}, fmt.Errorf("complete multipart upload: %w", err)
 	}
-	defer func() { _ = os.Remove(tempPath) }()
+	return streamPutUploadResult{Bytes: s.bytes, ETag: result.ETag, Mode: "multipart"}, nil
+}
 
-	if err := uploadStreamPutOutput(ctx, putter, dest.Key, tempPath, streamPutOverwrite); err != nil {
-		if provider.IsAlreadyExists(err) {
-			existsErr := fmt.Errorf("destination object already exists: %s", outputDestURI(dest))
-			_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeAlreadyExists, "Destination exists", existsErr, map[string]any{"dest_uri": outputDestURI(dest)})
-			return exitError(foundry.ExitFileWriteError, "Destination exists", existsErr)
-		}
-		_ = emitStreamPutError(ctx, w, dest.Key, classifyStreamPutErrCode(err), "PutObject failed", err, nil)
-		return exitError(foundry.ExitExternalServiceUnavailable, "PutObject failed", err)
+func (s *streamPutUploadSession) Abort(ctx context.Context) error {
+	_ = os.Remove(s.spoolPath)
+	if s.multipart && s.uploadID != "" {
+		return s.multipartUploader().AbortMultipartUpload(ctx, s.key, s.uploadID)
 	}
+	return nil
+}
 
-	return w.WriteAny(ctx, streamPutRecordType, &streamPutRecord{
-		DestURI:        outputDestURI(dest),
-		DestKey:        dest.Key,
-		Bytes:          bytesWritten,
-		Status:         "success",
-		SourceURI:      sourceURI,
-		SourceStreamID: sourceStreamID,
+func (s *streamPutUploadSession) startMultipart(ctx context.Context) error {
+	mu, ok := s.putter.(provider.MultipartUploader)
+	if !ok {
+		return fmt.Errorf("destination provider does not support multipart uploads")
+	}
+	uploadID, err := mu.CreateMultipartUpload(ctx, s.key)
+	if err != nil {
+		return fmt.Errorf("create multipart upload: %w", err)
+	}
+	s.multipart = true
+	s.uploadID = uploadID
+
+	if _, err := s.spool.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek temp spool: %w", err)
+	}
+	buf := make([]byte, s.opts.PartSize)
+	for {
+		n, readErr := io.ReadFull(s.spool, buf)
+		if n > 0 {
+			if readErr == io.ErrUnexpectedEOF {
+				_, _ = s.partBuf.Write(buf[:n])
+			} else {
+				part, err := mu.UploadPart(ctx, s.key, s.uploadID, s.partNum, bytes.NewReader(buf[:n]), int64(n))
+				if err != nil {
+					return fmt.Errorf("upload multipart part %d: %w", s.partNum, err)
+				}
+				s.parts = append(s.parts, part)
+				if err := s.writeProgress(ctx, part.PartNumber, int64(n), "uploaded"); err != nil {
+					return err
+				}
+				s.partNum++
+			}
+		}
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read temp spool: %w", readErr)
+		}
+	}
+	if err := s.spool.Close(); err != nil {
+		return fmt.Errorf("close temp spool: %w", err)
+	}
+	_ = os.Remove(s.spoolPath)
+	return nil
+}
+
+func (s *streamPutUploadSession) flushPart(ctx context.Context, final bool) error {
+	if s.partBuf.Len() == 0 && !final {
+		return nil
+	}
+	body := append([]byte(nil), s.partBuf.Bytes()...)
+	s.partBuf.Reset()
+	part, err := s.multipartUploader().UploadPart(ctx, s.key, s.uploadID, s.partNum, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return fmt.Errorf("upload multipart part %d: %w", s.partNum, err)
+	}
+	s.parts = append(s.parts, part)
+	if err := s.writeProgress(ctx, part.PartNumber, int64(len(body)), "uploaded"); err != nil {
+		return err
+	}
+	s.partNum++
+	return nil
+}
+
+func (s *streamPutUploadSession) multipartUploader() provider.MultipartUploader {
+	return s.putter.(provider.MultipartUploader)
+}
+
+func (s *streamPutUploadSession) writeProgress(ctx context.Context, partNumber int32, partBytes int64, status string) error {
+	return s.w.WriteAny(ctx, streamPutProgressType, &streamPutProgressRecord{
+		DestURI:    s.destURI,
+		DestKey:    s.key,
+		UploadID:   s.uploadID,
+		PartNumber: partNumber,
+		PartBytes:  partBytes,
+		Bytes:      s.bytes,
+		Status:     status,
 	})
+}
+
+func streamPutUploadExit(ctx context.Context, w output.Writer, dest *outputDestSpec, err error) error {
+	if provider.IsAlreadyExists(err) {
+		existsErr := fmt.Errorf("destination object already exists: %s", outputDestURI(dest))
+		_ = emitStreamPutError(ctx, w, dest.Key, output.ErrCodeAlreadyExists, "Destination exists", existsErr, map[string]any{"dest_uri": outputDestURI(dest)})
+		return exitError(foundry.ExitFileWriteError, "Destination exists", existsErr)
+	}
+	_ = emitStreamPutError(ctx, w, dest.Key, classifyStreamPutErrCode(err), "PutObject failed", err, nil)
+	return exitError(foundry.ExitExternalServiceUnavailable, "PutObject failed", err)
+}
+
+type streamPutDestRoot struct {
+	Provider       string
+	Bucket         string
+	Prefix         string
+	ExactKey       string
+	BaseDir        string
+	Region         string
+	Profile        string
+	Endpoint       string
+	ForcePathStyle bool
+}
+
+func runStreamPutFramed(ctx context.Context, cmd *cobra.Command, rawDest string, w *output.JSONLWriter, opts streamPutUploadOptions) error {
+	root, err := parseStreamPutDestRoot(rawDest)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid destination URI", err)
+	}
+	root.Region = streamPutRegion
+	root.Profile = streamPutProfile
+	root.Endpoint = streamPutEndpoint
+	root.ForcePathStyle = streamPutEndpoint != ""
+
+	provSpec := root.providerSpec()
+	putter, err := newOutputProvider(ctx, provSpec)
+	if err != nil {
+		_ = emitStreamPutError(ctx, w, root.Prefix, output.ErrCodeProviderUnavailable, "Failed to connect to storage provider", err, nil)
+		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
+	}
+	if closer, ok := putter.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
+
+	dec := stream.NewDecoder(cmd.InOrStdin())
+	var failures int
+	var objects int
+	var firstErr error
+	for {
+		rec, err := readStreamPutFramedObject(ctx, dec, root, putter, opts, w, objects)
+		if errors.Is(err, io.EOF) {
+			if objects == 0 && failures == 0 {
+				firstErr = errors.New("missing stream open record")
+				failures++
+				_ = emitStreamPutError(ctx, w, "", output.ErrCodeInvalidInput, "Invalid stream input", firstErr, map[string]any{"framing": streamPutFramingJSON})
+			}
+			break
+		}
+		if err != nil {
+			failures++
+			if firstErr == nil {
+				firstErr = err
+			}
+			_ = emitStreamPutError(ctx, w, "", output.ErrCodeInvalidInput, "Invalid stream input", err, map[string]any{"framing": streamPutFramingJSON})
+			if streamPutFailFast {
+				return exitError(foundry.ExitInvalidArgument, "Invalid stream input", err)
+			}
+			break
+		}
+		if rec == nil {
+			continue
+		}
+		objects++
+		if rec.Status != "success" {
+			failures++
+			if firstErr == nil {
+				firstErr = errors.New(rec.Error)
+			}
+			if streamPutFailFast {
+				return exitError(foundry.ExitExternalServiceUnavailable, "PutObject failed", fmt.Errorf("stream %s failed", rec.SourceStreamID))
+			}
+		}
+	}
+	if failures > 0 {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("failures=%d", failures)
+		}
+		return exitError(foundry.ExitExternalServiceUnavailable, "stream put completed with failures", firstErr)
+	}
+	return nil
+}
+
+func readStreamPutFramedObject(ctx context.Context, dec *stream.Decoder, root streamPutDestRoot, putter provider.ObjectPutter, opts streamPutUploadOptions, w *output.JSONLWriter, objectIndex int) (*streamPutRecord, error) {
+	ev, err := dec.Next()
+	if err != nil {
+		return nil, err
+	}
+	if ev.Kind != stream.EventRecord || ev.Record.Type != stream.TypeStreamOpen {
+		if ev.Kind == stream.EventChunk {
+			_ = ev.Chunk.Body.Close()
+			return nil, errors.New("stream chunk before open record")
+		}
+		if ev.Record.Type == stream.TypeStreamClose {
+			return nil, errors.New("trailing stream data after close record")
+		}
+		return nil, fmt.Errorf("expected stream open record, got %q", ev.Record.Type)
+	}
+
+	var open stream.Open
+	if err := json.Unmarshal(ev.Record.Data, &open); err != nil {
+		return nil, fmt.Errorf("decode stream open record: %w", err)
+	}
+	if strings.TrimSpace(open.StreamID) == "" {
+		return nil, errors.New("stream open record missing stream_id")
+	}
+	destKey, err := root.keyForOpen(open, streamPutDestFrame, objectIndex)
+	if err != nil {
+		return nil, err
+	}
+	dest := root.objectSpec(destKey)
+	providerKey := dest.Key
+	destURI := outputDestURI(dest)
+	session, err := newStreamPutUploadSession(ctx, putter, destURI, providerKey, opts, w)
+	if err != nil {
+		return nil, err
+	}
+
+	var bytesWritten int64
+	var expectedSeq int64
+	for {
+		ev, err = dec.Next()
+		if err != nil {
+			_ = session.Abort(ctx)
+			if errors.Is(err, io.EOF) {
+				return nil, errors.New("missing stream close record")
+			}
+			return nil, fmt.Errorf("decode stream input: %w", err)
+		}
+		if ev.Kind == stream.EventChunk {
+			hdr := ev.Chunk.Header
+			if hdr.StreamID != open.StreamID {
+				_ = ev.Chunk.Body.Close()
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("stream chunk uses stream_id %q, want %q", hdr.StreamID, open.StreamID)
+			}
+			if hdr.Seq != expectedSeq {
+				_ = ev.Chunk.Body.Close()
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("stream chunk seq=%d, want %d", hdr.Seq, expectedSeq)
+			}
+			if hdr.Offset != nil && *hdr.Offset != bytesWritten {
+				_ = ev.Chunk.Body.Close()
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("stream chunk offset=%d, want %d", *hdr.Offset, bytesWritten)
+			}
+			n, copyErr := io.Copy(session, ev.Chunk.Body)
+			closeErr := ev.Chunk.Body.Close()
+			if copyErr != nil {
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("read stream chunk seq=%d: %w", hdr.Seq, copyErr)
+			}
+			if closeErr != nil {
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("close stream chunk seq=%d: %w", hdr.Seq, closeErr)
+			}
+			if n != hdr.NBytes {
+				_ = session.Abort(ctx)
+				return nil, fmt.Errorf("stream chunk seq=%d read %d bytes, want %d", hdr.Seq, n, hdr.NBytes)
+			}
+			bytesWritten += n
+			expectedSeq++
+			continue
+		}
+		if ev.Record.Type != stream.TypeStreamClose {
+			_ = session.Abort(ctx)
+			if ev.Record.Type == stream.TypeStreamOpen {
+				return nil, errors.New("duplicate stream open record")
+			}
+			return nil, fmt.Errorf("unexpected stream record %q", ev.Record.Type)
+		}
+		var closeRec stream.Close
+		if err := json.Unmarshal(ev.Record.Data, &closeRec); err != nil {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("decode stream close record: %w", err)
+		}
+		if closeRec.StreamID != open.StreamID {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("stream close uses stream_id %q, want %q", closeRec.StreamID, open.StreamID)
+		}
+		if closeRec.Status != "success" {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("stream close status must be success, got %q", closeRec.Status)
+		}
+		if closeRec.Chunks != expectedSeq {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("stream close chunks=%d, want %d", closeRec.Chunks, expectedSeq)
+		}
+		if closeRec.Bytes != bytesWritten {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("stream close bytes=%d, want %d", closeRec.Bytes, bytesWritten)
+		}
+		if open.Size != nil && *open.Size != bytesWritten {
+			_ = session.Abort(ctx)
+			return nil, fmt.Errorf("stream open size=%d, want %d", *open.Size, bytesWritten)
+		}
+		break
+	}
+
+	result, err := session.Close(ctx)
+	if err != nil {
+		_ = session.Abort(ctx)
+		_ = emitStreamPutError(ctx, w, providerKey, classifyStreamPutErrCode(err), "PutObject failed", err, map[string]any{"dest_uri": destURI})
+		errText := err.Error()
+		if provider.IsAlreadyExists(err) {
+			errText = "Destination exists"
+		}
+		return &streamPutRecord{DestURI: destURI, DestKey: providerKey, Bytes: bytesWritten, Status: "error", SourceURI: open.URI, SourceStreamID: open.StreamID, Error: errText}, nil
+	}
+	rec := &streamPutRecord{
+		DestURI:        destURI,
+		DestKey:        providerKey,
+		Bytes:          result.Bytes,
+		Status:         "success",
+		SourceURI:      open.URI,
+		SourceStreamID: open.StreamID,
+		ETag:           result.ETag,
+		UploadMode:     result.Mode,
+	}
+	return rec, w.WriteAny(ctx, streamPutRecordType, rec)
+}
+
+func parseStreamPutDestRoot(raw string) (streamPutDestRoot, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return streamPutDestRoot{}, fmt.Errorf("destination root is required")
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "file://") {
+		p := strings.TrimSpace(raw[len("file://"):])
+		if p == "" {
+			return streamPutDestRoot{}, fmt.Errorf("file destination root is empty")
+		}
+		isPrefix := strings.HasSuffix(p, "/")
+		p = filepath.Clean(p)
+		if !filepath.IsAbs(p) {
+			return streamPutDestRoot{}, fmt.Errorf("file destination root must be absolute: %s", p)
+		}
+		exactKey := ""
+		if !isPrefix {
+			exactKey = filepath.ToSlash(filepath.Base(p))
+			p = filepath.Dir(p)
+		}
+		return streamPutDestRoot{Provider: string(provider.ProviderFile), BaseDir: p, ExactKey: exactKey}, nil
+	}
+	if strings.HasPrefix(lower, "s3://") {
+		remainder := raw[len("s3://"):]
+		slashIdx := strings.Index(remainder, "/")
+		if slashIdx == -1 {
+			return streamPutDestRoot{}, fmt.Errorf("s3 destination root must include a prefix or key: %s", raw)
+		}
+		bucket := remainder[:slashIdx]
+		prefix := remainder[slashIdx+1:]
+		if bucket == "" {
+			return streamPutDestRoot{}, fmt.Errorf("s3 destination root missing bucket: %s", raw)
+		}
+		exactKey := ""
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			exactKey = path.Base(prefix)
+			parent := path.Dir(prefix)
+			if parent == "." {
+				prefix = ""
+			} else {
+				prefix = parent + "/"
+			}
+		}
+		return streamPutDestRoot{Provider: string(provider.ProviderS3), Bucket: bucket, Prefix: prefix, ExactKey: exactKey}, nil
+	}
+	return streamPutDestRoot{}, fmt.Errorf("unsupported output scheme %q (supported: s3, file)", raw)
+}
+
+func (r streamPutDestRoot) providerSpec() *outputDestSpec {
+	return r.objectSpec("probe")
+}
+
+func (r streamPutDestRoot) objectSpec(key string) *outputDestSpec {
+	spec := &outputDestSpec{Provider: r.Provider, Region: r.Region, Profile: r.Profile, Endpoint: r.Endpoint, ForcePathStyle: r.ForcePathStyle}
+	switch r.Provider {
+	case string(provider.ProviderFile):
+		spec.BaseDir = r.BaseDir
+		spec.Key = filepath.FromSlash(key)
+	case string(provider.ProviderS3):
+		spec.Bucket = r.Bucket
+		spec.Key = r.Prefix + key
+	}
+	return spec
+}
+
+func (r streamPutDestRoot) keyForOpen(open stream.Open, allowDestKey bool, objectIndex int) (string, error) {
+	if strings.TrimSpace(open.DestKey) != "" {
+		if !allowDestKey {
+			return "", errors.New("frame dest_key requires --dest-from-frame")
+		}
+		if r.ExactKey != "" {
+			return "", errors.New("frame dest_key requires a destination root")
+		}
+		return sanitizeStreamPutRelativeKey(open.DestKey)
+	}
+	if r.ExactKey != "" {
+		if objectIndex > 0 {
+			return "", errors.New("exact destination accepts only one framed object; use a trailing-slash destination root for multiple objects")
+		}
+		return r.ExactKey, nil
+	}
+	return sanitizeStreamPutRelativeKey(defaultStreamPutSourceKey(open.URI))
+}
+
+func defaultStreamPutSourceKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if parsed, err := parseOutputLikeURI(raw); err == nil {
+		return parsed
+	}
+	return path.Base(strings.Trim(raw, "/"))
+}
+
+func parseOutputLikeURI(raw string) (string, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "s3://") {
+		remainder := raw[len("s3://"):]
+		idx := strings.Index(remainder, "/")
+		if idx == -1 || idx == len(remainder)-1 {
+			return "", fmt.Errorf("source URI has no key")
+		}
+		return remainder[idx+1:], nil
+	}
+	if strings.HasPrefix(lower, "file://") {
+		return filepath.Base(raw[len("file://"):]), nil
+	}
+	return "", fmt.Errorf("unsupported source URI")
+}
+
+func sanitizeStreamPutRelativeKey(raw string) (string, error) {
+	key := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if key == "" {
+		return "", errors.New("dest_key is empty")
+	}
+	if strings.Contains(key, "://") || strings.HasPrefix(key, "/") {
+		return "", fmt.Errorf("dest_key must be relative: %s", raw)
+	}
+	if first, _, _ := strings.Cut(key, "/"); isStreamPutSchemePrefix(first) {
+		return "", fmt.Errorf("dest_key must not start with a URI scheme: %s", raw)
+	}
+	clean := path.Clean(key)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("dest_key escapes destination root: %s", raw)
+	}
+	return clean, nil
+}
+
+func isStreamPutSchemePrefix(segment string) bool {
+	name, _, ok := strings.Cut(segment, ":")
+	if !ok || name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case i == 0 && ((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')):
+		case i > 0 && ((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '.' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func streamPutOutputProviderName(raw string) string {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.HasPrefix(lower, "s3://"):
+		return string(provider.ProviderS3)
+	case strings.HasPrefix(lower, "file://"):
+		return string(provider.ProviderFile)
+	default:
+		return "stream"
+	}
+}
+
+func applyStreamPutProviderFlags(dest *outputDestSpec) {
+	dest.Region = streamPutRegion
+	dest.Profile = streamPutProfile
+	dest.Endpoint = streamPutEndpoint
+	dest.ForcePathStyle = streamPutEndpoint != ""
+}
+
+func parseStreamPutSize(raw string, fallback int64) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	lower := strings.ToLower(raw)
+	mult := int64(1)
+	for _, suffix := range []struct {
+		text string
+		mult int64
+	}{
+		{"gib", 1024 * 1024 * 1024},
+		{"gb", 1000 * 1000 * 1000},
+		{"mib", 1024 * 1024},
+		{"mb", 1000 * 1000},
+		{"kib", 1024},
+		{"kb", 1000},
+		{"b", 1},
+	} {
+		if strings.HasSuffix(lower, suffix.text) {
+			mult = suffix.mult
+			raw = strings.TrimSpace(raw[:len(raw)-len(suffix.text)])
+			break
+		}
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return n * mult, nil
 }
 
 func uploadStreamPutOutput(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string, overwrite bool) error {
@@ -162,162 +843,6 @@ func uploadStreamPutOutput(ctx context.Context, putter provider.ObjectPutter, ke
 		return uploadToOutputDest(ctx, putter, key, tempFilePath)
 	}
 	return uploadConditionallyToOutputDest(ctx, putter, key, tempFilePath, provider.PutPrecondition{IfAbsent: true})
-}
-
-func spoolStreamPutInput(r io.Reader) (string, int64, error) {
-	tmp, err := os.CreateTemp("", "gonimbus-stream-put-*")
-	if err != nil {
-		return "", 0, fmt.Errorf("create temp spool: %w", err)
-	}
-	path := tmp.Name()
-
-	cleanup := true
-	defer func() {
-		_ = tmp.Close()
-		if cleanup {
-			_ = os.Remove(path)
-		}
-	}()
-
-	n, err := io.Copy(tmp, r)
-	if err != nil {
-		return "", n, fmt.Errorf("copy stdin to temp spool: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", n, fmt.Errorf("close temp spool: %w", err)
-	}
-
-	cleanup = false
-	return path, n, nil
-}
-
-func spoolStreamPutFramedInput(r io.Reader) (path string, bytesWritten int64, sourceURI string, sourceStreamID string, err error) {
-	tmp, err := os.CreateTemp("", "gonimbus-stream-put-*")
-	if err != nil {
-		return "", 0, "", "", fmt.Errorf("create temp spool: %w", err)
-	}
-	path = tmp.Name()
-
-	cleanup := true
-	defer func() {
-		_ = tmp.Close()
-		if cleanup {
-			_ = os.Remove(path)
-		}
-	}()
-
-	dec := stream.NewDecoder(r)
-	var open stream.Open
-	var openSeen bool
-	var closeSeen bool
-	var expectedSeq int64
-
-	for {
-		ev, nextErr := dec.Next()
-		if nextErr != nil {
-			if errors.Is(nextErr, io.EOF) {
-				if !openSeen {
-					return "", 0, "", "", errors.New("missing stream open record")
-				}
-				if !closeSeen {
-					return "", 0, "", "", errors.New("missing stream close record")
-				}
-				break
-			}
-			return "", 0, "", "", fmt.Errorf("decode stream input: %w", nextErr)
-		}
-
-		if closeSeen {
-			return "", 0, "", "", errors.New("trailing stream data after close record")
-		}
-
-		if ev.Kind == stream.EventChunk {
-			if !openSeen {
-				_ = ev.Chunk.Body.Close()
-				return "", 0, "", "", errors.New("stream chunk before open record")
-			}
-			hdr := ev.Chunk.Header
-			if hdr.StreamID != open.StreamID {
-				_ = ev.Chunk.Body.Close()
-				return "", 0, "", "", fmt.Errorf("stream chunk uses stream_id %q, want %q", hdr.StreamID, open.StreamID)
-			}
-			if hdr.Seq != expectedSeq {
-				_ = ev.Chunk.Body.Close()
-				return "", 0, "", "", fmt.Errorf("stream chunk seq=%d, want %d", hdr.Seq, expectedSeq)
-			}
-			if hdr.Offset != nil && *hdr.Offset != bytesWritten {
-				_ = ev.Chunk.Body.Close()
-				return "", 0, "", "", fmt.Errorf("stream chunk offset=%d, want %d", *hdr.Offset, bytesWritten)
-			}
-
-			n, copyErr := io.Copy(tmp, ev.Chunk.Body)
-			closeErr := ev.Chunk.Body.Close()
-			if copyErr != nil {
-				return "", 0, "", "", fmt.Errorf("read stream chunk seq=%d: %w", hdr.Seq, copyErr)
-			}
-			if closeErr != nil {
-				return "", 0, "", "", fmt.Errorf("close stream chunk seq=%d: %w", hdr.Seq, closeErr)
-			}
-			if n != hdr.NBytes {
-				return "", 0, "", "", fmt.Errorf("stream chunk seq=%d read %d bytes, want %d", hdr.Seq, n, hdr.NBytes)
-			}
-			bytesWritten += n
-			expectedSeq++
-			continue
-		}
-
-		switch ev.Record.Type {
-		case stream.TypeStreamOpen:
-			if openSeen {
-				return "", 0, "", "", errors.New("duplicate stream open record")
-			}
-			if err := json.Unmarshal(ev.Record.Data, &open); err != nil {
-				return "", 0, "", "", fmt.Errorf("decode stream open record: %w", err)
-			}
-			if strings.TrimSpace(open.StreamID) == "" {
-				return "", 0, "", "", errors.New("stream open record missing stream_id")
-			}
-			openSeen = true
-			sourceURI = open.URI
-			sourceStreamID = open.StreamID
-		case stream.TypeStreamClose:
-			if !openSeen {
-				return "", 0, "", "", errors.New("stream close before open record")
-			}
-			var closeRec stream.Close
-			if err := json.Unmarshal(ev.Record.Data, &closeRec); err != nil {
-				return "", 0, "", "", fmt.Errorf("decode stream close record: %w", err)
-			}
-			if closeRec.StreamID != open.StreamID {
-				return "", 0, "", "", fmt.Errorf("stream close uses stream_id %q, want %q", closeRec.StreamID, open.StreamID)
-			}
-			if closeRec.Status != "success" {
-				return "", 0, "", "", fmt.Errorf("stream close status must be success, got %q", closeRec.Status)
-			}
-			if closeRec.Chunks != expectedSeq {
-				return "", 0, "", "", fmt.Errorf("stream close chunks=%d, want %d", closeRec.Chunks, expectedSeq)
-			}
-			if closeRec.Bytes != bytesWritten {
-				return "", 0, "", "", fmt.Errorf("stream close bytes=%d, want %d", closeRec.Bytes, bytesWritten)
-			}
-			if open.Size != nil && *open.Size != bytesWritten {
-				return "", 0, "", "", fmt.Errorf("stream open size=%d, want %d", *open.Size, bytesWritten)
-			}
-			closeSeen = true
-		default:
-			if !openSeen {
-				return "", 0, "", "", fmt.Errorf("expected stream open record, got %q", ev.Record.Type)
-			}
-			return "", 0, "", "", fmt.Errorf("unexpected stream record %q", ev.Record.Type)
-		}
-	}
-
-	if err := tmp.Close(); err != nil {
-		return "", 0, "", "", fmt.Errorf("close temp spool: %w", err)
-	}
-
-	cleanup = false
-	return path, bytesWritten, sourceURI, sourceStreamID, nil
 }
 
 func outputDestURI(dest *outputDestSpec) string {
