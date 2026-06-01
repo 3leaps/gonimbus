@@ -4,9 +4,24 @@
     "./pkg/match",
     "./pkg/provider",
     "./pkg/provider/s3",
-    "./pkg/provider/file"
+    "./pkg/provider/file",
+    "./pkg/content"
+  ],
+  "storage_free_public_packages": [
+    "./pkg/uri",
+    "./pkg/match",
+    "./pkg/provider",
+    "./pkg/provider/s3",
+    "./pkg/provider/file",
+    "./pkg/content"
+  ],
+  "storageful_public_packages": [
+    "./pkg/indexstore",
+    "./pkg/reflowstate"
   ],
   "denied_imports": [
+    "github.com/3leaps/gonimbus/pkg/indexstore",
+    "github.com/3leaps/gonimbus/pkg/reflowstate",
     "github.com/fulmenhq/gofulmen",
     "github.com/go-chi/chi",
     "github.com/go-viper/mapstructure",

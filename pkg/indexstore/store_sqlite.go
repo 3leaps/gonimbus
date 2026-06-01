@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !gonimbus_libsql
 
 package indexstore
 
@@ -18,12 +18,12 @@ func init() {
 	sql.Register(driverLibsql, &sqlite.Driver{})
 }
 
-// Open opens (and creates if needed) a SQLite-backed index database.
+// Open opens (and creates if needed) a pure-Go SQLite-backed index database.
 //
 // Notes:
 // - Local file paths are created if parent directories do not exist.
 // - For local DBs, WAL and busy_timeout are applied for predictable CLI behavior.
-// - Remote libsql URLs require a cgo-enabled build.
+// - Remote libsql URLs require rebuilding with -tags gonimbus_libsql.
 func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -34,7 +34,7 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 		return nil, err
 	}
 	if strings.HasPrefix(dsn, "libsql://") || strings.HasPrefix(dsn, "https://") {
-		return nil, errors.New("libsql URL requires cgo-enabled build")
+		return nil, errors.New("remote libsql URLs require rebuilding with -tags gonimbus_libsql")
 	}
 
 	db, err := sql.Open(driverLibsql, dsn)

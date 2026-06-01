@@ -201,16 +201,16 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	// Date filters (can be pushed to DB)
 	if !params.ModifiedAfter.IsZero() {
 		query += ` AND last_modified >= ?`
-		args = append(args, params.ModifiedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedAfter))
 	}
 	if !params.ModifiedBefore.IsZero() {
 		query += ` AND last_modified <= ?`
-		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedBefore))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 	if !params.EnrichedAfter.IsZero() {
 		query += ` AND head_enriched_at >= ?`
-		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.EnrichedAfter))
 	}
 
 	query += ` ORDER BY rel_key`
@@ -684,16 +684,16 @@ func queryCountFast(ctx context.Context, db *sql.DB, params QueryParams) (int64,
 	}
 	if !params.ModifiedAfter.IsZero() {
 		query += ` AND last_modified >= ?`
-		args = append(args, params.ModifiedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedAfter))
 	}
 	if !params.ModifiedBefore.IsZero() {
 		query += ` AND last_modified <= ?`
-		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedBefore))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 	if !params.EnrichedAfter.IsZero() {
 		query += ` AND head_enriched_at >= ?`
-		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.EnrichedAfter))
 	}
 
 	var count int64
@@ -734,16 +734,16 @@ func queryCountStreaming(ctx context.Context, db *sql.DB, params QueryParams, ke
 	}
 	if !params.ModifiedAfter.IsZero() {
 		query += ` AND last_modified >= ?`
-		args = append(args, params.ModifiedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedAfter))
 	}
 	if !params.ModifiedBefore.IsZero() {
 		query += ` AND last_modified <= ?`
-		args = append(args, params.ModifiedBefore.Format(time.RFC3339))
+		args = append(args, timeString(params.ModifiedBefore))
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
 	if !params.EnrichedAfter.IsZero() {
 		query += ` AND head_enriched_at >= ?`
-		args = append(args, params.EnrichedAfter.Format(time.RFC3339))
+		args = append(args, timeString(params.EnrichedAfter))
 	}
 
 	// No ORDER BY for counting - unnecessary overhead at scale

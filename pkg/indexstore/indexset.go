@@ -183,7 +183,7 @@ func FindOrCreateIndexSet(ctx context.Context, db *sql.DB, params IndexSetParams
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newID, normalizeBaseURI(params.BaseURI), params.Provider, params.StorageProvider,
 		params.CloudProvider, params.RegionKind, params.Region,
-		params.Endpoint, endpointHost, identity.CanonicalSHA256, now)
+		params.Endpoint, endpointHost, identity.CanonicalSHA256, timeString(now))
 
 	if err != nil {
 		return nil, false, fmt.Errorf("create index_set: %w", err)

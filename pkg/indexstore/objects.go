@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const dbTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 // ObjectRow represents a row in the objects_current table.
 type ObjectRow struct {
 	IndexSetID     string
@@ -61,8 +63,8 @@ func UpsertObject(ctx context.Context, db *sql.DB, obj ObjectRow) error {
 		   last_seen_run_id = excluded.last_seen_run_id,
 		   last_seen_at = excluded.last_seen_at,
 		   deleted_at = NULL`,
-		obj.IndexSetID, obj.RelKey, obj.SizeBytes, obj.LastModified,
-		obj.ETag, obj.StorageClass, obj.LastSeenRunID, obj.LastSeenAt)
+		obj.IndexSetID, obj.RelKey, obj.SizeBytes, optionalTimeString(obj.LastModified),
+		obj.ETag, obj.StorageClass, obj.LastSeenRunID, timeString(obj.LastSeenAt))
 
 	if err != nil {
 		return fmt.Errorf("upsert object: %w", err)
@@ -108,8 +110,8 @@ func BatchUpsertObjects(ctx context.Context, db *sql.DB, objects []ObjectRow) er
 
 	for _, obj := range objects {
 		_, err := stmt.ExecContext(ctx,
-			obj.IndexSetID, obj.RelKey, obj.SizeBytes, obj.LastModified,
-			obj.ETag, obj.StorageClass, obj.LastSeenRunID, obj.LastSeenAt)
+			obj.IndexSetID, obj.RelKey, obj.SizeBytes, optionalTimeString(obj.LastModified),
+			obj.ETag, obj.StorageClass, obj.LastSeenRunID, timeString(obj.LastSeenAt))
 		if err != nil {
 			return fmt.Errorf("exec upsert for %s: %w", obj.RelKey, err)
 		}
@@ -229,7 +231,7 @@ func BatchUpdateHeadEnrichment(ctx context.Context, db *sql.DB, updates []HeadEn
 		}
 		_, err := stmt.ExecContext(ctx,
 			update.ArchiveStatus, update.RestoreState, optionalTimeString(update.RestoreExpiry),
-			update.ContentType, update.HeadEnrichedAt.UTC().Format(time.RFC3339),
+			update.ContentType, timeString(update.HeadEnrichedAt),
 			update.IndexSetID, update.RelKey)
 		if err != nil {
 			return fmt.Errorf("update head enrichment for %s: %w", update.RelKey, err)
@@ -332,6 +334,10 @@ func optionalTimeString(value *time.Time) *string {
 	if value == nil {
 		return nil
 	}
-	out := value.UTC().Format(time.RFC3339)
+	out := timeString(*value)
 	return &out
+}
+
+func timeString(value time.Time) string {
+	return value.UTC().Format(dbTimeLayout)
 }

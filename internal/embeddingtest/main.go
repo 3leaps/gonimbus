@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/3leaps/gonimbus/pkg/content"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/file"
@@ -27,6 +28,7 @@ func constructLibrarySurface() error {
 	_ = provider.ListOptions{Prefix: parsed.Key, MaxKeys: 10}
 	_ = s3.Config{Bucket: parsed.Bucket, Region: "us-east-1"}
 	_ = file.Config{BaseDir: "."}
+	_ = content.HeadBytesOptions{Bytes: 128, Parallel: 2}
 	_ = context.Background()
 
 	if parsed.Bucket == "" {

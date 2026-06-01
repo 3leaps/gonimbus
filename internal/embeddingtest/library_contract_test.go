@@ -14,9 +14,11 @@ import (
 )
 
 type depBoundary struct {
-	RecommendedPackages []string `json:"recommended_packages"`
-	DeniedImports       []string `json:"denied_imports"`
-	DeniedEnvCalls      []string `json:"denied_env_calls"`
+	RecommendedPackages       []string `json:"recommended_packages"`
+	StorageFreePublicPackages []string `json:"storage_free_public_packages"`
+	StoragefulPublicPackages  []string `json:"storageful_public_packages"`
+	DeniedImports             []string `json:"denied_imports"`
+	DeniedEnvCalls            []string `json:"denied_env_calls"`
 }
 
 func TestImportAndConfigLiteralAreEnvFree(t *testing.T) {
@@ -42,6 +44,7 @@ func TestEmbeddingImportHelper(t *testing.T) {
 func TestRecommendedPackagesAvoidDeniedEnvReadsAndImports(t *testing.T) {
 	root := repoRoot(t)
 	boundary := readDepBoundary(t, root)
+	assertBoundaryClassification(t, boundary)
 
 	for _, pkg := range boundary.RecommendedPackages {
 		pkgDir := filepath.Join(root, strings.TrimPrefix(pkg, "./"))
@@ -62,6 +65,7 @@ func TestRecommendedPackagesAvoidDeniedEnvReadsAndImports(t *testing.T) {
 func TestRecommendedPackageDependencyBoundary(t *testing.T) {
 	root := repoRoot(t)
 	boundary := readDepBoundary(t, root)
+	assertBoundaryClassification(t, boundary)
 
 	cmd := exec.Command("go", "list", "-deps", "./internal/embeddingtest")
 	cmd.Dir = root
@@ -76,6 +80,34 @@ func TestRecommendedPackageDependencyBoundary(t *testing.T) {
 			if importDenied(dep, denied) {
 				t.Fatalf("recommended embed package dependency graph includes denied dependency %q via %q", denied, dep)
 			}
+		}
+	}
+}
+
+func assertBoundaryClassification(t *testing.T, boundary depBoundary) {
+	t.Helper()
+
+	recommended := stringSet(boundary.RecommendedPackages)
+	storageFree := stringSet(boundary.StorageFreePublicPackages)
+	storageful := stringSet(boundary.StoragefulPublicPackages)
+
+	for pkg := range recommended {
+		if !storageFree[pkg] {
+			t.Fatalf("recommended package %q must be classified as storage-free", pkg)
+		}
+	}
+	for pkg := range storageFree {
+		if storageful[pkg] {
+			t.Fatalf("package %q is classified as both storage-free and storageful", pkg)
+		}
+	}
+	for _, pkg := range boundary.StoragefulPublicPackages {
+		importPath := strings.TrimPrefix(pkg, "./")
+		if !strings.HasPrefix(importPath, "github.com/3leaps/gonimbus/") {
+			importPath = "github.com/3leaps/gonimbus/" + importPath
+		}
+		if !containsString(boundary.DeniedImports, importPath) {
+			t.Fatalf("storageful package %q must be present in denied_imports", importPath)
 		}
 	}
 }
@@ -172,4 +204,21 @@ func repoRoot(t *testing.T) string {
 
 func importDenied(importPath, deniedPrefix string) bool {
 	return importPath == deniedPrefix || strings.HasPrefix(importPath, deniedPrefix+"/")
+}
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }

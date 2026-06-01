@@ -15,6 +15,7 @@ Recommended packages:
 - `github.com/3leaps/gonimbus/pkg/provider` for provider interfaces and capability types
 - `github.com/3leaps/gonimbus/pkg/provider/s3` for AWS S3 and S3-compatible storage
 - `github.com/3leaps/gonimbus/pkg/provider/file` for local filesystem-backed tests and workflows
+- `github.com/3leaps/gonimbus/pkg/content` for provider-backed object head-byte reads
 
 Discouraged surfaces:
 
@@ -181,3 +182,38 @@ artifact.
 When a dependency boundary changes intentionally, update the machine-readable
 artifact and review that change alongside the code or documentation that
 requires it.
+
+### Storage-Free and Storageful Packages
+
+The supported storage-free public package set is:
+
+- `pkg/uri`
+- `pkg/match`
+- `pkg/provider`
+- `pkg/provider/s3`
+- `pkg/provider/file`
+- `pkg/content`
+
+These packages are expected to stay outside the index-store compile graph.
+CI runs `go list -deps ./internal/embeddingtest` and fails if this surface pulls
+in `pkg/indexstore`, `pkg/reflowstate`, `github.com/tursodatabase/go-libsql`,
+or `modernc.org/sqlite`.
+
+Storageful public packages are:
+
+- `pkg/indexstore`
+- `pkg/reflowstate`
+
+Those packages intentionally use the SQLite-backed index substrate and are
+Experimental-tier. Import them only when your application deliberately wants
+gonimbus index persistence.
+
+### Libsql Build Tag
+
+The default build uses the pure-Go `modernc.org/sqlite` driver for local index
+databases, regardless of `CGO_ENABLED`. Remote libsql/Turso URLs are opt-in:
+build gonimbus with `-tags gonimbus_libsql` when you need that driver.
+
+Default builds fail remote libsql URLs with a clear rebuild diagnostic instead
+of silently falling back to a local database. The libsql flavor keeps the
+current remote-DB behavior, but it requires a CGO-capable build environment.

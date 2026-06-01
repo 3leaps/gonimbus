@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build gonimbus_libsql
 
 package indexstore
 
@@ -15,8 +15,10 @@ const driverLibsql = "libsql"
 // Open opens (and creates if needed) a libsql-backed index database.
 //
 // Notes:
-// - Local file paths are created if parent directories do not exist.
-// - For local DBs, WAL and busy_timeout are applied for predictable CLI behavior.
+//   - Local file paths are created if parent directories do not exist.
+//   - For local DBs, WAL and busy_timeout are applied for predictable CLI behavior.
+//   - This driver is opt-in. Build with -tags gonimbus_libsql to enable remote
+//     libsql/Turso URLs.
 func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 	if ctx == nil {
 		ctx = context.Background()
