@@ -97,8 +97,11 @@ Local directory sources are supported with `transfer reflow file://...`; hidden
 files and dot-directories are skipped by default unless `--hidden=include` is
 set. Indexes retain LIST-derived storage class and can be enriched with
 HEAD-derived archive/restore/content-type metadata via `index enrich-with-head`.
-See [docs/releases/v0.2.2.md](docs/releases/v0.2.2.md) for the current operator
-notes.
+`stream put` can now upload raw stdin or framed `stream get` batches, reflow can
+use `overwrite-if-source-newer` for freshness-based collision handling, and
+`inspect-pair` can verify terminal reflow write claims against destination HEAD
+results. See [docs/releases/v0.2.3.md](docs/releases/v0.2.3.md) for the
+current operator notes.
 
 ### Outputs
 

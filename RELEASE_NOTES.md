@@ -4,6 +4,109 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.2.3 (2026-05-31)
+
+**Stream Put Completion, Reflow Freshness Arbitration, and API Guardrails**
+
+v0.2.3 completes the stream write path, adds destination verification for
+reflow outputs, adds a newest-wins collision mode for mirror-style reflow, and
+formalizes Stable API and public-repository hygiene guardrails.
+
+### Stream Put Completion
+
+`gonimbus stream put` now writes stdin to a destination object. Raw mode writes
+one object from raw bytes:
+
+```bash
+cat payload.xml | gonimbus stream put 's3://bucket/landing/payload.xml'
+```
+
+Framed JSONL mode consumes one or more `stream get` frames:
+
+```bash
+gonimbus stream get 's3://source-bucket/path/payload.xml' \
+  | gonimbus stream put --framing jsonl 's3://dest-bucket/landing/payload.xml'
+```
+
+The CLI destination is authoritative. Exact destinations write one framed
+object; trailing-slash destinations act as roots for framed batches. Frame
+`dest_key` values are ignored unless `--dest-from-frame` is explicitly enabled,
+and enabled frame keys must remain relative under the CLI root.
+
+Large S3 writes use multipart upload after `--multipart-threshold` (default
+64 MiB), with `--part-size` defaulting to 8 MiB. Once multipart upload begins,
+gonimbus streams parts without buffering the full object and emits
+`gonimbus.stream.progress.v1` records.
+
+### Reflow Freshness Arbitration
+
+`transfer reflow` adds `--on-collision overwrite-if-source-newer` for
+mirror-style flows where object-store `LastModified` is the freshness signal:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest-bucket/landing/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{key}' \
+  --on-collision overwrite-if-source-newer
+```
+
+The mode first attempts the normal atomic create path. If a non-identical
+destination already exists, gonimbus HEADs the destination, compares source and
+destination `LastModified`, and overwrites only when the source is newer or when
+timestamps are equal but sizes differ. The overwrite uses the observed
+destination ETag as an `If-Match` precondition; a concurrent destination change
+becomes a deterministic skipped record rather than an unguarded overwrite.
+
+### Pair Verification
+
+`gonimbus inspect-pair` verifies terminal reflow write claims after a run:
+
+```bash
+gonimbus inspect-pair \
+  --from-reflow reflow.jsonl \
+  --expected-dest-prefix 's3://dest-bucket/landing/'
+```
+
+The command reads `gonimbus.reflow.v1` records, validates destination URIs
+against the expected prefix, HEADs claimed writes, and emits per-object
+`gonimbus.inspect.pair.v1` records plus a
+`gonimbus.inspect.pair.summary.v1` summary.
+
+### Stable API and Public-Surface Guardrails
+
+v0.2.3 introduces `docs/api-stability.md` and `make api-stability` as the
+release guard for the Stable embedded library packages. Stable API changes now
+need a changelog entry that states the break, migration path, and advance
+notice status before release.
+
+This release includes one Stable API break: `provider.MultipartUploader` now
+requires implementers to provide `UploadPart` and `CompleteMultipartUpload`.
+Providers that advertise multipart capability must implement the full
+create/upload-part/complete/abort lifecycle, or stop advertising
+`MultipartUploader` until they can support it.
+
+The repository also now points contributor and agent guidance at the canonical
+3leaps OSS sensitive-data policy. The practical rule is structural: sensitive
+or proprietary local data belongs outside repository working trees, not merely
+behind `.gitignore`.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.3
+```
+
+CLI JSONL additions are additive. The notable compatibility item is for Go
+embedders implementing `provider.MultipartUploader`; update those providers
+before moving to v0.2.3, or remove multipart capability advertisement until the
+new lifecycle is implemented.
+
+See [docs/releases/v0.2.3.md](docs/releases/v0.2.3.md) for the complete
+release notes.
+
+---
+
 ## v0.2.2 (2026-05-26)
 
 **Index Archive Operations and Local-Tree Reflow**
@@ -159,102 +262,8 @@ See [docs/releases/v0.2.1.md](docs/releases/v0.2.1.md) for the complete release 
 
 ---
 
-## v0.2.0 (2026-05-20)
-
-**Library-Enabling and Scaling — Far More Complex Reflow Patterns**
-
-v0.2.0 grows the tool along three axes simultaneously: stable library surface for Go consumers, deeper content-aware reflow patterns (derived vars, mixed segments, lookups, mirrored sidecars, Hive partitions, canonical-by-ETag dedup), and correctness primitives that keep behavior right at scale (atlas, conditional CAS, parallel-race arbitration). The core promise stays the same: predictable, prefix-first crawls with JSONL-first outputs.
-
-### Library Enablement
-
-Public URI parser package (`pkg/uri`), library-consumer config-contract docs, and reliable version stamping for `go install`-built binaries:
-
-```go
-import "github.com/3leaps/gonimbus/pkg/uri"
-
-ou, err := uri.ParseObjectURI("s3://my-bucket/some/prefix/object.json")
-```
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.0
-gonimbus version
-# gonimbus 0.2.0
-```
-
-See [`docs/library-consumers.md`](docs/library-consumers.md) for the embedding contract (credentials, env-var precedence, hermetic-embedder posture, dep-tree boundary).
-
-### Reflow + Probe Sophistication
-
-Derived variables, mixed-segment rewrites, lookup transforms, mirrored sidecars, Hive-partition pattern, and canonical-by-ETag dedup all compose in one pipeline:
-
-```yaml
-# probe.yaml — derived vars + lookup transform
-extract:
-  - name: date
-    xpath: //Record/Date
-
-derived:
-  - name: year
-    from: date
-    transform: substring
-    start: 0
-    length: 4
-  - name: region
-    from: site_id
-    transform: lookup
-    match: prefix
-    table:
-      a1: north
-      b2: west
-```
-
-```yaml
-# rewrite.yaml — mixed-segment rendering
-rewrite:
-  destination_template: "reflowed/region={region}/year={year}/{rel_key}"
-```
-
-Provenance sidecars (`.gnb.json` next to each destination, or under `--provenance-sidecar-root`) record source URI, derived fields, and rewrite path. `--on-collision quarantine` writes collisions to an explicit prefix; nested `collision` metadata replaces the legacy flat fields.
-
-Content-fingerprint dedup at query time:
-
-```bash
-gonimbus index query 's3://bucket/prefix/' --canonical-by-etag
-```
-
-### Scaling Correctness
-
-- **Atlas phase A** (`gonimbus atlas build`) — derived views across completed indexes for cross-run analytics without re-scanning the substrate
-- **Conditional `latest.json` CAS** — fail-closed publish semantics via `If-Match` / `If-None-Match` on substrates that support it; best-effort fallback preserved for v0.1.x-compatible hubs
-- **Atomic conditional puts** — provider-level `If-None-Match: *` opt-in for race-safe creation
-- **Parallel-race arbitration** — `transfer reflow --parallel N>1` arbitrates per destination key before issuing conditional writes, preserving the `skip-if-duplicate` contract even on substrates that don't enforce `If-None-Match: *`
-- **Opt-in build summary** — `gonimbus index build --summary` emits per-run JSONL totals without changing default streaming behavior
-
-### Stack
-
-Bounded dependency refresh: gofulmen v0.3.5 (pulls crucible v0.4.12, doublestar v4.10.0, zap v1.28.0), AWS SDK family coherent settle (`aws-sdk-go-v2` v1.41.7, `s3` v1.101.0, smithy v1.25.1), chi v5.2.5, mapstructure v2.5.0, cobra v1.10.2, `golang.org/x/net` v0.54.0, `golang.org/x/time` v0.15.0.
-
-CI runner image now `goneat-tools-runner-glibc:v0.4.2` (glibc variant required for libsql cgo); see [`docs/development/ci.md`](docs/development/ci.md).
-
-### Breaking Changes
-
-**Reflow collision flat fields removed.** The legacy `collision_kind`, `collision_etag`, `collision_size_bytes` are no longer emitted in `gonimbus.reflow.v1` records. Audit tooling must read the nested `collision` object. The Phase A warning window has expired.
-
-**`--on-collision log` deprecated.** Use `--on-collision skip-if-duplicate` (same behavior, clearer name). The alias is retained for one minor release and removed in v0.3.0.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.0
-```
-
-Re-install required to pick up the version-stamping fix; older binaries built via `go install` report incorrect version strings.
-
-See [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md) for the complete release notes.
-
----
-
 For v0.1.8 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
+<!-- v0.2.0 entry removed when v0.2.3 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.0.md -->
 <!-- v0.1.8 entry removed when v0.2.2 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.8.md -->
