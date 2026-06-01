@@ -32,7 +32,7 @@ func MarkObjectsDeletedNotSeenInRun(ctx context.Context, db *sql.DB, indexSetID,
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NULL
 		   AND last_seen_run_id != ?`,
-		runStartedAt, indexSetID, runID)
+		timeString(runStartedAt), indexSetID, runID)
 
 	if err != nil {
 		return 0, fmt.Errorf("mark deleted: %w", err)
@@ -60,7 +60,7 @@ func PurgeDeletedObjects(ctx context.Context, db *sql.DB, indexSetID string, old
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NOT NULL
 		   AND deleted_at < ?`,
-		indexSetID, olderThan)
+		indexSetID, timeString(olderThan))
 
 	if err != nil {
 		return 0, fmt.Errorf("purge deleted: %w", err)
@@ -89,7 +89,7 @@ func RestoreDeletedObjects(ctx context.Context, db *sql.DB, indexSetID string, d
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NOT NULL
 		   AND deleted_at >= ?`,
-		indexSetID, deletedAfter)
+		indexSetID, timeString(deletedAfter))
 
 	if err != nil {
 		return 0, fmt.Errorf("restore deleted: %w", err)

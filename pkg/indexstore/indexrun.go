@@ -97,7 +97,7 @@ func CreateIndexRun(ctx context.Context, db *sql.DB, indexSetID string, sourceTy
 		`INSERT INTO index_runs
 		 (run_id, index_set_id, started_at, acquired_at, source_type, status)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		runID, indexSetID, now, now, sourceType, RunStatusRunning)
+		runID, indexSetID, timeString(now), timeString(now), sourceType, RunStatusRunning)
 
 	if err != nil {
 		return nil, fmt.Errorf("create index_run: %w", err)
@@ -243,7 +243,7 @@ func UpdateIndexRunStatus(ctx context.Context, db *sql.DB, runID string, status 
 		`UPDATE index_runs
 		 SET status = ?, ended_at = ?, source_snapshot_at = ?
 		 WHERE run_id = ?`,
-		string(status), now, snapshotAt, runID)
+		string(status), timeString(now), optionalTimeString(snapshotAt), runID)
 
 	if err != nil {
 		return fmt.Errorf("update index_run status: %w", err)
@@ -263,7 +263,7 @@ func RecordRunEvent(ctx context.Context, db *sql.DB, event RunEvent) error {
 		 (event_id, run_id, occurred_at, event_type, event_category,
 		  detail, key, prefix, error_code)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.EventID, event.RunID, event.OccurredAt,
+		event.EventID, event.RunID, timeString(event.OccurredAt),
 		string(event.EventType), string(event.EventCategory),
 		event.Detail, event.Key, event.Prefix, event.ErrorCode)
 
@@ -309,15 +309,21 @@ func ListRunEvents(ctx context.Context, db *sql.DB, runID string, category *Even
 	var events []RunEvent
 	for rows.Next() {
 		var e RunEvent
+		var occurredAtRaw any
 		var detail, key, prefix, errorCode sql.NullString
 
 		err := rows.Scan(
-			&e.EventID, &e.RunID, &e.OccurredAt,
+			&e.EventID, &e.RunID, &occurredAtRaw,
 			&e.EventType, &e.EventCategory,
 			&detail, &key, &prefix, &errorCode)
 		if err != nil {
 			return nil, fmt.Errorf("scan run event: %w", err)
 		}
+		occurredAt, err := parseDBTimeValue(occurredAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse occurred_at: %w", err)
+		}
+		e.OccurredAt = occurredAt
 
 		if detail.Valid {
 			e.Detail = &detail.String

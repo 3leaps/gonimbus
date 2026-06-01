@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // Migrate creates (or upgrades) the index schema in-place.
 //
@@ -190,6 +190,13 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := ensureObjectsCurrentHeadEnrichmentIndex(ctx, tx); err != nil {
 		return err
 	}
+	// v7: normalize timestamp TEXT values to fixed-width UTC so SQLite
+	// lexicographic comparisons preserve chronological order.
+	if current < 7 {
+		if err := normalizeTimestampTextColumns(ctx, tx); err != nil {
+			return err
+		}
+	}
 
 	if current != SchemaVersion {
 		if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=? WHERE id=1`, SchemaVersion); err != nil {
@@ -254,6 +261,95 @@ func ensureObjectsCurrentHeadEnrichmentIndex(ctx context.Context, tx *sql.Tx) er
 	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_objects_current_head_enriched_at ON objects_current(index_set_id, head_enriched_at);`); err != nil {
 		return fmt.Errorf("exec migration statement: %w", err)
 	}
+	return nil
+}
+
+func normalizeTimestampTextColumns(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+
+	normalizations := []struct {
+		table     string
+		column    string
+		pkColumns []string
+	}{
+		{table: "index_sets", column: "created_at", pkColumns: []string{"index_set_id"}},
+		{table: "index_runs", column: "started_at", pkColumns: []string{"run_id"}},
+		{table: "index_runs", column: "ended_at", pkColumns: []string{"run_id"}},
+		{table: "index_runs", column: "acquired_at", pkColumns: []string{"run_id"}},
+		{table: "index_runs", column: "source_snapshot_at", pkColumns: []string{"run_id"}},
+		{table: "objects_current", column: "last_modified", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "restore_expiry", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "head_enriched_at", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "last_seen_at", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "deleted_at", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "index_run_events", column: "occurred_at", pkColumns: []string{"event_id"}},
+	}
+
+	for _, normalization := range normalizations {
+		if err := normalizeTimestampTextColumn(ctx, tx, normalization.table, normalization.column, normalization.pkColumns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeTimestampTextColumn(ctx context.Context, tx *sql.Tx, table, column string, pkColumns []string) error {
+	selectColumns := append(append([]string{}, pkColumns...), column)
+	// #nosec G201 -- identifiers come from normalizeTimestampTextColumns' fixed table/column allowlist.
+	query := fmt.Sprintf(`SELECT %s FROM %s WHERE %s IS NOT NULL AND trim(%s) != ''`, strings.Join(selectColumns, ", "), table, column, column)
+
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("query timestamp column %s.%s: %w", table, column, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		values := make([]sql.NullString, len(selectColumns))
+		dest := make([]any, len(values))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("scan timestamp column %s.%s: %w", table, column, err)
+		}
+
+		rawValue := values[len(values)-1]
+		if !rawValue.Valid {
+			continue
+		}
+		parsed, err := parseDBTimeString(rawValue.String)
+		if err != nil {
+			return fmt.Errorf("parse timestamp %s.%s: %w", table, column, err)
+		}
+		normalized := timeString(parsed)
+		if normalized == rawValue.String {
+			continue
+		}
+
+		whereParts := make([]string, len(pkColumns))
+		args := make([]any, 0, len(pkColumns)+1)
+		args = append(args, normalized)
+		for i, pkColumn := range pkColumns {
+			if !values[i].Valid {
+				return fmt.Errorf("timestamp normalization %s.%s has null primary key column %s", table, column, pkColumn)
+			}
+			whereParts[i] = fmt.Sprintf("%s = ?", pkColumn)
+			args = append(args, values[i].String)
+		}
+
+		// #nosec G201 -- identifiers come from normalizeTimestampTextColumns' fixed table/column allowlist.
+		update := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE %s`, table, column, strings.Join(whereParts, " AND "))
+		if _, err := tx.ExecContext(ctx, update, args...); err != nil {
+			return fmt.Errorf("normalize timestamp %s.%s: %w", table, column, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate timestamp column %s.%s: %w", table, column, err)
+	}
+
 	return nil
 }
 
