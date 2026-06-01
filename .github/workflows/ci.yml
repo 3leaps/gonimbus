@@ -129,6 +129,8 @@ jobs:
           set -euo pipefail
           go build -tags gonimbus_libsql ./cmd/gonimbus
       - name: Cross-compile default pure-Go graph
+        env:
+          CGO_ENABLED: "0"
         run: |
           set -euo pipefail
           GOOS=linux GOARCH=arm64 go build ./...
