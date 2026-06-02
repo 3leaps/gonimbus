@@ -398,30 +398,59 @@ func publishExclusiveFileAtomic0600(dir, finalPath, pattern string, data []byte)
 	return true, nil
 }
 
-func (s *Store) ReleaseLease(operation, runID, holderID string) error {
-	holderID = cleanSegment(holderID)
-	if holderID == "" {
-		return fmt.Errorf("lease holder_id is invalid")
+func (s *Store) ReleaseLease(operation string, lease Lease) error {
+	if err := validateLeaseIdentity(lease); err != nil {
+		return err
 	}
-	dir, err := s.runDir(operation, runID)
+	dir, err := s.runDir(operation, lease.RunID)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(dir, leaseFileName)
-	lease, err := readLease(path)
+	lockPath := filepath.Join(dir, reclaimLockName)
+	lock, err := claimReclaimLock(dir, lockPath, lease.HolderID)
+	if err != nil {
+		return err
+	}
+	defer releaseReclaimLock(lockPath, lock)
+
+	current, err := readLease(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	if lease.HolderID != holderID {
+	if !sameLease(current, &lease) {
 		return ErrLeaseHeld
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove lease: %w", err)
 	}
 	return nil
+}
+
+func validateLeaseIdentity(lease Lease) error {
+	if cleanSegment(lease.RunID) == "" {
+		return fmt.Errorf("lease run_id is invalid")
+	}
+	if cleanSegment(lease.HolderID) == "" {
+		return fmt.Errorf("lease holder_id is invalid")
+	}
+	if lease.ClaimedAt.IsZero() || lease.ExpiresAt.IsZero() {
+		return fmt.Errorf("lease identity timestamps are required")
+	}
+	return nil
+}
+
+func sameLease(a, b *Lease) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.RunID == b.RunID &&
+		a.HolderID == b.HolderID &&
+		a.ClaimedAt.Equal(b.ClaimedAt) &&
+		a.ExpiresAt.Equal(b.ExpiresAt)
 }
 
 func FingerprintConfig(v any) (string, error) {
@@ -551,6 +580,9 @@ func credentialString(value string) bool {
 	}
 	if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
 		if u.User != nil {
+			if u.User.Username() != "" {
+				return true
+			}
 			if password, ok := u.User.Password(); ok && password != "" {
 				return true
 			}

@@ -122,6 +122,10 @@ func TestWriteCheckpointRejectsCredentialMaterial(t *testing.T) {
 			name:    "auth bearing dsn",
 			payload: `{"source_uri":"postgres://user:password@example.invalid/db"}`,
 		},
+		{
+			name:    "username only url userinfo",
+			payload: `{"source_uri":"https://token@example.invalid/object"}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,8 +175,10 @@ func TestClaimLeaseIsExclusiveAndStaleLeaseCanBeReclaimed(t *testing.T) {
 
 	_, err = store.ClaimLease(ctx, "index-build", "run_lease", "holder-2", time.Hour)
 	require.ErrorIs(t, err, ErrLeaseHeld)
-	require.ErrorIs(t, store.ReleaseLease("index-build", "run_lease", "holder-2"), ErrLeaseHeld)
-	require.NoError(t, store.ReleaseLease("index-build", "run_lease", "holder-1"))
+	wrong := *first
+	wrong.HolderID = "holder-2"
+	require.ErrorIs(t, store.ReleaseLease("index-build", wrong), ErrLeaseHeld)
+	require.NoError(t, store.ReleaseLease("index-build", *first))
 
 	second, err := store.ClaimLease(ctx, "index-build", "run_lease", "holder-2", time.Hour)
 	require.NoError(t, err)
@@ -191,6 +197,30 @@ func TestClaimLeaseIsExclusiveAndStaleLeaseCanBeReclaimed(t *testing.T) {
 	third, err := store.ClaimLease(ctx, "index-build", "run_lease", "holder-3", time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, "holder-3", third.HolderID)
+}
+
+func TestReleaseLeaseDoesNotDeleteSuccessorAfterStaleTakeover(t *testing.T) {
+	store := newTestStore(t)
+	runID := "run_release_stale"
+	dir, err := store.ensureRunDir("index-build", runID)
+	require.NoError(t, err)
+	leasePath := filepath.Join(dir, leaseFileName)
+	stale := Lease{
+		RunID:     runID,
+		HolderID:  "holder-a",
+		ClaimedAt: time.Now().Add(-2 * time.Hour).UTC(),
+		ExpiresAt: time.Now().Add(-time.Hour).UTC(),
+	}
+	writeLeaseFile(t, leasePath, stale)
+
+	successor, err := store.ClaimLease(context.Background(), "index-build", runID, "holder-b", time.Hour)
+	require.NoError(t, err)
+
+	err = store.ReleaseLease("index-build", stale)
+	require.ErrorIs(t, err, ErrLeaseHeld)
+	current, err := readLease(leasePath)
+	require.NoError(t, err)
+	require.True(t, sameLease(current, successor))
 }
 
 func TestClaimLeaseCleansExpiredReclaimLock(t *testing.T) {
