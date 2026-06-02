@@ -254,6 +254,32 @@ func UpdateIndexRunStatus(ctx context.Context, db *sql.DB, runID string, status 
 	return nil
 }
 
+// MarkIndexRunResuming promotes a failed-resumable run back to running for a
+// same-run resume attempt. It fails closed if the run is no longer resumable.
+func MarkIndexRunResuming(ctx context.Context, db *sql.DB, runID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	now := time.Now().UTC()
+	res, err := db.ExecContext(ctx,
+		`UPDATE index_runs
+		 SET status = ?, ended_at = NULL, acquired_at = ?
+		 WHERE run_id = ? AND status = ?`,
+		string(RunStatusRunning), timeString(now), runID, string(RunStatusFailedResumable))
+	if err != nil {
+		return fmt.Errorf("mark index_run resuming: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark index_run resuming rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("index_run is not failed-resumable: %s", runID)
+	}
+	return nil
+}
+
 // RecordRunEvent records an event for an IndexRun.
 func RecordRunEvent(ctx context.Context, db *sql.DB, event RunEvent) error {
 	if ctx == nil {

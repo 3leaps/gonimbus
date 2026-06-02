@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -199,6 +200,84 @@ func TestEnrichHeadRunStatusPartialForPerObjectFailures(t *testing.T) {
 	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusPartial), enrichHeadRunStatus(enrichHeadSummaryData{Failed: 1}, nil))
 	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusFailed), enrichHeadRunStatus(enrichHeadSummaryData{Failed: 1}, context.Canceled))
 	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusSuccess), enrichHeadRunStatus(enrichHeadSummaryData{}, nil))
+}
+
+func TestEnrichHeadResumeRunDoesNotCollideWithBooleanResume(t *testing.T) {
+	cmd := indexEnrichWithHeadCmd
+	oldResumeRun, _ := cmd.Flags().GetString("resume-run")
+	oldResume, _ := cmd.Flags().GetBool("resume")
+	defer func() {
+		require.NoError(t, cmd.Flags().Set("resume-run", oldResumeRun))
+		require.NoError(t, cmd.Flags().Set("resume", boolString(oldResume)))
+	}()
+
+	require.NoError(t, cmd.Flags().Set("resume", "true"))
+	gotResume, err := cmd.Flags().GetBool("resume")
+	require.NoError(t, err)
+	require.True(t, gotResume)
+
+	require.NoError(t, cmd.Flags().Set("resume-run", "run_123"))
+	require.NoError(t, validateEnrichHeadArgs(cmd, nil))
+	require.NoError(t, validateEnrichHeadArgs(cmd, []string{"idx_123"}))
+	require.Error(t, validateEnrichHeadArgs(cmd, []string{"idx_123", "extra"}))
+
+	require.NoError(t, cmd.Flags().Set("resume-run", ""))
+	require.Error(t, validateEnrichHeadArgs(cmd, nil))
+	require.NoError(t, validateEnrichHeadArgs(cmd, []string{"idx_123"}))
+}
+
+func TestEnrichHeadResumeIdentityRejectsTamperedCheckpointConfig(t *testing.T) {
+	ctx, db, indexSet := setupEnrichHeadDB(t)
+	defer func() { _ = db.Close() }()
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, enrichHeadSourceType)
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil))
+
+	original := enrichHeadCheckpointConfig{
+		IndexSetID: indexSet.IndexSetID,
+		Query: enrichHeadQueryOptions{
+			Pattern:  "archive/**",
+			Parallel: 2,
+		},
+		Provider: enrichHeadProviderOptions{Region: "us-east-1"},
+	}
+	originalFingerprint, err := checkpointFingerprint(original)
+	require.NoError(t, err)
+	require.NoError(t, recordIndexRunCheckpointIdentity(ctx, db, run.RunID, operationIndexEnrichWithHead, originalFingerprint, time.Now().UTC()))
+
+	_, err = validateCheckpointIdentityAgainstIndexRun(ctx, db, &opcheckpoint.Envelope{
+		Operation:         operationIndexEnrichWithHead,
+		RunID:             run.RunID,
+		ConfigFingerprint: originalFingerprint,
+	}, operationIndexEnrichWithHead, original)
+	require.NoError(t, err)
+
+	tampered := original
+	tampered.Query.Pattern = "other/**"
+	tamperedFingerprint, err := checkpointFingerprint(tampered)
+	require.NoError(t, err)
+
+	_, err = validateCheckpointIdentityAgainstIndexRun(ctx, db, &opcheckpoint.Envelope{
+		Operation:         operationIndexEnrichWithHead,
+		RunID:             run.RunID,
+		ConfigFingerprint: tamperedFingerprint,
+	}, operationIndexEnrichWithHead, tampered)
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+
+	_, err = validateCheckpointIdentityAgainstIndexRun(ctx, db, &opcheckpoint.Envelope{
+		Operation:         operationIndexEnrichWithHead,
+		RunID:             run.RunID,
+		ConfigFingerprint: originalFingerprint,
+	}, operationIndexEnrichWithHead, tampered)
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func setupEnrichHeadDB(t *testing.T) (context.Context, *sql.DB, *indexstore.IndexSet) {

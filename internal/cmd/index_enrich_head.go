@@ -13,10 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providers3 "github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -41,7 +43,7 @@ var (
 var indexEnrichWithHeadCmd = &cobra.Command{
 	Use:   "enrich-with-head <index-set-id>",
 	Short: "Enrich indexed objects with HEAD-derived metadata",
-	Args:  cobra.ExactArgs(1),
+	Args:  validateEnrichHeadArgs,
 	RunE:  runIndexEnrichWithHead,
 }
 
@@ -57,9 +59,37 @@ func init() {
 	indexEnrichWithHeadCmd.Flags().Int("parallel", 32, "Max concurrent HEAD operations")
 	indexEnrichWithHeadCmd.Flags().Bool("resume", false, "Skip rows with non-null head_enriched_at")
 	indexEnrichWithHeadCmd.Flags().String("state-out", "", "Write per-candidate audit JSONL to this path")
+	indexEnrichWithHeadCmd.Flags().String("resume-run", "", "Resume a failed-resumable enrich-with-head run by run id")
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadProfile, "profile", "", "AWS profile")
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadRegion, "region", "", "AWS region override")
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadEndpoint, "endpoint", "", "Custom S3 endpoint override")
+}
+
+type enrichHeadCheckpointPayload struct {
+	Config  enrichHeadCheckpointConfig `json:"config"`
+	Summary enrichHeadSummaryData      `json:"summary"`
+}
+
+type enrichHeadCheckpointConfig struct {
+	IndexSetID string                    `json:"index_set_id"`
+	Query      enrichHeadQueryOptions    `json:"query"`
+	Provider   enrichHeadProviderOptions `json:"provider"`
+}
+
+type enrichHeadQueryOptions struct {
+	Pattern        string   `json:"pattern,omitempty"`
+	KeyRegex       string   `json:"key_regex,omitempty"`
+	MinSize        string   `json:"min_size,omitempty"`
+	MaxSize        string   `json:"max_size,omitempty"`
+	StorageClasses []string `json:"storage_classes,omitempty"`
+	IncludeDeleted bool     `json:"include_deleted,omitempty"`
+	Parallel       int      `json:"parallel"`
+}
+
+type enrichHeadProviderOptions struct {
+	Profile  string `json:"profile,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 type enrichHeadStateRecord struct {
@@ -117,6 +147,12 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
+	resumeRun, _ := cmd.Flags().GetString("resume-run")
+	resumeRun = strings.TrimSpace(resumeRun)
+	if resumeRun != "" {
+		return runIndexEnrichWithHeadResume(ctx, cmd, args, resumeRun)
+	}
+
 	indexSetID := strings.TrimSpace(args[0])
 	db, indexSet, err := openIndexDBByID(ctx, indexSetID)
 	if err != nil {
@@ -128,7 +164,11 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	params, storageFiltered, err := enrichHeadQueryParams(cmd, indexSet.IndexSetID)
+	checkpointCfg, params, storageFiltered, err := enrichHeadCheckpointConfigFromCommand(cmd, indexSet.IndexSetID)
+	if err != nil {
+		return err
+	}
+	fingerprint, err := checkpointFingerprint(checkpointCfg)
 	if err != nil {
 		return err
 	}
@@ -140,7 +180,7 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d candidate timestamp parse errors\n", stats.TimestampParseErrors)
 	}
 
-	prov, err := reconstructEnrichHeadProvider(ctx, indexSet)
+	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, checkpointCfg.Provider)
 	if err != nil {
 		return err
 	}
@@ -161,18 +201,36 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 
 	summary, runErr := executeEnrichHead(ctx, db, prov, indexSet, candidates, cmd, stateOut, storageFiltered)
 	status := enrichHeadRunStatus(summary, runErr)
-	if err := indexstore.UpdateIndexRunStatus(context.Background(), db, run.RunID, status, nil); err != nil && runErr == nil {
+	classification := classifyEnrichHeadRunError(runErr)
+	if runErr != nil && classification.Resumable {
+		progress := enrichHeadProgress(summary)
+		payload := enrichHeadCheckpointPayload{Config: checkpointCfg, Summary: summary}
+		opStore, storeErr := openDefaultOperationCheckpointStore(context.Background())
+		if storeErr != nil {
+			runErr = fmt.Errorf("%w; open operation checkpoint store: %v", runErr, storeErr)
+		} else if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, run.RunID, operationIndexEnrichWithHead, fingerprint, classification.Class, progress, payload); writeErr != nil {
+			runErr = fmt.Errorf("%w; write operation checkpoint: %v", runErr, writeErr)
+		} else {
+			status = indexstore.RunStatusFailedResumable
+		}
+	} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, run.RunID, status, nil); err != nil && runErr == nil {
 		runErr = fmt.Errorf("update enrich run status: %w", err)
 	}
 
 	summary.Status = string(status)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(enrichHeadSummaryRecord{
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	if err := enc.Encode(enrichHeadSummaryRecord{
 		Type: "gonimbus.index.enrich_with_head.summary.v1",
 		TS:   ts,
 		Data: summary,
 	}); err != nil && runErr == nil {
 		runErr = fmt.Errorf("write summary: %w", err)
+	}
+	if runErr != nil && classification.Resumable && status == indexstore.RunStatusFailedResumable {
+		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, run.RunID, classification.Class, enrichHeadProgress(summary)); err != nil {
+			runErr = fmt.Errorf("%w; write operation error record: %v", runErr, err)
+		}
 	}
 	if runErr != nil {
 		return runErr
@@ -181,6 +239,154 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("HEAD enrichment completed with %d failure(s)", summary.Failed)
 	}
 	return nil
+}
+
+func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args []string, runID string) error {
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return err
+	}
+	env, err := opStore.ReadCheckpoint(ctx, operationIndexEnrichWithHead, runID)
+	if err != nil {
+		return fmt.Errorf("read operation checkpoint: %w", err)
+	}
+	var payload enrichHeadCheckpointPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return fmt.Errorf("parse enrich-with-head checkpoint payload: %w", err)
+	}
+	resolved, err := findIndexRunInDefaultIndexes(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer closeResolvedIndexRun(resolved)
+	db := resolved.db
+	indexSet := resolved.indexSet
+	run := resolved.run
+
+	if run.IndexSetID != indexSet.IndexSetID || run.SourceType != enrichHeadSourceType || run.Status != indexstore.RunStatusFailedResumable {
+		return fmt.Errorf("index_run %s is not a failed-resumable enrich-with-head run", runID)
+	}
+	if payload.Config.IndexSetID != run.IndexSetID {
+		return opcheckpoint.ErrIdentityMismatch
+	}
+	if len(args) == 1 && strings.TrimSpace(args[0]) != run.IndexSetID {
+		return fmt.Errorf("--resume-run %s is bound to index_set_id %s", runID, run.IndexSetID)
+	}
+	fingerprint, err := validateCheckpointIdentityAgainstIndexRun(ctx, db, env, operationIndexEnrichWithHead, payload.Config)
+	if err != nil {
+		return err
+	}
+	if err := opStore.ValidateIdentity(env, opcheckpoint.Identity{
+		Operation:         operationIndexEnrichWithHead,
+		RunID:             runID,
+		ConfigFingerprint: fingerprint,
+	}); err != nil {
+		return err
+	}
+
+	lease, err := opStore.ClaimLease(ctx, operationIndexEnrichWithHead, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = opStore.ReleaseLease(operationIndexEnrichWithHead, *lease) }()
+
+	params, storageFiltered, err := enrichHeadQueryParamsFromOptions(payload.Config.IndexSetID, payload.Config.Query)
+	if err != nil {
+		return err
+	}
+	candidates, stats, err := indexstore.QueryHeadEnrichmentCandidates(ctx, db, params)
+	if err != nil {
+		return err
+	}
+	if stats.TimestampParseErrors > 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: %d candidate timestamp parse errors\n", stats.TimestampParseErrors)
+	}
+
+	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, payload.Config.Provider)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = prov.Close() }()
+
+	stateOut, err := openEnrichHeadStateOut(cmd)
+	if err != nil {
+		return err
+	}
+	if stateOut != nil {
+		defer func() { _ = stateOut.Close() }()
+	}
+
+	if err := indexstore.MarkIndexRunResuming(context.Background(), db, runID); err != nil {
+		return err
+	}
+	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
+		return err
+	}
+
+	summary, runErr := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, payload.Config.Query.Parallel, true, stateOut, storageFiltered)
+	status := enrichHeadRunStatus(summary, runErr)
+	classification := classifyEnrichHeadRunError(runErr)
+	if runErr != nil && classification.Resumable {
+		progress := enrichHeadProgress(summary)
+		payload.Summary = summary
+		if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexEnrichWithHead, fingerprint, classification.Class, progress, payload); writeErr != nil {
+			runErr = fmt.Errorf("%w; write operation checkpoint: %v", runErr, writeErr)
+		} else {
+			status = indexstore.RunStatusFailedResumable
+		}
+	} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil && runErr == nil {
+		runErr = fmt.Errorf("update enrich run status: %w", err)
+	}
+	if runErr == nil {
+		if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_completed", ""); err != nil {
+			runErr = err
+		}
+	}
+
+	summary.Status = string(status)
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	if err := enc.Encode(enrichHeadSummaryRecord{
+		Type: "gonimbus.index.enrich_with_head.summary.v1",
+		TS:   time.Now().UTC().Format(time.RFC3339),
+		Data: summary,
+	}); err != nil && runErr == nil {
+		runErr = fmt.Errorf("write summary: %w", err)
+	}
+	if runErr != nil && classification.Resumable && status == indexstore.RunStatusFailedResumable {
+		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, runID, classification.Class, enrichHeadProgress(summary)); err != nil {
+			runErr = fmt.Errorf("%w; write operation error record: %v", runErr, err)
+		}
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if summary.Failed > 0 {
+		return fmt.Errorf("HEAD enrichment completed with %d failure(s)", summary.Failed)
+	}
+
+	env.Status = opcheckpoint.StatusSuccess
+	env.Progress = enrichHeadProgress(summary)
+	env.Events = append(env.Events, opcheckpoint.CheckpointEvent{Type: "resume_completed", At: time.Now().UTC()})
+	rawPayload, err := json.Marshal(enrichHeadCheckpointPayload{Config: payload.Config, Summary: summary})
+	if err != nil {
+		return fmt.Errorf("marshal completed checkpoint payload: %w", err)
+	}
+	env.Payload = rawPayload
+	if err := opStore.WriteCheckpoint(context.Background(), *env); err != nil {
+		return fmt.Errorf("write completed checkpoint: %w", err)
+	}
+	return nil
+}
+
+func validateEnrichHeadArgs(cmd *cobra.Command, args []string) error {
+	resumeRun, _ := cmd.Flags().GetString("resume-run")
+	if strings.TrimSpace(resumeRun) != "" {
+		if len(args) > 1 {
+			return fmt.Errorf("accepts at most one index-set-id with --resume-run")
+		}
+		return nil
+	}
+	return cobra.ExactArgs(1)(cmd, args)
 }
 
 func enrichHeadRunStatus(summary enrichHeadSummaryData, runErr error) indexstore.RunStatus {
@@ -193,43 +399,79 @@ func enrichHeadRunStatus(summary enrichHeadSummaryData, runErr error) indexstore
 	return indexstore.RunStatusSuccess
 }
 
-func enrichHeadQueryParams(cmd *cobra.Command, indexSetID string) (indexstore.QueryParams, bool, error) {
+func enrichHeadCheckpointConfigFromCommand(cmd *cobra.Command, indexSetID string) (enrichHeadCheckpointConfig, indexstore.QueryParams, bool, error) {
+	opts, err := enrichHeadQueryOptionsFromCommand(cmd)
+	if err != nil {
+		return enrichHeadCheckpointConfig{}, indexstore.QueryParams{}, false, err
+	}
+	params, storageFiltered, err := enrichHeadQueryParamsFromOptions(indexSetID, opts)
+	if err != nil {
+		return enrichHeadCheckpointConfig{}, indexstore.QueryParams{}, false, err
+	}
+	cfg := enrichHeadCheckpointConfig{
+		IndexSetID: indexSetID,
+		Query:      opts,
+		Provider: enrichHeadProviderOptions{
+			Profile:  strings.TrimSpace(enrichHeadProfile),
+			Region:   strings.TrimSpace(enrichHeadRegion),
+			Endpoint: strings.TrimSpace(enrichHeadEndpoint),
+		},
+	}
+	return cfg, params, storageFiltered, nil
+}
+
+func enrichHeadQueryOptionsFromCommand(cmd *cobra.Command) (enrichHeadQueryOptions, error) {
 	pattern, _ := cmd.Flags().GetString("pattern")
 	keyRegex, _ := cmd.Flags().GetString("key-regex")
 	minSizeStr, _ := cmd.Flags().GetString("min-size")
 	maxSizeStr, _ := cmd.Flags().GetString("max-size")
 	storageClassRaw, _ := cmd.Flags().GetStringArray("storage-class")
 	includeDeleted, _ := cmd.Flags().GetBool("include-deleted")
-
-	params := indexstore.QueryParams{
-		IndexSetID:     indexSetID,
-		Pattern:        pattern,
-		KeyRegex:       keyRegex,
-		IncludeDeleted: includeDeleted,
+	parallel, _ := cmd.Flags().GetInt("parallel")
+	if parallel <= 0 {
+		return enrichHeadQueryOptions{}, fmt.Errorf("--parallel must be greater than zero")
 	}
 	storageClasses, err := parseStorageClassFilterValues(storageClassRaw)
 	if err != nil {
-		return params, false, err
+		return enrichHeadQueryOptions{}, err
 	}
-	params.StorageClasses = storageClasses
-	if minSizeStr != "" {
-		minSize, err := match.ParseSize(minSizeStr)
+	return enrichHeadQueryOptions{
+		Pattern:        strings.TrimSpace(pattern),
+		KeyRegex:       strings.TrimSpace(keyRegex),
+		MinSize:        strings.TrimSpace(minSizeStr),
+		MaxSize:        strings.TrimSpace(maxSizeStr),
+		StorageClasses: storageClasses,
+		IncludeDeleted: includeDeleted,
+		Parallel:       parallel,
+	}, nil
+}
+
+func enrichHeadQueryParamsFromOptions(indexSetID string, opts enrichHeadQueryOptions) (indexstore.QueryParams, bool, error) {
+	params := indexstore.QueryParams{
+		IndexSetID:     indexSetID,
+		Pattern:        opts.Pattern,
+		KeyRegex:       opts.KeyRegex,
+		IncludeDeleted: opts.IncludeDeleted,
+	}
+	params.StorageClasses = opts.StorageClasses
+	if opts.MinSize != "" {
+		minSize, err := match.ParseSize(opts.MinSize)
 		if err != nil {
 			return params, false, fmt.Errorf("invalid --min-size: %w", err)
 		}
 		params.MinSize = minSize
 	}
-	if maxSizeStr != "" {
-		maxSize, err := match.ParseSize(maxSizeStr)
+	if opts.MaxSize != "" {
+		maxSize, err := match.ParseSize(opts.MaxSize)
 		if err != nil {
 			return params, false, fmt.Errorf("invalid --max-size: %w", err)
 		}
 		params.MaxSize = maxSize
 	}
-	return params, len(storageClasses) > 0, nil
+	return params, len(opts.StorageClasses) > 0, nil
 }
 
-func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.IndexSet) (provider.Provider, error) {
+func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.IndexSet, opts enrichHeadProviderOptions) (provider.Provider, error) {
 	if indexSet == nil {
 		return nil, fmt.Errorf("index_set is nil")
 	}
@@ -240,18 +482,18 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 	if parsed.Provider != string(provider.ProviderS3) || indexSet.Provider != string(provider.ProviderS3) {
 		return nil, fmt.Errorf("unsupported provider for enrich-with-head: %s", indexSet.Provider)
 	}
-	region := strings.TrimSpace(enrichHeadRegion)
+	region := strings.TrimSpace(opts.Region)
 	if region == "" {
 		region = indexSet.Region
 	}
-	endpoint := strings.TrimSpace(enrichHeadEndpoint)
+	endpoint := strings.TrimSpace(opts.Endpoint)
 	if endpoint == "" {
 		endpoint = indexSet.Endpoint
 	}
 	return newEnrichHeadS3Provider(ctx, providers3.Config{
 		Bucket:         parsed.Bucket,
 		Region:         region,
-		Profile:        enrichHeadProfile,
+		Profile:        strings.TrimSpace(opts.Profile),
 		Endpoint:       endpoint,
 		ForcePathStyle: endpoint != "",
 	})
@@ -273,6 +515,10 @@ func rejectConcurrentBuild(ctx context.Context, db *sql.DB, indexSetID string) e
 func executeEnrichHead(ctx context.Context, db *sql.DB, prov provider.Provider, indexSet *indexstore.IndexSet, candidates []indexstore.HeadEnrichmentCandidate, cmd *cobra.Command, stateOut *os.File, storageFiltered bool) (enrichHeadSummaryData, error) {
 	parallel, _ := cmd.Flags().GetInt("parallel")
 	resume, _ := cmd.Flags().GetBool("resume")
+	return executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, parallel, resume, stateOut, storageFiltered)
+}
+
+func executeEnrichHeadWithOptions(ctx context.Context, db *sql.DB, prov provider.Provider, indexSet *indexstore.IndexSet, candidates []indexstore.HeadEnrichmentCandidate, parallel int, resume bool, stateOut *os.File, storageFiltered bool) (enrichHeadSummaryData, error) {
 	if parallel <= 0 {
 		return enrichHeadSummaryData{}, fmt.Errorf("--parallel must be greater than zero")
 	}
@@ -347,6 +593,40 @@ func executeEnrichHead(ctx context.Context, db *sql.DB, prov provider.Provider, 
 		return summary, ctx.Err()
 	}
 	return summary, nil
+}
+
+func classifyEnrichHeadRunError(err error) opcheckpoint.Classification {
+	if err == nil {
+		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
+	}
+	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
+		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+	})
+}
+
+func enrichHeadProgress(summary enrichHeadSummaryData) map[string]int64 {
+	return map[string]int64{
+		"candidates":     summary.Candidates,
+		"enriched":       summary.Enriched,
+		"resume_skipped": summary.ResumeSkipped,
+		"failed":         summary.Failed,
+		"head_calls":     summary.HeadCalls,
+	}
+}
+
+func recordIndexRunLifecycleEvent(ctx context.Context, db *sql.DB, runID, eventType, detail string) error {
+	var detailPtr *string
+	if detail != "" {
+		detailPtr = &detail
+	}
+	return indexstore.RecordRunEvent(ctx, db, indexstore.RunEvent{
+		EventID:       "evt_" + uuid.NewString(),
+		RunID:         runID,
+		OccurredAt:    time.Now().UTC(),
+		EventType:     eventType,
+		EventCategory: string(indexstore.EventCategoryInfo),
+		Detail:        detailPtr,
+	})
 }
 
 func enrichOneHead(ctx context.Context, prov provider.Provider, indexSet *indexstore.IndexSet, candidate indexstore.HeadEnrichmentCandidate) enrichHeadResult {
