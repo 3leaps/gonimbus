@@ -17,10 +17,12 @@
   ],
   "storageful_public_packages": [
     "./pkg/indexstore",
+    "./pkg/opcheckpoint",
     "./pkg/reflowstate"
   ],
   "denied_imports": [
     "github.com/3leaps/gonimbus/pkg/indexstore",
+    "github.com/3leaps/gonimbus/pkg/opcheckpoint",
     "github.com/3leaps/gonimbus/pkg/reflowstate",
     "github.com/fulmenhq/gofulmen",
     "github.com/go-chi/chi",

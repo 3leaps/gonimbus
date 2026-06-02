@@ -220,6 +220,7 @@ func TestExportableRunStatus_Valid(t *testing.T) {
 		{indexstore.RunStatusSuccess, "success"},
 		{indexstore.RunStatusPartial, "partial"},
 		{indexstore.RunStatusFailed, "failed"},
+		{indexstore.RunStatusFailedResumable, "failed-resumable"},
 	}
 	for _, tt := range tests {
 		s, err := exportableRunStatus(tt.status)

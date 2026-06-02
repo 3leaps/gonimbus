@@ -439,6 +439,8 @@ func exportableRunStatus(status indexstore.RunStatus) (string, error) {
 		return "partial", nil
 	case indexstore.RunStatusFailed:
 		return "failed", nil
+	case indexstore.RunStatusFailedResumable:
+		return "failed-resumable", nil
 	default:
 		return "", fmt.Errorf("unsupported run status for export: %q", status)
 	}
