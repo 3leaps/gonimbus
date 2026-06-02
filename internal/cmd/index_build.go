@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -27,10 +28,13 @@ import (
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/scope"
 )
+
+const operationIndexBuild = "index-build"
 
 var indexBuildCmd = &cobra.Command{
 	Use:   "build",
@@ -76,6 +80,7 @@ var (
 	indexBuildScopeMaxPrefix  int
 	indexBuildName            string
 	indexBuildSummary         bool
+	indexBuildResumeRun       string
 )
 
 func init() {
@@ -83,7 +88,6 @@ func init() {
 
 	// Required
 	indexBuildCmd.Flags().StringVarP(&indexBuildJobPath, "job", "j", "", "Path to index manifest (required)")
-	_ = indexBuildCmd.MarkFlagRequired("job")
 
 	// Optional
 	indexBuildCmd.Flags().StringVar(&indexBuildDBPath, "db", "", "Index database path or libsql DSN (default is per-index under data dir)")
@@ -94,6 +98,7 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildManagedJobID, "_managed-job-id", "", "(internal) Managed job id")
 	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
+	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
 
@@ -109,6 +114,14 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	resumeRun := strings.TrimSpace(indexBuildResumeRun)
+	if resumeRun != "" {
+		return runIndexBuildResume(ctx, cmd, resumeRun)
+	}
+	if strings.TrimSpace(indexBuildJobPath) == "" {
+		return fmt.Errorf("--job is required")
 	}
 
 	// Managed mode: translate SIGTERM into context cancellation.
@@ -238,6 +251,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	checkpointCfg := indexBuildCheckpointConfigFromManifest(m, identity, buildFilters.FiltersHash, scopeHash)
 
 	// Show plan in dry-run mode
 	if indexBuildDryRun {
@@ -309,6 +323,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	} else {
 		_, _ = fmt.Fprintf(os.Stderr, "Using existing IndexSet: %s\n", indexSet.IndexSetID)
 	}
+	checkpointCfg.IndexSetID = indexSet.IndexSetID
 
 	// Create IndexRun
 	sourceType := m.Build.Source
@@ -347,8 +362,33 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  source_type: %s\n", sourceType)
 
 	// Run crawl and ingest records (streaming - memory-bounded)
-	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run, buildFilters.Filter)
+	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run, buildFilters.Filter, nil)
 	if crawlErr != nil {
+		classification := classifyIndexBuildRunError(crawlErr, m)
+		if classification.Resumable && indexBuildCheckpointEligible(checkpointCfg) {
+			progress, checkpointErr := writeFailedResumableIndexBuildCheckpoint(context.Background(), db, run.RunID, checkpointCfg, classification.Class, result)
+			if checkpointErr == nil {
+				_, _ = fmt.Fprintf(os.Stderr, "\nIndex build failed with resumable checkpoint\n")
+				_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", run.RunID)
+				_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", indexstore.RunStatusFailedResumable)
+				_, _ = fmt.Fprintf(os.Stderr, "  error_class: %s\n", classification.Class)
+				summary := indexBuildSummaryFromResult(result)
+				_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", summary.ObjectsIngested)
+				_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", summary.PrefixesIngested)
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationIndexBuild, run.RunID, classification.Class, progress); emitErr != nil {
+					crawlErr = fmt.Errorf("%w; write operation error record: %v", crawlErr, emitErr)
+				}
+				if store != nil && job != nil {
+					job.State = jobregistry.JobStatePartial
+					ended := time.Now().UTC()
+					job.EndedAt = &ended
+					_ = store.Write(job)
+				}
+				return fmt.Errorf("index build failed resumable: %w", crawlErr)
+			}
+			crawlErr = fmt.Errorf("%w; write operation checkpoint: %v", crawlErr, checkpointErr)
+		}
 		// ENTARCH: Distinguish context cancellation from fatal errors.
 		// - Cancellation (Ctrl-C, timeout): record as "partial" (data was flushed, just incomplete)
 		// - Other errors: record as "failed" (something actually broke)
@@ -358,8 +398,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(os.Stderr, "\nIndex build interrupted\n")
 			_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", run.RunID)
 			_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", indexstore.RunStatusPartial)
-			_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
-			_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
+			summary := indexBuildSummaryFromResult(result)
+			_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", summary.ObjectsIngested)
+			_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", summary.PrefixesIngested)
 			_, _ = fmt.Fprintf(os.Stderr, "  note: run cancelled, data flushed but incomplete\n")
 
 			if store != nil && job != nil {
@@ -432,6 +473,345 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) error {
+	if strings.TrimSpace(indexBuildJobPath) != "" {
+		return fmt.Errorf("--job is not accepted with --resume-run; resume uses checkpointed build config")
+	}
+	if strings.TrimSpace(indexBuildDBPath) != "" {
+		return fmt.Errorf("--db is not accepted with --resume-run; resume uses the default index database recorded by the run")
+	}
+	if indexBuildDryRun {
+		return fmt.Errorf("--dry-run is not compatible with --resume-run")
+	}
+	if indexBuildBackground {
+		return fmt.Errorf("--background is not compatible with --resume-run")
+	}
+	if indexBuildSummary {
+		return fmt.Errorf("--summary is not compatible with --resume-run")
+	}
+
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return err
+	}
+	env, err := opStore.ReadCheckpoint(ctx, operationIndexBuild, runID)
+	if err != nil {
+		return fmt.Errorf("read operation checkpoint: %w", err)
+	}
+	var payload indexBuildCheckpointPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return fmt.Errorf("parse index build checkpoint payload: %w", err)
+	}
+	if !payload.Config.UsesDefaultIndexDB {
+		return fmt.Errorf("--resume-run %s is not supported for non-default index database paths in this slice", runID)
+	}
+
+	resolved, err := findIndexRunInDefaultIndexes(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer closeResolvedIndexRun(resolved)
+	db := resolved.db
+	indexSet := resolved.indexSet
+	run := resolved.run
+
+	if payload.Config.IndexSetID != "" && payload.Config.IndexSetID != run.IndexSetID {
+		return opcheckpoint.ErrIdentityMismatch
+	}
+	if run.IndexSetID != indexSet.IndexSetID || run.SourceType != payload.Config.SourceType || run.Status != indexstore.RunStatusFailedResumable {
+		return fmt.Errorf("index_run %s is not a failed-resumable index build run", runID)
+	}
+
+	fingerprint, err := validateIndexBuildCheckpointPayloadIdentity(ctx, db, env, payload)
+	if err != nil {
+		return err
+	}
+	if err := opStore.ValidateIdentity(env, opcheckpoint.Identity{
+		Operation:         operationIndexBuild,
+		RunID:             runID,
+		ConfigFingerprint: fingerprint,
+	}); err != nil {
+		return err
+	}
+
+	lease, err := opStore.ClaimLease(ctx, operationIndexBuild, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = opStore.ReleaseLease(operationIndexBuild, *lease) }()
+
+	m := &payload.Config.Manifest
+	if err := validateIdentity(m, effectiveIdentityFromCheckpoint(payload.Config.Identity)); err != nil {
+		return err
+	}
+	oldScopeWarnPrefix := indexBuildScopeWarnPrefix
+	oldScopeMaxPrefix := indexBuildScopeMaxPrefix
+	indexBuildScopeWarnPrefix = payload.Config.ScopeWarnPrefixes
+	indexBuildScopeMaxPrefix = payload.Config.ScopeMaxPrefixes
+	defer func() {
+		indexBuildScopeWarnPrefix = oldScopeWarnPrefix
+		indexBuildScopeMaxPrefix = oldScopeMaxPrefix
+	}()
+	buildFilters, err := computeIndexBuildFilters(m)
+	if err != nil {
+		return err
+	}
+
+	if err := indexstore.MarkIndexRunResuming(context.Background(), db, runID); err != nil {
+		return err
+	}
+	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
+		return err
+	}
+
+	result, crawlErr := runCrawlForIndex(ctx, m, db, run.IndexSetID, run, buildFilters.Filter, payload.CrawlPrefixes)
+	if crawlErr != nil {
+		classification := classifyIndexBuildRunError(crawlErr, m)
+		if classification.Resumable {
+			progress := indexBuildProgress(result)
+			if prefixes := indexBuildCrawlPrefixes(result); len(prefixes) > 0 {
+				payload.CrawlPrefixes = prefixes
+			}
+			payload.Summary = indexBuildSummaryFromResult(result)
+			if err := bindIndexBuildCrawlPrefixes(&payload.Config, payload.CrawlPrefixes); err != nil {
+				crawlErr = fmt.Errorf("%w; bind crawl prefix plan: %v", crawlErr, err)
+				return fmt.Errorf("index build resume failed: %w", crawlErr)
+			}
+			fingerprint, err = checkpointFingerprint(payload.Config)
+			if err != nil {
+				crawlErr = fmt.Errorf("%w; compute checkpoint fingerprint: %v", crawlErr, err)
+				return fmt.Errorf("index build resume failed: %w", crawlErr)
+			}
+			if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexBuild, fingerprint, classification.Class, progress, payload); writeErr != nil {
+				crawlErr = fmt.Errorf("%w; write operation checkpoint: %v", crawlErr, writeErr)
+			} else {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationIndexBuild, runID, classification.Class, progress); emitErr != nil {
+					crawlErr = fmt.Errorf("%w; write operation error record: %v", crawlErr, emitErr)
+				}
+			}
+		} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, indexstore.RunStatusFailed, nil); err != nil {
+			crawlErr = fmt.Errorf("%w; update index run status: %v", crawlErr, err)
+		}
+		return fmt.Errorf("index build resume failed: %w", crawlErr)
+	}
+
+	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
+	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
+		return fmt.Errorf("finalize index run: %w", err)
+	}
+	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_completed", ""); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "\nIndex build resume completed\n")
+	_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", runID)
+	_, _ = fmt.Fprintf(os.Stderr, "  index_set_id: %s\n", indexSet.IndexSetID)
+	_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", result.FinalStatus)
+	_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
+	_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
+
+	env.Status = opcheckpoint.StatusSuccess
+	env.Progress = indexBuildProgress(result)
+	env.Events = append(env.Events, opcheckpoint.CheckpointEvent{Type: "resume_completed", At: time.Now().UTC()})
+	payload.Summary = indexBuildSummaryFromResult(result)
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal completed checkpoint payload: %w", err)
+	}
+	env.Payload = rawPayload
+	if err := opStore.WriteCheckpoint(context.Background(), *env); err != nil {
+		return fmt.Errorf("write completed checkpoint: %w", err)
+	}
+	return nil
+}
+
+type indexBuildCheckpointPayload struct {
+	Config        indexBuildCheckpointConfig  `json:"config"`
+	CrawlPrefixes []string                    `json:"crawl_prefixes,omitempty"`
+	Summary       indexBuildCheckpointSummary `json:"summary"`
+}
+
+type indexBuildCheckpointConfig struct {
+	IndexSetID         string                  `json:"index_set_id,omitempty"`
+	SourceType         string                  `json:"source_type"`
+	Manifest           manifest.IndexManifest  `json:"manifest"`
+	Identity           indexBuildIdentityState `json:"identity"`
+	FiltersHash        string                  `json:"filters_hash,omitempty"`
+	ScopeHash          string                  `json:"scope_hash,omitempty"`
+	CrawlPrefixesHash  string                  `json:"crawl_prefixes_hash,omitempty"`
+	ScopeWarnPrefixes  int                     `json:"scope_warn_prefixes"`
+	ScopeMaxPrefixes   int                     `json:"scope_max_prefixes"`
+	UsesDefaultIndexDB bool                    `json:"uses_default_index_db"`
+}
+
+type indexBuildIdentityState struct {
+	StorageProvider string `json:"storage_provider,omitempty"`
+	CloudProvider   string `json:"cloud_provider,omitempty"`
+	RegionKind      string `json:"region_kind,omitempty"`
+	Region          string `json:"region,omitempty"`
+	EndpointHost    string `json:"endpoint_host,omitempty"`
+}
+
+type indexBuildCheckpointSummary struct {
+	ObjectsIngested  int64  `json:"objects_ingested"`
+	PrefixesIngested int64  `json:"prefixes_ingested"`
+	ObjectsDeleted   int64  `json:"objects_deleted,omitempty"`
+	FinalStatus      string `json:"final_status,omitempty"`
+}
+
+func indexBuildCheckpointConfigFromManifest(m *manifest.IndexManifest, identity effectiveIdentity, filtersHash, scopeHash string) indexBuildCheckpointConfig {
+	sourceType := "crawl"
+	if m != nil && m.Build != nil && strings.TrimSpace(m.Build.Source) != "" {
+		sourceType = strings.TrimSpace(m.Build.Source)
+	}
+	cfg := indexBuildCheckpointConfig{
+		SourceType:         sourceType,
+		Identity:           indexBuildIdentityState(identity),
+		FiltersHash:        strings.TrimSpace(filtersHash),
+		ScopeHash:          strings.TrimSpace(scopeHash),
+		ScopeWarnPrefixes:  indexBuildScopeWarnPrefix,
+		ScopeMaxPrefixes:   indexBuildScopeMaxPrefix,
+		UsesDefaultIndexDB: strings.TrimSpace(indexBuildDBPath) == "",
+	}
+	if m != nil {
+		cfg.Manifest = *m
+	}
+	return cfg
+}
+
+func effectiveIdentityFromCheckpoint(state indexBuildIdentityState) effectiveIdentity {
+	return effectiveIdentity(state)
+}
+
+func indexBuildSummaryFromResult(result *indexBuildResult) indexBuildCheckpointSummary {
+	if result == nil {
+		return indexBuildCheckpointSummary{}
+	}
+	return indexBuildCheckpointSummary{
+		ObjectsIngested:  result.ObjectsIngested,
+		PrefixesIngested: result.PrefixesIngested,
+		ObjectsDeleted:   result.ObjectsDeleted,
+		FinalStatus:      string(result.FinalStatus),
+	}
+}
+
+func indexBuildCheckpointEligible(cfg indexBuildCheckpointConfig) bool {
+	return cfg.UsesDefaultIndexDB
+}
+
+func writeFailedResumableIndexBuildCheckpoint(
+	ctx context.Context,
+	db *sql.DB,
+	runID string,
+	cfg indexBuildCheckpointConfig,
+	class opcheckpoint.ErrorClass,
+	result *indexBuildResult,
+) (map[string]int64, error) {
+	progress := indexBuildProgress(result)
+	payload := indexBuildCheckpointPayload{
+		Config:        cfg,
+		CrawlPrefixes: indexBuildCrawlPrefixes(result),
+		Summary:       indexBuildSummaryFromResult(result),
+	}
+	if err := bindIndexBuildCrawlPrefixes(&payload.Config, payload.CrawlPrefixes); err != nil {
+		return progress, fmt.Errorf("bind crawl prefix plan: %w", err)
+	}
+	fingerprint, err := checkpointFingerprint(payload.Config)
+	if err != nil {
+		return progress, fmt.Errorf("compute checkpoint fingerprint: %w", err)
+	}
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return progress, fmt.Errorf("open operation checkpoint store: %w", err)
+	}
+	if err := writeIndexRunCheckpoint(ctx, opStore, db, runID, operationIndexBuild, fingerprint, class, progress, payload); err != nil {
+		return progress, err
+	}
+	return progress, nil
+}
+
+func indexBuildCrawlPrefixes(result *indexBuildResult) []string {
+	if result == nil || len(result.CrawlPrefixes) == 0 {
+		return nil
+	}
+	return append([]string(nil), result.CrawlPrefixes...)
+}
+
+func bindIndexBuildCrawlPrefixes(cfg *indexBuildCheckpointConfig, prefixes []string) error {
+	if cfg == nil {
+		return fmt.Errorf("index build checkpoint config is nil")
+	}
+	hash, err := hashIndexBuildCrawlPrefixes(prefixes)
+	if err != nil {
+		return err
+	}
+	cfg.CrawlPrefixesHash = hash
+	return nil
+}
+
+func validateIndexBuildCheckpointPayloadIdentity(ctx context.Context, db *sql.DB, env *opcheckpoint.Envelope, payload indexBuildCheckpointPayload) (string, error) {
+	if err := validateIndexBuildCrawlPrefixes(payload.Config, payload.CrawlPrefixes); err != nil {
+		return "", err
+	}
+	return validateCheckpointIdentityAgainstIndexRun(ctx, db, env, operationIndexBuild, payload.Config)
+}
+
+func validateIndexBuildCrawlPrefixes(cfg indexBuildCheckpointConfig, prefixes []string) error {
+	hash, err := hashIndexBuildCrawlPrefixes(prefixes)
+	if err != nil {
+		return err
+	}
+	if hash != cfg.CrawlPrefixesHash {
+		return opcheckpoint.ErrIdentityMismatch
+	}
+	return nil
+}
+
+func hashIndexBuildCrawlPrefixes(prefixes []string) (string, error) {
+	if len(prefixes) == 0 {
+		return "", nil
+	}
+	canonical := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if prefix != strings.TrimSpace(prefix) {
+			return "", opcheckpoint.ErrIdentityMismatch
+		}
+		canonical = append(canonical, prefix)
+	}
+	sort.Strings(canonical)
+	b, err := json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	sha := sha256.Sum256(b)
+	return hex.EncodeToString(sha[:]), nil
+}
+
+func indexBuildProgress(result *indexBuildResult) map[string]int64 {
+	if result == nil {
+		return nil
+	}
+	progress := map[string]int64{
+		"objects_ingested":  result.ObjectsIngested,
+		"prefixes_ingested": result.PrefixesIngested,
+	}
+	if len(result.CrawlPrefixes) > 0 {
+		progress["crawl_prefixes"] = int64(len(result.CrawlPrefixes))
+	}
+	return progress
+}
+
+func classifyIndexBuildRunError(err error, m *manifest.IndexManifest) opcheckpoint.Classification {
+	if err == nil {
+		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
+	}
+	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
+		RefreshableCredentials: m != nil && strings.TrimSpace(m.Connection.Profile) != "",
+		Interrupted:            errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+	})
 }
 
 func validateIndexBuildBackgroundFlags() error {
@@ -1073,6 +1453,7 @@ type indexBuildResult struct {
 	ObjectsIngested  int64
 	PrefixesIngested int64
 	ObjectsDeleted   int64
+	CrawlPrefixes    []string
 }
 
 // runCrawlForIndex executes the crawl with streaming ingestion.
@@ -1086,6 +1467,7 @@ func runCrawlForIndex(
 	indexSetID string,
 	run *indexstore.IndexRun,
 	filter *match.CompositeFilter,
+	crawlPrefixesOverride []string,
 ) (*indexBuildResult, error) {
 	// Create provider
 	cfg := s3.Config{
@@ -1110,7 +1492,7 @@ func runCrawlForIndex(
 	}
 
 	var scopePlan *scope.Plan
-	if m.Build != nil && m.Build.Scope != nil {
+	if len(crawlPrefixesOverride) == 0 && m.Build != nil && m.Build.Scope != nil {
 		var lister provider.PrefixLister
 		if scope.RequiresPrefixLister(m.Build.Scope) {
 			lister = prov
@@ -1183,6 +1565,19 @@ func runCrawlForIndex(
 	}
 	if scopePlan != nil {
 		c = c.WithPrefixes(scopePlan.Prefixes)
+	} else if len(crawlPrefixesOverride) > 0 {
+		c = c.WithPrefixes(crawlPrefixesOverride)
+	}
+	crawlPrefixes := crawlPrefixesOverride
+	if len(crawlPrefixes) == 0 {
+		if scopePlan != nil {
+			crawlPrefixes = scopePlan.Prefixes
+		} else {
+			crawlPrefixes = matcher.Prefixes()
+			if len(crawlPrefixes) == 0 {
+				crawlPrefixes = []string{""}
+			}
+		}
 	}
 	_, crawlErr := c.Run(ctx)
 
@@ -1192,6 +1587,7 @@ func runCrawlForIndex(
 
 	// Get result from writer state
 	result := writer.Result()
+	result.CrawlPrefixes = append([]string(nil), crawlPrefixes...)
 
 	// ENTARCH: Context cancellation (Ctrl-C, timeout) must NOT look like success.
 	// If context was cancelled, mark as partial and return the context error.
