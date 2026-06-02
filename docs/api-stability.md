@@ -29,6 +29,7 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/manifest`      | Experimental | Manifest parsing and validation substrate.                              |
 | `github.com/3leaps/gonimbus/pkg/match`         | Stable       | Object-key pattern matching used by embedded consumers.                 |
 | `github.com/3leaps/gonimbus/pkg/output`        | Experimental | CLI JSONL output helpers.                                               |
+| `github.com/3leaps/gonimbus/pkg/opcheckpoint`  | Experimental | Sensitive local operation-checkpoint substrate.                         |
 | `github.com/3leaps/gonimbus/pkg/preflight`     | Experimental | Operator preflight checks.                                              |
 | `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                         |
 | `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, and capability interfaces.          |

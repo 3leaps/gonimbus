@@ -202,11 +202,12 @@ or `modernc.org/sqlite`.
 Storageful public packages are:
 
 - `pkg/indexstore`
+- `pkg/opcheckpoint`
 - `pkg/reflowstate`
 
-Those packages intentionally use the SQLite-backed index substrate and are
+Those packages intentionally use local persistence substrates and are
 Experimental-tier. Import them only when your application deliberately wants
-gonimbus index persistence.
+gonimbus index or operation-checkpoint persistence.
 
 ### Libsql Build Tag
 

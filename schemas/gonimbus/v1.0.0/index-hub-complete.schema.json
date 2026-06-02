@@ -75,7 +75,8 @@
           "enum": [
             "success",
             "partial",
-            "failed"
+            "failed",
+            "failed-resumable"
           ],
           "description": "Status of the source run at export time"
         },

@@ -19,6 +19,8 @@ const (
 	RunStatusPartial = "partial"
 	// RunStatusFailed indicates the run failed.
 	RunStatusFailed = "failed"
+	// RunStatusFailedResumable indicates the run failed after writing a resumable checkpoint.
+	RunStatusFailedResumable = "failed-resumable"
 )
 
 // IndexRun represents a single index build execution.
