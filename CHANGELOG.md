@@ -15,6 +15,15 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- **Added:** `pkg/provider` now exposes `ErrCredentialsRefreshFailed` and
+  `IsCredentialsRefreshFailed` so provider adapters can mark credential-cache
+  refresh failures with a stable sentinel instead of requiring command-layer
+  string matching. This is additive; existing provider implementations do not
+  need changes unless they want to surface refresh failures through the new
+  helper.
+
 ## [0.2.3] - 2026-05-31
 
 **Stream put completion, reflow freshness arbitration, and release-surface guardrails.**

@@ -19,6 +19,10 @@ var (
 	// ErrInvalidCredentials indicates authentication failed.
 	ErrInvalidCredentials = errors.New("invalid credentials")
 
+	// ErrCredentialsRefreshFailed indicates a provider credential cache or
+	// token provider could not refresh credentials for the operation.
+	ErrCredentialsRefreshFailed = errors.New("credentials refresh failed")
+
 	// ErrProviderUnavailable indicates the provider service is unavailable.
 	ErrProviderUnavailable = errors.New("provider unavailable")
 
@@ -84,6 +88,12 @@ func IsBucketNotFound(err error) bool {
 // IsInvalidCredentials returns true if the error indicates authentication failed.
 func IsInvalidCredentials(err error) bool {
 	return errors.Is(err, ErrInvalidCredentials)
+}
+
+// IsCredentialsRefreshFailed returns true if the error indicates a provider-side
+// credential refresh failure.
+func IsCredentialsRefreshFailed(err error) bool {
+	return errors.Is(err, ErrCredentialsRefreshFailed)
 }
 
 // IsProviderUnavailable returns true if the error indicates the provider service is unavailable.

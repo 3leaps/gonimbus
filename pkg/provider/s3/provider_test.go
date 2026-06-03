@@ -212,6 +212,12 @@ func TestIsInvalidCredentials(t *testing.T) {
 	assert.False(t, provider.IsInvalidCredentials(provider.ErrNotFound))
 }
 
+func TestIsCredentialsRefreshFailed(t *testing.T) {
+	assert.True(t, provider.IsCredentialsRefreshFailed(provider.ErrCredentialsRefreshFailed))
+	assert.True(t, provider.IsCredentialsRefreshFailed(&provider.ProviderError{Err: provider.ErrCredentialsRefreshFailed}))
+	assert.False(t, provider.IsCredentialsRefreshFailed(provider.ErrInvalidCredentials))
+}
+
 func TestIsProviderUnavailable(t *testing.T) {
 	assert.True(t, provider.IsProviderUnavailable(provider.ErrProviderUnavailable))
 	assert.True(t, provider.IsProviderUnavailable(&provider.ProviderError{Err: provider.ErrProviderUnavailable}))
@@ -491,6 +497,29 @@ func TestWrapError_APIError(t *testing.T) {
 			assert.True(t, errors.Is(err, tt.expected), "expected %v for code %s", tt.expected, tt.code)
 		})
 	}
+}
+
+func TestWrapError_CredentialRefreshFailure(t *testing.T) {
+	p := &Provider{bucket: "test-bucket"}
+
+	err := p.wrapError("List", "", fmt.Errorf("failed to refresh cached credentials, %w", errors.New("invalid_grant")))
+
+	assert.True(t, errors.Is(err, provider.ErrCredentialsRefreshFailed))
+	assert.True(t, provider.IsCredentialsRefreshFailed(err))
+	assert.False(t, errors.Is(err, provider.ErrInvalidCredentials))
+}
+
+func TestWrapError_APITextCannotSpoofCredentialRefreshFailure(t *testing.T) {
+	p := &Provider{bucket: "test-bucket"}
+	apiErr := &mockAPIError{
+		code:    "InternalError",
+		message: "failed to refresh cached credentials, invalid_grant",
+	}
+
+	err := p.wrapError("List", "", apiErr)
+
+	assert.False(t, errors.Is(err, provider.ErrCredentialsRefreshFailed))
+	assert.True(t, errors.Is(err, provider.ErrProviderUnavailable))
 }
 
 func TestWrapConditionalPutError_IfAbsentPreconditionFailure(t *testing.T) {

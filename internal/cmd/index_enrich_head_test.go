@@ -214,9 +214,9 @@ func TestExecuteEnrichHeadCredentialRefreshFailureAbortsRefreshableRun(t *testin
 		},
 	}
 
-	summary, err := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, 1, false, nil, false, true)
+	summary, err := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, 1, false, nil, false, false)
 	require.ErrorIs(t, err, opcheckpoint.ErrCredentialsRefreshFailed)
-	require.Equal(t, opcheckpoint.Classification{Class: opcheckpoint.ErrorClassCredentialsRefreshFailed, Resumable: true}, classifyEnrichHeadFatalError(err, true))
+	require.Equal(t, opcheckpoint.Classification{Class: opcheckpoint.ErrorClassCredentialsRefreshFailed, Resumable: true}, classifyEnrichHeadFatalError(err, false))
 	require.Equal(t, int64(1), summary.Failed)
 	require.Equal(t, int64(1), summary.HeadCalls)
 	require.Equal(t, []string{"prefix/archive/a.xml"}, prov.headCalls)

@@ -412,7 +412,7 @@ func TestTransferReflowCredentialRefreshWordingWithoutProfileIsNotResumable(t *t
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
 	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
 		require.Empty(t, cfg.Profile)
-		return refreshFailingGetProvider{Provider: src}, nil
+		return legacyRefreshTextGetProvider{Provider: src}, nil
 	}
 
 	var stdout bytes.Buffer
@@ -429,6 +429,35 @@ func TestTransferReflowCredentialRefreshWordingWithoutProfileIsNotResumable(t *t
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.NotContains(t, stdout.String(), opcheckpoint.ErrorRecordType)
+}
+
+func TestTransferReflowLegacyCredentialRefreshTextWithProfileIsNotResumable(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		require.Equal(t, "refreshable-profile", cfg.Profile)
+		return legacyRefreshTextGetProvider{Provider: src}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--src-profile", "refreshable-profile",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.NotContains(t, err.Error(), "reflow failed resumable")
 	require.NotContains(t, stdout.String(), opcheckpoint.ErrorRecordType)
 }
 
@@ -480,6 +509,14 @@ type refreshFailingGetProvider struct {
 
 func (p refreshFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
 	return nil, 0, fmt.Errorf("s3 GetObject: failed to refresh cached credentials: %w", opcheckpoint.ErrCredentialsRefreshFailed)
+}
+
+type legacyRefreshTextGetProvider struct {
+	provider.Provider
+}
+
+func (p legacyRefreshTextGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("s3 GetObject: failed to refresh cached credentials: invalid_grant")
 }
 
 type refreshFailingListProvider struct {

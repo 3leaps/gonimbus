@@ -2229,18 +2229,13 @@ func transferReflowProgress(invalidCount, errorCount int64) map[string]int64 {
 	return progress
 }
 
-func classifyTransferReflowRunErrorWithConfig(err error, cfg transferReflowCheckpointConfig) opcheckpoint.Classification {
+func classifyTransferReflowRunErrorWithConfig(err error, _ transferReflowCheckpointConfig) opcheckpoint.Classification {
 	if err == nil {
 		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
 	}
 	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
-		RefreshableCredentials: transferReflowRefreshableCredentials(cfg),
-		Interrupted:            errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
 	})
-}
-
-func transferReflowRefreshableCredentials(cfg transferReflowCheckpointConfig) bool {
-	return strings.TrimSpace(cfg.SrcProfile) != "" || strings.TrimSpace(cfg.DstProfile) != ""
 }
 
 func transferReflowFatalExitCode(classification opcheckpoint.Classification) int {

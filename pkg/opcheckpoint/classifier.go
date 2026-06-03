@@ -20,8 +20,9 @@ const (
 )
 
 // ClassifierInput describes the auth model and trigger context available at the
-// command boundary. RefreshableCredentials must only be true for auth models
-// with refresh semantics, such as SSO/OIDC/STS/OAuth.
+// command boundary. RefreshableCredentials permits legacy text-based refresh
+// detection for provider adapters that cannot surface provider.ErrCredentialsRefreshFailed.
+// Prefer provider-marked refresh errors for new provider paths.
 type ClassifierInput struct {
 	RefreshableCredentials  bool
 	Interrupted             bool
@@ -44,7 +45,10 @@ func ClassifyFatalError(err error, in ClassifierInput) Classification {
 	if in.Interrupted {
 		return Classification{Class: ErrorClassInterrupted, Resumable: true}
 	}
-	if in.RefreshableCredentials && isRefreshFailure(err) {
+	if provider.IsCredentialsRefreshFailed(err) || errors.Is(err, ErrCredentialsRefreshFailed) {
+		return Classification{Class: ErrorClassCredentialsRefreshFailed, Resumable: true}
+	}
+	if in.RefreshableCredentials && isRefreshFailureText(err) {
 		return Classification{Class: ErrorClassCredentialsRefreshFailed, Resumable: true}
 	}
 	if in.TransientRetryExhausted {
@@ -84,7 +88,7 @@ func isAuthDeny(err error) bool {
 	return false
 }
 
-func isRefreshFailure(err error) bool {
+func isRefreshFailureText(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -105,9 +109,9 @@ func isRefreshFailure(err error) bool {
 			return true
 		}
 	}
-	return errors.Is(err, ErrCredentialsRefreshFailed)
+	return false
 }
 
-// ErrCredentialsRefreshFailed is a local sentinel for tests and future provider
-// adapters that can identify refresh failure without relying on string matches.
-var ErrCredentialsRefreshFailed = errors.New("credentials refresh failed")
+// ErrCredentialsRefreshFailed is retained for callers/tests that imported the
+// opcheckpoint sentinel before the provider-layer sentinel existed.
+var ErrCredentialsRefreshFailed = provider.ErrCredentialsRefreshFailed

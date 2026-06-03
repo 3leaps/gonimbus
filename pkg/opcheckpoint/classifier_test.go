@@ -2,6 +2,7 @@ package opcheckpoint
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -16,21 +17,33 @@ func TestClassifyFatalErrorOrdering(t *testing.T) {
 		want Classification
 	}{
 		{
-			name: "refreshable credential refresh failure is resumable",
+			name: "provider credential refresh sentinel is resumable without text fallback",
+			err:  provider.ErrCredentialsRefreshFailed,
+			in:   ClassifierInput{},
+			want: Classification{Class: ErrorClassCredentialsRefreshFailed, Resumable: true},
+		},
+		{
+			name: "legacy refresh text needs explicit fallback",
+			err:  errors.New("s3 List: get identity: failed to refresh cached credentials: invalid_grant"),
+			in:   ClassifierInput{},
+			want: Classification{Class: ErrorClassRuntimeFailure, Resumable: false},
+		},
+		{
+			name: "legacy refresh text fallback remains supported",
 			err:  errors.New("s3 List: get identity: failed to refresh cached credentials: invalid_grant"),
 			in:   ClassifierInput{RefreshableCredentials: true},
 			want: Classification{Class: ErrorClassCredentialsRefreshFailed, Resumable: true},
 		},
 		{
-			name: "static credential model never emits refresh failure",
-			err:  errors.New("s3 List: get identity: failed to refresh cached credentials: invalid_grant"),
-			in:   ClassifierInput{RefreshableCredentials: false},
-			want: Classification{Class: ErrorClassRuntimeFailure, Resumable: false},
-		},
-		{
 			name: "access denied wins over refresh wording",
 			err:  errors.New("AccessDenied: failed to refresh cached credentials after revoked access"),
 			in:   ClassifierInput{RefreshableCredentials: true},
+			want: Classification{Class: ErrorClassAuthDenied, Resumable: false},
+		},
+		{
+			name: "access denied wins over provider refresh sentinel",
+			err:  fmt.Errorf("%w: operation error SSO: AccessDenied", provider.ErrCredentialsRefreshFailed),
+			in:   ClassifierInput{},
 			want: Classification{Class: ErrorClassAuthDenied, Resumable: false},
 		},
 		{

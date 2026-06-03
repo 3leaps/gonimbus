@@ -804,13 +804,12 @@ func indexBuildProgress(result *indexBuildResult) map[string]int64 {
 	return progress
 }
 
-func classifyIndexBuildRunError(err error, m *manifest.IndexManifest) opcheckpoint.Classification {
+func classifyIndexBuildRunError(err error, _ *manifest.IndexManifest) opcheckpoint.Classification {
 	if err == nil {
 		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
 	}
 	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
-		RefreshableCredentials: m != nil && strings.TrimSpace(m.Connection.Profile) != "",
-		Interrupted:            errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
 	})
 }
 
