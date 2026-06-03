@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -31,40 +32,307 @@ import (
 )
 
 func TestValidateTransferReflowArgs(t *testing.T) {
-	makeCmd := func(stdin bool) *cobra.Command {
+	makeCmd := func(stdin bool, resumeRun string) *cobra.Command {
 		c := &cobra.Command{}
 		c.Flags().Bool("stdin", stdin, "")
+		c.Flags().String("resume-run", resumeRun, "")
 		return c
 	}
 
 	t.Run("without stdin requires source uri", func(t *testing.T) {
-		err := validateTransferReflowArgs(makeCmd(false), []string{})
+		err := validateTransferReflowArgs(makeCmd(false, ""), []string{})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "requires exactly 1 argument")
 	})
 
 	t.Run("without stdin accepts one source uri", func(t *testing.T) {
-		err := validateTransferReflowArgs(makeCmd(false), []string{"s3://bucket/source/file.xml"})
+		err := validateTransferReflowArgs(makeCmd(false, ""), []string{"s3://bucket/source/file.xml"})
 		require.NoError(t, err)
 	})
 
 	t.Run("without stdin rejects too many source uris", func(t *testing.T) {
-		err := validateTransferReflowArgs(makeCmd(false), []string{"s3://bucket/source/a.xml", "s3://bucket/source/b.xml"})
+		err := validateTransferReflowArgs(makeCmd(false, ""), []string{"s3://bucket/source/a.xml", "s3://bucket/source/b.xml"})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "requires exactly 1 argument")
 	})
 
 	t.Run("stdin accepts no positional args", func(t *testing.T) {
-		err := validateTransferReflowArgs(makeCmd(true), []string{})
+		err := validateTransferReflowArgs(makeCmd(true, ""), []string{})
 		require.NoError(t, err)
 	})
 
 	t.Run("stdin rejects positional source uri", func(t *testing.T) {
-		err := validateTransferReflowArgs(makeCmd(true), []string{"s3://bucket/source/file.xml"})
+		err := validateTransferReflowArgs(makeCmd(true, ""), []string{"s3://bucket/source/file.xml"})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "when using --stdin")
 		require.Contains(t, err.Error(), "do not provide source-uri arguments")
 	})
+
+	t.Run("resume-run accepts no positional args", func(t *testing.T) {
+		err := validateTransferReflowArgs(makeCmd(false, "run_123"), []string{})
+		require.NoError(t, err)
+	})
+
+	t.Run("resume-run rejects positional source uri", func(t *testing.T) {
+		err := validateTransferReflowArgs(makeCmd(false, "run_123"), []string{"s3://bucket/source/file.xml"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "do not provide source-uri arguments with --resume-run")
+	})
+}
+
+func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	cmd := newTransferReflowTestCommand()
+	cmd.SetArgs([]string{"--resume-run", "run_123", "--dest", fileURI(t.TempDir())})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--dest")
+	require.Contains(t, err.Error(), "not accepted with --resume-run")
+}
+
+func TestTransferReflowResumeRunRejectsSuccessfulCheckpointBeforeWork(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	ctx := context.Background()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: statePath})
+	require.NoError(t, err)
+	defer func() { _ = state.Close() }()
+
+	cfg := transferReflowCheckpointConfig{
+		SourceURI:               "s3://source-bucket/a.txt",
+		Dest:                    fileURI(t.TempDir()),
+		RewriteFrom:             "{key}",
+		RewriteTo:               "{key}",
+		Parallel:                1,
+		CheckpointPath:          statePath,
+		OnCollision:             reflowCollisionSkip,
+		Provenance:              provenanceModeNone,
+		ProvenanceSuffix:        provenanceSuffix,
+		ProvenanceOnWriteError:  provenanceErrorWarn,
+		MetadataPolicy:          metadataPolicyClear,
+		MetadataOnMissingSource: metadataMissingSkip,
+		MetadataSidecarSuffix:   providerfile.DefaultMetadataSidecarSuffix,
+		Symlinks:                reflowSymlinkSkip,
+		Hidden:                  reflowHiddenSkip,
+		OnSourceFailure:         reflowSourceFailSkip,
+	}
+	fingerprint, err := checkpointFingerprint(cfg)
+	require.NoError(t, err)
+	require.NoError(t, state.SetOperationCheckpointIdentity(ctx, operationTransferReflow, fingerprint))
+	payload, err := json.Marshal(transferReflowCheckpointPayload{Config: cfg})
+	require.NoError(t, err)
+
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	require.NoError(t, err)
+	require.NoError(t, opStore.WriteCheckpoint(ctx, opcheckpoint.Envelope{
+		SchemaVersion:     opcheckpoint.SchemaVersion,
+		Operation:         operationTransferReflow,
+		RunID:             "run_success",
+		ConfigFingerprint: fingerprint,
+		Status:            opcheckpoint.StatusSuccess,
+		CreatedAt:         time.Now().UTC(),
+		Payload:           payload,
+	}))
+
+	var providerCalled bool
+	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+		providerCalled = true
+		return newReflowMemoryProvider(), nil
+	}
+
+	cmd := newTransferReflowTestCommand()
+	cmd.SetArgs([]string{"--resume-run", "run_success"})
+	err = cmd.Execute()
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+	require.False(t, providerCalled)
+}
+
+func TestTransferReflowCheckpointEligibility(t *testing.T) {
+	cfg := transferReflowCheckpointConfig{SourceURI: "s3://bucket/key", CheckpointPath: filepath.Join(t.TempDir(), "state.db")}
+	require.True(t, transferReflowCheckpointEligible(cfg))
+
+	cfg.Stdin = true
+	require.False(t, transferReflowCheckpointEligible(cfg))
+	cfg.Stdin = false
+
+	cfg.DryRun = true
+	require.False(t, transferReflowCheckpointEligible(cfg))
+	cfg.DryRun = false
+
+	cfg.SourceURI = ""
+	require.False(t, transferReflowCheckpointEligible(cfg))
+}
+
+func TestTransferReflowCheckpointIdentityRejectsTamperedConfig(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	ctx := context.Background()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: statePath})
+	require.NoError(t, err)
+	defer func() { _ = state.Close() }()
+
+	cfg := transferReflowCheckpointConfig{
+		SourceURI:               "s3://source-bucket/a.txt",
+		Dest:                    fileURI(t.TempDir()),
+		RewriteFrom:             "{key}",
+		RewriteTo:               "{key}",
+		Parallel:                1,
+		CheckpointPath:          statePath,
+		OnCollision:             reflowCollisionSkip,
+		Provenance:              provenanceModeNone,
+		ProvenanceSuffix:        provenanceSuffix,
+		ProvenanceOnWriteError:  provenanceErrorWarn,
+		MetadataPolicy:          metadataPolicyClear,
+		MetadataOnMissingSource: metadataMissingSkip,
+		MetadataSidecarSuffix:   providerfile.DefaultMetadataSidecarSuffix,
+		Symlinks:                reflowSymlinkSkip,
+		Hidden:                  reflowHiddenSkip,
+		OnSourceFailure:         reflowSourceFailSkip,
+	}
+	fingerprint, err := checkpointFingerprint(cfg)
+	require.NoError(t, err)
+	require.NoError(t, state.SetOperationCheckpointIdentity(ctx, operationTransferReflow, fingerprint))
+
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	require.NoError(t, err)
+	env := &opcheckpoint.Envelope{
+		SchemaVersion:     opcheckpoint.SchemaVersion,
+		Operation:         operationTransferReflow,
+		RunID:             "run_123",
+		ConfigFingerprint: fingerprint,
+		Status:            opcheckpoint.StatusFailedResumable,
+		CreatedAt:         time.Now().UTC(),
+	}
+	_, err = validateTransferReflowCheckpointIdentity(ctx, opStore, state, env, cfg)
+	require.NoError(t, err)
+
+	completedEnv := *env
+	completedEnv.Status = opcheckpoint.StatusSuccess
+	_, err = validateTransferReflowCheckpointIdentity(ctx, opStore, state, &completedEnv, cfg)
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+
+	tampered := cfg
+	tampered.RewriteTo = "changed/{key}"
+	_, err = validateTransferReflowCheckpointIdentity(ctx, opStore, state, env, tampered)
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+
+	tamperedFingerprint, err := checkpointFingerprint(tampered)
+	require.NoError(t, err)
+	tamperedEnv := *env
+	tamperedEnv.ConfigFingerprint = tamperedFingerprint
+	_, err = validateTransferReflowCheckpointIdentity(ctx, opStore, state, &tamperedEnv, tampered)
+	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
+}
+
+func TestTransferReflowFailedResumableCheckpointBindsStateIdentity(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	ctx := context.Background()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: statePath})
+	require.NoError(t, err)
+	defer func() { _ = state.Close() }()
+
+	cfg := transferReflowCheckpointConfig{
+		SourceURI:               "s3://source-bucket/a.txt",
+		Dest:                    fileURI(t.TempDir()),
+		RewriteFrom:             "{key}",
+		RewriteTo:               "{key}",
+		Parallel:                1,
+		CheckpointPath:          statePath,
+		OnCollision:             reflowCollisionSkip,
+		Provenance:              provenanceModeNone,
+		ProvenanceSuffix:        provenanceSuffix,
+		ProvenanceOnWriteError:  provenanceErrorWarn,
+		MetadataPolicy:          metadataPolicyClear,
+		MetadataOnMissingSource: metadataMissingSkip,
+		MetadataSidecarSuffix:   providerfile.DefaultMetadataSidecarSuffix,
+		Symlinks:                reflowSymlinkSkip,
+		Hidden:                  reflowHiddenSkip,
+		OnSourceFailure:         reflowSourceFailSkip,
+	}
+	progress := map[string]int64{"errors": 1}
+	require.NoError(t, writeFailedResumableTransferReflowCheckpoint(ctx, state, "run_reflow_123", cfg, opcheckpoint.ErrorClassInterrupted, progress))
+
+	wantFingerprint, err := checkpointFingerprint(cfg)
+	require.NoError(t, err)
+	gotFingerprint, err := state.OperationCheckpointFingerprint(ctx, operationTransferReflow)
+	require.NoError(t, err)
+	require.Equal(t, wantFingerprint, gotFingerprint)
+
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	require.NoError(t, err)
+	env, err := opStore.ReadCheckpoint(ctx, operationTransferReflow, "run_reflow_123")
+	require.NoError(t, err)
+	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
+	require.Equal(t, opcheckpoint.ErrorClassInterrupted, env.ErrorClass)
+	require.Equal(t, wantFingerprint, env.ConfigFingerprint)
+	require.Equal(t, progress, env.Progress)
+}
+
+func TestTransferReflowCancelledPositionalRunWritesOperationCheckpoint(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	ctx, cancel := context.WithCancel(context.Background())
+	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
+		return cancelingGetProvider{Provider: src, cancel: cancel}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetContext(ctx)
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow cancelled")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.Equal(t, operationTransferReflow, opErr.Operation)
+	require.Equal(t, opcheckpoint.ErrorClassInterrupted, opErr.ErrorClass)
+	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
+
+	opStore, err := openDefaultOperationCheckpointStore(context.Background())
+	require.NoError(t, err)
+	env, err := opStore.ReadCheckpoint(context.Background(), operationTransferReflow, opErr.RunID)
+	require.NoError(t, err)
+	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
+
+	var payload transferReflowCheckpointPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &payload))
+	state, err := newReflowStateStore(context.Background(), reflowstate.Config{Path: payload.Config.CheckpointPath})
+	require.NoError(t, err)
+	defer func() { _ = state.Close() }()
+	fingerprint, err := state.OperationCheckpointFingerprint(context.Background(), operationTransferReflow)
+	require.NoError(t, err)
+	require.Equal(t, env.ConfigFingerprint, fingerprint)
+}
+
+type cancelingGetProvider struct {
+	provider.Provider
+	cancel func()
+}
+
+func (p cancelingGetProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	return nil, 0, context.Canceled
 }
 
 func TestTransferReflowCommand_StdinPipeConsumesInput(t *testing.T) {
@@ -1868,6 +2136,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().IntVar(&reflowParallel, "parallel", 16, "")
 	cmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "")
 	cmd.Flags().BoolVar(&reflowResume, "resume", false, "")
+	cmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "")
 	cmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "")
 	cmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "")
 	cmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "")
@@ -1910,6 +2179,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldParallel := reflowParallel
 	oldDryRun := reflowDryRun
 	oldResume := reflowResume
+	oldResumeRun := reflowResumeRun
 	oldCheckpoint := reflowCheckpoint
 	oldOverwrite := reflowOverwrite
 	oldOnCollision := reflowOnCollision
@@ -1954,6 +2224,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowParallel = 16
 	reflowDryRun = false
 	reflowResume = false
+	reflowResumeRun = ""
 	reflowCheckpoint = ""
 	reflowOverwrite = false
 	reflowOnCollision = reflowCollisionSkip
@@ -1992,6 +2263,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowParallel = oldParallel
 		reflowDryRun = oldDryRun
 		reflowResume = oldResume
+		reflowResumeRun = oldResumeRun
 		reflowCheckpoint = oldCheckpoint
 		reflowOverwrite = oldOverwrite
 		reflowOnCollision = oldOnCollision
