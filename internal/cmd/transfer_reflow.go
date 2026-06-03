@@ -2229,13 +2229,35 @@ func transferReflowProgress(invalidCount, errorCount int64) map[string]int64 {
 	return progress
 }
 
-func classifyTransferReflowRunError(err error) opcheckpoint.Classification {
+func classifyTransferReflowRunErrorWithConfig(err error, cfg transferReflowCheckpointConfig) opcheckpoint.Classification {
 	if err == nil {
 		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
 	}
 	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
-		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		RefreshableCredentials: transferReflowRefreshableCredentials(cfg),
+		Interrupted:            errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
 	})
+}
+
+func transferReflowRefreshableCredentials(cfg transferReflowCheckpointConfig) bool {
+	return strings.TrimSpace(cfg.SrcProfile) != "" || strings.TrimSpace(cfg.DstProfile) != ""
+}
+
+func transferReflowFatalExitCode(classification opcheckpoint.Classification) int {
+	if classification.Class == opcheckpoint.ErrorClassInterrupted {
+		return foundry.ExitSignalInt
+	}
+	return foundry.ExitExternalServiceUnavailable
+}
+
+func transferReflowFatalExitMessage(classification opcheckpoint.Classification, checkpointWritten bool) string {
+	if classification.Class == opcheckpoint.ErrorClassInterrupted {
+		return "reflow cancelled"
+	}
+	if !checkpointWritten {
+		return "reflow failed"
+	}
+	return "reflow failed resumable"
 }
 
 func runTransferReflow(cmd *cobra.Command, args []string) error {
@@ -2248,7 +2270,8 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 }
 
 func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string) error {
-	ctx := cmd.Context()
+	ctx, cancelWork := context.WithCancel(cmd.Context())
+	defer cancelWork()
 	if reflowParallel < 1 {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --parallel value", fmt.Errorf("parallel must be >= 1"))
 	}
@@ -2445,7 +2468,27 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	var (
 		invalidCount atomic.Int64
 		errorCount   atomic.Int64
+		fatalMu      sync.Mutex
+		fatalErr     error
 	)
+	recordFatalReflowError := func(err error) bool {
+		classification := classifyTransferReflowRunErrorWithConfig(err, checkpointCfg)
+		if !classification.Resumable {
+			return false
+		}
+		fatalMu.Lock()
+		defer fatalMu.Unlock()
+		if fatalErr == nil {
+			fatalErr = err
+			cancelWork()
+		}
+		return true
+	}
+	currentFatalReflowError := func() error {
+		fatalMu.Lock()
+		defer fatalMu.Unlock()
+		return fatalErr
+	}
 
 	tasks := make(chan reflowTask, reflowParallel*2)
 	destArbiter := newReflowDestKeyArbiter()
@@ -2475,6 +2518,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 				src, dst, sidecarDst, err := getProviders(task.sourceProviderURI())
 				if err != nil {
+					if recordFatalReflowError(err) {
+						continue
+					}
 					errorCount.Add(1)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "failed to connect to provider", err, map[string]any{"source_uri": srcAuditURI})
 					continue
@@ -2540,6 +2586,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							task.SourceLastMod = meta.LastModified
 						}
 					} else if metaCfg.needsSourceHead() || needsSourceHeadForCollision {
+						if recordFatalReflowError(err) {
+							continue
+						}
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI})
 						continue
@@ -2576,6 +2625,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
 						bytes, qerr := transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutOptions{})
 						if qerr != nil {
+							if recordFatalReflowError(qerr) {
+								continue
+							}
 							errorCount.Add(1)
 							code := reflowErrCode(qerr)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
@@ -2639,6 +2691,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 					} else if !provider.IsNotFound(headErr) {
+						if recordFatalReflowError(headErr) {
+							continue
+						}
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						continue
@@ -2681,12 +2736,18 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					if err != nil && isConditionalExists(err) {
 						dstMeta, headErr := dst.Head(ctx, dstKey)
 						if headErr != nil {
+							if recordFatalReflowError(headErr) {
+								continue
+							}
 							errorCount.Add(1)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
 						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, destSpec.Provider, srcETag, srcSize, dstMeta)
 						if dupErr != nil {
+							if recordFatalReflowError(dupErr) {
+								continue
+							}
 							errorCount.Add(1)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
@@ -2798,6 +2859,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
 							bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, putOptions)
 							if err != nil {
+								if recordFatalReflowError(err) {
+									continue
+								}
 								errorCount.Add(1)
 								code := reflowErrCode(err)
 								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision})
@@ -2861,6 +2925,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					}
 				}
 				if err != nil {
+					if recordFatalReflowError(err) {
+						continue
+					}
 					errorCount.Add(1)
 					code := reflowErrCode(err)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
@@ -2921,6 +2988,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			}
 			srcIdentity, inputErr = enqueueReflowLine(ctx, line, srcIdentity, srcCfg, getInputProviders, tasks)
 			if inputErr != nil {
+				if recordFatalReflowError(inputErr) {
+					inputErr = nil
+					break
+				}
 				invalidCount.Add(1)
 				_ = emitReflowError(context.Background(), w, "", "invalid input", inputErr, map[string]any{"input": line})
 				inputErr = nil
@@ -2932,24 +3003,34 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		}
 	} else {
 		srcIdentity, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)
+		if inputErr != nil && recordFatalReflowError(inputErr) {
+			inputErr = nil
+		}
 	}
 	close(tasks)
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		classification := classifyTransferReflowRunError(ctx.Err())
+	fatalRunErr := currentFatalReflowError()
+	if fatalRunErr != nil || ctx.Err() != nil {
+		classifyErr := fatalRunErr
+		if classifyErr == nil {
+			classifyErr = ctx.Err()
+		}
+		classification := classifyTransferReflowRunErrorWithConfig(classifyErr, checkpointCfg)
+		checkpointWritten := false
 		if classification.Resumable && transferReflowCheckpointEligible(checkpointCfg) {
 			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
 			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
+				checkpointWritten = true
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationTransferReflow, jobID, classification.Class, progress); emitErr != nil {
-					return exitError(foundry.ExitSignalInt, "reflow cancelled", fmt.Errorf("%w; write operation error record: %v", ctx.Err(), emitErr))
+					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation error record: %v", classifyErr, emitErr))
 				}
 			} else {
-				return exitError(foundry.ExitSignalInt, "reflow cancelled", fmt.Errorf("%w; write operation checkpoint: %v", ctx.Err(), checkpointErr))
+				return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation checkpoint: %v", classifyErr, checkpointErr))
 			}
 		}
-		return exitError(foundry.ExitSignalInt, "reflow cancelled", ctx.Err())
+		return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), classifyErr)
 	}
 	if inputErr != nil {
 		return exitError(foundry.ExitInvalidArgument, "Failed to read input", inputErr)

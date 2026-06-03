@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -194,6 +195,31 @@ func TestExecuteEnrichHeadCountsRetryHeadCalls(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bytes.TrimSpace(data), &rec))
 	require.Equal(t, "success", rec.Data.Status)
 	require.Equal(t, 3, rec.Data.Attempts)
+}
+
+func TestExecuteEnrichHeadCredentialRefreshFailureAbortsRefreshableRun(t *testing.T) {
+	ctx, db, indexSet := setupEnrichHeadDB(t)
+	defer func() { _ = db.Close() }()
+
+	insertEnrichObject(t, ctx, db, indexSet.IndexSetID, "archive/a.xml", "GLACIER", nil)
+	candidates, _, err := indexstore.QueryHeadEnrichmentCandidates(ctx, db, indexstore.QueryParams{IndexSetID: indexSet.IndexSetID})
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+
+	refreshErr := fmt.Errorf("s3 HeadObject: failed to refresh cached credentials: %w", opcheckpoint.ErrCredentialsRefreshFailed)
+	prov := &fakeEnrichProvider{
+		metas: map[string]*provider.ObjectMeta{},
+		errs: map[string]error{
+			"prefix/archive/a.xml": refreshErr,
+		},
+	}
+
+	summary, err := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, 1, false, nil, false, true)
+	require.ErrorIs(t, err, opcheckpoint.ErrCredentialsRefreshFailed)
+	require.Equal(t, opcheckpoint.Classification{Class: opcheckpoint.ErrorClassCredentialsRefreshFailed, Resumable: true}, classifyEnrichHeadFatalError(err, true))
+	require.Equal(t, int64(1), summary.Failed)
+	require.Equal(t, int64(1), summary.HeadCalls)
+	require.Equal(t, []string{"prefix/archive/a.xml"}, prov.headCalls)
 }
 
 func TestEnrichHeadRunStatusPartialForPerObjectFailures(t *testing.T) {
