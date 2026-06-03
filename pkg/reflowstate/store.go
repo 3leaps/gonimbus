@@ -54,7 +54,9 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			source_provider TEXT,
 			source_bucket TEXT,
 			source_root TEXT,
-			source_uri TEXT
+			source_uri TEXT,
+			opcheckpoint_operation TEXT,
+			opcheckpoint_config_fingerprint TEXT
 		);`,
 		`INSERT OR IGNORE INTO reflow_meta (id, schema_version, created_at) VALUES (1, ?, ?);`,
 		`CREATE TABLE IF NOT EXISTS reflow_items (
@@ -120,6 +122,8 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE reflow_meta ADD COLUMN source_bucket TEXT;`,
 		`ALTER TABLE reflow_meta ADD COLUMN source_root TEXT;`,
 		`ALTER TABLE reflow_meta ADD COLUMN source_uri TEXT;`,
+		`ALTER TABLE reflow_meta ADD COLUMN opcheckpoint_operation TEXT;`,
+		`ALTER TABLE reflow_meta ADD COLUMN opcheckpoint_config_fingerprint TEXT;`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("migrate schema: %w", err)
@@ -135,6 +139,37 @@ func (s *Store) SetSourceMetadata(ctx context.Context, provider, bucket, root, s
 		WHERE id = 1
 	`, provider, bucket, root, sourceURI)
 	return err
+}
+
+func (s *Store) SetOperationCheckpointIdentity(ctx context.Context, operation, fingerprint string) error {
+	if strings.TrimSpace(operation) == "" {
+		return fmt.Errorf("operation is required")
+	}
+	if strings.TrimSpace(fingerprint) == "" {
+		return fmt.Errorf("config fingerprint is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE reflow_meta
+		SET opcheckpoint_operation = ?, opcheckpoint_config_fingerprint = ?
+		WHERE id = 1
+	`, operation, fingerprint)
+	return err
+}
+
+func (s *Store) OperationCheckpointFingerprint(ctx context.Context, operation string) (string, error) {
+	var gotOperation, fingerprint string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(opcheckpoint_operation, ''), COALESCE(opcheckpoint_config_fingerprint, '')
+		FROM reflow_meta
+		WHERE id = 1
+	`).Scan(&gotOperation, &fingerprint)
+	if err != nil {
+		return "", err
+	}
+	if gotOperation != operation || strings.TrimSpace(fingerprint) == "" {
+		return "", fmt.Errorf("operation checkpoint identity not found for %s", operation)
+	}
+	return fingerprint, nil
 }
 
 func (s *Store) ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error) {

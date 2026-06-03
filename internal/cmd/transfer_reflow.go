@@ -23,11 +23,13 @@ import (
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -39,55 +41,56 @@ import (
 )
 
 const (
-	reflowRecordType       = "gonimbus.reflow.v1"
-	reflowRunRecordType    = "gonimbus.reflow.run.v1"
-	reflowSourceRecordType = "gonimbus.reflow.source.v1"
-	reflowWarningRecord    = "gonimbus.warning.v1"
-	provenanceSchema       = "gonimbus.provenance.v1"
-	provenanceSchemaVer    = "1.0.0"
-	provenanceModeNone     = "none"
-	provenanceModeSidecar  = "sidecar"
-	provenancePlaceSibling = "sibling"
-	provenancePlaceMirror  = "mirrored-root"
-	provenanceErrorWarn    = "warn"
-	provenanceErrorFail    = "fail"
-	provenanceSuffix       = ".gnb.json"
-	reflowCollisionSkip    = "skip-if-duplicate"
-	reflowCollisionLog     = "log"
-	reflowCollisionFail    = "fail"
-	reflowCollisionOver    = "overwrite"
-	reflowCollisionQuar    = "quarantine"
-	reflowCollisionSrcNew  = "overwrite-if-source-newer"
-	collisionDuplicate     = "duplicate"
-	collisionConflict      = "conflict"
-	collisionQuarantined   = "conflict_quarantined"
-	collisionOverwritten   = "overwritten"
-	collisionSrcOlder      = "skipped_src_older"
-	collisionConcurrentMut = "skipped_concurrent_mutation"
-	decisionIfAbsentHead   = "ifabsent_then_head"
-	decisionOverwrite      = "unconditional_overwrite"
-	decisionQuarantine     = "quarantine_routed"
-	decisionHeadCompare    = "head_compare_then_conditional_overwrite"
-	reasonSrcNewer         = "src_newer"
-	reasonSrcOlder         = "src_older"
-	reasonEqualSizeDiffers = "equal_time_size_differs"
-	reasonConcurrentMut    = "concurrent_mutation"
-	metadataPolicyClear    = "clear"
-	metadataPolicyPreserve = "preserve"
-	metadataPolicyMerge    = "merge"
-	metadataMissingSkip    = "skip"
-	metadataMissingFail    = "fail"
-	metadataMissingEmpty   = "empty"
-	metadataMaxPairBytes   = 2 * 1024
-	metadataMaxTotalBytes  = 8 * 1024
-	storageClassPropagate  = "propagate"
-	reflowSourceBucketFile = "local"
-	reflowSymlinkSkip      = "skip"
-	reflowSymlinkFollow    = "follow"
-	reflowHiddenSkip       = "skip"
-	reflowHiddenInclude    = "include"
-	reflowSourceFailSkip   = "skip"
-	reflowSourceFailFail   = "fail"
+	reflowRecordType        = "gonimbus.reflow.v1"
+	reflowRunRecordType     = "gonimbus.reflow.run.v1"
+	reflowSourceRecordType  = "gonimbus.reflow.source.v1"
+	reflowWarningRecord     = "gonimbus.warning.v1"
+	provenanceSchema        = "gonimbus.provenance.v1"
+	provenanceSchemaVer     = "1.0.0"
+	provenanceModeNone      = "none"
+	provenanceModeSidecar   = "sidecar"
+	provenancePlaceSibling  = "sibling"
+	provenancePlaceMirror   = "mirrored-root"
+	provenanceErrorWarn     = "warn"
+	provenanceErrorFail     = "fail"
+	provenanceSuffix        = ".gnb.json"
+	reflowCollisionSkip     = "skip-if-duplicate"
+	reflowCollisionLog      = "log"
+	reflowCollisionFail     = "fail"
+	reflowCollisionOver     = "overwrite"
+	reflowCollisionQuar     = "quarantine"
+	reflowCollisionSrcNew   = "overwrite-if-source-newer"
+	collisionDuplicate      = "duplicate"
+	collisionConflict       = "conflict"
+	collisionQuarantined    = "conflict_quarantined"
+	collisionOverwritten    = "overwritten"
+	collisionSrcOlder       = "skipped_src_older"
+	collisionConcurrentMut  = "skipped_concurrent_mutation"
+	decisionIfAbsentHead    = "ifabsent_then_head"
+	decisionOverwrite       = "unconditional_overwrite"
+	decisionQuarantine      = "quarantine_routed"
+	decisionHeadCompare     = "head_compare_then_conditional_overwrite"
+	reasonSrcNewer          = "src_newer"
+	reasonSrcOlder          = "src_older"
+	reasonEqualSizeDiffers  = "equal_time_size_differs"
+	reasonConcurrentMut     = "concurrent_mutation"
+	metadataPolicyClear     = "clear"
+	metadataPolicyPreserve  = "preserve"
+	metadataPolicyMerge     = "merge"
+	metadataMissingSkip     = "skip"
+	metadataMissingFail     = "fail"
+	metadataMissingEmpty    = "empty"
+	metadataMaxPairBytes    = 2 * 1024
+	metadataMaxTotalBytes   = 8 * 1024
+	storageClassPropagate   = "propagate"
+	reflowSourceBucketFile  = "local"
+	reflowSymlinkSkip       = "skip"
+	reflowSymlinkFollow     = "follow"
+	reflowHiddenSkip        = "skip"
+	reflowHiddenInclude     = "include"
+	reflowSourceFailSkip    = "skip"
+	reflowSourceFailFail    = "fail"
+	operationTransferReflow = "transfer-reflow"
 )
 
 var transferReflowCmd = &cobra.Command{
@@ -120,6 +123,7 @@ var (
 	reflowParallel    int
 	reflowDryRun      bool
 	reflowResume      bool
+	reflowResumeRun   string
 	reflowCheckpoint  string
 	reflowOverwrite   bool
 	reflowOnCollision string
@@ -166,6 +170,8 @@ var (
 type reflowStateStore interface {
 	Close() error
 	SetSourceMetadata(ctx context.Context, provider, bucket, root, sourceURI string) error
+	SetOperationCheckpointIdentity(ctx context.Context, operation, fingerprint string) error
+	OperationCheckpointFingerprint(ctx context.Context, operation string) (string, error)
 	ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error)
 	UpsertItem(ctx context.Context, p reflowstate.UpsertItemParams) error
 	NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error
@@ -184,6 +190,7 @@ func init() {
 	transferReflowCmd.Flags().IntVar(&reflowParallel, "parallel", 16, "Concurrent copy workers")
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
+	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume a failed-resumable transfer reflow run by run id")
 	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Checkpoint DB path (sqlite)")
 	transferReflowCmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "Allow overwriting destination objects")
 	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer (log is a deprecated alias)")
@@ -235,12 +242,16 @@ func init() {
 	_ = viper.BindPFlag("source.preserve_mode", transferReflowCmd.Flags().Lookup("preserve-mode"))
 	_ = viper.BindPFlag("source.on_failure", transferReflowCmd.Flags().Lookup("on-source-failure"))
 
-	_ = transferReflowCmd.MarkFlagRequired("dest")
-	_ = transferReflowCmd.MarkFlagRequired("rewrite-from")
-	_ = transferReflowCmd.MarkFlagRequired("rewrite-to")
 }
 
 func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
+	resumeRun, _ := cmd.Flags().GetString("resume-run")
+	if strings.TrimSpace(resumeRun) != "" {
+		if len(args) > 0 {
+			return fmt.Errorf("do not provide source-uri arguments with --resume-run")
+		}
+		return nil
+	}
 	stdin, _ := cmd.Flags().GetBool("stdin")
 	if stdin {
 		if len(args) > 0 {
@@ -1835,13 +1846,423 @@ func emitPreserveModeWarning(w io.Writer, srcProvider string, destProvider strin
 	}
 }
 
+type transferReflowCheckpointPayload struct {
+	Config transferReflowCheckpointConfig `json:"config"`
+}
+
+type transferReflowCheckpointConfig struct {
+	SourceURI                 string   `json:"source_uri"`
+	Stdin                     bool     `json:"stdin"`
+	Dest                      string   `json:"dest"`
+	RewriteFrom               string   `json:"rewrite_from"`
+	RewriteTo                 string   `json:"rewrite_to"`
+	Parallel                  int      `json:"parallel"`
+	DryRun                    bool     `json:"dry_run"`
+	CheckpointPath            string   `json:"checkpoint_path"`
+	Overwrite                 bool     `json:"overwrite"`
+	OnCollision               string   `json:"on_collision"`
+	CollisionQuarantinePrefix string   `json:"collision_quarantine_prefix,omitempty"`
+	Provenance                string   `json:"provenance"`
+	ProvenanceSidecarRoot     string   `json:"provenance_sidecar_root,omitempty"`
+	ProvenanceSuffix          string   `json:"provenance_suffix,omitempty"`
+	ProvenanceOnWriteError    string   `json:"provenance_on_write_error,omitempty"`
+	AllowUnsafeSuffix         bool     `json:"allow_unsafe_suffix"`
+	MetadataPolicy            string   `json:"metadata_policy"`
+	MetadataSet               []string `json:"metadata_set,omitempty"`
+	MetadataSetFromSourceKey  []string `json:"metadata_set_from_source_key,omitempty"`
+	MetadataSetDerived        []string `json:"metadata_set_from_source_derived,omitempty"`
+	MetadataOnMissingSource   string   `json:"metadata_on_missing_source,omitempty"`
+	PreserveContentType       bool     `json:"preserve_content_type"`
+	DestinationStorageClass   string   `json:"destination_storage_class,omitempty"`
+	MetadataSidecarSuffix     string   `json:"metadata_sidecar_suffix,omitempty"`
+	Symlinks                  string   `json:"symlinks"`
+	Hidden                    string   `json:"hidden"`
+	Excludes                  []string `json:"excludes,omitempty"`
+	PreserveMode              bool     `json:"preserve_mode"`
+	OnSourceFailure           string   `json:"on_source_failure"`
+	SrcRegion                 string   `json:"src_region,omitempty"`
+	SrcProfile                string   `json:"src_profile,omitempty"`
+	SrcEndpoint               string   `json:"src_endpoint,omitempty"`
+	DstRegion                 string   `json:"dest_region,omitempty"`
+	DstProfile                string   `json:"dest_profile,omitempty"`
+	DstEndpoint               string   `json:"dest_endpoint,omitempty"`
+}
+
+func transferReflowCheckpointConfigFromEffective(
+	args []string,
+	checkpointPath string,
+	collCfg collisionConfig,
+	metaCfg reflowMetadataConfig,
+	srcCfg reflowSourceConfig,
+	provCfg provenanceConfig,
+) transferReflowCheckpointConfig {
+	sourceURI := ""
+	if len(args) == 1 {
+		sourceURI = strings.TrimSpace(args[0])
+	}
+	return transferReflowCheckpointConfig{
+		SourceURI:                 sourceURI,
+		Stdin:                     reflowStdin,
+		Dest:                      reflowDest,
+		RewriteFrom:               reflowRewriteFrom,
+		RewriteTo:                 reflowRewriteTo,
+		Parallel:                  reflowParallel,
+		DryRun:                    reflowDryRun,
+		CheckpointPath:            checkpointPath,
+		Overwrite:                 reflowOverwrite,
+		OnCollision:               collCfg.Mode,
+		CollisionQuarantinePrefix: collCfg.QuarantinePrefix,
+		Provenance:                provCfg.Mode,
+		ProvenanceSidecarRoot:     provCfg.SidecarRootRaw,
+		ProvenanceSuffix:          provCfg.Suffix,
+		ProvenanceOnWriteError:    provCfg.OnWriteError,
+		AllowUnsafeSuffix:         provCfg.AllowUnsafeSuffix,
+		MetadataPolicy:            metaCfg.Policy,
+		MetadataSet:               metadataSetRawFromMap(metaCfg.Set),
+		MetadataSetFromSourceKey:  metadataSourceRuleRaw(metaCfg.SourceKeyRules),
+		MetadataSetDerived:        metadataDerivedRuleRaw(metaCfg.DerivedRules),
+		MetadataOnMissingSource:   metaCfg.OnMissingSource,
+		PreserveContentType:       metaCfg.PreserveContentType,
+		DestinationStorageClass:   metaCfg.DestinationStorageClass,
+		MetadataSidecarSuffix:     metaCfg.MetadataSidecarSuffix,
+		Symlinks:                  srcCfg.Symlinks,
+		Hidden:                    srcCfg.Hidden,
+		Excludes:                  append([]string(nil), srcCfg.Excludes...),
+		PreserveMode:              srcCfg.PreserveMode,
+		OnSourceFailure:           srcCfg.OnSourceFailure,
+		SrcRegion:                 reflowSrcRegion,
+		SrcProfile:                reflowSrcProfile,
+		SrcEndpoint:               reflowSrcEndpoint,
+		DstRegion:                 reflowDstRegion,
+		DstProfile:                reflowDstProfile,
+		DstEndpoint:               reflowDstEndpoint,
+	}
+}
+
+func metadataSetRawFromMap(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
+func metadataSourceRuleRaw(rules []metadataSourceKeyRule) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, rule.Raw)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func metadataDerivedRuleRaw(rules []metadataDerivedRule) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, rule.Raw)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func transferReflowCheckpointEligible(cfg transferReflowCheckpointConfig) bool {
+	return !cfg.Stdin && !cfg.DryRun && strings.TrimSpace(cfg.SourceURI) != "" && strings.TrimSpace(cfg.CheckpointPath) != ""
+}
+
+func runTransferReflowResume(ctx context.Context, cmd *cobra.Command, runID string) error {
+	if err := rejectTransferReflowResumeRunFlagConflicts(cmd); err != nil {
+		return err
+	}
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return err
+	}
+	env, err := opStore.ReadCheckpoint(ctx, operationTransferReflow, runID)
+	if err != nil {
+		return fmt.Errorf("read operation checkpoint: %w", err)
+	}
+	var payload transferReflowCheckpointPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return fmt.Errorf("parse transfer reflow checkpoint payload: %w", err)
+	}
+	if payload.Config.Stdin || strings.TrimSpace(payload.Config.SourceURI) == "" {
+		return fmt.Errorf("--resume-run %s is not supported for stdin-backed transfer reflow checkpoints in this slice", runID)
+	}
+	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: payload.Config.CheckpointPath})
+	if err != nil {
+		return exitError(foundry.ExitFileWriteError, "Failed to open checkpoint", err)
+	}
+	defer func() {
+		if state != nil {
+			_ = state.Close()
+		}
+	}()
+	fingerprint, err := validateTransferReflowCheckpointIdentity(ctx, opStore, state, env, payload.Config)
+	if err != nil {
+		return err
+	}
+	if err := state.Close(); err != nil {
+		return err
+	}
+	state = nil
+	lease, err := opStore.ClaimLease(ctx, operationTransferReflow, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = opStore.ReleaseLease(operationTransferReflow, *lease) }()
+
+	if err := applyTransferReflowCheckpointConfig(cmd, payload.Config); err != nil {
+		return err
+	}
+	if err := opStore.ValidateIdentity(env, opcheckpoint.Identity{Operation: operationTransferReflow, RunID: runID, ConfigFingerprint: fingerprint}); err != nil {
+		return err
+	}
+	err = runTransferReflowWithRunID(cmd, []string{payload.Config.SourceURI}, runID)
+	if err != nil {
+		return err
+	}
+	env.Status = opcheckpoint.StatusSuccess
+	env.Progress = nil
+	env.Events = append(env.Events, opcheckpoint.CheckpointEvent{Type: "resume_completed", At: time.Now().UTC()})
+	if err := opStore.WriteCheckpoint(context.Background(), *env); err != nil {
+		return fmt.Errorf("write completed checkpoint: %w", err)
+	}
+	return nil
+}
+
+func validateTransferReflowCheckpointIdentity(ctx context.Context, opStore *opcheckpoint.Store, state reflowStateStore, env *opcheckpoint.Envelope, cfg transferReflowCheckpointConfig) (string, error) {
+	if env == nil {
+		return "", fmt.Errorf("checkpoint envelope is nil")
+	}
+	if env.Status != opcheckpoint.StatusFailedResumable {
+		return "", opcheckpoint.ErrIdentityMismatch
+	}
+	expected, err := state.OperationCheckpointFingerprint(ctx, operationTransferReflow)
+	if err != nil {
+		return "", err
+	}
+	if env.Operation != operationTransferReflow || env.ConfigFingerprint != expected {
+		return "", opcheckpoint.ErrIdentityMismatch
+	}
+	actual, err := checkpointFingerprint(cfg)
+	if err != nil {
+		return "", err
+	}
+	if actual != expected {
+		return "", opcheckpoint.ErrIdentityMismatch
+	}
+	if err := opStore.ValidateIdentity(env, opcheckpoint.Identity{Operation: operationTransferReflow, RunID: env.RunID, ConfigFingerprint: expected}); err != nil {
+		return "", err
+	}
+	return expected, nil
+}
+
+func rejectTransferReflowResumeRunFlagConflicts(cmd *cobra.Command) error {
+	if cmd == nil {
+		return nil
+	}
+	var conflicts []string
+	cmd.Flags().Visit(func(flag *pflag.Flag) {
+		if flag.Name != "resume-run" {
+			conflicts = append(conflicts, "--"+flag.Name)
+		}
+	})
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		return fmt.Errorf("%s are not accepted with --resume-run; resume uses checkpointed reflow config", strings.Join(conflicts, ", "))
+	}
+	return nil
+}
+
+func applyTransferReflowCheckpointConfig(cmd *cobra.Command, cfg transferReflowCheckpointConfig) error {
+	set := func(name, value string) error {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			return fmt.Errorf("restore --%s: %w", name, err)
+		}
+		return nil
+	}
+	setBool := func(name string, value bool) error {
+		if value {
+			return set(name, "true")
+		}
+		return set(name, "false")
+	}
+	setInt := func(name string, value int) error {
+		return set(name, fmt.Sprintf("%d", value))
+	}
+	setArray := func(name string, values []string) error {
+		for _, value := range values {
+			if err := set(name, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := setBool("stdin", false); err != nil {
+		return err
+	}
+	for _, pair := range []struct{ name, value string }{
+		{"dest", cfg.Dest},
+		{"rewrite-from", cfg.RewriteFrom},
+		{"rewrite-to", cfg.RewriteTo},
+		{"checkpoint", cfg.CheckpointPath},
+		{"on-collision", cfg.OnCollision},
+		{"collision-quarantine-prefix", cfg.CollisionQuarantinePrefix},
+		{"provenance", cfg.Provenance},
+		{"provenance-sidecar-root", cfg.ProvenanceSidecarRoot},
+		{"provenance-suffix", cfg.ProvenanceSuffix},
+		{"provenance-on-write-error", cfg.ProvenanceOnWriteError},
+		{"metadata-policy", cfg.MetadataPolicy},
+		{"metadata-on-missing-source", cfg.MetadataOnMissingSource},
+		{"destination-storage-class", cfg.DestinationStorageClass},
+		{"metadata-sidecar-suffix", cfg.MetadataSidecarSuffix},
+		{"symlinks", cfg.Symlinks},
+		{"hidden", cfg.Hidden},
+		{"on-source-failure", cfg.OnSourceFailure},
+		{"src-region", cfg.SrcRegion},
+		{"src-profile", cfg.SrcProfile},
+		{"src-endpoint", cfg.SrcEndpoint},
+		{"dest-region", cfg.DstRegion},
+		{"dest-profile", cfg.DstProfile},
+		{"dest-endpoint", cfg.DstEndpoint},
+	} {
+		if err := set(pair.name, pair.value); err != nil {
+			return err
+		}
+	}
+	for _, pair := range []struct {
+		name  string
+		value bool
+	}{
+		{"dry-run", false},
+		{"resume", true},
+		{"overwrite", cfg.Overwrite},
+		{"allow-unsafe-suffix", cfg.AllowUnsafeSuffix},
+		{"preserve-content-type", cfg.PreserveContentType},
+		{"preserve-mode", cfg.PreserveMode},
+	} {
+		if err := setBool(pair.name, pair.value); err != nil {
+			return err
+		}
+	}
+	if err := setInt("parallel", cfg.Parallel); err != nil {
+		return err
+	}
+	for _, pair := range []struct {
+		name   string
+		values []string
+	}{
+		{"metadata-set", cfg.MetadataSet},
+		{"metadata-set-from-source-key", cfg.MetadataSetFromSourceKey},
+		{"metadata-set-from-source-derived", cfg.MetadataSetDerived},
+		{"exclude", cfg.Excludes},
+	} {
+		if err := setArray(pair.name, pair.values); err != nil {
+			return err
+		}
+	}
+	reflowResumeRun = ""
+	return nil
+}
+
+func writeFailedResumableTransferReflowCheckpoint(ctx context.Context, state reflowStateStore, runID string, cfg transferReflowCheckpointConfig, class opcheckpoint.ErrorClass, progress map[string]int64) error {
+	opStore, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open operation checkpoint store: %w", err)
+	}
+	fingerprint, err := checkpointFingerprint(cfg)
+	if err != nil {
+		return err
+	}
+	if err := state.SetOperationCheckpointIdentity(ctx, operationTransferReflow, fingerprint); err != nil {
+		return fmt.Errorf("record operation checkpoint identity: %w", err)
+	}
+	rawPayload, err := json.Marshal(transferReflowCheckpointPayload{Config: cfg})
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint payload: %w", err)
+	}
+	now := time.Now().UTC()
+	env := opcheckpoint.Envelope{
+		SchemaVersion:     opcheckpoint.SchemaVersion,
+		Operation:         operationTransferReflow,
+		RunID:             runID,
+		ConfigFingerprint: fingerprint,
+		Status:            opcheckpoint.StatusFailedResumable,
+		ErrorClass:        class,
+		CreatedAt:         now,
+		Progress:          progress,
+		Payload:           rawPayload,
+		Events: []opcheckpoint.CheckpointEvent{{
+			Type:       "failed_resumable",
+			At:         now,
+			ErrorClass: class,
+		}},
+	}
+	return opStore.WriteCheckpoint(ctx, env)
+}
+
+func transferReflowProgress(invalidCount, errorCount int64) map[string]int64 {
+	progress := map[string]int64{}
+	if invalidCount > 0 {
+		progress["invalid_inputs"] = invalidCount
+	}
+	if errorCount > 0 {
+		progress["errors"] = errorCount
+	}
+	if len(progress) == 0 {
+		return nil
+	}
+	return progress
+}
+
+func classifyTransferReflowRunError(err error) opcheckpoint.Classification {
+	if err == nil {
+		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
+	}
+	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
+		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+	})
+}
+
 func runTransferReflow(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	resumeRun := strings.TrimSpace(reflowResumeRun)
+	if resumeRun != "" {
+		return runTransferReflowResume(ctx, cmd, resumeRun)
+	}
+	return runTransferReflowWithRunID(cmd, args, "")
+}
+
+func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string) error {
 	ctx := cmd.Context()
 	if reflowParallel < 1 {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --parallel value", fmt.Errorf("parallel must be >= 1"))
 	}
 	if reflowResume && strings.TrimSpace(reflowCheckpoint) == "" {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --resume usage", fmt.Errorf("--resume requires --checkpoint"))
+	}
+	if strings.TrimSpace(reflowDest) == "" {
+		return exitError(foundry.ExitInvalidArgument, "Missing --dest", fmt.Errorf("--dest is required"))
+	}
+	if strings.TrimSpace(reflowRewriteFrom) == "" {
+		return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-from", fmt.Errorf("--rewrite-from is required"))
+	}
+	if strings.TrimSpace(reflowRewriteTo) == "" {
+		return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-to", fmt.Errorf("--rewrite-to is required"))
 	}
 	collCfg, err := resolveCollisionConfig(cmd)
 	if err != nil {
@@ -1885,7 +2306,10 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Invalid rewrite templates", err)
 	}
 
-	jobID := uuid.New().String()
+	jobID := strings.TrimSpace(runID)
+	if jobID == "" {
+		jobID = uuid.New().String()
+	}
 	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, destSpec.Provider)
 	defer func() { _ = w.Close() }()
 
@@ -1896,6 +2320,7 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	if strings.TrimSpace(reflowCheckpoint) != "" {
 		checkpointPath = reflowCheckpoint
 	}
+	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg)
 
 	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {
@@ -2511,11 +2936,23 @@ func runTransferReflow(cmd *cobra.Command, args []string) error {
 	close(tasks)
 	wg.Wait()
 
+	if ctx.Err() != nil {
+		classification := classifyTransferReflowRunError(ctx.Err())
+		if classification.Resumable && transferReflowCheckpointEligible(checkpointCfg) {
+			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
+			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationTransferReflow, jobID, classification.Class, progress); emitErr != nil {
+					return exitError(foundry.ExitSignalInt, "reflow cancelled", fmt.Errorf("%w; write operation error record: %v", ctx.Err(), emitErr))
+				}
+			} else {
+				return exitError(foundry.ExitSignalInt, "reflow cancelled", fmt.Errorf("%w; write operation checkpoint: %v", ctx.Err(), checkpointErr))
+			}
+		}
+		return exitError(foundry.ExitSignalInt, "reflow cancelled", ctx.Err())
+	}
 	if inputErr != nil {
 		return exitError(foundry.ExitInvalidArgument, "Failed to read input", inputErr)
-	}
-	if ctx.Err() != nil {
-		return exitError(foundry.ExitSignalInt, "reflow cancelled", ctx.Err())
 	}
 	if invalidCount.Load() > 0 {
 		return exitError(foundry.ExitInvalidArgument, "reflow completed with invalid inputs", fmt.Errorf("invalid_inputs=%d", invalidCount.Load()))
