@@ -323,6 +323,145 @@ func TestTransferReflowCancelledPositionalRunWritesOperationCheckpoint(t *testin
 	require.Equal(t, env.ConfigFingerprint, fingerprint)
 }
 
+func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		require.Equal(t, "refreshable-profile", cfg.Profile)
+		return refreshFailingGetProvider{Provider: src}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--src-profile", "refreshable-profile",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow failed resumable")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.Equal(t, operationTransferReflow, opErr.Operation)
+	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, opErr.ErrorClass)
+	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
+
+	opStore, err := openDefaultOperationCheckpointStore(context.Background())
+	require.NoError(t, err)
+	env, err := opStore.ReadCheckpoint(context.Background(), operationTransferReflow, opErr.RunID)
+	require.NoError(t, err)
+	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
+	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, env.ErrorClass)
+}
+
+func TestTransferReflowCredentialRefreshListFailureWritesOperationCheckpoint(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("prefix/a.txt", "payload", "etag-a", time.Now().UTC())
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		require.Equal(t, "refreshable-profile", cfg.Profile)
+		return &refreshFailingListProvider{Provider: src}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "prefix/{name}",
+		"--rewrite-to", "{name}",
+		"--parallel", "1",
+		"--src-profile", "refreshable-profile",
+		"s3://source-bucket/prefix/",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow failed resumable")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.Equal(t, operationTransferReflow, opErr.Operation)
+	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, opErr.ErrorClass)
+	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
+
+	opStore, err := openDefaultOperationCheckpointStore(context.Background())
+	require.NoError(t, err)
+	env, err := opStore.ReadCheckpoint(context.Background(), operationTransferReflow, opErr.RunID)
+	require.NoError(t, err)
+	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
+	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, env.ErrorClass)
+}
+
+func TestTransferReflowCredentialRefreshWordingWithoutProfileIsNotResumable(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		require.Empty(t, cfg.Profile)
+		return refreshFailingGetProvider{Provider: src}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.NotContains(t, stdout.String(), opcheckpoint.ErrorRecordType)
+}
+
+func TestTransferReflowStdinCredentialRefreshFailureIsNotAdvertisedResumable(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+		require.Equal(t, "refreshable-profile", cfg.Profile)
+		return refreshFailingGetProvider{Provider: src}, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader("s3://source-bucket/a.txt\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--src-profile", "refreshable-profile",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow failed")
+	require.NotContains(t, err.Error(), "reflow failed resumable")
+	require.NotContains(t, stdout.String(), opcheckpoint.ErrorRecordType)
+}
+
 type cancelingGetProvider struct {
 	provider.Provider
 	cancel func()
@@ -333,6 +472,35 @@ func (p cancelingGetProvider) GetObject(ctx context.Context, key string) (io.Rea
 		p.cancel()
 	}
 	return nil, 0, context.Canceled
+}
+
+type refreshFailingGetProvider struct {
+	provider.Provider
+}
+
+func (p refreshFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, fmt.Errorf("s3 GetObject: failed to refresh cached credentials: %w", opcheckpoint.ErrCredentialsRefreshFailed)
+}
+
+type refreshFailingListProvider struct {
+	provider.Provider
+	listCalls int
+}
+
+func (p *refreshFailingListProvider) List(_ context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	p.listCalls++
+	if opts.ContinuationToken == "" {
+		return &provider.ListResult{
+			Objects: []provider.ObjectSummary{{
+				Key:  "prefix/a.txt",
+				Size: int64(len("payload")),
+				ETag: "etag-a",
+			}},
+			IsTruncated:       true,
+			ContinuationToken: "next-page",
+		}, nil
+	}
+	return nil, fmt.Errorf("s3 ListObjectsV2: failed to refresh cached credentials: %w", opcheckpoint.ErrCredentialsRefreshFailed)
 }
 
 func TestTransferReflowCommand_StdinPipeConsumesInput(t *testing.T) {
