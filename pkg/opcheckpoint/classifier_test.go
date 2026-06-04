@@ -47,6 +47,12 @@ func TestClassifyFatalErrorOrdering(t *testing.T) {
 			want: Classification{Class: ErrorClassAuthDenied, Resumable: false},
 		},
 		{
+			name: "invalid credentials wins over provider refresh sentinel",
+			err:  errors.Join(provider.ErrCredentialsRefreshFailed, provider.ErrInvalidCredentials),
+			in:   ClassifierInput{},
+			want: Classification{Class: ErrorClassAuthDenied, Resumable: false},
+		},
+		{
 			name: "access denied wins over interruption",
 			err:  errors.New("AccessDenied: revoked access while context interrupted"),
 			in:   ClassifierInput{Interrupted: true},

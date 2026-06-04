@@ -511,7 +511,7 @@ func wrapS3Error(op, bucket, key string, err error) error {
 	}
 
 	if isS3CredentialRefreshFailure(err) {
-		wrapped.Err = fmt.Errorf("%w: %v", provider.ErrCredentialsRefreshFailed, err)
+		wrapped.Err = errors.Join(provider.ErrCredentialsRefreshFailed, err)
 		return wrapped
 	}
 

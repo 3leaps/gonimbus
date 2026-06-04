@@ -509,6 +509,16 @@ func TestWrapError_CredentialRefreshFailure(t *testing.T) {
 	assert.False(t, errors.Is(err, provider.ErrInvalidCredentials))
 }
 
+func TestWrapError_CredentialRefreshFailurePreservesInnerCause(t *testing.T) {
+	p := &Provider{bucket: "test-bucket"}
+
+	inner := fmt.Errorf("failed to refresh cached credentials, %w", provider.ErrInvalidCredentials)
+	err := p.wrapError("List", "", inner)
+
+	assert.True(t, errors.Is(err, provider.ErrCredentialsRefreshFailed))
+	assert.True(t, errors.Is(err, provider.ErrInvalidCredentials))
+}
+
 func TestWrapError_APITextCannotSpoofCredentialRefreshFailure(t *testing.T) {
 	p := &Provider{bucket: "test-bucket"}
 	apiErr := &mockAPIError{
