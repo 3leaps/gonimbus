@@ -53,12 +53,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 
 	awsCfg, err := loadAWSConfig(ctx, cfg)
 	if err != nil {
-		return nil, &provider.ProviderError{
-			Op:       "New",
-			Provider: provider.ProviderS3,
-			Bucket:   cfg.Bucket,
-			Err:      err,
-		}
+		return nil, wrapS3Error("New", cfg.Bucket, "", err)
 	}
 
 	s3Opts := []func(*s3.Options){
@@ -503,12 +498,21 @@ func (p *Provider) PutObjectEmpty(ctx context.Context, key string) error {
 
 // wrapError converts S3 errors to provider errors with appropriate sentinel errors.
 func (p *Provider) wrapError(op, key string, err error) error {
+	return wrapS3Error(op, p.bucket, key, err)
+}
+
+func wrapS3Error(op, bucket, key string, err error) error {
 	wrapped := &provider.ProviderError{
 		Op:       op,
 		Provider: provider.ProviderS3,
-		Bucket:   p.bucket,
+		Bucket:   bucket,
 		Key:      key,
 		Err:      err,
+	}
+
+	if isS3CredentialRefreshFailure(err) {
+		wrapped.Err = errors.Join(provider.ErrCredentialsRefreshFailed, err)
+		return wrapped
 	}
 
 	// Check for specific S3 error types first
@@ -564,6 +568,31 @@ func (p *Provider) wrapError(op, key string, err error) error {
 	}
 
 	return wrapped
+}
+
+func isS3CredentialRefreshFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if provider.IsCredentialsRefreshFailed(err) {
+		return true
+	}
+	if hasAWSCredentialCacheRefreshWrapper(err) {
+		return true
+	}
+	return false
+}
+
+func hasAWSCredentialCacheRefreshWrapper(err error) bool {
+	for err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.HasPrefix(msg, "failed to refresh cached credentials,") ||
+			strings.HasPrefix(msg, "failed to refresh cached credentials:") {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 func (p *Provider) wrapConditionalPutError(key string, precond provider.PutPrecondition, err error) error {

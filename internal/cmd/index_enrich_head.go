@@ -323,7 +323,7 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		return err
 	}
 
-	summary, runErr := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, payload.Config.Query.Parallel, true, stateOut, storageFiltered, enrichHeadRefreshableCredentials(payload.Config.Provider))
+	summary, runErr := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, payload.Config.Query.Parallel, true, stateOut, storageFiltered, false)
 	status := enrichHeadRunStatus(summary, runErr)
 	classification := classifyEnrichHeadRunError(runErr, payload.Config.Provider)
 	if runErr != nil && classification.Resumable {
@@ -515,10 +515,10 @@ func rejectConcurrentBuild(ctx context.Context, db *sql.DB, indexSetID string) e
 func executeEnrichHead(ctx context.Context, db *sql.DB, prov provider.Provider, indexSet *indexstore.IndexSet, candidates []indexstore.HeadEnrichmentCandidate, cmd *cobra.Command, stateOut *os.File, storageFiltered bool) (enrichHeadSummaryData, error) {
 	parallel, _ := cmd.Flags().GetInt("parallel")
 	resume, _ := cmd.Flags().GetBool("resume")
-	return executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, parallel, resume, stateOut, storageFiltered, strings.TrimSpace(enrichHeadProfile) != "")
+	return executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, parallel, resume, stateOut, storageFiltered, false)
 }
 
-func executeEnrichHeadWithOptions(ctx context.Context, db *sql.DB, prov provider.Provider, indexSet *indexstore.IndexSet, candidates []indexstore.HeadEnrichmentCandidate, parallel int, resume bool, stateOut *os.File, storageFiltered bool, refreshableCredentials bool) (enrichHeadSummaryData, error) {
+func executeEnrichHeadWithOptions(ctx context.Context, db *sql.DB, prov provider.Provider, indexSet *indexstore.IndexSet, candidates []indexstore.HeadEnrichmentCandidate, parallel int, resume bool, stateOut *os.File, storageFiltered bool, legacyRefreshTextFallback bool) (enrichHeadSummaryData, error) {
 	if parallel <= 0 {
 		return enrichHeadSummaryData{}, fmt.Errorf("--parallel must be greater than zero")
 	}
@@ -579,7 +579,7 @@ func executeEnrichHeadWithOptions(ctx context.Context, db *sql.DB, prov provider
 		case "resume_skipped":
 			summary.ResumeSkipped++
 		default:
-			if classification := classifyEnrichHeadFatalError(result.err, refreshableCredentials); classification.Resumable {
+			if classification := classifyEnrichHeadFatalError(result.err, legacyRefreshTextFallback); classification.Resumable {
 				if fatalErr == nil {
 					fatalErr = result.err
 					cancelWork()
@@ -607,22 +607,18 @@ func executeEnrichHeadWithOptions(ctx context.Context, db *sql.DB, prov provider
 	return summary, nil
 }
 
-func classifyEnrichHeadRunError(err error, opts enrichHeadProviderOptions) opcheckpoint.Classification {
-	return classifyEnrichHeadFatalError(err, enrichHeadRefreshableCredentials(opts))
+func classifyEnrichHeadRunError(err error, _ enrichHeadProviderOptions) opcheckpoint.Classification {
+	return classifyEnrichHeadFatalError(err, false)
 }
 
-func classifyEnrichHeadFatalError(err error, refreshableCredentials bool) opcheckpoint.Classification {
+func classifyEnrichHeadFatalError(err error, legacyRefreshTextFallback bool) opcheckpoint.Classification {
 	if err == nil {
 		return opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false}
 	}
 	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
-		RefreshableCredentials: refreshableCredentials,
+		RefreshableCredentials: legacyRefreshTextFallback,
 		Interrupted:            errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
 	})
-}
-
-func enrichHeadRefreshableCredentials(opts enrichHeadProviderOptions) bool {
-	return strings.TrimSpace(opts.Profile) != ""
 }
 
 func enrichHeadProgress(summary enrichHeadSummaryData) map[string]int64 {
