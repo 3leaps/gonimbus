@@ -24,6 +24,14 @@ changes.
   need changes unless they want to surface refresh failures through the new
   helper.
 
+### Added
+
+- **Failed-resumable index discovery:** `index list` and `index stats --runs`
+  now expose the latest run ID and a safe `--resume-run` command for
+  failed-resumable index runs; `index stats` also reports a separate
+  failed-resumable run count, and `index query` warns when the latest run is a
+  partial failed-resumable checkpoint.
+
 ## [0.2.3] - 2026-05-31
 
 **Stream put completion, reflow freshness arbitration, and release-surface guardrails.**

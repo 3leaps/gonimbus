@@ -111,11 +111,16 @@ func printStatsTable(summary *indexstore.IndexSetSummary, prefixStats []indexsto
 	_, _ = fmt.Fprintf(os.Stdout, "  Successful: %d\n", summary.SuccessfulRuns)
 	_, _ = fmt.Fprintf(os.Stdout, "  Partial:    %d\n", summary.PartialRuns)
 	_, _ = fmt.Fprintf(os.Stdout, "  Failed:     %d\n", summary.FailedRuns)
+	_, _ = fmt.Fprintf(os.Stdout, "  Resumable:  %d\n", summary.FailedResumableRuns)
 
 	if summary.LatestRun != nil {
-		_, _ = fmt.Fprintf(os.Stdout, "  Latest:     %s (%s)\n",
+		_, _ = fmt.Fprintf(os.Stdout, "  Latest:     %s (%s, %s)\n",
 			summary.LatestRun.StartedAt.Format(time.RFC3339),
+			summary.LatestRun.RunID,
 			summary.LatestRun.Status)
+		if cmd := resumeCommandForIndexRun(string(summary.LatestRun.Status), summary.LatestRun.SourceType, summary.LatestRun.RunID); cmd != "" {
+			_, _ = fmt.Fprintf(os.Stdout, "  Resume:     %s\n", cmd)
+		}
 	}
 	_, _ = fmt.Fprintln(os.Stdout)
 
@@ -148,17 +153,23 @@ func printStatsTable(summary *indexstore.IndexSetSummary, prefixStats []indexsto
 	if len(runs) > 0 {
 		_, _ = fmt.Fprintln(os.Stdout, "Run History:")
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "  STARTED\tSTATUS\tSOURCE\tDURATION")
+		_, _ = fmt.Fprintln(w, "  RUN ID\tSTARTED\tSTATUS\tSOURCE\tDURATION\tRESUME")
 		for _, r := range runs {
 			duration := "-"
 			if r.EndedAt != nil {
 				duration = r.EndedAt.Sub(r.StartedAt).Round(time.Second).String()
 			}
-			_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n",
+			resume := "-"
+			if cmd := resumeCommandForIndexRun(string(r.Status), r.SourceType, r.RunID); cmd != "" {
+				resume = cmd
+			}
+			_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\n",
+				r.RunID,
 				r.StartedAt.Format("2006-01-02 15:04:05"),
 				r.Status,
 				r.SourceType,
 				duration,
+				resume,
 			)
 		}
 		_ = w.Flush()
@@ -176,11 +187,12 @@ func displayPrefix(prefix string) string {
 
 func printStatsJSON(summary *indexstore.IndexSetSummary, prefixStats []indexstore.PrefixStatRow, runs []indexstore.IndexRun, indexSet *indexstore.IndexSet) error {
 	type jsonRun struct {
-		RunID      string  `json:"run_id"`
-		StartedAt  string  `json:"started_at"`
-		EndedAt    *string `json:"ended_at,omitempty"`
-		SourceType string  `json:"source_type"`
-		Status     string  `json:"status"`
+		RunID         string  `json:"run_id"`
+		StartedAt     string  `json:"started_at"`
+		EndedAt       *string `json:"ended_at,omitempty"`
+		SourceType    string  `json:"source_type"`
+		Status        string  `json:"status"`
+		ResumeCommand string  `json:"resume_command,omitempty"`
 	}
 
 	type jsonPrefix struct {
@@ -210,10 +222,11 @@ func printStatsJSON(summary *indexstore.IndexSetSummary, prefixStats []indexstor
 		} `json:"objects"`
 
 		Runs struct {
-			Total      int `json:"total"`
-			Successful int `json:"successful"`
-			Partial    int `json:"partial"`
-			Failed     int `json:"failed"`
+			Total           int `json:"total"`
+			Successful      int `json:"successful"`
+			Partial         int `json:"partial"`
+			Failed          int `json:"failed"`
+			FailedResumable int `json:"failed_resumable"`
 		} `json:"runs"`
 
 		LatestRun  *jsonRun     `json:"latest_run,omitempty"`
@@ -240,14 +253,16 @@ func printStatsJSON(summary *indexstore.IndexSetSummary, prefixStats []indexstor
 	out.Runs.Successful = summary.SuccessfulRuns
 	out.Runs.Partial = summary.PartialRuns
 	out.Runs.Failed = summary.FailedRuns
+	out.Runs.FailedResumable = summary.FailedResumableRuns
 
 	if summary.LatestRun != nil {
 		r := summary.LatestRun
 		out.LatestRun = &jsonRun{
-			RunID:      r.RunID,
-			StartedAt:  r.StartedAt.Format(time.RFC3339),
-			SourceType: r.SourceType,
-			Status:     string(r.Status),
+			RunID:         r.RunID,
+			StartedAt:     r.StartedAt.Format(time.RFC3339),
+			SourceType:    r.SourceType,
+			Status:        string(r.Status),
+			ResumeCommand: resumeCommandForIndexRun(string(r.Status), r.SourceType, r.RunID),
 		}
 		if r.EndedAt != nil {
 			ts := r.EndedAt.Format(time.RFC3339)
@@ -274,10 +289,11 @@ func printStatsJSON(summary *indexstore.IndexSetSummary, prefixStats []indexstor
 		out.RunHistory = make([]jsonRun, len(runs))
 		for i, r := range runs {
 			out.RunHistory[i] = jsonRun{
-				RunID:      r.RunID,
-				StartedAt:  r.StartedAt.Format(time.RFC3339),
-				SourceType: r.SourceType,
-				Status:     string(r.Status),
+				RunID:         r.RunID,
+				StartedAt:     r.StartedAt.Format(time.RFC3339),
+				SourceType:    r.SourceType,
+				Status:        string(r.Status),
+				ResumeCommand: resumeCommandForIndexRun(string(r.Status), r.SourceType, r.RunID),
 			}
 			if r.EndedAt != nil {
 				ts := r.EndedAt.Format(time.RFC3339)

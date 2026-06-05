@@ -222,7 +222,10 @@ List all local indexes.
 gonimbus index list
 ```
 
-Output shows base URI, provider, object count, size, and status.
+Output shows base URI, provider, object count, size, latest status, latest run
+ID, and identity health. If the latest index run is `failed-resumable`, list
+output includes a `gonimbus index ... --resume-run <run_id>` hint for the
+operation that wrote the checkpoint.
 
 ### `index query`
 
@@ -269,6 +272,11 @@ gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
 
 When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
 
+If the latest run for the selected index is `failed-resumable`, `index query`
+still allows inspection of the local partial index but prints a stderr warning
+with the resumable run ID. Treat those query results as checkpoint-state
+inspection, not as a validated completed snapshot.
+
 `--canonical-by-etag` groups query results by non-empty ETag and emits one
 `gonimbus.index.object.canonical.v1` record per group. Rows with empty or
 missing ETag are emitted unchanged as standard `gonimbus.index.object.v1`
@@ -300,6 +308,10 @@ View detailed statistics for an index.
 ```bash
 gonimbus index stats 's3://bucket/prefix/'
 ```
+
+Use `--runs` to include run IDs, statuses, and resume hints for
+`failed-resumable` runs. The run summary counts failed-resumable runs
+separately from hard failed runs.
 
 ### `index doctor`
 
