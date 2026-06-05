@@ -22,11 +22,12 @@ type IndexSetSummary struct {
 	TotalSizeBytes int64
 
 	// Run statistics
-	TotalRuns      int
-	SuccessfulRuns int
-	PartialRuns    int
-	FailedRuns     int
-	LatestRun      *IndexRun
+	TotalRuns           int
+	SuccessfulRuns      int
+	PartialRuns         int
+	FailedRuns          int
+	FailedResumableRuns int
+	LatestRun           *IndexRun
 }
 
 // TopLevelObjectSummary provides object distribution for a single run.
@@ -101,8 +102,8 @@ func GetIndexSetSummary(ctx context.Context, db *sql.DB, indexSetID string) (*In
 	err = db.QueryRowContext(ctx,
 		`SELECT
 			COUNT(*) as total,
-			SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) as active,
-			SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) as deleted,
+			COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) as active,
+			COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) as deleted,
 			COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN size_bytes ELSE 0 END), 0) as total_size
 		 FROM objects_current
 		 WHERE index_set_id = ?`,
@@ -118,14 +119,16 @@ func GetIndexSetSummary(ctx context.Context, db *sql.DB, indexSetID string) (*In
 	err = db.QueryRowContext(ctx,
 		`SELECT
 			COUNT(*) as total,
-			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
-			SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) as partial,
-			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+			COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as success,
+			COALESCE(SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END), 0) as partial,
+			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed,
+			COALESCE(SUM(CASE WHEN status = 'failed-resumable' THEN 1 ELSE 0 END), 0) as failed_resumable
 		 FROM index_runs
 		 WHERE index_set_id = ?`,
 		indexSetID).Scan(
 		&summary.TotalRuns, &summary.SuccessfulRuns,
-		&summary.PartialRuns, &summary.FailedRuns)
+		&summary.PartialRuns, &summary.FailedRuns,
+		&summary.FailedResumableRuns)
 
 	if err != nil {
 		return nil, fmt.Errorf("get run stats: %w", err)
@@ -145,15 +148,17 @@ func GetIndexSetSummary(ctx context.Context, db *sql.DB, indexSetID string) (*In
 
 // IndexListEntry provides summary info for the index list command.
 type IndexListEntry struct {
-	IndexSetID     string
-	BaseURI        string
-	Provider       string
-	CreatedAt      time.Time
-	ObjectCount    int64
-	TotalSizeBytes int64
-	RunCount       int
-	LatestRunAt    *time.Time
-	LatestStatus   string
+	IndexSetID       string
+	BaseURI          string
+	Provider         string
+	CreatedAt        time.Time
+	ObjectCount      int64
+	TotalSizeBytes   int64
+	RunCount         int
+	LatestRunID      string
+	LatestRunAt      *time.Time
+	LatestStatus     string
+	LatestSourceType string
 }
 
 // ListIndexSetsWithStats returns all IndexSets with summary statistics.
@@ -202,21 +207,29 @@ func ListIndexSetsWithStats(ctx context.Context, db *sql.DB) ([]IndexListEntry, 
 		}
 
 		// Get latest run
+		var latestRunID sql.NullString
 		var latestRunAtRaw any
 		var latestStatus sql.NullString
+		var latestSourceType sql.NullString
 		err = db.QueryRowContext(ctx,
-			`SELECT started_at, status FROM index_runs
+			`SELECT run_id, started_at, status, source_type FROM index_runs
 			 WHERE index_set_id = ?
 			 ORDER BY started_at DESC LIMIT 1`,
-			is.IndexSetID).Scan(&latestRunAtRaw, &latestStatus)
+			is.IndexSetID).Scan(&latestRunID, &latestRunAtRaw, &latestStatus, &latestSourceType)
 		if err == nil {
 			latestRunAt, err := parseOptionalDBTime(latestRunAtRaw)
 			if err != nil {
 				return nil, fmt.Errorf("parse latest run started_at: %w", err)
 			}
+			if latestRunID.Valid {
+				entry.LatestRunID = latestRunID.String
+			}
 			entry.LatestRunAt = latestRunAt
 			if latestStatus.Valid {
 				entry.LatestStatus = latestStatus.String
+			}
+			if latestSourceType.Valid {
+				entry.LatestSourceType = latestSourceType.String
 			}
 		}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 )
 
 var indexListCmd = &cobra.Command{
@@ -139,7 +140,7 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 	defer func() { _ = w.Flush() }()
 
 	// Header
-	_, _ = fmt.Fprintln(w, "DIR\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tIDENTITY")
+	_, _ = fmt.Fprintln(w, "DIR\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tRUN ID\tRESUME\tIDENTITY")
 
 	for _, e := range entries {
 		info := e.Info
@@ -155,7 +156,17 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 			status = info.LatestStatus
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n",
+		runID := "-"
+		if info.LatestRunID != "" {
+			runID = info.LatestRunID
+		}
+
+		resume := "-"
+		if cmd := resumeCommandForIndexRun(info.LatestStatus, info.LatestSourceType, info.LatestRunID); cmd != "" {
+			resume = cmd
+		}
+
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
 			e.DirName,
 			info.BaseURI,
 			info.Provider,
@@ -164,6 +175,8 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 			info.RunCount,
 			latestStr,
 			status,
+			runID,
+			resume,
 			e.IdentityStatus,
 		)
 	}
@@ -180,8 +193,10 @@ func printIndexListJSON(entries []indexListDisplayEntry) error {
 		ObjectCount    int64   `json:"object_count"`
 		TotalSizeBytes int64   `json:"total_size_bytes"`
 		RunCount       int     `json:"run_count"`
+		LatestRunID    string  `json:"latest_run_id,omitempty"`
 		LatestRunAt    *string `json:"latest_run_at,omitempty"`
 		LatestStatus   string  `json:"latest_status,omitempty"`
+		ResumeCommand  string  `json:"resume_command,omitempty"`
 
 		DirName        string `json:"dir_name"`
 		DBPath         string `json:"db_path"`
@@ -200,7 +215,9 @@ func printIndexListJSON(entries []indexListDisplayEntry) error {
 			ObjectCount:    info.ObjectCount,
 			TotalSizeBytes: info.TotalSizeBytes,
 			RunCount:       info.RunCount,
+			LatestRunID:    info.LatestRunID,
 			LatestStatus:   info.LatestStatus,
+			ResumeCommand:  resumeCommandForIndexRun(info.LatestStatus, info.LatestSourceType, info.LatestRunID),
 			DirName:        e.DirName,
 			DBPath:         e.DBPath,
 			IdentityPath:   e.IdentityPath,
@@ -215,6 +232,21 @@ func printIndexListJSON(entries []indexListDisplayEntry) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+func resumeCommandForIndexRun(status string, sourceType string, runID string) string {
+	if status != string(indexstore.RunStatusFailedResumable) || runID == "" {
+		return ""
+	}
+	operation := operationIndexBuild
+	if sourceType == enrichHeadSourceType {
+		operation = operationIndexEnrichWithHead
+	}
+	cmd, err := opcheckpoint.ResumeCommand(operation, runID)
+	if err != nil {
+		return ""
+	}
+	return cmd
 }
 
 // formatBytes formats bytes as human-readable string.

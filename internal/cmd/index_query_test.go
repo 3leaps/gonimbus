@@ -441,6 +441,36 @@ func TestIndexQueryRecordIncludesStorageClass(t *testing.T) {
 	require.Contains(t, string(b), `"storage_class":"DEEP_ARCHIVE"`)
 }
 
+func TestWarnIfLatestIndexRunFailedResumable(t *testing.T) {
+	ctx := context.Background()
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: ":memory:"})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	require.NoError(t, indexstore.Migrate(ctx, db))
+
+	indexSet, _, err := indexstore.FindOrCreateIndexSet(ctx, db, indexstore.IndexSetParams{
+		BaseURI:  "s3://bucket/prefix/",
+		Provider: "s3",
+		BuildParams: indexstore.BuildParams{
+			SourceType:    "crawl",
+			SchemaVersion: indexstore.SchemaVersion,
+		},
+	})
+	require.NoError(t, err)
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil))
+
+	stderr := captureStderr(t, func() {
+		require.NoError(t, warnIfLatestIndexRunFailedResumable(ctx, db, indexSet))
+	})
+
+	require.Contains(t, stderr, "latest index run "+run.RunID+" is failed-resumable")
+	require.Contains(t, stderr, "query results may reflect partial checkpoint state")
+	require.Contains(t, stderr, "resume: gonimbus index build --resume-run "+run.RunID)
+}
+
 func stringPtr(value string) *string {
 	return &value
 }

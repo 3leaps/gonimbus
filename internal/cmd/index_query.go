@@ -228,6 +228,9 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		}
 		baseURI = indexSet.BaseURI
 	}
+	if err := warnIfLatestIndexRunFailedResumable(ctx, db, indexSet); err != nil {
+		return err
+	}
 
 	// Build query params
 	params := indexstore.QueryParams{
@@ -943,6 +946,25 @@ func runTimestamp(run *indexstore.IndexRun) time.Time {
 		return *run.EndedAt
 	}
 	return run.StartedAt
+}
+
+func warnIfLatestIndexRunFailedResumable(ctx context.Context, db *sql.DB, indexSet *indexstore.IndexSet) error {
+	if db == nil || indexSet == nil {
+		return nil
+	}
+	runs, err := indexstore.ListIndexRuns(ctx, db, indexSet.IndexSetID)
+	if err != nil {
+		return fmt.Errorf("list index runs for query status: %w", err)
+	}
+	if len(runs) == 0 || runs[0].Status != indexstore.RunStatusFailedResumable {
+		return nil
+	}
+	resume := resumeCommandForIndexRun(string(runs[0].Status), runs[0].SourceType, runs[0].RunID)
+	_, _ = fmt.Fprintf(os.Stderr, "warning: latest index run %s is failed-resumable; query results may reflect partial checkpoint state\n", runs[0].RunID)
+	if resume != "" {
+		_, _ = fmt.Fprintf(os.Stderr, "resume: %s\n", resume)
+	}
+	return nil
 }
 
 func warnIndexDB(format string, args ...any) {
