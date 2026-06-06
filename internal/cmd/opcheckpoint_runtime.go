@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -309,6 +311,38 @@ func emitOperationErrorRecord(ctx context.Context, cmdOut jsonEncoder, operation
 	default:
 	}
 	return cmdOut.Encode(rec)
+}
+
+func writeOperationErrorSummary(w io.Writer, title, operation, runID string, class opcheckpoint.ErrorClass, progress map[string]int64) {
+	if w == nil {
+		return
+	}
+	resumeCommand, err := opcheckpoint.ResumeCommand(operation, runID)
+	if err != nil {
+		resumeCommand = ""
+	}
+	_, _ = fmt.Fprintf(w, "\n%s\n", title)
+	_, _ = fmt.Fprintf(w, "  run_id: %s\n", runID)
+	_, _ = fmt.Fprintf(w, "  status: %s\n", indexstore.RunStatusFailedResumable)
+	_, _ = fmt.Fprintf(w, "  error_class: %s\n", class)
+	for _, key := range sortedProgressKeys(progress) {
+		_, _ = fmt.Fprintf(w, "  %s: %d\n", key, progress[key])
+	}
+	if resumeCommand != "" {
+		_, _ = fmt.Fprintf(w, "  resume_command: %s\n", resumeCommand)
+	}
+}
+
+func sortedProgressKeys(progress map[string]int64) []string {
+	if len(progress) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(progress))
+	for key := range progress {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type jsonEncoder interface {

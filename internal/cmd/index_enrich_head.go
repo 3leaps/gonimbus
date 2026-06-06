@@ -198,6 +198,7 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create enrich run: %w", err)
 	}
+	cmd.SilenceUsage = true
 
 	summary, runErr := executeEnrichHead(ctx, db, prov, indexSet, candidates, cmd, stateOut, storageFiltered)
 	status := enrichHeadRunStatus(summary, runErr)
@@ -228,7 +229,9 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		runErr = fmt.Errorf("write summary: %w", err)
 	}
 	if runErr != nil && classification.Resumable && status == indexstore.RunStatusFailedResumable {
-		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, run.RunID, classification.Class, enrichHeadProgress(summary)); err != nil {
+		progress := enrichHeadProgress(summary)
+		writeOperationErrorSummary(cmd.ErrOrStderr(), "HEAD enrichment failed with resumable checkpoint", operationIndexEnrichWithHead, run.RunID, classification.Class, progress)
+		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, run.RunID, classification.Class, progress); err != nil {
 			runErr = fmt.Errorf("%w; write operation error record: %v", runErr, err)
 		}
 	}
@@ -325,6 +328,7 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
 		return err
 	}
+	cmd.SilenceUsage = true
 
 	summary, runErr := executeEnrichHeadWithOptions(ctx, db, prov, indexSet, candidates, payload.Config.Query.Parallel, true, stateOut, storageFiltered, false)
 	status := enrichHeadRunStatus(summary, runErr)
@@ -356,7 +360,9 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		runErr = fmt.Errorf("write summary: %w", err)
 	}
 	if runErr != nil && classification.Resumable && status == indexstore.RunStatusFailedResumable {
-		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, runID, classification.Class, enrichHeadProgress(summary)); err != nil {
+		progress := enrichHeadProgress(summary)
+		writeOperationErrorSummary(cmd.ErrOrStderr(), "HEAD enrichment resume failed with resumable checkpoint", operationIndexEnrichWithHead, runID, classification.Class, progress)
+		if err := emitOperationErrorRecord(context.Background(), enc, operationIndexEnrichWithHead, runID, classification.Class, progress); err != nil {
 			runErr = fmt.Errorf("%w; write operation error record: %v", runErr, err)
 		}
 	}

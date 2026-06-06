@@ -31,6 +31,12 @@ changes.
   failed-resumable index runs; `index stats` also reports a separate
   failed-resumable run count, and `index query` warns when the latest run is a
   partial failed-resumable checkpoint.
+- **Resumable runtime failure summaries:** `index build`,
+  `index enrich-with-head`, and `transfer reflow` now print short redacted
+  stderr summaries for failed-resumable runtime interruptions, including
+  `run_id`, `status`, `error_class`, progress counters, and the safe
+  `--resume-run` command. Runtime failures no longer need command-help dumps
+  for operator classification; argument errors still show usage.
 
 ## [0.2.3] - 2026-05-31
 

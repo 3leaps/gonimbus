@@ -896,6 +896,19 @@ gonimbus transfer reflow 's3://source/' \
   --resume
 ```
 
+For resumable fatal interruptions, Gonimbus also writes an operation checkpoint
+and emits a redacted `gonimbus.operation.error.v1` record with `run_id`,
+`error_class`, progress counters, and a safe command:
+
+```bash
+gonimbus transfer reflow --resume-run <run_id>
+```
+
+This operation-level resume path is explicit and uses checkpointed config. It
+does not require echoing source or destination arguments on the command line.
+Runtime failures print a short stderr summary with the same fields and no
+command help dump; argument errors still show usage.
+
 ### Dry Run
 
 Always preview before executing:

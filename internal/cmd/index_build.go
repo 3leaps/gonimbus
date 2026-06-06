@@ -341,6 +341,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("create index run: %w", err)
 	}
+	cmd.SilenceUsage = true
 
 	var stopHeartbeat func()
 	if store != nil && job != nil {
@@ -368,13 +369,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		if classification.Resumable && indexBuildCheckpointEligible(checkpointCfg) {
 			progress, checkpointErr := writeFailedResumableIndexBuildCheckpoint(context.Background(), db, run.RunID, checkpointCfg, classification.Class, result)
 			if checkpointErr == nil {
-				_, _ = fmt.Fprintf(os.Stderr, "\nIndex build failed with resumable checkpoint\n")
-				_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", run.RunID)
-				_, _ = fmt.Fprintf(os.Stderr, "  status: %s\n", indexstore.RunStatusFailedResumable)
-				_, _ = fmt.Fprintf(os.Stderr, "  error_class: %s\n", classification.Class)
-				summary := indexBuildSummaryFromResult(result)
-				_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", summary.ObjectsIngested)
-				_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", summary.PrefixesIngested)
+				writeOperationErrorSummary(cmd.ErrOrStderr(), "Index build failed with resumable checkpoint", operationIndexBuild, run.RunID, classification.Class, progress)
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationIndexBuild, run.RunID, classification.Class, progress); emitErr != nil {
 					crawlErr = fmt.Errorf("%w; write operation error record: %v", crawlErr, emitErr)
@@ -568,6 +563,7 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
 		return err
 	}
+	cmd.SilenceUsage = true
 
 	result, crawlErr := runCrawlForIndex(ctx, m, db, run.IndexSetID, run, buildFilters.Filter, payload.CrawlPrefixes)
 	if crawlErr != nil {
@@ -590,6 +586,7 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 			if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexBuild, fingerprint, classification.Class, progress, payload); writeErr != nil {
 				crawlErr = fmt.Errorf("%w; write operation checkpoint: %v", crawlErr, writeErr)
 			} else {
+				writeOperationErrorSummary(cmd.ErrOrStderr(), "Index build resume failed with resumable checkpoint", operationIndexBuild, runID, classification.Class, progress)
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationIndexBuild, runID, classification.Class, progress); emitErr != nil {
 					crawlErr = fmt.Errorf("%w; write operation error record: %v", crawlErr, emitErr)
