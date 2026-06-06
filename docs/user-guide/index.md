@@ -214,6 +214,25 @@ gonimbus index build --job index-manifest.yaml
 
 Progress is streamed to stdout. Build time scales linearly with object count (~3,000 objects/sec).
 
+If a long-running build stops on a resumable fatal interruption such as an
+expired refreshable credential or operator cancellation, Gonimbus preserves the
+partial run as `failed-resumable`, writes a redacted
+`gonimbus.operation.error.v1` JSON record to stdout, and prints a short stderr
+summary with `run_id`, `status`, `error_class`, progress counters, and a
+`gonimbus index build --resume-run <run_id>` command. Runtime failures do not
+print command help; argument errors still do.
+
+Resume is explicit:
+
+```bash
+gonimbus index build --resume-run <run_id>
+```
+
+The resume path validates checkpoint identity and fresh credentials before any
+data-plane call or run-state mutation. Recovery from a crashed resume records
+`resume_recovered`; normal resume attempts record `resume_started`, then
+`resume_completed` on success.
+
 ### `index list`
 
 List all local indexes.
@@ -525,6 +544,19 @@ and overwrites the HEAD-derived fields only on successful HEAD responses.
 rows skipped by `--resume`. Durable state lives in the index. The command exits
 non-zero on any permanent per-object failure, unsupported provider, invalid
 filter, provider reconstruction failure, or interruption.
+
+Resumable fatal interruptions use the operation-level run ID, distinct from the
+row-skipping `--resume` flag:
+
+```bash
+gonimbus index enrich-with-head --resume-run <run_id>
+```
+
+When a failed enrichment run can be resumed, stdout includes a redacted
+`gonimbus.operation.error.v1` record and stderr includes `run_id`, `status`,
+`error_class`, progress counters, and the safe resume command. The
+`failed-resumable`, `resume_recovered`, `resume_started`, and
+`resume_completed` lifecycle is the same as `index build`.
 
 | Canonical Option   | Flag                    | Behavior                                       |
 | ------------------ | ----------------------- | ---------------------------------------------- |

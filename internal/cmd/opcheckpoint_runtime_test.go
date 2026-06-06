@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fulmenhq/gofulmen/appidentity"
@@ -100,4 +102,22 @@ func TestRecoverIndexRunResumeCrashRestoresFailedResumableBeforeMarkingResuming(
 	require.NoError(t, err)
 	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusRunning), resuming.Status)
 	require.Nil(t, resuming.EndedAt)
+}
+
+func TestWriteOperationErrorSummaryIncludesResumeHintAndSortedProgress(t *testing.T) {
+	var buf bytes.Buffer
+	writeOperationErrorSummary(&buf, "Index build failed with resumable checkpoint", operationIndexBuild, "run_123", opcheckpoint.ErrorClassCredentialsRefreshFailed, map[string]int64{
+		"prefixes_ingested": 2,
+		"objects_ingested":  10,
+	})
+
+	text := buf.String()
+	require.Contains(t, text, "Index build failed with resumable checkpoint")
+	require.Contains(t, text, "  run_id: run_123\n")
+	require.Contains(t, text, "  status: failed-resumable\n")
+	require.Contains(t, text, "  error_class: credentials_refresh_failed\n")
+	require.Contains(t, text, "  resume_command: gonimbus index build --resume-run run_123\n")
+	require.Less(t, strings.Index(text, "objects_ingested"), strings.Index(text, "prefixes_ingested"))
+	require.NotContains(t, text, "Usage:")
+	require.NotContains(t, text, "s3://")
 }

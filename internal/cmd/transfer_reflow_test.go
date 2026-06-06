@@ -333,9 +333,10 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 		return refreshFailingGetProvider{Provider: src}, nil
 	}
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd := newTransferReflowTestCommand()
 	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{
 		"--dest", fileURI(t.TempDir()),
 		"--rewrite-from", "{key}",
@@ -348,6 +349,10 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reflow failed resumable")
+	require.Contains(t, stderr.String(), "Transfer reflow failed with resumable checkpoint")
+	require.Contains(t, stderr.String(), "status: failed-resumable")
+	require.Contains(t, stderr.String(), "error_class: credentials_refresh_failed")
+	require.NotContains(t, stderr.String(), "Usage:")
 
 	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
 	var opErr opcheckpoint.ErrorRecordData
@@ -355,6 +360,8 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 	require.Equal(t, operationTransferReflow, opErr.Operation)
 	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, opErr.ErrorClass)
 	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
+	require.Contains(t, stderr.String(), "run_id: "+opErr.RunID)
+	require.Contains(t, stderr.String(), "resume_command: "+opErr.ResumeCommand)
 
 	opStore, err := openDefaultOperationCheckpointStore(context.Background())
 	require.NoError(t, err)

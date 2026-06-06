@@ -318,6 +318,13 @@ gonimbus transfer reflow --stdin \
 
 The checkpoint database tracks which objects have been successfully copied. Resume skips completed objects and picks up where it left off.
 
+If a fatal interruption is resumable, Gonimbus also emits a
+`gonimbus.operation.error.v1` record with `run_id`, `error_class`, progress
+counters, and a `gonimbus transfer reflow --resume-run <run_id>` hint. The
+`--resume-run` form resumes from checkpointed config and does not require
+repeating the original source or destination arguments. Runtime failure stderr
+uses the same redacted summary fields and does not print command help.
+
 ## End-to-End Example
 
 Here's a complete pipeline for reorganizing activity log data from entity-first to date-first structure.

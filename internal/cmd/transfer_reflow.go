@@ -2323,6 +2323,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid rewrite templates", err)
 	}
+	cmd.SilenceUsage = true
 
 	jobID := strings.TrimSpace(runID)
 	if jobID == "" {
@@ -3017,6 +3018,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
 			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
 				checkpointWritten = true
+				writeOperationErrorSummary(cmd.ErrOrStderr(), "Transfer reflow failed with resumable checkpoint", operationTransferReflow, jobID, classification.Class, progress)
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationTransferReflow, jobID, classification.Class, progress); emitErr != nil {
 					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation error record: %v", classifyErr, emitErr))
