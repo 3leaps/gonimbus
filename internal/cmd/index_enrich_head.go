@@ -263,8 +263,8 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	indexSet := resolved.indexSet
 	run := resolved.run
 
-	if run.IndexSetID != indexSet.IndexSetID || run.SourceType != enrichHeadSourceType || run.Status != indexstore.RunStatusFailedResumable {
-		return fmt.Errorf("index_run %s is not a failed-resumable enrich-with-head run", runID)
+	if err := validateIndexRunResumeCandidate(run, indexSet, enrichHeadSourceType, "enrich-with-head", env.Status); err != nil {
+		return err
 	}
 	if payload.Config.IndexSetID != run.IndexSetID {
 		return opcheckpoint.ErrIdentityMismatch
@@ -289,6 +289,9 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		return err
 	}
 	defer func() { _ = opStore.ReleaseLease(operationIndexEnrichWithHead, *lease) }()
+	if err := recoverIndexRunResumeCrash(context.Background(), db, run); err != nil {
+		return err
+	}
 
 	params, storageFiltered, err := enrichHeadQueryParamsFromOptions(payload.Config.IndexSetID, payload.Config.Query)
 	if err != nil {

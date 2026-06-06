@@ -520,8 +520,8 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	if payload.Config.IndexSetID != "" && payload.Config.IndexSetID != run.IndexSetID {
 		return opcheckpoint.ErrIdentityMismatch
 	}
-	if run.IndexSetID != indexSet.IndexSetID || run.SourceType != payload.Config.SourceType || run.Status != indexstore.RunStatusFailedResumable {
-		return fmt.Errorf("index_run %s is not a failed-resumable index build run", runID)
+	if err := validateIndexRunResumeCandidate(run, indexSet, payload.Config.SourceType, "index build", env.Status); err != nil {
+		return err
 	}
 
 	fingerprint, err := validateIndexBuildCheckpointPayloadIdentity(ctx, db, env, payload)
@@ -541,6 +541,9 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 		return err
 	}
 	defer func() { _ = opStore.ReleaseLease(operationIndexBuild, *lease) }()
+	if err := recoverIndexRunResumeCrash(context.Background(), db, run); err != nil {
+		return err
+	}
 
 	m := &payload.Config.Manifest
 	if err := validateIdentity(m, effectiveIdentityFromCheckpoint(payload.Config.Identity)); err != nil {

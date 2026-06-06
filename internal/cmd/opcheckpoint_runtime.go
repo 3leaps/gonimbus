@@ -222,6 +222,41 @@ func validateCheckpointIdentityAgainstIndexRun(ctx context.Context, db *sql.DB, 
 	return expected, nil
 }
 
+func validateIndexRunResumeCandidate(run *indexstore.IndexRun, indexSet *indexstore.IndexSet, sourceType, label, checkpointStatus string) error {
+	if run == nil {
+		return fmt.Errorf("index_run is nil")
+	}
+	if indexSet == nil {
+		return fmt.Errorf("index_set is nil")
+	}
+	if run.IndexSetID != indexSet.IndexSetID || run.SourceType != sourceType {
+		return fmt.Errorf("index_run %s is not a failed-resumable %s run", run.RunID, label)
+	}
+	switch run.Status {
+	case indexstore.RunStatusFailedResumable:
+		return nil
+	case indexstore.RunStatusRunning:
+		if checkpointStatus == opcheckpoint.StatusFailedResumable {
+			return nil
+		}
+	}
+	return fmt.Errorf("index_run %s is not a failed-resumable %s run", run.RunID, label)
+}
+
+func recoverIndexRunResumeCrash(ctx context.Context, db *sql.DB, run *indexstore.IndexRun) error {
+	if run == nil || run.Status != indexstore.RunStatusRunning {
+		return nil
+	}
+	if err := indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil); err != nil {
+		return fmt.Errorf("recover stuck index_run resume status: %w", err)
+	}
+	if err := recordIndexRunLifecycleEvent(ctx, db, run.RunID, "resume_recovered", "stale running resume recovered from failed-resumable checkpoint"); err != nil {
+		return err
+	}
+	run.Status = indexstore.RunStatusFailedResumable
+	return nil
+}
+
 func findIndexRunInDefaultIndexes(ctx context.Context, runID string) (*resolvedIndexRun, error) {
 	paths, err := listIndexDBPaths()
 	if err != nil {
