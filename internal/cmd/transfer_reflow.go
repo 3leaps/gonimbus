@@ -2027,6 +2027,7 @@ func runTransferReflowResume(ctx context.Context, cmd *cobra.Command, runID stri
 	if err != nil {
 		return err
 	}
+	leaseCtx = contextWithResumeLeaseHeartbeat(leaseCtx, heartbeat)
 	previousCtx := cmd.Context()
 	cmd.SetContext(leaseCtx)
 	defer func() {
@@ -3029,6 +3030,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		checkpointWritten := false
 		if classification.Resumable && transferReflowCheckpointEligible(checkpointCfg) {
 			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
+			if heartbeat := resumeLeaseHeartbeatFromContext(ctx); heartbeat != nil {
+				if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), err)
+				}
+			}
 			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
 				checkpointWritten = true
 				writeOperationErrorSummary(cmd.ErrOrStderr(), "Transfer reflow failed with resumable checkpoint", operationTransferReflow, jobID, classification.Class, progress)

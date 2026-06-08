@@ -151,6 +151,71 @@ func TestStopResumeLeaseHeartbeatReturnsLeaseLoss(t *testing.T) {
 	require.ErrorIs(t, stopResumeLeaseHeartbeat(heartbeat), opcheckpoint.ErrLeaseHeld)
 }
 
+func TestLostResumeLeaseSkipsFailedResumableIndexCheckpointWrite(t *testing.T) {
+	ctx, db, indexSet := setupIndexBuildResumeDB(t)
+	defer func() { _ = db.Close() }()
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil))
+	require.NoError(t, indexstore.MarkIndexRunResuming(ctx, db, run.RunID))
+	store := newRuntimeTestOperationStore(t)
+	lease, err := store.ClaimLease(context.Background(), operationIndexBuild, run.RunID, "holder-a", time.Hour)
+	require.NoError(t, err)
+	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), operationIndexBuild, lease, time.Millisecond, time.Hour)
+	require.NoError(t, err)
+
+	writeLeaseForRuntimeTest(t, filepath.Join(store.RootDir(), operationIndexBuild, run.RunID, "resume.lease.json"), opcheckpoint.Lease{
+		RunID:     run.RunID,
+		HolderID:  "holder-b",
+		ClaimedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	})
+
+	require.Eventually(t, func() bool {
+		return heartbeat.Context().Err() != nil
+	}, time.Second, time.Millisecond)
+
+	err = stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat)
+	require.ErrorIs(t, err, opcheckpoint.ErrLeaseHeld)
+	if err == nil {
+		require.NoError(t, writeIndexRunCheckpoint(context.Background(), store, db, run.RunID, operationIndexBuild, "fingerprint-a", opcheckpoint.ErrorClassInterrupted, nil, map[string]string{"status": "interrupted"}))
+	}
+
+	_, readErr := store.ReadCheckpoint(context.Background(), operationIndexBuild, run.RunID)
+	require.True(t, os.IsNotExist(readErr), "got error: %v", readErr)
+	updated, err := indexstore.GetIndexRun(context.Background(), db, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusRunning), updated.Status)
+}
+
+func TestOperatorCancellationAllowsFailedResumableCheckpointWrite(t *testing.T) {
+	ctx, db, indexSet := setupIndexBuildResumeDB(t)
+	defer func() { _ = db.Close() }()
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil))
+	require.NoError(t, indexstore.MarkIndexRunResuming(ctx, db, run.RunID))
+	store := newRuntimeTestOperationStore(t)
+	lease, err := store.ClaimLease(context.Background(), operationIndexBuild, run.RunID, "holder-a", time.Hour)
+	require.NoError(t, err)
+	parentCtx, cancel := context.WithCancel(context.Background())
+	heartbeat, err := store.StartLeaseHeartbeat(parentCtx, operationIndexBuild, lease, time.Hour, time.Hour)
+	require.NoError(t, err)
+	cancel()
+
+	require.NoError(t, stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat))
+	require.NoError(t, writeIndexRunCheckpoint(context.Background(), store, db, run.RunID, operationIndexBuild, "fingerprint-a", opcheckpoint.ErrorClassInterrupted, nil, map[string]string{"status": "interrupted"}))
+
+	env, err := store.ReadCheckpoint(context.Background(), operationIndexBuild, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
+	updated, err := indexstore.GetIndexRun(context.Background(), db, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusFailedResumable), updated.Status)
+}
+
 func newRuntimeTestOperationStore(t *testing.T) *opcheckpoint.Store {
 	t.Helper()
 	store, err := opcheckpoint.Open(context.Background(), opcheckpoint.Config{AppDataDir: filepath.Join(t.TempDir(), "data")})

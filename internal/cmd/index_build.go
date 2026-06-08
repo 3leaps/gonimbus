@@ -591,6 +591,9 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 				crawlErr = fmt.Errorf("%w; compute checkpoint fingerprint: %v", crawlErr, err)
 				return fmt.Errorf("index build resume failed: %w", crawlErr)
 			}
+			if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+				return fmt.Errorf("index build resume failed: %w", err)
+			}
 			if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexBuild, fingerprint, classification.Class, progress, payload); writeErr != nil {
 				crawlErr = fmt.Errorf("%w; write operation checkpoint: %v", crawlErr, writeErr)
 			} else {

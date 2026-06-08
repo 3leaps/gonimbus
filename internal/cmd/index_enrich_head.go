@@ -344,6 +344,9 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	if runErr != nil && classification.Resumable {
 		progress := enrichHeadProgress(summary)
 		payload.Summary = summary
+		if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+			return err
+		}
 		if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexEnrichWithHead, fingerprint, classification.Class, progress, payload); writeErr != nil {
 			runErr = fmt.Errorf("%w; write operation checkpoint: %v", runErr, writeErr)
 		} else {

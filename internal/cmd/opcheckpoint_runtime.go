@@ -39,6 +39,8 @@ type resolvedIndexRun struct {
 	path     string
 }
 
+type resumeLeaseHeartbeatContextKey struct{}
+
 func openDefaultOperationCheckpointStore(ctx context.Context) (*opcheckpoint.Store, error) {
 	dataDir, err := indexDataDir()
 	if err != nil {
@@ -115,6 +117,22 @@ func startResumeLeaseHeartbeat(ctx context.Context, store *opcheckpoint.Store, o
 func stopResumeLeaseHeartbeat(heartbeat *opcheckpoint.LeaseHeartbeat) error {
 	if err := heartbeat.Stop(); err != nil {
 		return fmt.Errorf("resume lease heartbeat failed: %w", err)
+	}
+	return nil
+}
+
+func contextWithResumeLeaseHeartbeat(ctx context.Context, heartbeat *opcheckpoint.LeaseHeartbeat) context.Context {
+	return context.WithValue(ctx, resumeLeaseHeartbeatContextKey{}, heartbeat)
+}
+
+func resumeLeaseHeartbeatFromContext(ctx context.Context) *opcheckpoint.LeaseHeartbeat {
+	heartbeat, _ := ctx.Value(resumeLeaseHeartbeatContextKey{}).(*opcheckpoint.LeaseHeartbeat)
+	return heartbeat
+}
+
+func stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat *opcheckpoint.LeaseHeartbeat) error {
+	if err := stopResumeLeaseHeartbeat(heartbeat); err != nil {
+		return fmt.Errorf("resume lease lost before writing failed-resumable checkpoint: %w", err)
 	}
 	return nil
 }
