@@ -330,10 +330,9 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		defer func() { _ = stateOut.Close() }()
 	}
 
-	if err := indexstore.MarkIndexRunResuming(context.Background(), db, runID); err != nil {
-		return err
-	}
-	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
+	if err := indexstore.MarkIndexRunResumingWithEvents(context.Background(), db, runID, []indexstore.RunEvent{
+		indexRunLifecycleEvent(runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted), time.Now().UTC()),
+	}); err != nil {
 		return err
 	}
 	cmd.SilenceUsage = true
@@ -358,16 +357,13 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 				return err
 			}
 		}
-		if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil {
+		if err := indexstore.UpdateIndexRunStatusWithEvents(context.Background(), db, runID, status, nil, []indexstore.RunEvent{
+			indexRunLifecycleEvent(runID, "resume_completed", "", time.Now().UTC()),
+		}); err != nil {
 			runErr = fmt.Errorf("update enrich run status: %w", err)
 		}
 	} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil {
 		runErr = fmt.Errorf("update enrich run status: %w", err)
-	}
-	if runErr == nil {
-		if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_completed", ""); err != nil {
-			runErr = err
-		}
 	}
 
 	summary.Status = string(status)
@@ -660,19 +656,19 @@ func enrichHeadProgress(summary enrichHeadSummaryData) map[string]int64 {
 	}
 }
 
-func recordIndexRunLifecycleEvent(ctx context.Context, db *sql.DB, runID, eventType, detail string) error {
+func indexRunLifecycleEvent(runID, eventType, detail string, at time.Time) indexstore.RunEvent {
 	var detailPtr *string
 	if detail != "" {
 		detailPtr = &detail
 	}
-	return indexstore.RecordRunEvent(ctx, db, indexstore.RunEvent{
+	return indexstore.RunEvent{
 		EventID:       "evt_" + uuid.NewString(),
 		RunID:         runID,
-		OccurredAt:    time.Now().UTC(),
+		OccurredAt:    at,
 		EventType:     eventType,
 		EventCategory: string(indexstore.EventCategoryInfo),
 		Detail:        detailPtr,
-	})
+	}
 }
 
 func enrichOneHead(ctx context.Context, prov provider.Provider, indexSet *indexstore.IndexSet, candidate indexstore.HeadEnrichmentCandidate) enrichHeadResult {

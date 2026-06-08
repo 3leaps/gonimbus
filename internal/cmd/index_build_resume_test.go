@@ -164,10 +164,37 @@ func TestIndexBuildResumePromotionCanRunAfterHeartbeatStop(t *testing.T) {
 	require.ErrorIs(t, leaseCtx.Err(), context.Canceled)
 
 	result := &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}
-	require.NoError(t, finalizeIndexRun(context.Background(), db, indexSet.IndexSetID, run, result, false))
+	require.NoError(t, finalizeIndexRun(context.Background(), db, indexSet.IndexSetID, run, result, false, nil))
 	updated, err := indexstore.GetIndexRun(context.Background(), db, run.RunID)
 	require.NoError(t, err)
 	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusSuccess), updated.Status)
+}
+
+func TestIndexBuildFinalizeRollsBackResumeCompletedWhenSoftDeleteFails(t *testing.T) {
+	ctx, db, indexSet := setupIndexBuildResumeDB(t)
+	defer func() { _ = db.Close() }()
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil))
+	_, err = db.ExecContext(ctx, `DROP TABLE objects_current`)
+	require.NoError(t, err)
+
+	result := &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}
+	err = finalizeIndexRun(context.Background(), db, indexSet.IndexSetID, run, result, true, []indexstore.RunEvent{
+		indexRunLifecycleEvent(run.RunID, "resume_completed", "", time.Now().UTC()),
+	})
+	require.ErrorContains(t, err, "mark deleted")
+
+	updated, err := indexstore.GetIndexRun(context.Background(), db, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusFailedResumable), updated.Status)
+
+	events, err := indexstore.ListRunEvents(context.Background(), db, run.RunID, nil)
+	require.NoError(t, err)
+	for _, event := range events {
+		require.NotEqual(t, "resume_completed", event.EventType)
+	}
 }
 
 func setupIndexBuildResumeDB(t *testing.T) (context.Context, *sql.DB, *indexstore.IndexSet) {

@@ -176,21 +176,22 @@ func writeIndexRunCheckpoint(
 		return err
 	}
 	if db != nil {
-		if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, indexstore.RunStatusFailedResumable, nil); err != nil {
-			return err
-		}
-		if err := recordIndexRunCheckpointIdentity(context.Background(), db, runID, operation, fingerprint, now); err != nil {
+		identityEvent, err := indexRunCheckpointIdentityRunEvent(runID, operation, fingerprint, now)
+		if err != nil {
 			return err
 		}
 		detail := string(class)
-		if err := indexstore.RecordRunEvent(context.Background(), db, indexstore.RunEvent{
-			EventID:       "evt_" + uuid.NewString(),
-			RunID:         runID,
-			OccurredAt:    now,
-			EventType:     "failed_resumable",
-			EventCategory: string(indexstore.EventCategoryError),
-			Detail:        &detail,
-			ErrorCode:     checkpointStringPtr(string(class)),
+		if err := indexstore.UpdateIndexRunStatusWithEvents(context.Background(), db, runID, indexstore.RunStatusFailedResumable, nil, []indexstore.RunEvent{
+			identityEvent,
+			{
+				EventID:       "evt_" + uuid.NewString(),
+				RunID:         runID,
+				OccurredAt:    now,
+				EventType:     "failed_resumable",
+				EventCategory: string(indexstore.EventCategoryError),
+				Detail:        &detail,
+				ErrorCode:     checkpointStringPtr(string(class)),
+			},
 		}); err != nil {
 			return err
 		}
@@ -199,22 +200,30 @@ func writeIndexRunCheckpoint(
 }
 
 func recordIndexRunCheckpointIdentity(ctx context.Context, db *sql.DB, runID, operation, fingerprint string, at time.Time) error {
+	event, err := indexRunCheckpointIdentityRunEvent(runID, operation, fingerprint, at)
+	if err != nil {
+		return err
+	}
+	return indexstore.RecordRunEvent(ctx, db, event)
+}
+
+func indexRunCheckpointIdentityRunEvent(runID, operation, fingerprint string, at time.Time) (indexstore.RunEvent, error) {
 	detail, err := json.Marshal(indexRunCheckpointIdentityEvent{
 		Operation:         operation,
 		ConfigFingerprint: fingerprint,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal checkpoint identity event: %w", err)
+		return indexstore.RunEvent{}, fmt.Errorf("marshal checkpoint identity event: %w", err)
 	}
 	detailText := string(detail)
-	return indexstore.RecordRunEvent(ctx, db, indexstore.RunEvent{
+	return indexstore.RunEvent{
 		EventID:       "evt_" + uuid.NewString(),
 		RunID:         runID,
 		OccurredAt:    at,
 		EventType:     eventTypeOperationCheckpointIdentity,
 		EventCategory: string(indexstore.EventCategoryInfo),
 		Detail:        &detailText,
-	})
+	}, nil
 }
 
 func expectedIndexRunCheckpointFingerprint(ctx context.Context, db *sql.DB, runID, operation string) (string, error) {
@@ -287,11 +296,10 @@ func recoverIndexRunResumeCrash(ctx context.Context, db *sql.DB, run *indexstore
 	if run == nil || run.Status != indexstore.RunStatusRunning {
 		return nil
 	}
-	if err := indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil); err != nil {
+	if err := indexstore.UpdateIndexRunStatusWithEvents(ctx, db, run.RunID, indexstore.RunStatusFailedResumable, nil, []indexstore.RunEvent{
+		indexRunLifecycleEvent(run.RunID, "resume_recovered", "stale running resume recovered from failed-resumable checkpoint", time.Now().UTC()),
+	}); err != nil {
 		return fmt.Errorf("recover stuck index_run resume status: %w", err)
-	}
-	if err := recordIndexRunLifecycleEvent(ctx, db, run.RunID, "resume_recovered", "stale running resume recovered from failed-resumable checkpoint"); err != nil {
-		return err
 	}
 	run.Status = indexstore.RunStatusFailedResumable
 	return nil

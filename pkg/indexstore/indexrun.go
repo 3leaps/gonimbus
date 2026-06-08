@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+type indexRunSQLExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// IndexRunSoftDelete describes the successful-run soft-delete mutation that can
+// be committed with an index-run status transition.
+type IndexRunSoftDelete struct {
+	IndexSetID   string
+	RunID        string
+	RunStartedAt time.Time
+}
+
 // RunStatus represents the status of an IndexRun.
 type RunStatus string
 
@@ -239,19 +251,63 @@ func UpdateIndexRunStatus(ctx context.Context, db *sql.DB, runID string, status 
 		ctx = context.Background()
 	}
 
-	now := time.Now().UTC()
-
-	_, err := db.ExecContext(ctx,
-		`UPDATE index_runs
-		 SET status = ?, ended_at = ?, source_snapshot_at = ?
-		 WHERE run_id = ?`,
-		string(status), timeString(now), optionalTimeString(snapshotAt), runID)
-
-	if err != nil {
+	if err := updateIndexRunStatus(ctx, db, runID, status, snapshotAt); err != nil {
 		return fmt.Errorf("update index_run status: %w", err)
 	}
 
 	return nil
+}
+
+// UpdateIndexRunStatusWithEvents atomically updates an index run's terminal
+// status and records its associated lifecycle/audit events.
+func UpdateIndexRunStatusWithEvents(ctx context.Context, db *sql.DB, runID string, status RunStatus, snapshotAt *time.Time, events []RunEvent) error {
+	_, err := UpdateIndexRunStatusWithEventsAndSoftDelete(ctx, db, runID, status, snapshotAt, events, nil)
+	return err
+}
+
+// UpdateIndexRunStatusWithEventsAndSoftDelete atomically updates status,
+// records lifecycle/audit events, and optionally marks objects not seen in the
+// run as deleted. It returns the number of soft-deleted objects.
+func UpdateIndexRunStatusWithEventsAndSoftDelete(ctx context.Context, db *sql.DB, runID string, status RunStatus, snapshotAt *time.Time, events []RunEvent, softDelete *IndexRunSoftDelete) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin index_run status transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := updateIndexRunStatus(ctx, tx, runID, status, snapshotAt); err != nil {
+		return 0, fmt.Errorf("update index_run status: %w", err)
+	}
+	for _, event := range events {
+		if err := recordRunEvent(ctx, tx, event); err != nil {
+			return 0, err
+		}
+	}
+	var deleted int64
+	if softDelete != nil {
+		deleted, err = markObjectsDeletedNotSeenInRun(ctx, tx, softDelete.IndexSetID, softDelete.RunID, softDelete.RunStartedAt)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit index_run status transaction: %w", err)
+	}
+	return deleted, nil
+}
+
+func updateIndexRunStatus(ctx context.Context, exec indexRunSQLExecutor, runID string, status RunStatus, snapshotAt *time.Time) error {
+	now := time.Now().UTC()
+	_, err := exec.ExecContext(ctx,
+		`UPDATE index_runs
+		 SET status = ?, ended_at = ?, source_snapshot_at = ?
+		 WHERE run_id = ?`,
+		string(status), timeString(now), optionalTimeString(snapshotAt), runID)
+	return err
 }
 
 // MarkIndexRunResuming promotes a failed-resumable run back to running for a
@@ -261,8 +317,39 @@ func MarkIndexRunResuming(ctx context.Context, db *sql.DB, runID string) error {
 		ctx = context.Background()
 	}
 
+	return markIndexRunResuming(ctx, db, runID)
+}
+
+// MarkIndexRunResumingWithEvents atomically promotes a failed-resumable run
+// back to running and records the resume lifecycle events.
+func MarkIndexRunResumingWithEvents(ctx context.Context, db *sql.DB, runID string, events []RunEvent) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin index_run resuming transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := markIndexRunResuming(ctx, tx, runID); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := recordRunEvent(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit index_run resuming transaction: %w", err)
+	}
+	return nil
+}
+
+func markIndexRunResuming(ctx context.Context, exec indexRunSQLExecutor, runID string) error {
 	now := time.Now().UTC()
-	res, err := db.ExecContext(ctx,
+	res, err := exec.ExecContext(ctx,
 		`UPDATE index_runs
 		 SET status = ?, ended_at = NULL, acquired_at = ?
 		 WHERE run_id = ? AND status = ?`,
@@ -286,7 +373,11 @@ func RecordRunEvent(ctx context.Context, db *sql.DB, event RunEvent) error {
 		ctx = context.Background()
 	}
 
-	_, err := db.ExecContext(ctx,
+	return recordRunEvent(ctx, db, event)
+}
+
+func recordRunEvent(ctx context.Context, exec indexRunSQLExecutor, event RunEvent) error {
+	_, err := exec.ExecContext(ctx,
 		`INSERT INTO index_run_events
 		 (event_id, run_id, occurred_at, event_type, event_category,
 		  detail, key, prefix, error_code)
@@ -294,11 +385,9 @@ func RecordRunEvent(ctx context.Context, db *sql.DB, event RunEvent) error {
 		event.EventID, event.RunID, timeString(event.OccurredAt),
 		string(event.EventType), string(event.EventCategory),
 		event.Detail, event.Key, event.Prefix, event.ErrorCode)
-
 	if err != nil {
 		return fmt.Errorf("record run event: %w", err)
 	}
-
 	return nil
 }
 
@@ -390,11 +479,7 @@ func RecordPartialRun(ctx context.Context, db *sql.DB, runID string, reason stri
 		Detail:        &reason,
 	}
 
-	if err := RecordRunEvent(ctx, db, event); err != nil {
-		return err
-	}
-
-	return UpdateIndexRunStatus(ctx, db, runID, RunStatusPartial, nil)
+	return UpdateIndexRunStatusWithEvents(ctx, db, runID, RunStatusPartial, nil, []RunEvent{event})
 }
 
 // RecordThrottling records a rate-limiting event for a prefix.
