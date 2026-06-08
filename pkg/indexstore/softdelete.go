@@ -26,7 +26,11 @@ func MarkObjectsDeletedNotSeenInRun(ctx context.Context, db *sql.DB, indexSetID,
 		ctx = context.Background()
 	}
 
-	result, err := db.ExecContext(ctx,
+	return markObjectsDeletedNotSeenInRun(ctx, db, indexSetID, runID, runStartedAt)
+}
+
+func markObjectsDeletedNotSeenInRun(ctx context.Context, exec indexRunSQLExecutor, indexSetID, runID string, runStartedAt time.Time) (int64, error) {
+	result, err := exec.ExecContext(ctx,
 		`UPDATE objects_current
 		 SET deleted_at = ?
 		 WHERE index_set_id = ?

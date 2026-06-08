@@ -420,7 +420,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	// Finalize run status based on collected errors (soft-delete only on success)
 	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
-	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
+	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete, nil); err != nil {
 		if store != nil && job != nil {
 			job.State = jobregistry.JobStateFailed
 			ended := time.Now().UTC()
@@ -565,10 +565,9 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 		return err
 	}
 
-	if err := indexstore.MarkIndexRunResuming(context.Background(), db, runID); err != nil {
-		return err
-	}
-	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted)); err != nil {
+	if err := indexstore.MarkIndexRunResumingWithEvents(context.Background(), db, runID, []indexstore.RunEvent{
+		indexRunLifecycleEvent(runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted), time.Now().UTC()),
+	}); err != nil {
 		return err
 	}
 	cmd.SilenceUsage = true
@@ -614,11 +613,10 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	}
 	promoteCtx := context.Background()
 	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
-	if err := finalizeIndexRun(promoteCtx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
+	if err := finalizeIndexRun(promoteCtx, db, indexSet.IndexSetID, run, result, allowSoftDelete, []indexstore.RunEvent{
+		indexRunLifecycleEvent(runID, "resume_completed", "", time.Now().UTC()),
+	}); err != nil {
 		return fmt.Errorf("finalize index run: %w", err)
-	}
-	if err := recordIndexRunLifecycleEvent(promoteCtx, db, runID, "resume_completed", ""); err != nil {
-		return err
 	}
 
 	_, _ = fmt.Fprintf(os.Stderr, "\nIndex build resume completed\n")
@@ -1636,22 +1634,28 @@ func finalizeIndexRun(
 	run *indexstore.IndexRun,
 	result *indexBuildResult,
 	allowSoftDelete bool,
+	events []indexstore.RunEvent,
 ) error {
-	// Update run status
+	var softDelete *indexstore.IndexRunSoftDelete
+	if result.FinalStatus == indexstore.RunStatusSuccess && allowSoftDelete {
+		softDelete = &indexstore.IndexRunSoftDelete{
+			IndexSetID:   indexSetID,
+			RunID:        run.RunID,
+			RunStartedAt: run.StartedAt,
+		}
+	}
+
+	if len(events) > 0 || softDelete != nil {
+		deleted, err := indexstore.UpdateIndexRunStatusWithEventsAndSoftDelete(ctx, db, run.RunID, result.FinalStatus, nil, events, softDelete)
+		if err != nil {
+			return fmt.Errorf("update run status: %w", err)
+		}
+		result.ObjectsDeleted = deleted
+		return nil
+	}
+
 	if err := indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, result.FinalStatus, nil); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
-
-	// ENTARCH: Only soft-delete for successful runs
-	// Per softdelete.go policy: partial runs may have missing objects due to
-	// incomplete traversal, not actual deletions.
-	if result.FinalStatus == indexstore.RunStatusSuccess && allowSoftDelete {
-		deleted, err := indexstore.MarkObjectsDeletedNotSeenInRun(ctx, db, indexSetID, run.RunID, run.StartedAt)
-		if err != nil {
-			return fmt.Errorf("mark deleted objects: %w", err)
-		}
-		result.ObjectsDeleted = deleted
-	}
-
 	return nil
 }
