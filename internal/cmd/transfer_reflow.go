@@ -2019,11 +2019,22 @@ func runTransferReflowResume(ctx context.Context, cmd *cobra.Command, runID stri
 		return err
 	}
 	state = nil
-	lease, err := opStore.ClaimLease(ctx, operationTransferReflow, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	lease, err := opStore.ClaimLease(ctx, operationTransferReflow, runID, "gonimbus-"+uuid.NewString(), resumeLeaseTTL)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opStore.ReleaseLease(operationTransferReflow, *lease) }()
+	heartbeat, leaseCtx, err := startResumeLeaseHeartbeat(ctx, opStore, operationTransferReflow, lease)
+	if err != nil {
+		return err
+	}
+	leaseCtx = contextWithResumeLeaseHeartbeat(leaseCtx, heartbeat)
+	previousCtx := cmd.Context()
+	cmd.SetContext(leaseCtx)
+	defer func() {
+		cmd.SetContext(previousCtx)
+		_ = heartbeat.Stop()
+		_ = opStore.ReleaseLease(operationTransferReflow, *lease)
+	}()
 
 	if err := applyTransferReflowCheckpointConfig(cmd, payload.Config); err != nil {
 		return err
@@ -2033,6 +2044,9 @@ func runTransferReflowResume(ctx context.Context, cmd *cobra.Command, runID stri
 	}
 	err = runTransferReflowWithRunID(cmd, []string{payload.Config.SourceURI}, runID)
 	if err != nil {
+		return err
+	}
+	if err := stopResumeLeaseHeartbeat(heartbeat); err != nil {
 		return err
 	}
 	env.Status = opcheckpoint.StatusSuccess
@@ -3016,6 +3030,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		checkpointWritten := false
 		if classification.Resumable && transferReflowCheckpointEligible(checkpointCfg) {
 			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
+			if heartbeat := resumeLeaseHeartbeatFromContext(ctx); heartbeat != nil {
+				if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), err)
+				}
+			}
 			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
 				checkpointWritten = true
 				writeOperationErrorSummary(cmd.ErrOrStderr(), "Transfer reflow failed with resumable checkpoint", operationTransferReflow, jobID, classification.Class, progress)

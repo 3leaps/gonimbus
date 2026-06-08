@@ -148,6 +148,28 @@ func TestIndexBuildResumableFailureHelpersAreNilResultSafe(t *testing.T) {
 	require.Empty(t, summary.FinalStatus)
 }
 
+func TestIndexBuildResumePromotionCanRunAfterHeartbeatStop(t *testing.T) {
+	ctx, db, indexSet := setupIndexBuildResumeDB(t)
+	defer func() { _ = db.Close() }()
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	store := newRuntimeTestOperationStore(t)
+	lease, err := store.ClaimLease(context.Background(), operationIndexBuild, run.RunID, "holder-a", time.Hour)
+	require.NoError(t, err)
+	heartbeat, leaseCtx, err := startResumeLeaseHeartbeat(context.Background(), store, operationIndexBuild, lease)
+	require.NoError(t, err)
+
+	require.NoError(t, stopResumeLeaseHeartbeat(heartbeat))
+	require.ErrorIs(t, leaseCtx.Err(), context.Canceled)
+
+	result := &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}
+	require.NoError(t, finalizeIndexRun(context.Background(), db, indexSet.IndexSetID, run, result, false))
+	updated, err := indexstore.GetIndexRun(context.Background(), db, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, indexstore.RunStatus(indexstore.RunStatusSuccess), updated.Status)
+}
+
 func setupIndexBuildResumeDB(t *testing.T) (context.Context, *sql.DB, *indexstore.IndexSet) {
 	t.Helper()
 	ctx := context.Background()

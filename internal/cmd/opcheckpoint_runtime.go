@@ -22,6 +22,11 @@ const operationIndexEnrichWithHead = "index-enrich-with-head"
 
 const eventTypeOperationCheckpointIdentity = "operation_checkpoint_identity"
 
+const (
+	resumeLeaseTTL               = 30 * time.Minute
+	resumeLeaseHeartbeatInterval = 5 * time.Minute
+)
+
 type indexRunCheckpointIdentityEvent struct {
 	Operation         string `json:"operation"`
 	ConfigFingerprint string `json:"config_fingerprint"`
@@ -33,6 +38,8 @@ type resolvedIndexRun struct {
 	run      *indexstore.IndexRun
 	path     string
 }
+
+type resumeLeaseHeartbeatContextKey struct{}
 
 func openDefaultOperationCheckpointStore(ctx context.Context) (*opcheckpoint.Store, error) {
 	dataDir, err := indexDataDir()
@@ -97,6 +104,37 @@ func checkpointFingerprint(v any) (string, error) {
 		return "", fmt.Errorf("compute checkpoint fingerprint: %w", err)
 	}
 	return fp, nil
+}
+
+func startResumeLeaseHeartbeat(ctx context.Context, store *opcheckpoint.Store, operation string, lease *opcheckpoint.Lease) (*opcheckpoint.LeaseHeartbeat, context.Context, error) {
+	heartbeat, err := store.StartLeaseHeartbeat(ctx, operation, lease, resumeLeaseHeartbeatInterval, resumeLeaseTTL)
+	if err != nil {
+		return nil, ctx, err
+	}
+	return heartbeat, heartbeat.Context(), nil
+}
+
+func stopResumeLeaseHeartbeat(heartbeat *opcheckpoint.LeaseHeartbeat) error {
+	if err := heartbeat.Stop(); err != nil {
+		return fmt.Errorf("resume lease heartbeat failed: %w", err)
+	}
+	return nil
+}
+
+func contextWithResumeLeaseHeartbeat(ctx context.Context, heartbeat *opcheckpoint.LeaseHeartbeat) context.Context {
+	return context.WithValue(ctx, resumeLeaseHeartbeatContextKey{}, heartbeat)
+}
+
+func resumeLeaseHeartbeatFromContext(ctx context.Context) *opcheckpoint.LeaseHeartbeat {
+	heartbeat, _ := ctx.Value(resumeLeaseHeartbeatContextKey{}).(*opcheckpoint.LeaseHeartbeat)
+	return heartbeat
+}
+
+func stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat *opcheckpoint.LeaseHeartbeat) error {
+	if err := stopResumeLeaseHeartbeat(heartbeat); err != nil {
+		return fmt.Errorf("resume lease lost before writing failed-resumable checkpoint: %w", err)
+	}
+	return nil
 }
 
 func writeIndexRunCheckpoint(

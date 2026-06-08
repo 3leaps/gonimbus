@@ -37,6 +37,10 @@ changes.
   `run_id`, `status`, `error_class`, progress counters, and the safe
   `--resume-run` command. Runtime failures no longer need command-help dumps
   for operator classification; argument errors still show usage.
+- **Resume lease heartbeat:** `--resume-run` operations now renew their
+  operation-checkpoint lease while they are running, so long index build,
+  enrich-with-head, and transfer reflow resumes do not outlive the fixed lease
+  claimed at startup.
 
 ## [0.2.3] - 2026-05-31
 

@@ -531,11 +531,19 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 		return err
 	}
 
-	lease, err := opStore.ClaimLease(ctx, operationIndexBuild, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	lease, err := opStore.ClaimLease(ctx, operationIndexBuild, runID, "gonimbus-"+uuid.NewString(), resumeLeaseTTL)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opStore.ReleaseLease(operationIndexBuild, *lease) }()
+	heartbeat, leaseCtx, err := startResumeLeaseHeartbeat(ctx, opStore, operationIndexBuild, lease)
+	if err != nil {
+		return err
+	}
+	ctx = leaseCtx
+	defer func() {
+		_ = heartbeat.Stop()
+		_ = opStore.ReleaseLease(operationIndexBuild, *lease)
+	}()
 	if err := recoverIndexRunResumeCrash(context.Background(), db, run); err != nil {
 		return err
 	}
@@ -583,6 +591,9 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 				crawlErr = fmt.Errorf("%w; compute checkpoint fingerprint: %v", crawlErr, err)
 				return fmt.Errorf("index build resume failed: %w", crawlErr)
 			}
+			if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+				return fmt.Errorf("index build resume failed: %w", err)
+			}
 			if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexBuild, fingerprint, classification.Class, progress, payload); writeErr != nil {
 				crawlErr = fmt.Errorf("%w; write operation checkpoint: %v", crawlErr, writeErr)
 			} else {
@@ -598,11 +609,15 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 		return fmt.Errorf("index build resume failed: %w", crawlErr)
 	}
 
+	if err := stopResumeLeaseHeartbeat(heartbeat); err != nil {
+		return err
+	}
+	promoteCtx := context.Background()
 	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
-	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
+	if err := finalizeIndexRun(promoteCtx, db, indexSet.IndexSetID, run, result, allowSoftDelete); err != nil {
 		return fmt.Errorf("finalize index run: %w", err)
 	}
-	if err := recordIndexRunLifecycleEvent(context.Background(), db, runID, "resume_completed", ""); err != nil {
+	if err := recordIndexRunLifecycleEvent(promoteCtx, db, runID, "resume_completed", ""); err != nil {
 		return err
 	}
 

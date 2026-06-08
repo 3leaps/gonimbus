@@ -97,6 +97,14 @@ type Lease struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// LeaseHeartbeat renews a resume lease until stopped or until renewal fails.
+type LeaseHeartbeat struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	errs   chan error
+}
+
 type reclaimLock struct {
 	HolderID  string    `json:"holder_id"`
 	ClaimedAt time.Time `json:"claimed_at"`
@@ -283,6 +291,124 @@ func (s *Store) ClaimLease(ctx context.Context, operation, runID, holderID strin
 		if err := reclaimStaleLease(ctx, dir, path, holderID); err != nil {
 			return nil, err
 		}
+	}
+}
+
+func (s *Store) RenewLease(ctx context.Context, operation string, lease Lease, ttl time.Duration) (*Lease, error) {
+	if err := validateLeaseIdentity(lease); err != nil {
+		return nil, err
+	}
+	if ttl <= 0 {
+		return nil, fmt.Errorf("lease ttl must be positive")
+	}
+	dir, err := s.runDir(operation, lease.RunID)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, leaseFileName)
+	lockPath := filepath.Join(dir, reclaimLockName)
+	lock, err := claimReclaimLock(dir, lockPath, lease.HolderID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseReclaimLock(lockPath, lock)
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	current, err := readLease(path)
+	if err != nil {
+		return nil, err
+	}
+	if !sameLease(current, &lease) {
+		return nil, ErrLeaseHeld
+	}
+	now := time.Now().UTC()
+	if !now.Before(current.ExpiresAt) {
+		return nil, ErrLeaseHeld
+	}
+	renewed := *current
+	renewed.ExpiresAt = now.Add(ttl)
+	if renewed.ExpiresAt.Before(current.ExpiresAt) {
+		renewed.ExpiresAt = current.ExpiresAt
+	}
+	data, err := json.MarshalIndent(renewed, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal renewed lease: %w", err)
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomic0600(dir, path, data); err != nil {
+		return nil, fmt.Errorf("renew lease: %w", err)
+	}
+	return &renewed, nil
+}
+
+func (s *Store) StartLeaseHeartbeat(ctx context.Context, operation string, lease *Lease, interval, ttl time.Duration) (*LeaseHeartbeat, error) {
+	if lease == nil {
+		return nil, fmt.Errorf("lease is nil")
+	}
+	if err := validateLeaseIdentity(*lease); err != nil {
+		return nil, err
+	}
+	if interval <= 0 {
+		return nil, fmt.Errorf("lease heartbeat interval must be positive")
+	}
+	if ttl <= 0 {
+		return nil, fmt.Errorf("lease ttl must be positive")
+	}
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	h := &LeaseHeartbeat{
+		ctx:    heartbeatCtx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		errs:   make(chan error, 1),
+	}
+	go func() {
+		defer close(h.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, err := s.RenewLease(heartbeatCtx, operation, *lease, ttl)
+				if err != nil {
+					h.errs <- err
+					cancel()
+					return
+				}
+				*lease = *renewed
+			}
+		}
+	}()
+	return h, nil
+}
+
+func (h *LeaseHeartbeat) Context() context.Context {
+	if h == nil || h.ctx == nil {
+		return context.Background()
+	}
+	return h.ctx
+}
+
+func (h *LeaseHeartbeat) Stop() error {
+	if h == nil {
+		return nil
+	}
+	h.cancel()
+	<-h.done
+	select {
+	case err := <-h.errs:
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	default:
+		return nil
 	}
 }
 

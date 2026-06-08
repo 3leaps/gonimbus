@@ -287,11 +287,19 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		return err
 	}
 
-	lease, err := opStore.ClaimLease(ctx, operationIndexEnrichWithHead, runID, "gonimbus-"+uuid.NewString(), 30*time.Minute)
+	lease, err := opStore.ClaimLease(ctx, operationIndexEnrichWithHead, runID, "gonimbus-"+uuid.NewString(), resumeLeaseTTL)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opStore.ReleaseLease(operationIndexEnrichWithHead, *lease) }()
+	heartbeat, leaseCtx, err := startResumeLeaseHeartbeat(ctx, opStore, operationIndexEnrichWithHead, lease)
+	if err != nil {
+		return err
+	}
+	ctx = leaseCtx
+	defer func() {
+		_ = heartbeat.Stop()
+		_ = opStore.ReleaseLease(operationIndexEnrichWithHead, *lease)
+	}()
 	if err := recoverIndexRunResumeCrash(context.Background(), db, run); err != nil {
 		return err
 	}
@@ -336,12 +344,24 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	if runErr != nil && classification.Resumable {
 		progress := enrichHeadProgress(summary)
 		payload.Summary = summary
+		if err := stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat); err != nil {
+			return err
+		}
 		if writeErr := writeIndexRunCheckpoint(context.Background(), opStore, db, runID, operationIndexEnrichWithHead, fingerprint, classification.Class, progress, payload); writeErr != nil {
 			runErr = fmt.Errorf("%w; write operation checkpoint: %v", runErr, writeErr)
 		} else {
 			status = indexstore.RunStatusFailedResumable
 		}
-	} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil && runErr == nil {
+	} else if runErr == nil {
+		if status == indexstore.RunStatusSuccess {
+			if err := stopResumeLeaseHeartbeat(heartbeat); err != nil {
+				return err
+			}
+		}
+		if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil {
+			runErr = fmt.Errorf("update enrich run status: %w", err)
+		}
+	} else if err := indexstore.UpdateIndexRunStatus(context.Background(), db, runID, status, nil); err != nil {
 		runErr = fmt.Errorf("update enrich run status: %w", err)
 	}
 	if runErr == nil {
