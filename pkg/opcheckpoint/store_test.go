@@ -223,6 +223,104 @@ func TestReleaseLeaseDoesNotDeleteSuccessorAfterStaleTakeover(t *testing.T) {
 	require.True(t, sameLease(current, successor))
 }
 
+func TestRenewLeaseExtendsCurrentLease(t *testing.T) {
+	store := newTestStore(t)
+	lease, err := store.ClaimLease(context.Background(), "index-build", "run_renew", "holder-a", time.Hour)
+	require.NoError(t, err)
+
+	renewed, err := store.RenewLease(context.Background(), "index-build", *lease, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, lease.RunID, renewed.RunID)
+	require.Equal(t, lease.HolderID, renewed.HolderID)
+	require.True(t, renewed.ClaimedAt.Equal(lease.ClaimedAt))
+	require.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
+
+	require.ErrorIs(t, store.ReleaseLease("index-build", *lease), ErrLeaseHeld)
+	require.NoError(t, store.ReleaseLease("index-build", *renewed))
+}
+
+func TestRenewLeaseFailsAfterStaleTakeover(t *testing.T) {
+	store := newTestStore(t)
+	runID := "run_renew_stale"
+	dir, err := store.ensureRunDir("index-build", runID)
+	require.NoError(t, err)
+	leasePath := filepath.Join(dir, leaseFileName)
+	stale := Lease{
+		RunID:     runID,
+		HolderID:  "holder-a",
+		ClaimedAt: time.Now().Add(-2 * time.Hour).UTC(),
+		ExpiresAt: time.Now().Add(-time.Hour).UTC(),
+	}
+	writeLeaseFile(t, leasePath, stale)
+
+	successor, err := store.ClaimLease(context.Background(), "index-build", runID, "holder-b", time.Hour)
+	require.NoError(t, err)
+	_, err = store.RenewLease(context.Background(), "index-build", stale, time.Hour)
+	require.ErrorIs(t, err, ErrLeaseHeld)
+	current, err := readLease(leasePath)
+	require.NoError(t, err)
+	require.True(t, sameLease(current, successor))
+}
+
+func TestRenewLeaseCannotReviveExpiredLease(t *testing.T) {
+	store := newTestStore(t)
+	runID := "run_renew_expired"
+	dir, err := store.ensureRunDir("index-build", runID)
+	require.NoError(t, err)
+	expired := Lease{
+		RunID:     runID,
+		HolderID:  "holder-a",
+		ClaimedAt: time.Now().Add(-2 * time.Hour).UTC(),
+		ExpiresAt: time.Now().Add(-time.Hour).UTC(),
+	}
+	writeLeaseFile(t, filepath.Join(dir, leaseFileName), expired)
+
+	_, err = store.RenewLease(context.Background(), "index-build", expired, time.Hour)
+	require.ErrorIs(t, err, ErrLeaseHeld)
+}
+
+func TestLeaseHeartbeatRenewsUntilStopped(t *testing.T) {
+	store := newTestStore(t)
+	lease, err := store.ClaimLease(context.Background(), "index-build", "run_heartbeat", "holder-a", 20*time.Millisecond)
+	require.NoError(t, err)
+	initialExpiresAt := lease.ExpiresAt
+
+	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), "index-build", lease, 5*time.Millisecond, 50*time.Millisecond)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		current, err := readLease(filepath.Join(store.RootDir(), "index-build", "run_heartbeat", leaseFileName))
+		return err == nil && current.ExpiresAt.After(initialExpiresAt)
+	}, time.Second, 5*time.Millisecond)
+	require.NoError(t, heartbeat.Stop())
+	require.NoError(t, store.ReleaseLease("index-build", *lease))
+}
+
+func TestLeaseHeartbeatCancelsContextWhenLeaseIsLost(t *testing.T) {
+	store := newTestStore(t)
+	runID := "run_heartbeat_lost"
+	lease, err := store.ClaimLease(context.Background(), "index-build", runID, "holder-a", time.Hour)
+	require.NoError(t, err)
+	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), "index-build", lease, 5*time.Millisecond, time.Hour)
+	require.NoError(t, err)
+
+	writeLeaseFile(t, filepath.Join(store.RootDir(), "index-build", runID, leaseFileName), Lease{
+		RunID:     runID,
+		HolderID:  "holder-b",
+		ClaimedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	})
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-heartbeat.Context().Done():
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 5*time.Millisecond)
+	require.ErrorIs(t, heartbeat.Stop(), ErrLeaseHeld)
+}
+
 func TestClaimLeaseCleansExpiredReclaimLock(t *testing.T) {
 	store := newTestStore(t)
 	runID := "run_expired_reclaim_lock"

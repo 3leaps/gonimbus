@@ -3,11 +3,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fulmenhq/gofulmen/appidentity"
 	"github.com/stretchr/testify/require"
@@ -120,4 +122,45 @@ func TestWriteOperationErrorSummaryIncludesResumeHintAndSortedProgress(t *testin
 	require.Less(t, strings.Index(text, "objects_ingested"), strings.Index(text, "prefixes_ingested"))
 	require.NotContains(t, text, "Usage:")
 	require.NotContains(t, text, "s3://")
+}
+
+func TestStopResumeLeaseHeartbeatReturnsLeaseLoss(t *testing.T) {
+	store := newRuntimeTestOperationStore(t)
+
+	runID := "run_heartbeat_lost"
+	lease, err := store.ClaimLease(context.Background(), operationIndexBuild, runID, "holder-a", time.Hour)
+	require.NoError(t, err)
+	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), operationIndexBuild, lease, time.Millisecond, time.Hour)
+	require.NoError(t, err)
+
+	writeLeaseForRuntimeTest(t, filepath.Join(store.RootDir(), operationIndexBuild, runID, "resume.lease.json"), opcheckpoint.Lease{
+		RunID:     runID,
+		HolderID:  "holder-b",
+		ClaimedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	})
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-heartbeat.Context().Done():
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.ErrorIs(t, stopResumeLeaseHeartbeat(heartbeat), opcheckpoint.ErrLeaseHeld)
+}
+
+func newRuntimeTestOperationStore(t *testing.T) *opcheckpoint.Store {
+	t.Helper()
+	store, err := opcheckpoint.Open(context.Background(), opcheckpoint.Config{AppDataDir: filepath.Join(t.TempDir(), "data")})
+	require.NoError(t, err)
+	return store
+}
+
+func writeLeaseForRuntimeTest(t *testing.T, path string, lease opcheckpoint.Lease) {
+	t.Helper()
+	data, err := json.Marshal(lease)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
 }

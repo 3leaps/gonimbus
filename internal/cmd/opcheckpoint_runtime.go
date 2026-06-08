@@ -22,6 +22,11 @@ const operationIndexEnrichWithHead = "index-enrich-with-head"
 
 const eventTypeOperationCheckpointIdentity = "operation_checkpoint_identity"
 
+const (
+	resumeLeaseTTL               = 30 * time.Minute
+	resumeLeaseHeartbeatInterval = 5 * time.Minute
+)
+
 type indexRunCheckpointIdentityEvent struct {
 	Operation         string `json:"operation"`
 	ConfigFingerprint string `json:"config_fingerprint"`
@@ -97,6 +102,21 @@ func checkpointFingerprint(v any) (string, error) {
 		return "", fmt.Errorf("compute checkpoint fingerprint: %w", err)
 	}
 	return fp, nil
+}
+
+func startResumeLeaseHeartbeat(ctx context.Context, store *opcheckpoint.Store, operation string, lease *opcheckpoint.Lease) (*opcheckpoint.LeaseHeartbeat, context.Context, error) {
+	heartbeat, err := store.StartLeaseHeartbeat(ctx, operation, lease, resumeLeaseHeartbeatInterval, resumeLeaseTTL)
+	if err != nil {
+		return nil, ctx, err
+	}
+	return heartbeat, heartbeat.Context(), nil
+}
+
+func stopResumeLeaseHeartbeat(heartbeat *opcheckpoint.LeaseHeartbeat) error {
+	if err := heartbeat.Stop(); err != nil {
+		return fmt.Errorf("resume lease heartbeat failed: %w", err)
+	}
+	return nil
 }
 
 func writeIndexRunCheckpoint(
