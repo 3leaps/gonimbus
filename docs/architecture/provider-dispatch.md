@@ -4,11 +4,17 @@ Gonimbus builds transfer providers from parsed URI schemes, then runs copy and
 metadata behavior through the shared `provider.Provider` interface and optional
 capability interfaces.
 
+This document is transitional for GON-042 PR-1: the shared construction seam is
+now `internal/providerdispatch`, and `transfer reflow` is the first migrated
+caller. Full CLI-wide command adoption, provider registration checklist updates,
+and broader doctor/hub/read-command migration remain tracked by the GON-042
+follow-up slices.
+
 ## Reflow Dispatch
 
 `transfer reflow` parses the source URI with `pkg/uri.ParseURI` and the
-destination URI with the reflow destination parser. Source construction is
-scheme-based:
+destination URI with the reflow destination parser, then delegates provider
+construction to `internal/providerdispatch`. Source construction is scheme-based:
 
 - `s3://bucket/key` constructs `pkg/provider/s3` with the source bucket and
   source AWS flags.
@@ -43,7 +49,8 @@ points are:
 1. Register the accepted scheme and URI semantics in `pkg/uri`.
 2. Add `pkg/provider/gcs` implementing `provider.Provider` and needed optional
    capability interfaces.
-3. Register the scheme in the reflow source/destination provider factory.
+3. Register the scheme in `internal/providerdispatch` source/destination
+   construction.
 4. Add provider-specific auth flags only if the default provider config cannot
    cover the use case.
 
