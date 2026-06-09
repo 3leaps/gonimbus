@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -30,6 +31,12 @@ import (
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
+
+func useTransferReflowProviderFactories(t *testing.T, f providerdispatch.Factories) {
+	t.Helper()
+	restore := providerdispatch.UseFactoriesForTest(f)
+	t.Cleanup(restore)
+}
 
 func TestValidateTransferReflowArgs(t *testing.T) {
 	makeCmd := func(stdin bool, resumeRun string) *cobra.Command {
@@ -138,10 +145,12 @@ func TestTransferReflowResumeRunRejectsSuccessfulCheckpointBeforeWork(t *testing
 	}))
 
 	var providerCalled bool
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		providerCalled = true
-		return newReflowMemoryProvider(), nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			providerCalled = true
+			return newReflowMemoryProvider(), nil
+		},
+	})
 
 	cmd := newTransferReflowTestCommand()
 	cmd.SetArgs([]string{"--resume-run", "run_success"})
@@ -280,9 +289,11 @@ func TestTransferReflowCancelledPositionalRunWritesOperationCheckpoint(t *testin
 	src := newReflowMemoryProvider()
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
 	ctx, cancel := context.WithCancel(context.Background())
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		return cancelingGetProvider{Provider: src, cancel: cancel}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return cancelingGetProvider{Provider: src, cancel: cancel}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -328,10 +339,12 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 
 	src := newReflowMemoryProvider()
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		require.Equal(t, "refreshable-profile", cfg.Profile)
-		return refreshFailingGetProvider{Provider: src}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "refreshable-profile", cfg.Profile)
+			return refreshFailingGetProvider{Provider: src}, nil
+		},
+	})
 
 	var stdout, stderr bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -376,10 +389,12 @@ func TestTransferReflowCredentialRefreshListFailureWritesOperationCheckpoint(t *
 
 	src := newReflowMemoryProvider()
 	src.putFixture("prefix/a.txt", "payload", "etag-a", time.Now().UTC())
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		require.Equal(t, "refreshable-profile", cfg.Profile)
-		return &refreshFailingListProvider{Provider: src}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "refreshable-profile", cfg.Profile)
+			return &refreshFailingListProvider{Provider: src}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -417,10 +432,12 @@ func TestTransferReflowCredentialRefreshWordingWithoutProfileIsNotResumable(t *t
 
 	src := newReflowMemoryProvider()
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		require.Empty(t, cfg.Profile)
-		return legacyRefreshTextGetProvider{Provider: src}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Empty(t, cfg.Profile)
+			return legacyRefreshTextGetProvider{Provider: src}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -444,10 +461,12 @@ func TestTransferReflowLegacyCredentialRefreshTextWithProfileIsNotResumable(t *t
 
 	src := newReflowMemoryProvider()
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		require.Equal(t, "refreshable-profile", cfg.Profile)
-		return legacyRefreshTextGetProvider{Provider: src}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "refreshable-profile", cfg.Profile)
+			return legacyRefreshTextGetProvider{Provider: src}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -473,10 +492,12 @@ func TestTransferReflowStdinCredentialRefreshFailureIsNotAdvertisedResumable(t *
 
 	src := newReflowMemoryProvider()
 	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		require.Equal(t, "refreshable-profile", cfg.Profile)
-		return refreshFailingGetProvider{Provider: src}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "refreshable-profile", cfg.Profile)
+			return refreshFailingGetProvider{Provider: src}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -1363,9 +1384,11 @@ func TestTransferReflowCommand_PreserveModeWarnsForNonFileToFileCells(t *testing
 		srcDir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("payload"), 0o644))
 		dst := newReflowMemoryProvider()
-		newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-			return dst, nil
-		}
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(context.Context, s3.Config) (provider.Provider, error) {
+				return dst, nil
+			},
+		})
 
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
@@ -1809,12 +1832,14 @@ func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerRequiresConditiona
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
 	dst := newReflowMemoryProvider()
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		return src, nil
-	}
-	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
-		return &reflowNoConditionalProvider{p: dst}, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return src, nil
+		},
+		File: func(providerfile.Config) (provider.Provider, error) {
+			return &reflowNoConditionalProvider{p: dst}, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	cmd := newTransferReflowTestCommand()
@@ -2250,12 +2275,14 @@ func TestTransferReflowCommand_MetadataCapabilityFailureEmitsConfigJSONLError(t 
 	withTransferReflowTestState(t)
 	src := newReflowMemoryProvider()
 	dst := &reflowBareProvider{p: newReflowMemoryProvider()}
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		return src, nil
-	}
-	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
-		return dst, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return src, nil
+		},
+		File: func(providerfile.Config) (provider.Provider, error) {
+			return dst, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -2300,10 +2327,15 @@ func TestTransferReflowSourceConfigValidation(t *testing.T) {
 }
 
 func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testing.T) {
-	require.NoError(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear}))
-	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, Set: map[string]string{"owner": "team"}}), "metadata-aware PUT")
-	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyPreserve}), "--metadata-policy")
-	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
+	require.NoError(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear}))
+
+	err := ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear, Set: map[string]string{"owner": "team"}})
+	require.ErrorContains(t, err, "MetadataAwarePutter")
+	require.ErrorContains(t, err, "transfer-reflow")
+	require.ErrorContains(t, err, "file")
+
+	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyPreserve}), "--metadata-policy")
+	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
 }
 
 func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
@@ -2420,8 +2452,6 @@ func withTransferReflowTestState(t *testing.T) {
 	oldDstRegion := reflowDstRegion
 	oldDstProfile := reflowDstProfile
 	oldDstEndpoint := reflowDstEndpoint
-	oldS3Provider := newReflowS3Provider
-	oldFileProvider := newReflowFileProvider
 	oldStateStore := newReflowStateStore
 
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -2504,8 +2534,6 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowDstRegion = oldDstRegion
 		reflowDstProfile = oldDstProfile
 		reflowDstEndpoint = oldDstEndpoint
-		newReflowS3Provider = oldS3Provider
-		newReflowFileProvider = oldFileProvider
 		newReflowStateStore = oldStateStore
 	})
 }
@@ -2903,12 +2931,14 @@ func runTransferReflowWithProvidersAndErr(t *testing.T, src *reflowMemoryProvide
 	t.Helper()
 	withTransferReflowTestState(t)
 
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		return src, nil
-	}
-	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
-		return dst, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return src, nil
+		},
+		File: func(providerfile.Config) (provider.Provider, error) {
+			return dst, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -2933,15 +2963,17 @@ func runTransferReflowWithProviderFactory(t *testing.T, src *reflowMemoryProvide
 	t.Helper()
 	withTransferReflowTestState(t)
 
-	newReflowS3Provider = func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-		if cfg.Bucket == "source-bucket" {
-			return src, nil
-		}
-		return dst, nil
-	}
-	newReflowFileProvider = func(providerfile.Config) (provider.Provider, error) {
-		return dst, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			if cfg.Bucket == "source-bucket" {
+				return src, nil
+			}
+			return dst, nil
+		},
+		File: func(providerfile.Config) (provider.Provider, error) {
+			return dst, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -2958,9 +2990,11 @@ func runTransferReflowWithMemorySourceAndRealFileDest(t *testing.T, src *reflowM
 	t.Helper()
 	withTransferReflowTestState(t)
 
-	newReflowS3Provider = func(context.Context, s3.Config) (provider.Provider, error) {
-		return src, nil
-	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return src, nil
+		},
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

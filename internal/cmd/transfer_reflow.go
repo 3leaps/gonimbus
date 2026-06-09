@@ -28,13 +28,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -156,12 +156,6 @@ var (
 )
 
 var (
-	newReflowS3Provider = func(ctx context.Context, cfg s3.Config) (provider.Provider, error) {
-		return s3.New(ctx, cfg)
-	}
-	newReflowFileProvider = func(cfg providerfile.Config) (provider.Provider, error) {
-		return providerfile.New(cfg)
-	}
 	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
 		return reflowstate.Open(ctx, cfg)
 	}
@@ -1090,27 +1084,29 @@ func uniqueSortedStrings(values []string) []string {
 	return out
 }
 
-func ensureMetadataCapability(dst provider.Provider, cfg reflowMetadataConfig) error {
+func ensureMetadataCapability(dst provider.Provider, destProvider string, cfg reflowMetadataConfig) error {
 	if !cfg.requiresCapability() {
 		return nil
 	}
-	if _, ok := dst.(provider.MetadataAwarePutter); ok {
-		return nil
+	_, err := providerdispatch.RequireCapability[provider.MetadataAwarePutter](dst, operationTransferReflow, destProvider, "metadata-aware PUT (MetadataAwarePutter)")
+	if err != nil {
+		return fmt.Errorf("%w required by %s", err, strings.Join(cfg.capabilityFlags(), ", "))
 	}
-	return fmt.Errorf("destination provider does not support metadata-aware PUT required by %s", strings.Join(cfg.capabilityFlags(), ", "))
+	return nil
 }
 
 func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg collisionConfig) error {
 	if cfg.Mode != reflowCollisionSrcNew {
 		return nil
 	}
-	if _, ok := dst.(provider.ConditionalPutter); ok {
-		return nil
-	}
 	if destProvider == "" {
 		destProvider = "destination"
 	}
-	return fmt.Errorf("destination provider %q does not support conditional PUT with IfMatchETag required by --on-collision=%s", destProvider, reflowCollisionSrcNew)
+	_, err := providerdispatch.RequireCapability[provider.ConditionalPutter](dst, operationTransferReflow, destProvider, "ConditionalPutter.IfMatchETag")
+	if err != nil {
+		return fmt.Errorf("%w required by --on-collision=%s", err, reflowCollisionSrcNew)
+	}
+	return nil
 }
 
 func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err error, details map[string]any) error {
@@ -1573,43 +1569,36 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
-	switch dest.Provider {
-	case string(provider.ProviderS3):
-		return newReflowS3Provider(ctx, s3.Config{
-			Bucket:         dest.Bucket,
+	return providerdispatch.NewDestination(ctx, providerdispatch.DestinationOptions{
+		Command:             operationTransferReflow,
+		Provider:            dest.Provider,
+		S3Bucket:            dest.Bucket,
+		S3Prefix:            dest.Prefix,
+		FileBaseDir:         dest.BaseDir,
+		FileMetadataSidecar: metaCfg.MetadataSidecarSuffix,
+		S3: providerdispatch.S3Options{
 			Region:         dest.Region,
 			Endpoint:       dest.Endpoint,
 			Profile:        dest.Profile,
 			ForcePathStyle: dest.ForcePathStyle,
-		})
-	case string(provider.ProviderFile):
-		if err := os.MkdirAll(dest.BaseDir, 0o750); err != nil {
-			return nil, err
-		}
-		return newReflowFileProvider(providerfile.Config{BaseDir: dest.BaseDir, MetadataSidecarSuffix: metaCfg.MetadataSidecarSuffix})
-	default:
-		return nil, fmt.Errorf("unsupported destination provider %q", dest.Provider)
-	}
+		},
+	})
 }
 
 func newSourceProvider(ctx context.Context, src *uri.ObjectURI) (provider.Provider, error) {
 	if src == nil {
 		return nil, fmt.Errorf("source URI is nil")
 	}
-	switch src.Provider {
-	case string(provider.ProviderS3):
-		return newReflowS3Provider(ctx, s3.Config{
-			Bucket:         src.Bucket,
+	return providerdispatch.NewSource(ctx, src, providerdispatch.SourceOptions{
+		Command:             operationTransferReflow,
+		FileMetadataSidecar: reflowMetaSuffix,
+		S3: providerdispatch.S3Options{
 			Region:         reflowSrcRegion,
 			Endpoint:       reflowSrcEndpoint,
 			Profile:        reflowSrcProfile,
 			ForcePathStyle: reflowSrcEndpoint != "",
-		})
-	case string(provider.ProviderFile):
-		return newReflowFileProvider(providerfile.Config{BaseDir: src.Key, MetadataSidecarSuffix: reflowMetaSuffix})
-	default:
-		return nil, fmt.Errorf("unsupported source provider %q", src.Provider)
-	}
+		},
+	})
 }
 
 func reflowSourceIdentity(src *uri.ObjectURI) string {
@@ -2373,10 +2362,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to destination provider", err)
 	}
-	if err := ensureMetadataCapability(dstProv, metaCfg); err != nil {
+	if err := ensureMetadataCapability(dstProv, destSpec.Provider, metaCfg); err != nil {
 		return emitReflowConfigError(ctx, w, "Invalid metadata configuration", err, map[string]any{
 			"missing_capability": "MetadataAwarePutter",
 			"flags":              metaCfg.capabilityFlags(),
+			"provider":           destSpec.Provider,
 		})
 	}
 	if err := ensureCollisionCapability(dstProv, destSpec.Provider, collCfg); err != nil {
@@ -2418,7 +2408,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			if err := ensureMetadataCapability(pNew, metaCfg); err != nil {
+			if err := ensureMetadataCapability(pNew, destSpec.Provider, metaCfg); err != nil {
 				return nil, nil, nil, err
 			}
 			if err := ensureCollisionCapability(pNew, destSpec.Provider, collCfg); err != nil {
