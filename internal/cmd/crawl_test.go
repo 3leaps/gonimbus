@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +13,22 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/pkg/manifest"
+	"github.com/3leaps/gonimbus/pkg/output"
 )
+
+func withCrawlTestState(t *testing.T) {
+	t.Helper()
+	oldEmit := crawlEmit
+	oldSelectionSummary := crawlSelectionSum
+	oldMinObjects := crawlMinObjects
+	oldMaxBytes := crawlMaxBytes
+	t.Cleanup(func() {
+		crawlEmit = oldEmit
+		crawlSelectionSum = oldSelectionSummary
+		crawlMinObjects = oldMinObjects
+		crawlMaxBytes = oldMaxBytes
+	})
+}
 
 func TestShowCrawlPlan(t *testing.T) {
 	tests := []struct {
@@ -209,6 +226,86 @@ func TestCreateWriter_InvalidPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to create output file")
 }
 
+func TestCrawlFileReflowInputSelectionSummaryAndGuard(t *testing.T) {
+	withCrawlTestState(t)
+
+	srcDir := createCrawlFileFixture(t)
+	summaryPath := filepath.Join(t.TempDir(), "selection.jsonl")
+	crawlEmit = crawlEmitReflowInput
+	crawlSelectionSum = summaryPath
+	crawlMinObjects = 2
+	crawlMaxBytes = 100
+
+	stdout, err := runCrawlManifestForTest(t, crawlFileManifest(srcDir))
+	require.NoError(t, err)
+
+	records := parseCrawlReflowInputRecords(t, stdout)
+	require.Len(t, records, 2)
+	require.Equal(t, []string{".secret/token", "keep.txt"}, []string{records[0].SourceKey, records[1].SourceKey})
+	require.Contains(t, records[0].SourceURI, srcDir)
+	require.Contains(t, records[1].SourceURI, srcDir)
+	require.NotContains(t, stdout, "link.txt")
+	require.NotContains(t, stdout, "skip.tmp")
+	requireNoRecordType(t, stdout, output.TypeSummary)
+	requireNoRecordType(t, stdout, output.TypePreflight)
+
+	summary := readCrawlSelectionSummary(t, summaryPath)
+	require.Equal(t, int64(2), summary.ObjectsSelected)
+	require.Equal(t, int64(len("secret")+len("keep")), summary.BytesTotal)
+	require.Equal(t, "ok", summary.Status)
+
+	crawlSelectionSum = filepath.Join(t.TempDir(), "selection-failed.jsonl")
+	crawlMaxBytes = 1
+	stdout, err = runCrawlManifestForTest(t, crawlFileManifest(srcDir))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "maximum byte threshold")
+	require.Empty(t, strings.TrimSpace(stdout))
+	failed := readCrawlSelectionSummary(t, crawlSelectionSum)
+	require.Equal(t, "failed", failed.Status)
+	require.Equal(t, "max_bytes", failed.Reason)
+}
+
+func TestCrawlFileReflowInputPipesToTransferReflowWithRedactedSidecar(t *testing.T) {
+	withCrawlTestState(t)
+
+	srcDir := createCrawlFileFixture(t)
+	crawlEmit = crawlEmitReflowInput
+	crawlSelectionSum = filepath.Join(t.TempDir(), "selection.jsonl")
+	crawlOut, err := runCrawlManifestForTest(t, crawlFileManifest(srcDir))
+	require.NoError(t, err)
+
+	withTransferReflowTestState(t)
+	destDir := t.TempDir()
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(crawlOut))
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--provenance", "sidecar",
+	})
+
+	require.NoError(t, cmd.Execute(), stdout.String())
+	require.Equal(t, "keep", string(mustReadFile(t, filepath.Join(destDir, "keep.txt"))))
+	require.Equal(t, "secret", string(mustReadFile(t, filepath.Join(destDir, ".secret", "token"))))
+	require.NoFileExists(t, filepath.Join(destDir, "link.txt"))
+	require.NoFileExists(t, filepath.Join(destDir, "skip.tmp"))
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/.secret/token"`)
+	require.NotContains(t, stdout.String(), srcDir)
+
+	sidecarRaw := mustReadFile(t, filepath.Join(destDir, "keep.txt"+provenanceSuffix))
+	require.NotContains(t, string(sidecarRaw), srcDir)
+	var sidecar map[string]any
+	require.NoError(t, json.Unmarshal(sidecarRaw, &sidecar))
+	source, ok := sidecar["source"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "file://local/keep.txt", source["uri"])
+}
+
 func TestExitError(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -240,4 +337,81 @@ func TestExitError(t *testing.T) {
 			assert.True(t, strings.Contains(err.Error(), tt.want))
 		})
 	}
+}
+
+func createCrawlFileFixture(t *testing.T) string {
+	t.Helper()
+	srcDir := mustEvalSymlinks(t, t.TempDir())
+	outsideDir := mustEvalSymlinks(t, t.TempDir())
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".secret"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "keep.txt"), []byte("keep"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".secret", "token"), []byte("secret"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "skip.tmp"), []byte("skip"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "outside.txt"), []byte("outside"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "outside.txt"), filepath.Join(srcDir, "link.txt")))
+	return srcDir
+}
+
+func crawlFileManifest(srcDir string) *manifest.Manifest {
+	return &manifest.Manifest{
+		Version: "1.0",
+		Connection: manifest.ConnectionConfig{
+			Provider: "file",
+			BaseDir:  srcDir,
+		},
+		Match: manifest.MatchConfig{
+			Includes:      []string{"**"},
+			Excludes:      []string{"skip.tmp"},
+			IncludeHidden: true,
+		},
+		Crawl: manifest.CrawlConfig{Concurrency: 1},
+		Output: manifest.OutputConfig{
+			Destination: "stdout",
+		},
+	}
+}
+
+func runCrawlManifestForTest(t *testing.T, m *manifest.Manifest) (string, error) {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+		_ = r.Close()
+	}()
+
+	runErr := executeCrawl(context.Background(), m)
+	require.NoError(t, w.Close())
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String(), runErr
+}
+
+func parseCrawlReflowInputRecords(t *testing.T, stdout string) []reflowInputRecord {
+	t.Helper()
+	var out []reflowInputRecord
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var env testRecordEnvelope
+		require.NoError(t, json.Unmarshal([]byte(line), &env))
+		require.Equal(t, crawlReflowInputType, env.Type)
+		var rec reflowInputRecord
+		require.NoError(t, json.Unmarshal(env.Data, &rec))
+		out = append(out, rec)
+	}
+	return out
+}
+
+func readCrawlSelectionSummary(t *testing.T, path string) crawlSelectionSummary {
+	t.Helper()
+	raw := mustReadFile(t, path)
+	record := requireRecord(t, string(raw), crawlSelectionSumType, "")
+	var summary crawlSelectionSummary
+	require.NoError(t, json.Unmarshal(record.Data, &summary))
+	return summary
 }

@@ -260,6 +260,51 @@ match:
 			errContains: "provider",
 		},
 		{
+			name: "valid file provider manifest",
+			content: `version: "1.0"
+connection:
+  provider: file
+  base_dir: /tmp/source
+match:
+  includes:
+    - "**"
+`,
+			filename: "file-provider.yaml",
+			wantErr:  false,
+			validate: func(t *testing.T, m *Manifest) {
+				assert.Equal(t, "file", m.Connection.Provider)
+				assert.Equal(t, "/tmp/source", m.Connection.BaseDir)
+				assert.Empty(t, m.Connection.Bucket)
+			},
+		},
+		{
+			name: "file provider requires base_dir",
+			content: `version: "1.0"
+connection:
+  provider: file
+match:
+  includes:
+    - "**"
+`,
+			filename:    "file-missing-base-dir.yaml",
+			wantErr:     true,
+			errContains: "base_dir",
+		},
+		{
+			name: "file provider rejects relative base_dir",
+			content: `version: "1.0"
+connection:
+  provider: file
+  base_dir: relative/source
+match:
+  includes:
+    - "**"
+`,
+			filename:    "file-relative-base-dir.yaml",
+			wantErr:     true,
+			errContains: "absolute",
+		},
+		{
 			name: "missing includes",
 			content: `version: "1.0"
 connection:

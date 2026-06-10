@@ -34,9 +34,9 @@ type IndexManifest struct {
 	PathDate *PathDateConfig `json:"path_date,omitempty" yaml:"path_date,omitempty"`
 }
 
-// IndexConnectionConfig configures to cloud storage connection.
+// IndexConnectionConfig configures the index source storage connection.
 type IndexConnectionConfig struct {
-	// Provider is the storage provider type. Currently only "s3" is supported.
+	// Provider is the storage provider type.
 	Provider string `json:"provider" yaml:"provider"`
 
 	// Bucket is the bucket name to index.

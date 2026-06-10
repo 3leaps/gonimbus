@@ -260,22 +260,23 @@ func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
 }
 
 type reflowTask struct {
-	SourceProvider   string
-	SourceBucket     string
-	SourceRoot       string
-	SourceURI        string
-	SourceCheckpoint string
-	SourceKey        string
-	SourceETag       string
-	SourceSize       int64
-	SourceLastMod    time.Time
-	SourceMode       fs.FileMode
-	SourceFailure    string
-	Vars             map[string]string
-	Probe            *probe.ProbeAudit
-	DestRelKey       string
-	RoutingClass     string
-	QuarantinePrefix string
+	SourceProvider    string
+	SourceBucket      string
+	SourceRoot        string
+	SourceURI         string
+	SourceCheckpoint  string
+	SourceKey         string
+	SourceETag        string
+	SourceSize        int64
+	SourceLastMod     time.Time
+	SourceMode        fs.FileMode
+	SourceFailure     string
+	Vars              map[string]string
+	Probe             *probe.ProbeAudit
+	DestRelKey        string
+	RoutingClass      string
+	QuarantinePrefix  string
+	RejectSymlinkPath bool
 }
 
 type reflowRecord struct {
@@ -1658,6 +1659,39 @@ func fileCheckpointSourceURI(rel string) string {
 	return "file-checkpoint://local/" + rel
 }
 
+func filePathContainsSymlink(path string) (bool, error) {
+	cleanPath := filepath.Clean(path)
+	volume := filepath.VolumeName(cleanPath)
+	rest := strings.TrimPrefix(cleanPath, volume)
+	if filepath.IsAbs(cleanPath) {
+		rest = strings.TrimPrefix(rest, string(filepath.Separator))
+	}
+	parts := strings.Split(rest, string(filepath.Separator))
+
+	cur := volume
+	if filepath.IsAbs(cleanPath) {
+		cur += string(filepath.Separator)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if cur == "" || cur == string(filepath.Separator) || strings.HasSuffix(cur, string(filepath.Separator)) {
+			cur += part
+		} else {
+			cur = filepath.Join(cur, part)
+		}
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func redactedPathError(defaultMessage string, verboseMessage string) error {
 	if verbose && verboseMessage != "" {
 		return errors.New(verboseMessage)
@@ -2351,12 +2385,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	defer func() { _ = state.Close() }()
 
 	var (
-		srcProv        provider.Provider
-		dstProv        provider.Provider
-		sidecarProv    provider.Provider
-		srcIdentity    string
-		preserveWarned bool
-		provMu         sync.Mutex
+		srcProv             provider.Provider
+		dstProv             provider.Provider
+		sidecarProv         provider.Provider
+		srcProviderIdentity string
+		preserveWarned      bool
+		provMu              sync.Mutex
 	)
 	dstProv, err = newDestProvider(ctx, destSpec, metaCfg)
 	if err != nil {
@@ -2438,9 +2472,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				return nil, nil, nil, err
 			}
 			srcProv = pNew
-			srcIdentity = identity
-		} else if srcIdentity != "" && identity != "" && srcIdentity != identity {
-			return nil, nil, nil, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcIdentity)
+			srcProviderIdentity = identity
+		} else if srcProviderIdentity != "" && identity != "" && srcProviderIdentity != identity {
+			return nil, nil, nil, fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, srcProviderIdentity)
 		}
 		return srcProv, dstProv, sidecarProv, nil
 	}
@@ -2568,6 +2602,34 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				if reflowDryRun {
 					_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "planned"))
 					continue
+				}
+
+				if task.RejectSymlinkPath {
+					sourcePath := filepath.Join(task.SourceRoot, filepath.FromSlash(task.SourceKey))
+					hasSymlink, err := filePathContainsSymlink(sourcePath)
+					if err != nil {
+						errorCount.Add(1)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source path validation failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						}
+						rec := task.reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = "source.path.validation_failed"
+						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						continue
+					}
+					if hasSymlink {
+						errorCount.Add(1)
+						err := errors.New("file source path uses a symlink")
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source symlink refused", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						}
+						rec := task.reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = "source.symlink.refused"
+						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						continue
+					}
 				}
 
 				_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "in_progress"))
@@ -2978,6 +3040,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 	// Feed tasks from stdin / positional.
 	var inputErr error
+	srcIdentity := ""
 	if reflowStdin {
 		s := bufio.NewScanner(cmd.InOrStdin())
 		s.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -3002,7 +3065,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			inputErr = err
 		}
 	} else {
-		srcIdentity, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)
+		_, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)
 		if inputErr != nil && recordFatalReflowError(inputErr) {
 			inputErr = nil
 		}
@@ -3121,7 +3184,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 				srcURI = fileURI(filepath.Join(sourceRoot, filepath.FromSlash(key)))
 			}
 			select {
-			case out <- reflowTask{SourceProvider: base.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes, SourceLastMod: data.LastModified}:
+			case out <- reflowTask{SourceProvider: base.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.ETag, SourceSize: data.SizeBytes, SourceLastMod: data.LastModified, RejectSymlinkPath: base.Provider == string(provider.ProviderFile)}:
 				return srcIdentity, nil
 			case <-ctx.Done():
 				return srcIdentity, ctx.Err()
@@ -3204,7 +3267,7 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 				return srcIdentity, fmt.Errorf("quarantine_prefix must be a relative destination prefix")
 			}
 			select {
-			case out <- reflowTask{SourceProvider: u.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix}:
+			case out <- reflowTask{SourceProvider: u.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix, RejectSymlinkPath: u.Provider == string(provider.ProviderFile)}:
 				return srcIdentity, nil
 			case <-ctx.Done():
 				return srcIdentity, ctx.Err()

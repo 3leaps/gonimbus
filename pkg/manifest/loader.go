@@ -72,6 +72,10 @@ func LoadFromBytes(data []byte, path string) (*Manifest, error) {
 		return nil, err
 	}
 
+	if err := validateConnectionSemantics(manifest); err != nil {
+		return nil, err
+	}
+
 	// Apply defaults
 	manifest.ApplyDefaults()
 
@@ -130,6 +134,32 @@ func parseYAML(data []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("invalid YAML in manifest: %w", err)
 	}
 	return &manifest, nil
+}
+
+func validateConnectionSemantics(m *Manifest) error {
+	if m == nil {
+		return errors.New("manifest is nil")
+	}
+	switch strings.TrimSpace(m.Connection.Provider) {
+	case "s3":
+		if strings.TrimSpace(m.Connection.Bucket) == "" {
+			return fmt.Errorf("connection.bucket is required when connection.provider=s3")
+		}
+	case "file":
+		baseDir := strings.TrimSpace(m.Connection.BaseDir)
+		if baseDir == "" {
+			return fmt.Errorf("connection.base_dir is required when connection.provider=file")
+		}
+		if !filepath.IsAbs(baseDir) {
+			return fmt.Errorf("connection.base_dir must be absolute when connection.provider=file")
+		}
+		if filepath.Clean(baseDir) != baseDir {
+			return fmt.Errorf("connection.base_dir must be clean when connection.provider=file")
+		}
+	default:
+		return fmt.Errorf("unsupported connection.provider %q", m.Connection.Provider)
+	}
+	return nil
 }
 
 // toJSON converts the input data to JSON format for schema validation.
