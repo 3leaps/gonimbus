@@ -65,3 +65,22 @@ controls.
 `--symlinks=preserve`, hardlink preservation, xattrs, and TOCTOU-resistant
 opens are intentionally outside the current provider interface and need their
 own capability design if they become required.
+
+File-backed crawl selection defaults to a fail-closed filesystem posture:
+selected keys are always relative to the configured local root, symlinks are not
+listed by default, and non-regular files are skipped. Key relativity prevents
+absolute-path leakage in ordinary object records, but it is not the same as
+content-origin confinement; traversal policy must also ensure selected bytes
+come from inside the configured root.
+
+The crawl `--emit reflow-input` mode is a pipe-internal adapter for
+`transfer reflow --stdin`. Its `source_uri` field carries the exact local
+`file:///...` path needed for the transfer process to open the selected file.
+Destination-written artifacts such as provenance sidecars and normal reflow
+records use the redacted `file://local/<relative-path>` form instead.
+
+File-backed selection is faithful to the manifest allow-list. It does not treat
+ignored files, dotfiles, or credential-like filenames as special security
+controls. If those files match the manifest selection, their contents are in
+scope for transfer. Operators must express exclusions explicitly; gitignore
+support is a separate future policy layer, not a confidentiality boundary.

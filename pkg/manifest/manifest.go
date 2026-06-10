@@ -51,13 +51,16 @@ type Manifest struct {
 	Output OutputConfig `json:"output,omitempty" yaml:"output,omitempty"`
 }
 
-// ConnectionConfig configures the cloud storage provider connection.
+// ConnectionConfig configures the storage provider connection.
 type ConnectionConfig struct {
-	// Provider is the storage provider type. Currently only "s3" is supported.
+	// Provider is the storage provider type.
 	Provider string `json:"provider" yaml:"provider"`
 
-	// Bucket is the bucket name to crawl.
-	Bucket string `json:"bucket" yaml:"bucket"`
+	// Bucket is the bucket name to crawl for object-store providers.
+	Bucket string `json:"bucket,omitempty" yaml:"bucket,omitempty"`
+
+	// BaseDir is the absolute local root for provider=file crawl manifests.
+	BaseDir string `json:"base_dir,omitempty" yaml:"base_dir,omitempty"`
 
 	// Region is the AWS region (e.g., "us-east-1"). Optional.
 	Region string `json:"region,omitempty" yaml:"region,omitempty"`

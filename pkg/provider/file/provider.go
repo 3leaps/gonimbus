@@ -601,6 +601,13 @@ func (p *Provider) collectKeys(prefix string) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
 		rel, err := filepath.Rel(p.baseDir, path)
 		if err != nil {
 			return nil

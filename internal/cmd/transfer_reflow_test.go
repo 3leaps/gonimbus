@@ -1096,7 +1096,7 @@ func TestTransferReflowCommand_FileSourceVerboseEmitsAbsoluteSourceRootOnlyWhenO
 func TestTransferReflowCommand_FileReflowInputAcceptsMultipleExactRecordsFromSameRoot(t *testing.T) {
 	withTransferReflowTestState(t)
 
-	srcDir := t.TempDir()
+	srcDir := mustEvalSymlinks(t, t.TempDir())
 	destDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("alpha"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte("bravo"), 0o644))
@@ -1134,6 +1134,102 @@ func TestTransferReflowCommand_FileReflowInputAcceptsMultipleExactRecordsFromSam
 	require.Contains(t, stdout.String(), `"source_uri":"file://local/a.txt"`)
 	require.Contains(t, stdout.String(), `"source_uri":"file://local/b.txt"`)
 	require.NotContains(t, stdout.String(), srcDir)
+}
+
+func TestTransferReflowCommand_FileReflowInputRejectsSymlinkPaths(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	srcDir := mustEvalSymlinks(t, t.TempDir())
+	outsideDir := mustEvalSymlinks(t, t.TempDir())
+	destDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "target.txt"), []byte("target"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "target.txt"), filepath.Join(srcDir, "link.txt")))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(srcDir, "alias")))
+
+	line := func(sourceKey string) string {
+		data := map[string]any{
+			"source_uri":        fileURI(filepath.Join(srcDir, filepath.FromSlash(sourceKey))),
+			"source_key":        sourceKey,
+			"dest_rel_key":      sourceKey,
+			"source_size_bytes": int64(6),
+		}
+		b, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+		require.NoError(t, err)
+		return string(b)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(line("link.txt") + "\n" + line("alias/secret.txt") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.NoFileExists(t, filepath.Join(destDir, "link.txt"))
+	require.NoFileExists(t, filepath.Join(destDir, "alias", "secret.txt"))
+
+	records := requireReflowRecords(t, stdout.String())
+	requireReflowStatusReasonCount(t, records, "failed", "source.symlink.refused", 2)
+	requireReflowStatusReasonCount(t, records, "in_progress", "", 0)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/link.txt"`)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/alias/secret.txt"`)
+	require.NotContains(t, stdout.String(), srcDir)
+	require.NotContains(t, stdout.String(), outsideDir)
+}
+
+func TestTransferReflowCommand_FileReflowInputRejectsParentSymlinkPath(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	realRoot := mustEvalSymlinks(t, t.TempDir())
+	linkParent := filepath.Join(mustEvalSymlinks(t, t.TempDir()), "linked-source")
+	destDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(realRoot, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realRoot, "sub", "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Symlink(realRoot, linkParent))
+
+	data := map[string]any{
+		"source_uri":        fileURI(filepath.Join(linkParent, "sub", "secret.txt")),
+		"source_key":        "secret.txt",
+		"dest_rel_key":      "secret.txt",
+		"source_size_bytes": int64(6),
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	require.NoError(t, err)
+
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(bytes.NewReader(append(line, '\n')))
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(destDir) + "/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	})
+
+	err = cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.NoFileExists(t, filepath.Join(destDir, "secret.txt"))
+
+	records := requireReflowRecords(t, stdout.String())
+	requireReflowStatusReasonCount(t, records, "failed", "source.symlink.refused", 1)
+	requireReflowStatusReasonCount(t, records, "in_progress", "", 0)
+	require.Contains(t, stdout.String(), `"source_uri":"file://local/secret.txt"`)
+	require.NotContains(t, stdout.String(), realRoot)
+	require.NotContains(t, stdout.String(), linkParent)
 }
 
 func TestTransferReflowCommand_FileSourceResumeUsesRelativeCheckpointIdentityAcrossVerboseAndMovedRoot(t *testing.T) {
@@ -3240,6 +3336,13 @@ func mustReadFile(t *testing.T, path string) []byte {
 	data, err := os.ReadFile(path) // #nosec G304 -- tests read paths created under t.TempDir().
 	require.NoError(t, err)
 	return data
+}
+
+func mustEvalSymlinks(t *testing.T, path string) string {
+	t.Helper()
+	realPath, err := filepath.EvalSymlinks(path)
+	require.NoError(t, err)
+	return realPath
 }
 
 func readCheckpointErrorMessage(t *testing.T, path string) string {

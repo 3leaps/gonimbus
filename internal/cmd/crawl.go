@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
@@ -12,12 +17,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/preflight"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var crawlCmd = &cobra.Command{
@@ -43,6 +50,17 @@ var (
 	crawlDryRun        bool
 	crawlPlan          bool
 	crawlPreflightMode string
+	crawlEmit          string
+	crawlSelectionSum  string
+	crawlMinObjects    int64
+	crawlMaxBytes      int64
+)
+
+const (
+	crawlEmitObject       = "object"
+	crawlEmitReflowInput  = "reflow-input"
+	crawlReflowInputType  = "gonimbus.reflow.input.v1"
+	crawlSelectionSumType = "gonimbus.selection.summary.v1"
 )
 
 func init() {
@@ -54,6 +72,10 @@ func init() {
 	crawlCmd.Flags().BoolVar(&crawlDryRun, "dry-run", false, "Validate manifest and show plan without executing")
 	crawlCmd.Flags().BoolVar(&crawlPlan, "plan", false, "Alias for --dry-run")
 	crawlCmd.Flags().StringVar(&crawlPreflightMode, "preflight", "", "Override preflight mode (plan-only|read-safe|write-probe)")
+	crawlCmd.Flags().StringVar(&crawlEmit, "emit", crawlEmitObject, "Output mode: object|reflow-input")
+	crawlCmd.Flags().StringVar(&crawlSelectionSum, "selection-summary", "", "Write gonimbus.selection.summary.v1 JSONL side output for --emit reflow-input")
+	crawlCmd.Flags().Int64Var(&crawlMinObjects, "min-objects", 0, "Fail before streaming reflow input if selected object count is below this value")
+	crawlCmd.Flags().Int64Var(&crawlMaxBytes, "max-bytes", 0, "Fail before streaming reflow input if selected bytes exceed this value")
 
 	_ = crawlCmd.MarkFlagRequired("job")
 }
@@ -96,6 +118,9 @@ func runCrawl(cmd *cobra.Command, args []string) error {
 		enabled := false
 		m.Output.Progress = &enabled
 	}
+	if err := validateCrawlEmitFlags(); err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid crawl output mode", err)
+	}
 
 	// Plan mode: show plan and exit
 	if crawlPlan || crawlDryRun {
@@ -104,6 +129,34 @@ func runCrawl(cmd *cobra.Command, args []string) error {
 
 	// Execute crawl
 	return executeCrawl(ctx, m)
+}
+
+func validateCrawlEmitFlags() error {
+	switch crawlEmit {
+	case "", crawlEmitObject:
+		crawlEmit = crawlEmitObject
+	case crawlEmitReflowInput:
+	default:
+		return fmt.Errorf("--emit must be one of: object, reflow-input")
+	}
+	if crawlMinObjects < 0 {
+		return fmt.Errorf("--min-objects must be >= 0")
+	}
+	if crawlMaxBytes < 0 {
+		return fmt.Errorf("--max-bytes must be >= 0")
+	}
+	if crawlEmit != crawlEmitReflowInput {
+		if crawlSelectionSum != "" {
+			return fmt.Errorf("--selection-summary requires --emit reflow-input")
+		}
+		if crawlMinObjects > 0 {
+			return fmt.Errorf("--min-objects requires --emit reflow-input")
+		}
+		if crawlMaxBytes > 0 {
+			return fmt.Errorf("--max-bytes requires --emit reflow-input")
+		}
+	}
+	return nil
 }
 
 // showCrawlPlan displays what would be crawled without executing.
@@ -202,6 +255,10 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 	}
 	defer cleanup()
 
+	if crawlEmit == crawlEmitReflowInput {
+		return executeCrawlReflowInput(ctx, m, prov, matcher, filter, writer, jobID)
+	}
+
 	// Preflight checks (plan-only/read-safe/write-probe)
 	pfSpec := preflight.Spec{
 		Mode:          preflight.Mode(m.Crawl.Preflight.Mode),
@@ -259,6 +316,146 @@ func executeCrawl(ctx context.Context, m *manifest.Manifest) error {
 	return nil
 }
 
+type crawlSelectionSummary struct {
+	ObjectsSelected int64  `json:"objects_selected"`
+	BytesTotal      int64  `json:"bytes_total"`
+	MinObjects      int64  `json:"min_objects,omitempty"`
+	MaxBytes        int64  `json:"max_bytes,omitempty"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+func executeCrawlReflowInput(ctx context.Context, m *manifest.Manifest, prov provider.Provider, matcher *match.Matcher, filter *match.CompositeFilter, writer output.Writer, jobID string) error {
+	spool, err := os.CreateTemp("", "gonimbus-selection-*.jsonl")
+	if err != nil {
+		return exitError(foundry.ExitFileWriteError, "Failed to create selection spool", err)
+	}
+	spoolPath := spool.Name()
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spoolPath)
+	}()
+
+	summary, err := spoolCrawlReflowSelection(ctx, m, prov, matcher, filter, spool)
+	if err != nil {
+		return exitError(foundry.ExitExternalServiceUnavailable, "Crawl selection failed", err)
+	}
+
+	summary.Status = "ok"
+	if crawlMinObjects > 0 && summary.ObjectsSelected < crawlMinObjects {
+		summary.Status = "failed"
+		summary.Reason = "min_objects"
+		_ = writeCrawlSelectionSummary(ctx, m, jobID, summary)
+		return exitError(foundry.ExitInvalidArgument, "Crawl selection below minimum object threshold", fmt.Errorf("selected_objects=%d min_objects=%d", summary.ObjectsSelected, crawlMinObjects))
+	}
+	if crawlMaxBytes > 0 && summary.BytesTotal > crawlMaxBytes {
+		summary.Status = "failed"
+		summary.Reason = "max_bytes"
+		_ = writeCrawlSelectionSummary(ctx, m, jobID, summary)
+		return exitError(foundry.ExitInvalidArgument, "Crawl selection exceeds maximum byte threshold", fmt.Errorf("selected_bytes=%d max_bytes=%d", summary.BytesTotal, crawlMaxBytes))
+	}
+	if err := writeCrawlSelectionSummary(ctx, m, jobID, summary); err != nil {
+		return exitError(foundry.ExitFileWriteError, "Failed to write selection summary", err)
+	}
+
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return exitError(foundry.ExitFileReadError, "Failed to read selection spool", err)
+	}
+	scanner := bufio.NewScanner(spool)
+	for scanner.Scan() {
+		var rec reflowInputRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			return exitError(foundry.ExitFailure, "Failed to decode selection spool", err)
+		}
+		jsonl, ok := writer.(*output.JSONLWriter)
+		if !ok {
+			return exitError(foundry.ExitFailure, "Unsupported crawl writer", fmt.Errorf("writer does not support custom records"))
+		}
+		if err := jsonl.WriteAny(ctx, crawlReflowInputType, &rec); err != nil {
+			return exitError(foundry.ExitFileWriteError, "Failed to write reflow input", err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return exitError(foundry.ExitFileReadError, "Failed to read selection spool", err)
+	}
+	return nil
+}
+
+func spoolCrawlReflowSelection(ctx context.Context, m *manifest.Manifest, prov provider.Provider, matcher *match.Matcher, filter *match.CompositeFilter, spool io.Writer) (crawlSelectionSummary, error) {
+	summary := crawlSelectionSummary{MinObjects: crawlMinObjects, MaxBytes: crawlMaxBytes}
+	enc := json.NewEncoder(spool)
+	for _, prefix := range matcher.Prefixes() {
+		var token string
+		for {
+			res, err := prov.List(ctx, provider.ListOptions{Prefix: prefix, ContinuationToken: token})
+			if err != nil {
+				return summary, err
+			}
+			for _, obj := range res.Objects {
+				if !matcher.Match(obj.Key) {
+					continue
+				}
+				if filter != nil && !filter.Match(&obj) {
+					continue
+				}
+				rec := crawlReflowRecordForObject(m, obj)
+				if err := enc.Encode(&rec); err != nil {
+					return summary, err
+				}
+				summary.ObjectsSelected++
+				summary.BytesTotal += obj.Size
+			}
+			if !res.IsTruncated {
+				break
+			}
+			token = res.ContinuationToken
+			if token == "" {
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return summary, err
+			}
+		}
+	}
+	return summary, nil
+}
+
+func crawlReflowRecordForObject(m *manifest.Manifest, obj provider.ObjectSummary) reflowInputRecord {
+	key := strings.TrimPrefix(obj.Key, "/")
+	sourceURI := fmt.Sprintf("%s://%s/%s", m.Connection.Provider, m.Connection.Bucket, key)
+	if m.Connection.Provider == string(provider.ProviderFile) {
+		sourceURI = fileURI(filepath.Join(m.Connection.BaseDir, filepath.FromSlash(key)))
+	}
+	var lastMod *time.Time
+	if !obj.LastModified.IsZero() {
+		t := obj.LastModified.UTC()
+		lastMod = &t
+	}
+	return reflowInputRecord{
+		SourceURI:     sourceURI,
+		SourceKey:     key,
+		SourceETag:    obj.ETag,
+		SourceSize:    obj.Size,
+		SourceLastMod: lastMod,
+		DestRelKey:    key,
+	}
+}
+
+func writeCrawlSelectionSummary(ctx context.Context, m *manifest.Manifest, jobID string, summary crawlSelectionSummary) error {
+	if crawlSelectionSum == "" {
+		return nil
+	}
+	path := strings.TrimPrefix(crawlSelectionSum, "file:")
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	w := output.NewJSONLWriter(f, jobID, m.Connection.Provider)
+	defer func() { _ = w.Close() }()
+	return w.WriteAny(ctx, crawlSelectionSumType, &summary)
+}
+
 func buildCrawlFilter(m *manifest.Manifest) (*match.CompositeFilter, error) {
 	if m.Match.Filters == nil {
 		return nil, nil
@@ -287,17 +484,27 @@ func buildCrawlFilter(m *manifest.Manifest) (*match.CompositeFilter, error) {
 }
 
 // createProvider creates a storage provider from manifest configuration.
-func createProvider(ctx context.Context, m *manifest.Manifest) (*s3.Provider, error) {
-	cfg := s3.Config{
+func createProvider(ctx context.Context, m *manifest.Manifest) (provider.Provider, error) {
+	src := &uri.ObjectURI{
+		Provider: m.Connection.Provider,
 		Bucket:   m.Connection.Bucket,
-		Region:   m.Connection.Region,
-		Endpoint: m.Connection.Endpoint,
-		Profile:  m.Connection.Profile,
-		// Force path-style URLs when custom endpoint is set.
-		// S3-compatible services (moto, MinIO, etc.) require this.
-		ForcePathStyle: m.Connection.Endpoint != "",
 	}
-	return s3.New(ctx, cfg)
+	opts := providerdispatch.SourceOptions{
+		Command: "crawl",
+		S3: providerdispatch.S3Options{
+			Region:         m.Connection.Region,
+			Endpoint:       m.Connection.Endpoint,
+			Profile:        m.Connection.Profile,
+			ForcePathStyle: m.Connection.Endpoint != "",
+		},
+	}
+	if m.Connection.Provider == string(provider.ProviderFile) {
+		baseDir := filepath.Clean(m.Connection.BaseDir)
+		src.Bucket = "local"
+		src.Key = baseDir
+		opts.FileBaseDir = baseDir
+	}
+	return providerdispatch.NewSource(ctx, src, opts)
 }
 
 // createWriter creates an output writer from manifest configuration.

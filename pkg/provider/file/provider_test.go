@@ -117,6 +117,24 @@ func TestGetObjectVersionedReturnsOpaqueLocalVersion(t *testing.T) {
 	require.NotEmpty(t, meta.ETag)
 }
 
+func TestListSkipsSymlinksByDefault(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "nested", "keep.txt"), []byte("keep"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(baseDir, "nested", "link.txt")))
+
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+
+	res, err := p.List(ctx, provider.ListOptions{Prefix: ""})
+	require.NoError(t, err)
+	require.Len(t, res.Objects, 1)
+	require.Equal(t, "nested/keep.txt", res.Objects[0].Key)
+}
+
 func TestHeadReturnsIfMatchVersionToken(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()

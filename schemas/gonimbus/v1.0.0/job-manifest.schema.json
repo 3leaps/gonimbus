@@ -36,24 +36,65 @@
   "$defs": {
     "connection": {
       "type": "object",
-      "description": "Cloud storage connection configuration",
+      "description": "Storage connection configuration",
       "required": [
-        "provider",
-        "bucket"
+        "provider"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "s3"
+              }
+            },
+            "required": [
+              "provider"
+            ]
+          },
+          "then": {
+            "required": [
+              "bucket"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "provider"
+            ]
+          },
+          "then": {
+            "required": [
+              "base_dir"
+            ]
+          }
+        }
       ],
       "additionalProperties": false,
       "properties": {
         "provider": {
           "type": "string",
           "enum": [
-            "s3"
+            "s3",
+            "file"
           ],
           "description": "Storage provider type"
         },
         "bucket": {
           "type": "string",
           "minLength": 1,
-          "description": "Bucket name"
+          "description": "Bucket name for object-store providers"
+        },
+        "base_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local root for provider=file crawl manifests"
         },
         "region": {
           "type": "string",

@@ -138,6 +138,7 @@ type reflowInputRecord struct {
 	SourceSize       int64             `json:"source_size_bytes,omitempty"`
 	SourceLastMod    *time.Time        `json:"source_last_modified,omitempty"`
 	Vars             map[string]string `json:"vars,omitempty"`
+	DestRelKey       string            `json:"dest_rel_key,omitempty"`
 	RoutingClass     string            `json:"routing_class,omitempty"`
 	QuarantinePrefix string            `json:"quarantine_prefix,omitempty"`
 	Probe            *probe.ProbeAudit `json:"probe,omitempty"`
