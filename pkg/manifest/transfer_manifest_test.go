@@ -70,3 +70,27 @@ transfer:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown_field")
 }
+
+func TestLoadTransferFromBytes_FileSourceRedirectsToCrawlReflowPipe(t *testing.T) {
+	raw := `version: "1.0"
+source:
+  provider: file
+  base_dir: /tmp/source
+
+target:
+  provider: s3
+  bucket: dst-bucket
+
+match:
+  includes:
+    - "**/*"
+
+transfer: {}
+`
+
+	_, err := LoadTransferFromBytes([]byte(raw), "transfer.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider=file sources")
+	assert.Contains(t, err.Error(), "crawl --job <file-manifest> --emit reflow-input")
+	assert.Contains(t, err.Error(), "transfer reflow --stdin")
+}

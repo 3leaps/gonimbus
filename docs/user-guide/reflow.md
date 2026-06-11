@@ -511,6 +511,12 @@ gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.tx
   | gonimbus transfer reflow --stdin --dest 's3://dest/' --rewrite-from '...' --rewrite-to '...'
 ```
 
+When stdin records already carry `dest_rel_key`, such as records emitted by
+`crawl --emit reflow-input`, `transfer reflow --stdin` can omit
+`--rewrite-from` and `--rewrite-to`. Stdin records without `dest_rel_key`, such
+as legacy index-object records or probe records that only carry vars, still need
+rewrite templates.
+
 For large jobs (100K+ objects), write intermediate JSONL to a file for checkpoint/resume capability.
 
 ## See Also

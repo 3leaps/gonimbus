@@ -32,6 +32,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
@@ -756,7 +757,12 @@ func buildReflowDestKey(dest *reflowDestSpec, destRel string) string {
 		key = strings.ReplaceAll(key, "//", "/")
 		return key
 	case string(provider.ProviderFile):
-		return destRel
+		key := filepath.Clean("/" + filepath.FromSlash(destRel))
+		key = strings.TrimPrefix(key, string(filepath.Separator))
+		if key == "." {
+			return ""
+		}
+		return filepath.ToSlash(key)
 	default:
 		return destRel
 	}
@@ -1775,6 +1781,40 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 	return summary, nil
 }
 
+func runS3ReflowDryRunPreflight(ctx context.Context, w output.Writer, dst provider.Provider, dest *reflowDestSpec) error {
+	probePrefix := strings.TrimPrefix(dest.Prefix, "/")
+	if probePrefix != "" && !strings.HasSuffix(probePrefix, "/") {
+		probePrefix += "/"
+	}
+	probePrefix += ".gonimbus-preflight/"
+
+	if IsReadOnly() {
+		rec := &output.PreflightRecord{
+			Mode:          string(preflight.ModeWriteProbe),
+			ProbeStrategy: string(preflight.ProbePutDelete),
+			ProbePrefix:   probePrefix,
+			Results: []output.PreflightCheckResult{{
+				Capability: preflight.CapTargetWrite,
+				Allowed:    false,
+				Method:     "PutObjectConditional(IfAbsent,0 bytes)+DeleteObject",
+				ErrorCode:  "READONLY",
+				Detail:     "readonly mode enabled: refusing destination S3 write probe",
+			}},
+		}
+		return w.WritePreflight(ctx, rec)
+	}
+
+	rec, err := preflight.WriteProbe(ctx, dst, preflight.Spec{
+		Mode:          preflight.ModeWriteProbe,
+		ProbeStrategy: preflight.ProbePutDelete,
+		ProbePrefix:   probePrefix,
+	})
+	if writeErr := w.WritePreflight(ctx, rec); writeErr != nil {
+		return writeErr
+	}
+	return err
+}
+
 func summarizeFileSource(ctx context.Context, root string, srcCfg reflowSourceConfig, summary *reflowFilePreflightSummary) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -2314,11 +2354,15 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if strings.TrimSpace(reflowDest) == "" {
 		return exitError(foundry.ExitInvalidArgument, "Missing --dest", fmt.Errorf("--dest is required"))
 	}
-	if strings.TrimSpace(reflowRewriteFrom) == "" {
-		return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-from", fmt.Errorf("--rewrite-from is required"))
-	}
-	if strings.TrimSpace(reflowRewriteTo) == "" {
-		return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-to", fmt.Errorf("--rewrite-to is required"))
+	rewriteFromSet := strings.TrimSpace(reflowRewriteFrom) != ""
+	rewriteToSet := strings.TrimSpace(reflowRewriteTo) != ""
+	if !reflowStdin || rewriteFromSet || rewriteToSet {
+		if !rewriteFromSet {
+			return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-from", fmt.Errorf("--rewrite-from is required when --rewrite-to is set or when not using --stdin"))
+		}
+		if !rewriteToSet {
+			return exitError(foundry.ExitInvalidArgument, "Missing --rewrite-to", fmt.Errorf("--rewrite-to is required when --rewrite-from is set or when not using --stdin"))
+		}
 	}
 	collCfg, err := resolveCollisionConfig(cmd)
 	if err != nil {
@@ -2357,9 +2401,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	emitProvenancePlacementWarnings(cmd.ErrOrStderr(), destSpec, provCfg)
 
-	rewrite, err := transfer.CompileReflowRewrite(reflowRewriteFrom, reflowRewriteTo)
-	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid rewrite templates", err)
+	var rewrite *transfer.ReflowRewrite
+	if rewriteFromSet && rewriteToSet {
+		rewrite, err = transfer.CompileReflowRewrite(reflowRewriteFrom, reflowRewriteTo)
+		if err != nil {
+			return exitError(foundry.ExitInvalidArgument, "Invalid rewrite templates", err)
+		}
 	}
 	cmd.SilenceUsage = true
 
@@ -2410,6 +2457,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			"on_collision":       collCfg.Mode,
 			"provider":           destSpec.Provider,
 		})
+	}
+
+	if reflowDryRun && destSpec.Provider == string(provider.ProviderS3) {
+		if err := runS3ReflowDryRunPreflight(ctx, w, dstProv, destSpec); err != nil {
+			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
+		}
 	}
 
 	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
@@ -2567,6 +2620,15 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				} else if task.DestRelKey != "" {
 					destRel = task.DestRelKey
 				} else {
+					if rewrite == nil {
+						invalidCount.Add(1)
+						err := fmt.Errorf("stdin record lacks dest_rel_key and no rewrite templates were supplied")
+						_ = emitReflowInputError(context.Background(), w, task.SourceKey, "destination mapping unavailable", err, map[string]any{"source_uri": srcAuditURI})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: "", SourceKey: task.SourceKey, DestKey: "", SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						}
+						continue
+					}
 					mapped, _, err := rewrite.ApplyWithVars(task.SourceKey, task.Vars)
 					if err != nil {
 						invalidCount.Add(1)
@@ -3580,6 +3642,14 @@ func isRelativeQuarantinePrefix(prefix string) bool {
 }
 
 func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
+	return emitReflowErrorWithCode(ctx, w, reflowErrCode(err), key, msg, err, details)
+}
+
+func emitReflowInputError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
+	return emitReflowErrorWithCode(ctx, w, output.ErrCodeInvalidInput, key, msg, err, details)
+}
+
+func emitReflowErrorWithCode(ctx context.Context, w output.Writer, code string, key, msg string, err error, details map[string]any) error {
 	if details == nil {
 		details = map[string]any{}
 	}
@@ -3589,7 +3659,6 @@ func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err 
 		delete(details, "collision")
 	}
 	details["mode"] = "transfer_reflow"
-	code := reflowErrCode(err)
 	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Key: key, Details: details, Collision: collision}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow error record", zap.Error(werr))
 	}

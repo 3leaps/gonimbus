@@ -146,20 +146,22 @@ func WriteProbe(ctx context.Context, prov provider.Provider, spec Spec) (*output
 		})
 		return rec, nil
 	case ProbePutDelete:
-		putter, ok := prov.(provider.ObjectPutter)
-		if !ok {
-			return rec, fmt.Errorf("provider does not support put-object write probes")
-		}
 		deleter, ok := prov.(provider.ObjectDeleter)
 		if !ok {
 			return rec, fmt.Errorf("provider does not support delete-object write probes")
 		}
 
-		if err := putter.PutObject(ctx, key, strings.NewReader(""), 0); err != nil {
+		putter, ok := prov.(provider.ConditionalPutter)
+		if !ok {
+			return rec, fmt.Errorf("provider does not support conditional put-object write probes")
+		}
+
+		method := "PutObjectConditional(IfAbsent,0 bytes)"
+		if _, err := putter.PutObjectConditional(ctx, key, strings.NewReader(""), 0, provider.PutPrecondition{IfAbsent: true}); err != nil {
 			rec.Results = append(rec.Results, output.PreflightCheckResult{
 				Capability: CapTargetWrite,
 				Allowed:    false,
-				Method:     "PutObject(0 bytes)",
+				Method:     method,
 				ErrorCode:  normalizeErrorCode(err),
 				Detail:     err.Error(),
 			})
@@ -180,7 +182,7 @@ func WriteProbe(ctx context.Context, prov provider.Provider, spec Spec) (*output
 		rec.Results = append(rec.Results, output.PreflightCheckResult{
 			Capability: CapTargetWrite,
 			Allowed:    true,
-			Method:     "PutObject(0 bytes)",
+			Method:     method,
 		})
 		rec.Results = append(rec.Results, output.PreflightCheckResult{
 			Capability: CapTargetDelete,

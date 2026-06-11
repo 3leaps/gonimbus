@@ -103,6 +103,9 @@ come from inside the configured root.
 The crawl `--emit reflow-input` mode is a pipe-internal adapter for
 `transfer reflow --stdin`. Its `source_uri` field carries the exact local
 `file:///...` path needed for the transfer process to open the selected file.
+For file manifests, that URI is emitted under the resolved source root so a
+symlinked root such as `/tmp/...` does not make crawl accept a file that reflow
+then refuses.
 Destination-written artifacts such as provenance sidecars and normal reflow
 records use the redacted `file://local/<relative-path>` form instead.
 

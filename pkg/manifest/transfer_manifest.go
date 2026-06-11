@@ -226,6 +226,9 @@ func LoadTransferFromBytes(data []byte, path string) (*TransferManifest, error) 
 		return nil, err
 	}
 
+	if err := rejectTransferFileSource(jsonData); err != nil {
+		return nil, err
+	}
 	if err := ValidateTransferRaw(jsonData); err != nil {
 		return nil, err
 	}
@@ -237,6 +240,21 @@ func LoadTransferFromBytes(data []byte, path string) (*TransferManifest, error) 
 
 	manifest.ApplyDefaults()
 	return manifest, nil
+}
+
+func rejectTransferFileSource(jsonData []byte) error {
+	var raw struct {
+		Source struct {
+			Provider string `json:"provider"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(jsonData, &raw); err != nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(raw.Source.Provider), "file") {
+		return fmt.Errorf("transfer manifests do not support provider=file sources yet; use `gonimbus crawl --job <file-manifest> --emit reflow-input | gonimbus transfer reflow --stdin --dest <dest-uri>` for file-source backups")
+	}
+	return nil
 }
 
 func parseTransferManifest(data []byte, path string) (*TransferManifest, error) {

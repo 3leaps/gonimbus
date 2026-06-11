@@ -384,6 +384,14 @@ func executeCrawlReflowInput(ctx context.Context, m *manifest.Manifest, prov pro
 func spoolCrawlReflowSelection(ctx context.Context, m *manifest.Manifest, prov provider.Provider, matcher *match.Matcher, filter *match.CompositeFilter, spool io.Writer) (crawlSelectionSummary, error) {
 	summary := crawlSelectionSummary{MinObjects: crawlMinObjects, MaxBytes: crawlMaxBytes}
 	enc := json.NewEncoder(spool)
+	sourceBaseDir := strings.TrimSpace(m.Connection.BaseDir)
+	if m.Connection.Provider == string(provider.ProviderFile) {
+		resolved, err := filepath.EvalSymlinks(sourceBaseDir)
+		if err != nil {
+			return summary, fmt.Errorf("resolve file source base_dir: %w", err)
+		}
+		sourceBaseDir = filepath.Clean(resolved)
+	}
 	for _, prefix := range matcher.Prefixes() {
 		var token string
 		for {
@@ -398,7 +406,7 @@ func spoolCrawlReflowSelection(ctx context.Context, m *manifest.Manifest, prov p
 				if filter != nil && !filter.Match(&obj) {
 					continue
 				}
-				rec := crawlReflowRecordForObject(m, obj)
+				rec := crawlReflowRecordForObject(m, sourceBaseDir, obj)
 				if err := enc.Encode(&rec); err != nil {
 					return summary, err
 				}
@@ -420,11 +428,11 @@ func spoolCrawlReflowSelection(ctx context.Context, m *manifest.Manifest, prov p
 	return summary, nil
 }
 
-func crawlReflowRecordForObject(m *manifest.Manifest, obj provider.ObjectSummary) reflowInputRecord {
+func crawlReflowRecordForObject(m *manifest.Manifest, sourceBaseDir string, obj provider.ObjectSummary) reflowInputRecord {
 	key := strings.TrimPrefix(obj.Key, "/")
 	sourceURI := fmt.Sprintf("%s://%s/%s", m.Connection.Provider, m.Connection.Bucket, key)
 	if m.Connection.Provider == string(provider.ProviderFile) {
-		sourceURI = fileURI(filepath.Join(m.Connection.BaseDir, filepath.FromSlash(key)))
+		sourceURI = fileURI(filepath.Join(sourceBaseDir, filepath.FromSlash(key)))
 	}
 	var lastMod *time.Time
 	if !obj.LastModified.IsZero() {

@@ -265,6 +265,27 @@ func TestCrawlFileReflowInputSelectionSummaryAndGuard(t *testing.T) {
 	require.Equal(t, "max_bytes", failed.Reason)
 }
 
+func TestCrawlFileReflowInputEmitsResolvedFileSourceURI(t *testing.T) {
+	withCrawlTestState(t)
+
+	realRoot := mustEvalSymlinks(t, t.TempDir())
+	require.NoError(t, os.WriteFile(filepath.Join(realRoot, "keep.txt"), []byte("keep"), 0o644))
+	linkRoot := filepath.Join(t.TempDir(), "linked-root")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	crawlEmit = crawlEmitReflowInput
+	stdout, err := runCrawlManifestForTest(t, crawlFileManifest(linkRoot))
+	require.NoError(t, err)
+
+	records := parseCrawlReflowInputRecords(t, stdout)
+	require.Len(t, records, 1)
+	require.Equal(t, "keep.txt", records[0].SourceKey)
+	require.Equal(t, fileURI(filepath.Join(realRoot, "keep.txt")), records[0].SourceURI)
+	require.NotContains(t, records[0].SourceURI, filepath.ToSlash(linkRoot))
+}
+
 func TestCrawlFileReflowInputPipesToTransferReflowWithRedactedSidecar(t *testing.T) {
 	withCrawlTestState(t)
 
@@ -283,8 +304,6 @@ func TestCrawlFileReflowInputPipesToTransferReflowWithRedactedSidecar(t *testing
 	cmd.SetArgs([]string{
 		"--stdin",
 		"--dest", fileURI(destDir) + "/",
-		"--rewrite-from", "{key}",
-		"--rewrite-to", "{key}",
 		"--parallel", "1",
 		"--provenance", "sidecar",
 	})
