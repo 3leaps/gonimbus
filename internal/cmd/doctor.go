@@ -18,6 +18,7 @@ import (
 
 	errwrap "github.com/3leaps/gonimbus/internal/errors"
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providers3 "github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -32,8 +33,8 @@ var (
 	doctorRegion    string
 	doctorProbeURI  string
 
-	newDoctorS3ProbeProvider = func(ctx context.Context, cfg providers3.Config) (doctorS3ProbeProvider, error) {
-		return providers3.New(ctx, cfg)
+	newDoctorProbeProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (doctorS3ProbeProvider, error) {
+		return providerdispatch.NewSource(ctx, src, opts)
 	}
 )
 
@@ -52,11 +53,11 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(doctorCmd)
-	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "", "Run provider-specific checks (s3)")
+	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "", "Run provider-specific checks (s3|file)")
 	doctorCmd.Flags().StringVar(&doctorProfile, "profile", "", "AWS profile to check (requires --provider s3)")
 	doctorCmd.Flags().StringVar(&doctorEndpoint, "endpoint", "", "Custom S3 endpoint (requires --provider s3)")
 	doctorCmd.Flags().StringVar(&doctorRegion, "region", "", "AWS region (requires --provider s3)")
-	doctorCmd.Flags().StringVar(&doctorProbeURI, "probe-uri", "", "Opt-in read-only S3 probe target (s3://bucket[/prefix-or-key], requires --provider s3)")
+	doctorCmd.Flags().StringVar(&doctorProbeURI, "probe-uri", "", "Opt-in read-only provider probe target (s3://bucket[/prefix-or-key] or file:///path, requires --provider)")
 	doctorCmd.Flags().StringVar(&doctorLogFormat, "log-format", diagnosticLogFormatPlain, "diagnostic output format (plain or structured)")
 }
 
@@ -104,6 +105,8 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		if s3Opts.Probe != nil {
 			totalChecks++
 		}
+	} else if s3Opts.Probe != nil {
+		totalChecks++
 	}
 
 	// Check 1: Go version
@@ -164,6 +167,10 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	// S3-specific checks
 	if doctorProvider == "s3" {
 		allChecks = runS3Checks(ctx, out, checkNum, totalChecks, allChecks, s3Opts)
+	} else if s3Opts.Probe != nil {
+		if !runDoctorProviderProbe(ctx, out, checkNum, totalChecks, s3Opts, "") {
+			allChecks = false
+		}
 	}
 
 	out.Info("")
@@ -215,8 +222,13 @@ func doctorS3OptionsFromFlags() (*doctorS3Options, error) {
 	if doctorRegion != "" && doctorProvider != "s3" {
 		return nil, fmt.Errorf("--region requires --provider s3")
 	}
-	if doctorProbeURI != "" && doctorProvider != "s3" {
-		return nil, fmt.Errorf("--probe-uri requires --provider s3")
+	if doctorProbeURI != "" && doctorProvider == "" {
+		return nil, fmt.Errorf("--probe-uri requires --provider")
+	}
+	switch doctorProvider {
+	case "", string(provider.ProviderS3), string(provider.ProviderFile):
+	default:
+		return nil, fmt.Errorf("unsupported --provider %q", doctorProvider)
 	}
 
 	opts := &doctorS3Options{
@@ -229,6 +241,9 @@ func doctorS3OptionsFromFlags() (*doctorS3Options, error) {
 		if err != nil {
 			return nil, err
 		}
+		if probe.URI.Provider != doctorProvider {
+			return nil, fmt.Errorf("--probe-uri provider %q does not match --provider %q", probe.URI.Provider, doctorProvider)
+		}
 		opts.Probe = probe
 	}
 	return opts, nil
@@ -238,9 +253,6 @@ func parseDoctorProbeURI(raw string) (*doctorProbeTarget, error) {
 	parsed, err := uri.ParseURI(strings.TrimSpace(raw))
 	if err != nil {
 		return nil, fmt.Errorf("invalid --probe-uri: %w", err)
-	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		return nil, fmt.Errorf("--probe-uri must use s3://")
 	}
 	if parsed.IsPattern() {
 		return nil, fmt.Errorf("--probe-uri does not accept glob patterns; provide a bucket, prefix, or exact key")
@@ -371,7 +383,7 @@ func runS3Checks(ctx context.Context, out *diagnosticPrinter, checkNum, totalChe
 	checkNum++
 
 	if opts.Probe != nil {
-		if !runDoctorS3Probe(ctx, out, checkNum, totalChecks, opts, cfg.Region) {
+		if !runDoctorProviderProbe(ctx, out, checkNum, totalChecks, opts, cfg.Region) {
 			allChecks = false
 		}
 	}
@@ -379,10 +391,22 @@ func runS3Checks(ctx context.Context, out *diagnosticPrinter, checkNum, totalChe
 	return allChecks
 }
 
-func runDoctorS3Probe(ctx context.Context, out *diagnosticPrinter, checkNum, totalChecks int, opts *doctorS3Options, effectiveRegion string) bool {
+func runDoctorProviderProbe(ctx context.Context, out *diagnosticPrinter, checkNum, totalChecks int, opts *doctorS3Options, effectiveRegion string) bool {
 	probe := opts.Probe
-	providerCfg := opts.providerConfig(probe.URI.Bucket, effectiveRegion)
-	prov, err := newDoctorS3ProbeProvider(ctx, providerCfg)
+	target := commandSourceTargetForRead(probe.URI)
+	region := effectiveRegion
+	if strings.TrimSpace(opts.Region) != "" {
+		region = strings.TrimSpace(opts.Region)
+	}
+	prov, err := newDoctorProbeProvider(ctx, target.ProviderURI, providerdispatch.SourceOptions{
+		Command: "doctor",
+		S3: providerdispatch.S3Options{
+			Region:         region,
+			Endpoint:       opts.Endpoint,
+			Profile:        opts.Profile,
+			ForcePathStyle: opts.Endpoint != "",
+		},
+	})
 	if err != nil {
 		writeDoctorProbeFailure(out, checkNum, totalChecks, probe, classifyDoctorProbeError(probe.Op, err), err)
 		return false
@@ -391,9 +415,9 @@ func runDoctorS3Probe(ctx context.Context, out *diagnosticPrinter, checkNum, tot
 
 	switch probe.Op {
 	case doctorProbeOpListObjects:
-		_, err = prov.List(ctx, provider.ListOptions{Prefix: probe.URI.Key, MaxKeys: 1})
+		_, err = prov.List(ctx, provider.ListOptions{Prefix: target.QueryURI.Key, MaxKeys: 1})
 	case doctorProbeOpHeadObject:
-		_, err = prov.Head(ctx, probe.URI.Key)
+		_, err = prov.Head(ctx, target.QueryURI.Key)
 	default:
 		err = fmt.Errorf("unsupported probe op %q", probe.Op)
 	}
@@ -402,14 +426,14 @@ func runDoctorS3Probe(ctx context.Context, out *diagnosticPrinter, checkNum, tot
 		return false
 	}
 
-	out.Info(fmt.Sprintf("[%d/%d] Probing S3 target... ✅ op=%s target=%s", checkNum, totalChecks, probe.Op, probe.URI.String()),
+	out.Info(fmt.Sprintf("[%d/%d] Probing provider target... ✅ op=%s target=%s", checkNum, totalChecks, probe.Op, probe.URI.String()),
 		zap.String("probe_op", probe.Op),
 		zap.String("probe_uri", probe.URI.String()))
 	return true
 }
 
 func writeDoctorProbeFailure(out *diagnosticPrinter, checkNum, totalChecks int, probe *doctorProbeTarget, failureClass string, err error) {
-	out.Error(fmt.Sprintf("[%d/%d] Probing S3 target... ❌ op=%s target=%s failure_class=%s", checkNum, totalChecks, probe.Op, probe.URI.String(), failureClass),
+	out.Error(fmt.Sprintf("[%d/%d] Probing provider target... ❌ op=%s target=%s failure_class=%s", checkNum, totalChecks, probe.Op, probe.URI.String(), failureClass),
 		zap.String("probe_op", probe.Op),
 		zap.String("probe_uri", probe.URI.String()),
 		zap.String("failure_class", failureClass),

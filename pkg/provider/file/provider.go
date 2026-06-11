@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -24,7 +25,9 @@ import (
 // This provider is intended for bucket-to-local transfer workflows.
 type Provider struct {
 	baseDir               string
+	realBaseDir           string
 	metadataSidecarSuffix string
+	symlinkPolicy         string
 }
 
 // Ensure Provider implements provider capability interfaces.
@@ -42,11 +45,14 @@ var (
 type Config struct {
 	BaseDir               string
 	MetadataSidecarSuffix string
+	SymlinkPolicy         string
 }
 
 const (
 	DefaultMetadataSidecarSuffix = ".gnb-meta.json"
 	metadataSidecarSchema        = "gonimbus.reflow.meta.v1"
+	SymlinkPolicySkip            = "skip"
+	SymlinkPolicyFollow          = "follow"
 )
 
 type metadataSidecar struct {
@@ -63,6 +69,11 @@ func (c Config) Validate() error {
 	if strings.Contains(strings.TrimSpace(c.MetadataSidecarSuffix), "/") {
 		return fmt.Errorf("metadata sidecar suffix must not contain '/'")
 	}
+	switch strings.TrimSpace(c.SymlinkPolicy) {
+	case "", SymlinkPolicySkip, SymlinkPolicyFollow:
+	default:
+		return fmt.Errorf("symlink policy must be one of: skip, follow")
+	}
 	return nil
 }
 
@@ -71,11 +82,21 @@ func New(cfg Config) (*Provider, error) {
 		return nil, err
 	}
 	base := filepath.Clean(cfg.BaseDir)
+	realBase := base
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		realBase = filepath.Clean(resolved)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	suffix := strings.TrimSpace(cfg.MetadataSidecarSuffix)
 	if suffix == "" {
 		suffix = DefaultMetadataSidecarSuffix
 	}
-	return &Provider{baseDir: base, metadataSidecarSuffix: suffix}, nil
+	symlinkPolicy := strings.TrimSpace(cfg.SymlinkPolicy)
+	if symlinkPolicy == "" {
+		symlinkPolicy = SymlinkPolicySkip
+	}
+	return &Provider{baseDir: base, realBaseDir: realBase, metadataSidecarSuffix: suffix, symlinkPolicy: symlinkPolicy}, nil
 }
 
 func (p *Provider) Close() error { return nil }
@@ -111,7 +132,7 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 
 	objects := make([]provider.ObjectSummary, 0, end-start)
 	for _, k := range keys[start:end] {
-		full, err := p.fullPath(k)
+		full, err := p.readPath(k)
 		if err != nil {
 			continue
 		}
@@ -132,18 +153,14 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 
 func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
 	_ = ctx
-	full, err := p.fullPath(key)
-	if err != nil {
-		return nil, p.wrapError("Head", key, err)
-	}
-	st, err := os.Stat(full)
+	_, st, err := p.statReadPath(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 		}
 		return nil, p.wrapError("Head", key, err)
 	}
-	if st.IsDir() {
+	if !st.Mode().IsRegular() {
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 	}
 
@@ -166,20 +183,11 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 
 func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
 	_ = ctx
-	full, err := p.fullPath(key)
-	if err != nil {
-		return nil, 0, p.wrapError("GetObject", key, err)
-	}
-	f, err := os.Open(full)
+	f, st, err := p.openReadPath(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 		}
-		return nil, 0, p.wrapError("GetObject", key, err)
-	}
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
 		return nil, 0, p.wrapError("GetObject", key, err)
 	}
 	return f, st.Size(), nil
@@ -187,20 +195,11 @@ func (p *Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, in
 
 func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadCloser, provider.ObjectMeta, error) {
 	_ = ctx
-	full, err := p.fullPath(key)
-	if err != nil {
-		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
-	}
-	f, err := os.Open(full) // #nosec G304 -- fullPath cleans key under configured provider baseDir before opening.
+	f, st, err := p.openReadPath(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectVersioned", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 		}
-		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
-	}
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
 		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
 	}
 	meta := provider.ObjectMeta{
@@ -226,21 +225,11 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 
 func (p *Provider) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, int64, error) {
 	_ = ctx
-	full, err := p.fullPath(key)
-	if err != nil {
-		return nil, 0, p.wrapError("GetRange", key, err)
-	}
-	f, err := os.Open(full)
+	f, st, err := p.openReadPath(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, &provider.ProviderError{Op: "GetRange", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 		}
-		return nil, 0, p.wrapError("GetRange", key, err)
-	}
-
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
 		return nil, 0, p.wrapError("GetRange", key, err)
 	}
 
@@ -492,15 +481,17 @@ func (p *Provider) DeleteObject(ctx context.Context, key string) error {
 }
 
 func (p *Provider) readMetadataSidecar(key string) (*metadataSidecar, error) {
-	full, err := p.metadataSidecarPath(key)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(full) // #nosec G304 -- metadataSidecarPath cleans key under configured provider baseDir.
+	sidecarKey := key + p.metadataSidecarSuffix
+	f, _, err := p.openReadPath(sidecarKey)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(f)
+	if err != nil {
 		return nil, err
 	}
 	var sidecar metadataSidecar
@@ -570,6 +561,74 @@ func (p *Provider) metadataSidecarPath(key string) (string, error) {
 }
 
 func (p *Provider) fullPath(key string) (string, error) {
+	return p.pathUnderRoot(p.baseDir, key)
+}
+
+func (p *Provider) readPath(key string) (string, error) {
+	lexicalFull, err := p.pathUnderRoot(p.baseDir, key)
+	if err != nil {
+		return "", err
+	}
+	switch p.symlinkPolicy {
+	case SymlinkPolicyFollow:
+		resolved, err := filepath.EvalSymlinks(lexicalFull)
+		if err != nil {
+			return "", err
+		}
+		resolved = filepath.Clean(resolved)
+		if !pathWithinRoot(p.realBaseDir, resolved) {
+			return "", fmt.Errorf("file source path escapes base dir")
+		}
+		return resolved, nil
+	default:
+		hasSymlink, err := pathContainsSymlink(lexicalFull)
+		if err != nil {
+			return "", err
+		}
+		if hasSymlink {
+			return "", fmt.Errorf("file source path uses a symlink")
+		}
+		return lexicalFull, nil
+	}
+}
+
+func (p *Provider) statReadPath(key string) (string, os.FileInfo, error) {
+	full, err := p.readPath(key)
+	if err != nil {
+		return "", nil, err
+	}
+	st, err := os.Stat(full)
+	if err != nil {
+		return "", nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("file source path is not a regular file")
+	}
+	return full, st, nil
+}
+
+func (p *Provider) openReadPath(key string) (*os.File, os.FileInfo, error) {
+	full, err := p.readPath(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := openReadNoFollow(full)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !st.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("file source path is not a regular file")
+	}
+	return f, st, nil
+}
+
+func (p *Provider) pathUnderRoot(root string, key string) (string, error) {
 	key = strings.TrimSpace(key)
 	key = strings.TrimPrefix(key, "/")
 	// Prevent path traversal.
@@ -578,7 +637,75 @@ func (p *Provider) fullPath(key string) (string, error) {
 	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("invalid key path")
 	}
-	return filepath.Join(p.baseDir, filepath.FromSlash(clean)), nil
+	return filepath.Join(root, filepath.FromSlash(clean)), nil
+}
+
+func pathWithinRoot(root string, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func pathContainsSymlink(path string) (bool, error) {
+	cleanPath := filepath.Clean(path)
+	volume := filepath.VolumeName(cleanPath)
+	rest := strings.TrimPrefix(cleanPath, volume)
+	if filepath.IsAbs(cleanPath) {
+		rest = strings.TrimPrefix(rest, string(filepath.Separator))
+	}
+	parts := strings.Split(rest, string(filepath.Separator))
+
+	cur := volume
+	if filepath.IsAbs(cleanPath) {
+		cur += string(filepath.Separator)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if cur == "" || cur == string(filepath.Separator) || strings.HasSuffix(cur, string(filepath.Separator)) {
+			cur += part
+		} else {
+			cur = filepath.Join(cur, part)
+		}
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if isDarwinSystemPathAlias(cur) {
+				continue
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isDarwinSystemPathAlias(path string) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	clean := filepath.Clean(path)
+	sep := string(filepath.Separator)
+	var expected string
+	switch clean {
+	case sep + "etc":
+		expected = filepath.Clean(sep + filepath.Join("private", "etc"))
+	case sep + "tmp":
+		expected = filepath.Clean(sep + filepath.Join("private", "tmp"))
+	case sep + "var":
+		expected = filepath.Clean(sep + filepath.Join("private", "var"))
+	default:
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(resolved) == expected
 }
 
 func (p *Provider) collectKeys(prefix string) ([]string, error) {

@@ -9,8 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/output"
-	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -45,20 +43,12 @@ func runStreamHead(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		return exitError(foundry.ExitInvalidArgument, "Unsupported provider", fmt.Errorf("provider %q is not supported", parsed.Provider))
-	}
 	if parsed.IsPattern() || parsed.IsPrefix() {
 		return exitError(foundry.ExitInvalidArgument, "stream head requires an exact object key", fmt.Errorf("provide an exact object URI (no glob, no trailing '/'): %s", rawURI))
 	}
 
-	prov, err := s3.New(ctx, s3.Config{
-		Bucket:         parsed.Bucket,
-		Region:         streamGetRegion,
-		Endpoint:       streamGetEndpoint,
-		Profile:        streamGetProfile,
-		ForcePathStyle: streamGetEndpoint != "",
-	})
+	target := commandSourceTargetForRead(parsed)
+	prov, err := newCommandSourceProvider(ctx, target.ProviderURI, "stream head", streamGetRegion, streamGetProfile, streamGetEndpoint)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}
@@ -68,7 +58,7 @@ func runStreamHead(cmd *cobra.Command, args []string) error {
 	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, parsed.Provider)
 	defer func() { _ = w.Close() }()
 
-	meta, err := prov.Head(ctx, parsed.Key)
+	meta, err := prov.Head(ctx, target.QueryURI.Key)
 	if err != nil {
 		_ = emitStreamError(context.Background(), w, parsed.Key, err)
 		return exitError(foundry.ExitExternalServiceUnavailable, "Head failed", err)

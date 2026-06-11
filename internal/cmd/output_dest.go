@@ -8,9 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 )
 
 // outputDestSpec describes an exact output object destination (s3://bucket/key.jsonl
@@ -101,31 +100,32 @@ func parseOutputDest(uri string) (*outputDestSpec, error) {
 
 // newOutputProvider creates a provider capable of PutObject for the given destination spec.
 func newOutputProvider(ctx context.Context, spec *outputDestSpec) (provider.ObjectPutter, error) {
-	switch spec.Provider {
-	case string(provider.ProviderS3):
-		p, err := s3.New(ctx, s3.Config{
-			Bucket:         spec.Bucket,
+	if spec.Provider == string(provider.ProviderFile) {
+		if err := os.MkdirAll(spec.BaseDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create output directory: %w", err)
+		}
+	}
+	p, err := providerdispatch.NewDestination(ctx, providerdispatch.DestinationOptions{
+		Command:     "output",
+		Provider:    spec.Provider,
+		S3Bucket:    spec.Bucket,
+		S3Prefix:    spec.Key,
+		FileBaseDir: spec.BaseDir,
+		S3: providerdispatch.S3Options{
 			Region:         spec.Region,
 			Endpoint:       spec.Endpoint,
 			Profile:        spec.Profile,
 			ForcePathStyle: spec.ForcePathStyle,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("create output S3 provider: %w", err)
-		}
-		return p, nil
-	case string(provider.ProviderFile):
-		if err := os.MkdirAll(spec.BaseDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create output directory: %w", err)
-		}
-		p, err := providerfile.New(providerfile.Config{BaseDir: spec.BaseDir})
-		if err != nil {
-			return nil, fmt.Errorf("create output file provider: %w", err)
-		}
-		return p, nil
-	default:
-		return nil, fmt.Errorf("unsupported output provider %q", spec.Provider)
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create output provider: %w", err)
 	}
+	putter, err := providerdispatch.RequireCapability[provider.ObjectPutter](p, "output", spec.Provider, "ObjectPutter")
+	if err != nil {
+		return nil, err
+	}
+	return putter, nil
 }
 
 // uploadToOutputDest opens a temp file and uploads it to the output destination.

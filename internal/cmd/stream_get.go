@@ -13,9 +13,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/stream"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -58,31 +58,27 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		return exitError(foundry.ExitInvalidArgument, "Unsupported provider", fmt.Errorf("provider %q is not supported", parsed.Provider))
-	}
 	if parsed.IsPattern() || parsed.IsPrefix() {
 		return exitError(foundry.ExitInvalidArgument, "stream get requires an exact object key", fmt.Errorf("provide an exact object URI (no glob, no trailing '/'): %s", rawURI))
 	}
 
-	prov, err := s3.New(ctx, s3.Config{
-		Bucket:         parsed.Bucket,
-		Region:         streamGetRegion,
-		Endpoint:       streamGetEndpoint,
-		Profile:        streamGetProfile,
-		ForcePathStyle: streamGetEndpoint != "",
-	})
+	target := commandSourceTargetForRead(parsed)
+	prov, err := newCommandSourceProvider(ctx, target.ProviderURI, "stream get", streamGetRegion, streamGetProfile, streamGetEndpoint)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}
 	defer func() { _ = prov.Close() }()
+	getter, err := providerdispatch.RequireCapability[provider.ObjectGetter](prov, "stream get", parsed.Provider, "ObjectGetter")
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Provider does not support object reads", err)
+	}
 
 	jobID := uuid.New().String()
 	recordWriter := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, parsed.Provider)
 	defer func() { _ = recordWriter.Close() }()
 
 	// HEAD first: probing command, so extra roundtrip is acceptable.
-	meta, err := prov.Head(ctx, parsed.Key)
+	meta, err := prov.Head(ctx, target.QueryURI.Key)
 	if err != nil {
 		_ = emitStreamError(ctx, recordWriter, parsed.Key, err)
 		return exitError(foundry.ExitExternalServiceUnavailable, "Head failed", err)
@@ -109,7 +105,7 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitFileWriteError, "Failed to write stream open", err)
 	}
 
-	body, gotSize, err := prov.GetObject(ctx, parsed.Key)
+	body, gotSize, err := getter.GetObject(ctx, target.QueryURI.Key)
 	if err != nil {
 		_ = emitStreamError(ctx, recordWriter, parsed.Key, err)
 		_ = streamWriter.WriteClose(ctx, &stream.Close{StreamID: streamID, Status: "error", Chunks: 0, Bytes: 0})

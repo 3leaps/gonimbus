@@ -3,6 +3,7 @@ package file
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +134,114 @@ func TestListSkipsSymlinksByDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, res.Objects, 1)
 	require.Equal(t, "nested/keep.txt", res.Objects[0].Key)
+}
+
+func TestReadMethodsRejectSymlinksByDefault(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(baseDir, "link.txt")))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(baseDir, "alias")))
+
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+
+	_, err = p.Head(ctx, "link.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetObject(ctx, "link.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetObjectVersioned(ctx, "link.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetRange(ctx, "link.txt", 0, 2)
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetObject(ctx, "alias/secret.txt")
+	require.ErrorContains(t, err, "symlink")
+}
+
+func TestReadMethodsRejectSymlinkedBaseByDefault(t *testing.T) {
+	ctx := context.Background()
+	parentDir := t.TempDir()
+	realDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(realDir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "sub", "secret.txt"), []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(realDir, filepath.Join(parentDir, "alias")))
+
+	p, err := New(Config{BaseDir: filepath.Join(parentDir, "alias", "sub")})
+	require.NoError(t, err)
+
+	_, err = p.Head(ctx, "secret.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetObject(ctx, "secret.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetObjectVersioned(ctx, "secret.txt")
+	require.ErrorContains(t, err, "symlink")
+
+	_, _, err = p.GetRange(ctx, "secret.txt", 0, 2)
+	require.ErrorContains(t, err, "symlink")
+}
+
+func TestReadMethodsFollowOnlyConfinedSymlinksWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "nested", "target.txt"), []byte("inside"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("outside"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(baseDir, "nested", "target.txt"), filepath.Join(baseDir, "inside-link.txt")))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(baseDir, "outside-link.txt")))
+
+	p, err := New(Config{BaseDir: baseDir, SymlinkPolicy: SymlinkPolicyFollow})
+	require.NoError(t, err)
+
+	body, size, err := p.GetObject(ctx, "inside-link.txt")
+	require.NoError(t, err)
+	defer func() { _ = body.Close() }()
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, int64(len("inside")), size)
+	require.Equal(t, "inside", string(raw))
+
+	_, _, err = p.GetObject(ctx, "outside-link.txt")
+	require.ErrorContains(t, err, "escapes base dir")
+}
+
+func TestReadMethodsFollowSymlinkedBaseWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	parentDir := t.TempDir()
+	realDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(realDir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "sub", "object.txt"), []byte("payload"), 0o600))
+	require.NoError(t, os.Symlink(realDir, filepath.Join(parentDir, "alias")))
+
+	p, err := New(Config{BaseDir: filepath.Join(parentDir, "alias", "sub"), SymlinkPolicy: SymlinkPolicyFollow})
+	require.NoError(t, err)
+
+	body, size, err := p.GetObject(ctx, "object.txt")
+	require.NoError(t, err)
+	defer func() { _ = body.Close() }()
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, int64(len("payload")), size)
+	require.Equal(t, "payload", string(raw))
+}
+
+func TestReadMethodsRejectNonRegularFiles(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(baseDir, "dir"), 0o755))
+
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+
+	_, _, err = p.GetObject(ctx, "dir")
+	require.ErrorContains(t, err, "not a regular file")
 }
 
 func TestHeadReturnsIfMatchVersionToken(t *testing.T) {

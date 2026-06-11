@@ -81,12 +81,14 @@ func TestNewSourceBuildsFileProviderFromParsedURI(t *testing.T) {
 	p, err := NewSource(context.Background(), src, SourceOptions{
 		Command:             "transfer-reflow",
 		FileMetadataSidecar: ".meta.json",
+		FileSymlinkPolicy:   providerfile.SymlinkPolicyFollow,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, p)
 	require.Equal(t, "/tmp/source-root", got.BaseDir)
 	require.Equal(t, ".meta.json", got.MetadataSidecarSuffix)
+	require.Equal(t, providerfile.SymlinkPolicyFollow, got.SymlinkPolicy)
 }
 
 func TestNewDestinationBuildsS3Provider(t *testing.T) {

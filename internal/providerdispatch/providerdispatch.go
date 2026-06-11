@@ -101,6 +101,7 @@ func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (pro
 		return factories.File(providerfile.Config{
 			BaseDir:               baseDir,
 			MetadataSidecarSuffix: opts.FileMetadataSidecar,
+			SymlinkPolicy:         opts.FileSymlinkPolicy,
 		})
 	default:
 		return nil, unsupportedProviderError(opts.Command, "source", src.Provider)

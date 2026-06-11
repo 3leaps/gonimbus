@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,7 +21,6 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -90,10 +90,10 @@ func validateContentHeadBytes(n int64) error {
 type contentHeadTask struct {
 	// URI is the resolved exact object URI for this task.
 	// BaseURI is the original input URI that produced this task (stdin line, prefix URI, or glob URI).
-	Bucket  string
-	Key     string
-	URI     string
-	BaseURI string
+	ProviderURI *uri.ObjectURI
+	Key         string
+	URI         string
+	BaseURI     string
 }
 
 func runContentHead(cmd *cobra.Command, args []string) error {
@@ -129,39 +129,34 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 	)
 
 	provMu := sync.Mutex{}
-	providers := map[string]*s3.Provider{}
-	getProvider := func(bucket string) (*s3.Provider, error) {
+	providers := map[string]provider.Provider{}
+	getProvider := func(src *uri.ObjectURI) (provider.Provider, error) {
+		id := commandSourceProviderID(src)
 		provMu.Lock()
-		if p, ok := providers[bucket]; ok {
+		if p, ok := providers[id]; ok {
 			provMu.Unlock()
 			return p, nil
 		}
 		provMu.Unlock()
 
-		pNew, err := s3.New(ctx, s3.Config{
-			Bucket:         bucket,
-			Region:         contentHeadRegion,
-			Endpoint:       contentHeadEndpoint,
-			Profile:        contentHeadProfile,
-			ForcePathStyle: contentHeadEndpoint != "",
-		})
+		pNew, err := newCommandSourceProvider(ctx, src, "content head", contentHeadRegion, contentHeadProfile, contentHeadEndpoint)
 		if err != nil {
 			return nil, err
 		}
 
 		provMu.Lock()
-		if p, ok := providers[bucket]; ok {
+		if p, ok := providers[id]; ok {
 			provMu.Unlock()
 			_ = pNew.Close()
 			return p, nil
 		}
-		providers[bucket] = pNew
+		providers[id] = pNew
 		provMu.Unlock()
 		return pNew, nil
 	}
 	defer func() {
 		provMu.Lock()
-		toClose := make([]*s3.Provider, 0, len(providers))
+		toClose := make([]provider.Provider, 0, len(providers))
 		for _, p := range providers {
 			toClose = append(toClose, p)
 		}
@@ -182,7 +177,7 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 				if ctx.Err() != nil {
 					return
 				}
-				p, err := getProvider(task.Bucket)
+				p, err := getProvider(task.ProviderURI)
 				if err != nil {
 					serviceErrCount.Add(1)
 					_ = emitContentHeadError(context.Background(), w, task.Key, "failed to connect to storage provider", err, map[string]any{"uri": task.URI, "base_uri": task.BaseURI})
@@ -265,7 +260,7 @@ func enqueueContentHeadInput(
 	input string,
 	ch chan<- contentHeadTask,
 	w output.Writer,
-	getProvider func(bucket string) (*s3.Provider, error),
+	getProvider func(src *uri.ObjectURI) (provider.Provider, error),
 	invalidCount *atomic.Int64,
 	serviceErrCount *atomic.Int64,
 ) error {
@@ -280,16 +275,12 @@ func enqueueContentHeadInput(
 		_ = emitContentHeadError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": uriStr})
 		return nil
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		invalidCount.Add(1)
-		_ = emitContentHeadError(context.Background(), w, "", "unsupported provider", fmt.Errorf("provider %q is not supported", parsed.Provider), map[string]any{"uri": uriStr})
-		return nil
-	}
+	target := commandSourceTargetForRead(parsed)
 
 	// Exact key: schedule directly.
 	if !parsed.IsPattern() && !parsed.IsPrefix() {
 		select {
-		case ch <- contentHeadTask{Bucket: parsed.Bucket, Key: parsed.Key, URI: parsed.String(), BaseURI: uriStr}:
+		case ch <- contentHeadTask{ProviderURI: target.ProviderURI, Key: target.QueryURI.Key, URI: parsed.String(), BaseURI: uriStr}:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -297,7 +288,7 @@ func enqueueContentHeadInput(
 	}
 
 	// Prefix or glob: enumerate via list.
-	p, err := getProvider(parsed.Bucket)
+	p, err := getProvider(target.ProviderURI)
 	if err != nil {
 		serviceErrCount.Add(1)
 		_ = emitContentHeadError(context.Background(), w, "", "failed to connect to storage provider", err, map[string]any{"uri": uriStr, "base_uri": parsed.String()})
@@ -317,7 +308,7 @@ func enqueueContentHeadInput(
 
 	var token string
 	for {
-		res, err := p.List(ctx, provider.ListOptions{Prefix: parsed.Key, ContinuationToken: token})
+		res, err := p.List(ctx, provider.ListOptions{Prefix: target.QueryURI.Key, ContinuationToken: token})
 		if err != nil {
 			serviceErrCount.Add(1)
 			_ = emitContentHeadListError(context.Background(), w, parsed.Key, "list failed", err, map[string]any{"uri": uriStr, "base_uri": parsed.String()})
@@ -329,8 +320,11 @@ func enqueueContentHeadInput(
 				continue
 			}
 			objURI := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, obj.Key)
+			if parsed.Provider == string(provider.ProviderFile) {
+				objURI = fileURI(filepath.Join(target.ProviderURI.Key, filepath.FromSlash(obj.Key)))
+			}
 			select {
-			case ch <- contentHeadTask{Bucket: parsed.Bucket, Key: obj.Key, URI: objURI, BaseURI: uriStr}:
+			case ch <- contentHeadTask{ProviderURI: target.ProviderURI, Key: obj.Key, URI: objURI, BaseURI: uriStr}:
 				// ok
 			case <-ctx.Done():
 				return ctx.Err()

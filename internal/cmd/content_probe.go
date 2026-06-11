@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,6 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -35,8 +35,8 @@ type contentProbeProvider interface {
 	provider.Provider
 }
 
-var newContentProbeProvider = func(ctx context.Context, cfg s3.Config) (contentProbeProvider, error) {
-	return s3.New(ctx, cfg)
+var newContentProbeProvider = func(ctx context.Context, src *uri.ObjectURI) (contentProbeProvider, error) {
+	return newCommandSourceProvider(ctx, src, "content probe", contentProbeRegion, contentProbeProfile, contentProbeEndpoint)
 }
 
 var contentProbeCmd = &cobra.Command{
@@ -110,12 +110,12 @@ func validateContentProbeArgs(cmd *cobra.Command, args []string) error {
 }
 
 type probeTask struct {
-	Bucket    string
-	Key       string
-	URI       string
-	BaseInput string
-	ETag      string
-	Size      int64
+	ProviderURI *uri.ObjectURI
+	Key         string
+	URI         string
+	BaseInput   string
+	ETag        string
+	Size        int64
 }
 
 type contentProbeRecord struct {
@@ -205,32 +205,27 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 
 	provMu := sync.Mutex{}
 	providers := map[string]contentProbeProvider{}
-	getProvider := func(bucket string) (contentProbeProvider, error) {
+	getProvider := func(src *uri.ObjectURI) (contentProbeProvider, error) {
+		id := commandSourceProviderID(src)
 		provMu.Lock()
-		if p, ok := providers[bucket]; ok {
+		if p, ok := providers[id]; ok {
 			provMu.Unlock()
 			return p, nil
 		}
 		provMu.Unlock()
 
-		pNew, err := newContentProbeProvider(ctx, s3.Config{
-			Bucket:         bucket,
-			Region:         contentProbeRegion,
-			Endpoint:       contentProbeEndpoint,
-			Profile:        contentProbeProfile,
-			ForcePathStyle: contentProbeEndpoint != "",
-		})
+		pNew, err := newContentProbeProvider(ctx, src)
 		if err != nil {
 			return nil, err
 		}
 
 		provMu.Lock()
-		if p, ok := providers[bucket]; ok {
+		if p, ok := providers[id]; ok {
 			provMu.Unlock()
 			_ = pNew.Close()
 			return p, nil
 		}
-		providers[bucket] = pNew
+		providers[id] = pNew
 		provMu.Unlock()
 		return pNew, nil
 	}
@@ -256,7 +251,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 				if ctx.Err() != nil {
 					return
 				}
-				prov, err := getProvider(task.Bucket)
+				prov, err := getProvider(task.ProviderURI)
 				if err != nil {
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "failed to connect to provider", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
@@ -613,7 +608,7 @@ func enqueueContentProbeInput(
 	input string,
 	ch chan<- probeTask,
 	w output.Writer,
-	getProvider func(bucket string) (contentProbeProvider, error),
+	getProvider func(src *uri.ObjectURI) (contentProbeProvider, error),
 	invalidCount *atomic.Int64,
 	errorCount *atomic.Int64,
 ) error {
@@ -660,11 +655,6 @@ func enqueueContentProbeInput(
 			_ = emitContentProbeError(context.Background(), w, "", "invalid base_uri", err, map[string]any{"base_uri": data.BaseURI})
 			return nil
 		}
-		if base.Provider != string(provider.ProviderS3) {
-			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "unsupported provider", fmt.Errorf("provider %q is not supported", base.Provider), map[string]any{"base_uri": data.BaseURI})
-			return nil
-		}
 		key := strings.TrimPrefix(data.Key, "/")
 		if key == "" {
 			key = strings.TrimPrefix(data.RelKey, "/")
@@ -674,9 +664,13 @@ func enqueueContentProbeInput(
 			_ = emitContentProbeError(context.Background(), w, "", "missing key", fmt.Errorf("missing key in index record"), map[string]any{"base_uri": data.BaseURI})
 			return nil
 		}
+		target := commandSourceTargetForRead(base)
 		uri := fmt.Sprintf("%s://%s/%s", base.Provider, base.Bucket, key)
+		if base.Provider == string(provider.ProviderFile) {
+			uri = fileURI(filepath.Join(target.ProviderURI.Key, filepath.FromSlash(key)))
+		}
 		select {
-		case ch <- probeTask{Bucket: base.Bucket, Key: key, URI: uri, BaseInput: "jsonl", ETag: data.ETag, Size: data.SizeBytes}:
+		case ch <- probeTask{ProviderURI: target.ProviderURI, Key: key, URI: uri, BaseInput: "jsonl", ETag: data.ETag, Size: data.SizeBytes}:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -689,22 +683,18 @@ func enqueueContentProbeInput(
 		_ = emitContentProbeError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": line})
 		return nil
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		invalidCount.Add(1)
-		_ = emitContentProbeError(context.Background(), w, "", "unsupported provider", fmt.Errorf("provider %q is not supported", parsed.Provider), map[string]any{"uri": line})
-		return nil
-	}
+	target := commandSourceTargetForRead(parsed)
 
 	if !parsed.IsPrefix() && !parsed.IsPattern() {
 		select {
-		case ch <- probeTask{Bucket: parsed.Bucket, Key: parsed.Key, URI: parsed.String(), BaseInput: line}:
+		case ch <- probeTask{ProviderURI: target.ProviderURI, Key: target.QueryURI.Key, URI: parsed.String(), BaseInput: line}:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 
-	prov, err := getProvider(parsed.Bucket)
+	prov, err := getProvider(target.ProviderURI)
 	if err != nil {
 		errorCount.Add(1)
 		_ = emitContentProbeError(context.Background(), w, "", "failed to connect to provider", err, map[string]any{"uri": line})
@@ -724,7 +714,7 @@ func enqueueContentProbeInput(
 
 	var token string
 	for {
-		res, err := prov.List(ctx, provider.ListOptions{Prefix: parsed.Key, ContinuationToken: token})
+		res, err := prov.List(ctx, provider.ListOptions{Prefix: target.QueryURI.Key, ContinuationToken: token})
 		if err != nil {
 			errorCount.Add(1)
 			_ = emitContentProbeError(context.Background(), w, parsed.Key, "list failed", err, map[string]any{"uri": line})
@@ -735,8 +725,11 @@ func enqueueContentProbeInput(
 				continue
 			}
 			uri := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, obj.Key)
+			if parsed.Provider == string(provider.ProviderFile) {
+				uri = fileURI(filepath.Join(target.ProviderURI.Key, filepath.FromSlash(obj.Key)))
+			}
 			select {
-			case ch <- probeTask{Bucket: parsed.Bucket, Key: obj.Key, URI: uri, BaseInput: line, ETag: obj.ETag, Size: obj.Size}:
+			case ch <- probeTask{ProviderURI: target.ProviderURI, Key: obj.Key, URI: uri, BaseInput: line, ETag: obj.ETag, Size: obj.Size}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}

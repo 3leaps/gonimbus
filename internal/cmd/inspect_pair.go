@@ -14,10 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -50,20 +49,19 @@ var (
 type inspectPairProviderFactory func(context.Context, inspectPairScope) (provider.Provider, error)
 
 var newInspectPairProvider inspectPairProviderFactory = func(ctx context.Context, scope inspectPairScope) (provider.Provider, error) {
-	switch scope.Provider {
-	case string(provider.ProviderS3):
-		return s3.New(ctx, s3.Config{
-			Bucket:         scope.Bucket,
+	return providerdispatch.NewDestination(ctx, providerdispatch.DestinationOptions{
+		Command:     "inspect-pair",
+		Provider:    scope.Provider,
+		S3Bucket:    scope.Bucket,
+		S3Prefix:    scope.Prefix,
+		FileBaseDir: scope.FileRoot,
+		S3: providerdispatch.S3Options{
 			Region:         inspectPairRegion,
 			Endpoint:       inspectPairEndpoint,
 			Profile:        inspectPairProfile,
 			ForcePathStyle: inspectPairEndpoint != "",
-		})
-	case string(provider.ProviderFile):
-		return providerfile.New(providerfile.Config{BaseDir: scope.FileRoot})
-	default:
-		return nil, fmt.Errorf("unsupported destination provider %q", scope.Provider)
-	}
+		},
+	})
 }
 
 func init() {

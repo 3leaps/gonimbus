@@ -11,10 +11,10 @@ import (
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/atlas"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -23,8 +23,12 @@ type atlasBuildProvider interface {
 	provider.ObjectGetter
 }
 
-var newAtlasBuildProvider = func(ctx context.Context, cfg s3.Config) (atlasBuildProvider, error) {
-	return s3.New(ctx, cfg)
+var newAtlasBuildProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (atlasBuildProvider, error) {
+	p, err := providerdispatch.NewSource(ctx, src, opts)
+	if err != nil {
+		return nil, err
+	}
+	return providerdispatch.RequireCapability[atlasBuildProvider](p, "atlas build", src.Provider, "ObjectGetter")
 }
 
 var atlasCmd = &cobra.Command{
@@ -136,21 +140,20 @@ func runAtlasBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("parse index base_uri: %w", err)
 	}
-	if parsed.Provider != "s3" {
-		return fmt.Errorf("atlas Phase A supports s3 indexes only, got %s", parsed.Provider)
-	}
 	if region == "" {
 		region = indexSet.Region
 	}
 	if endpoint == "" {
 		endpoint = indexSet.Endpoint
 	}
-	prov, err := newAtlasBuildProvider(ctx, s3.Config{
-		Bucket:         parsed.Bucket,
-		Region:         region,
-		Profile:        profile,
-		Endpoint:       endpoint,
-		ForcePathStyle: endpoint != "",
+	prov, err := newAtlasBuildProvider(ctx, parsed, providerdispatch.SourceOptions{
+		Command: "atlas build",
+		S3: providerdispatch.S3Options{
+			Region:         region,
+			Profile:        profile,
+			Endpoint:       endpoint,
+			ForcePathStyle: endpoint != "",
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("source provider: %w", err)

@@ -14,6 +14,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 func TestRunContentProbeUntilResolvedReadsMonotonicRanges(t *testing.T) {
@@ -250,7 +251,7 @@ func TestContentProbeJSONLInputUsesSourceKeyForRewriteCapture(t *testing.T) {
 	var buf bytes.Buffer
 	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
 
-	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(string) (contentProbeProvider, error) {
+	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(*uri.ObjectURI) (contentProbeProvider, error) {
 		t.Fatal("jsonl exact object input should not connect to provider")
 		return nil, nil
 	}, &invalidCount, &errorCount)

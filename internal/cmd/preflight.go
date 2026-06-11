@@ -11,11 +11,11 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -225,16 +225,16 @@ func runPreflightWrite(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func createPreflightProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
-	cfg := s3.Config{
-		Bucket:   uri.Bucket,
-		Region:   preflightRegion,
-		Endpoint: preflightEndpoint,
-		Profile:  preflightProfile,
-		// Force path-style URLs when custom endpoint is set.
-		ForcePathStyle: preflightEndpoint != "",
-	}
-	return s3.New(ctx, cfg)
+func createPreflightProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Provider, error) {
+	return providerdispatch.NewSource(ctx, objURI, providerdispatch.SourceOptions{
+		Command: "preflight",
+		S3: providerdispatch.S3Options{
+			Region:         preflightRegion,
+			Endpoint:       preflightEndpoint,
+			Profile:        preflightProfile,
+			ForcePathStyle: preflightEndpoint != "",
+		},
+	})
 }
 
 func preflightErrorCode(err error) string {

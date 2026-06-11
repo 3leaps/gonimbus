@@ -13,8 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	providers3 "github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 func TestMaskAccessKey(t *testing.T) {
@@ -161,7 +162,7 @@ func TestDoctorS3OptionsRequireProviderS3(t *testing.T) {
 			configure: func() {
 				doctorProbeURI = "s3://bucket"
 			},
-			want: "--probe-uri requires --provider s3",
+			want: "--probe-uri requires --provider",
 		},
 	}
 
@@ -273,13 +274,14 @@ func TestRunDoctorS3ProbeDispatchesListForBucketAndPrefix(t *testing.T) {
 			probe, err := parseDoctorProbeURI(tt.probeURI)
 			require.NoError(t, err)
 			fake := &fakeDoctorProbeProvider{}
-			var gotCfg providers3.Config
-			withDoctorProbeProvider(t, fake, &gotCfg)
+			var gotSrc *uri.ObjectURI
+			var gotOpts providerdispatch.SourceOptions
+			withDoctorProbeProvider(t, fake, &gotSrc, &gotOpts)
 			cmd, stdout, stderr := testCommandBuffers()
 			out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
 			require.NoError(t, err)
 
-			ok := runDoctorS3Probe(context.Background(), out, 1, 1, &doctorS3Options{
+			ok := runDoctorProviderProbe(context.Background(), out, 1, 1, &doctorS3Options{
 				Profile:  "demo",
 				Endpoint: "https://cli.example.com",
 				Probe:    probe,
@@ -288,11 +290,11 @@ func TestRunDoctorS3ProbeDispatchesListForBucketAndPrefix(t *testing.T) {
 			require.True(t, ok)
 			require.Empty(t, stderr.String())
 			require.Contains(t, stdout.String(), "op=list_objects_v2")
-			require.Equal(t, "bucket", gotCfg.Bucket)
-			require.Equal(t, "us-east-2", gotCfg.Region)
-			require.Equal(t, "https://cli.example.com", gotCfg.Endpoint)
-			require.Equal(t, "demo", gotCfg.Profile)
-			require.True(t, gotCfg.ForcePathStyle)
+			require.Equal(t, "bucket", gotSrc.Bucket)
+			require.Equal(t, "us-east-2", gotOpts.S3.Region)
+			require.Equal(t, "https://cli.example.com", gotOpts.S3.Endpoint)
+			require.Equal(t, "demo", gotOpts.S3.Profile)
+			require.True(t, gotOpts.S3.ForcePathStyle)
 			require.Len(t, fake.listCalls, 1)
 			require.Equal(t, tt.wantPrefix, fake.listCalls[0].Prefix)
 			require.Equal(t, 1, fake.listCalls[0].MaxKeys)
@@ -305,12 +307,12 @@ func TestRunDoctorS3ProbeDispatchesHeadForExactKey(t *testing.T) {
 	probe, err := parseDoctorProbeURI("s3://bucket/some/key.xml")
 	require.NoError(t, err)
 	fake := &fakeDoctorProbeProvider{}
-	withDoctorProbeProvider(t, fake, nil)
+	withDoctorProbeProvider(t, fake, nil, nil)
 	cmd, stdout, stderr := testCommandBuffers()
 	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
 	require.NoError(t, err)
 
-	ok := runDoctorS3Probe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
+	ok := runDoctorProviderProbe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
 
 	require.True(t, ok)
 	require.Empty(t, stderr.String())
@@ -381,12 +383,12 @@ func TestRunDoctorS3ProbeReportsFailureClassWithoutRawPlainError(t *testing.T) {
 	probe, err := parseDoctorProbeURI("s3://bucket/missing.xml")
 	require.NoError(t, err)
 	fake := &fakeDoctorProbeProvider{headErr: providerError(provider.ErrNotFound)}
-	withDoctorProbeProvider(t, fake, nil)
+	withDoctorProbeProvider(t, fake, nil, nil)
 	cmd, stdout, stderr := testCommandBuffers()
 	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
 	require.NoError(t, err)
 
-	ok := runDoctorS3Probe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
+	ok := runDoctorProviderProbe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
 
 	require.False(t, ok)
 	require.Empty(t, stdout.String())
@@ -439,12 +441,12 @@ func TestRunDoctorS3ProbeReportsFailureClasses(t *testing.T) {
 			probe, err := parseDoctorProbeURI(tt.probeURI)
 			require.NoError(t, err)
 			fake := &fakeDoctorProbeProvider{listErr: tt.listErr, headErr: tt.headErr}
-			withDoctorProbeProvider(t, fake, nil)
+			withDoctorProbeProvider(t, fake, nil, nil)
 			cmd, stdout, stderr := testCommandBuffers()
 			out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
 			require.NoError(t, err)
 
-			ok := runDoctorS3Probe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
+			ok := runDoctorProviderProbe(context.Background(), out, 1, 1, &doctorS3Options{Probe: probe}, "us-east-1")
 
 			require.False(t, ok)
 			require.Empty(t, stdout.String())
@@ -466,7 +468,7 @@ func TestDoctorS3DefaultNoProbeNoise(t *testing.T) {
 	require.Empty(t, stderr.String())
 	require.Contains(t, stdout.String(), "S3 Provider Checks:")
 	require.Contains(t, stdout.String(), "Checking S3 endpoint/region")
-	require.NotContains(t, stdout.String(), "Probing S3 target")
+	require.NotContains(t, stdout.String(), "Probing provider target")
 }
 
 type fakeDoctorProbeProvider struct {
@@ -498,17 +500,20 @@ func (p *fakeDoctorProbeProvider) Close() error {
 	return nil
 }
 
-func withDoctorProbeProvider(t *testing.T, fake *fakeDoctorProbeProvider, cfgOut *providers3.Config) {
+func withDoctorProbeProvider(t *testing.T, fake *fakeDoctorProbeProvider, srcOut **uri.ObjectURI, optsOut *providerdispatch.SourceOptions) {
 	t.Helper()
-	old := newDoctorS3ProbeProvider
-	newDoctorS3ProbeProvider = func(_ context.Context, cfg providers3.Config) (doctorS3ProbeProvider, error) {
-		if cfgOut != nil {
-			*cfgOut = cfg
+	old := newDoctorProbeProvider
+	newDoctorProbeProvider = func(_ context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (doctorS3ProbeProvider, error) {
+		if srcOut != nil {
+			*srcOut = src
+		}
+		if optsOut != nil {
+			*optsOut = opts
 		}
 		return fake, nil
 	}
 	t.Cleanup(func() {
-		newDoctorS3ProbeProvider = old
+		newDoctorProbeProvider = old
 	})
 }
 
