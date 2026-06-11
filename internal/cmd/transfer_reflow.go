@@ -636,21 +636,32 @@ func isConditionalExists(err error) bool {
 	return provider.IsAlreadyExists(err) || provider.IsPreconditionFailed(err)
 }
 
-func isDuplicateCollision(srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) bool {
-	if dstMeta == nil || srcETag == "" || dstMeta.ETag == "" || srcETag != dstMeta.ETag {
+func isDuplicateCollision(srcProvider string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) bool {
+	if !collisionETagsComparable(srcProvider, destProvider) || dstMeta == nil || srcETag == "" || dstMeta.ETag == "" || srcETag != dstMeta.ETag {
 		return false
 	}
 	return srcSize <= 0 || dstMeta.Size <= 0 || srcSize == dstMeta.Size
 }
 
-func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) (bool, error) {
-	if isDuplicateCollision(srcETag, srcSize, dstMeta) {
+func collisionETagsComparable(srcProvider string, destProvider string) bool {
+	srcProvider = strings.TrimSpace(srcProvider)
+	if srcProvider == "" {
+		srcProvider = string(provider.ProviderS3)
+	}
+	return srcProvider == destProvider && srcProvider != string(provider.ProviderFile)
+}
+
+func canCompareObjectBodies(src provider.Provider, dst provider.Provider) bool {
+	_, srcOK := src.(provider.ObjectGetter)
+	_, dstOK := dst.(provider.ObjectGetter)
+	return srcOK && dstOK
+}
+
+func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, sourceProvider string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) (bool, error) {
+	if isDuplicateCollision(sourceProvider, destProvider, srcETag, srcSize, dstMeta) {
 		return true, nil
 	}
-	if destProvider != string(provider.ProviderFile) || dstMeta == nil {
-		return false, nil
-	}
-	if srcSize != dstMeta.Size {
+	if dstMeta == nil || srcSize != dstMeta.Size || !canCompareObjectBodies(src, dst) {
 		return false, nil
 	}
 	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey)
@@ -2808,7 +2819,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					dstMeta, headErr := dst.Head(ctx, dstKey)
 					if headErr == nil {
 						kind := collisionConflict
-						if isDuplicateCollision(srcETag, srcSize, dstMeta) {
+						if isDuplicateCollision(task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta) {
 							kind = collisionDuplicate
 						}
 						collision = newCollisionInfo(kind, dstMeta, decisionOverwrite)
@@ -2868,7 +2879,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
-						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, destSpec.Provider, srcETag, srcSize, dstMeta)
+						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta)
 						if dupErr != nil {
 							if recordFatalReflowError(dupErr) {
 								continue

@@ -874,6 +874,29 @@ func TestTransferReflowCommand_CollisionSkipDuplicateEmitsNestedCollision(t *tes
 	requireNoLegacyCollisionKeys(t, requireRecord(t, stdout, reflowRecordType, "skipped").Data)
 }
 
+func TestTransferReflowCommand_CollisionSkipDuplicateComparesBodiesForS3DestWhenETagsDiffer(t *testing.T) {
+	sourceRoot := mustEvalSymlinks(t, t.TempDir())
+	sourcePath := filepath.Join(sourceRoot, "source", "file.xml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o755))
+	require.NoError(t, os.WriteFile(sourcePath, []byte("payload"), 0o644))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("data/source/file.xml", "payload", "dest-md5", time.Time{})
+
+	stdout, _, err := runTransferReflowWithFileSourceAndMemoryS3Dest(t, dst, fileReflowInputLine(sourcePath, "source/file.xml", "source/file.xml", "source-sha256", int64(len("payload"))),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--parallel", "1",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"data/source/file.xml"}, dst.conditionalPutCallsSnapshot())
+	require.Equal(t, []string{"data/source/file.xml"}, dst.headCallsSnapshot())
+	requireNoRecordType(t, stdout, output.TypeError)
+
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.duplicate", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "dest-md5", int64(len("payload")))
+}
+
 func TestTransferReflowCommand_CollisionZeroByteDuplicatePreservesObservedSize(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/empty.xml", "", "empty-etag", time.Time{})
@@ -1791,6 +1814,30 @@ func TestTransferReflowCommand_CollisionSkipConflictFails(t *testing.T) {
 	require.NotNil(t, errRecord.Collision)
 	require.Equal(t, collisionConflict, errRecord.Collision.Kind)
 	require.NotContains(t, fmt.Sprint(errRecord.Details), "collision")
+}
+
+func TestTransferReflowCommand_CollisionConflictComparesBodiesForS3DestWhenETagsDiffer(t *testing.T) {
+	sourceRoot := mustEvalSymlinks(t, t.TempDir())
+	sourcePath := filepath.Join(sourceRoot, "source", "file.xml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o755))
+	require.NoError(t, os.WriteFile(sourcePath, []byte("payload-a"), 0o644))
+	dst := newReflowMemoryProvider()
+	dst.putFixture("data/source/file.xml", "payload-b", "dest-md5", time.Time{})
+
+	stdout, _, err := runTransferReflowWithFileSourceAndMemoryS3Dest(t, dst, fileReflowInputLine(sourcePath, "source/file.xml", "source/file.xml", "source-sha256", int64(len("payload-a"))),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--parallel", "1",
+	)
+	require.Error(t, err)
+	require.Equal(t, "payload-b", string(dst.mustObject("data/source/file.xml")))
+
+	failed := requireReflowData(t, stdout, "failed")
+	require.Equal(t, "collision.conflict", failed.Reason)
+	requireCollisionEqual(t, failed, collisionConflict, decisionIfAbsentHead, "dest-md5", int64(len("payload-b")))
+	errRecord := requireErrorData(t, stdout)
+	require.NotNil(t, errRecord.Collision)
+	require.Equal(t, collisionConflict, errRecord.Collision.Kind)
 }
 
 func TestTransferReflowCommand_ParallelConflictRaceSkipModeFailsWaiters(t *testing.T) {
@@ -3216,6 +3263,30 @@ func runTransferReflowWithProviderFactory(t *testing.T, src *reflowMemoryProvide
 	return stdout.String(), stderr.String(), err
 }
 
+func runTransferReflowWithFileSourceAndMemoryS3Dest(t *testing.T, dst *reflowMemoryProvider, input string, args ...string) (string, string, error) {
+	t.Helper()
+	withTransferReflowTestState(t)
+
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return dst, nil
+		},
+		File: func(cfg providerfile.Config) (provider.Provider, error) {
+			return providerfile.New(cfg)
+		},
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
 func runTransferReflowWithMemorySourceAndRealFileDest(t *testing.T, src *reflowMemoryProvider, destDir string, input string, extraArgs ...string) (string, string, error) {
 	t.Helper()
 	withTransferReflowTestState(t)
@@ -3277,6 +3348,22 @@ func reflowInputLineWithDestRel(key string, destRelKey string, etag string, size
 	}
 	if quarantinePrefix != "" {
 		data["quarantine_prefix"] = quarantinePrefix
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
+
+func fileReflowInputLine(sourcePath string, sourceKey string, destRelKey string, etag string, size int64) string {
+	data := map[string]any{
+		"source_uri":           fileURI(sourcePath),
+		"source_key":           sourceKey,
+		"source_etag":          etag,
+		"source_size_bytes":    size,
+		"dest_rel_key":         destRelKey,
+		"source_last_modified": "2026-01-15T20:53:44Z",
 	}
 	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
 	if err != nil {
