@@ -595,6 +595,22 @@ func TestTransferReflowCommand_StdinPipeConsumesInput(t *testing.T) {
 	require.Contains(t, stdout.String(), "transfer_reflow")
 }
 
+func TestTransferReflowCommand_StdinDestRelKeyDoesNotRequireRewrite(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("nested/path/file.txt", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst,
+		reflowInputLineWithDestRel("nested/path/file.txt", "archive/nested/path/file.txt", "src-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/backups/",
+		"--parallel", "1",
+	)
+	require.NoError(t, err, stdout)
+	require.True(t, dst.hasObject("backups/archive/nested/path/file.txt"))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout), "complete", "", 1)
+}
+
 func TestTransferReflowCommand_StdinRejectsExplicitSourceArg(t *testing.T) {
 	withTransferReflowTestState(t)
 
@@ -1134,6 +1150,124 @@ func TestTransferReflowCommand_FileReflowInputAcceptsMultipleExactRecordsFromSam
 	require.Contains(t, stdout.String(), `"source_uri":"file://local/a.txt"`)
 	require.Contains(t, stdout.String(), `"source_uri":"file://local/b.txt"`)
 	require.NotContains(t, stdout.String(), srcDir)
+}
+
+func TestTransferReflowCommand_StdinWithoutDestRelKeyRequiresRewrite(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("nested/path/file.txt", "payload", "src-etag", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLineNoDestRel("nested/path/file.txt", "src-etag", int64(len("payload"))),
+		"--stdin",
+		"--dest", "s3://dest-bucket/backup/",
+		"--parallel", "1",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid inputs")
+	require.False(t, dst.hasObject("backup/nested/path/file.txt"))
+	errData := requireErrorData(t, stdout)
+	require.Equal(t, output.ErrCodeInvalidInput, errData.Code)
+	require.Contains(t, errData.Message, "destination mapping unavailable")
+	require.Contains(t, errData.Message, "lacks dest_rel_key")
+}
+
+func TestTransferReflowCommand_IndexObjectStdinStillSupportsExplicitRewrite(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("nested/path/file.txt", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+
+	stdout, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowIndexObjectInputLine("nested/path/file.txt", "src-etag", int64(len("payload")), "2026-01-15T20:53:44Z"),
+		"--stdin",
+		"--dest", "s3://dest-bucket/backup/",
+		"--rewrite-from", "nested/{dir}/{file}",
+		"--rewrite-to", "{dir}/{file}",
+		"--parallel", "1",
+	)
+	require.NoError(t, err, stderr)
+	require.Equal(t, "payload", string(dst.mustObject("backup/path/file.txt")))
+	requireReflowStatusReasonCount(t, requireReflowRecords(t, stdout), "complete", "", 1)
+}
+
+func TestTransferReflowCommand_DryRunS3DestinationWriteProbeWritesAndCleansUp(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source.txt", "payload", "src-etag", time.Time{})
+
+	stdout, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source.txt", "src-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/backup/",
+		"--dry-run",
+		"--parallel", "1",
+	)
+	require.NoError(t, err, stderr)
+
+	puts := dst.conditionalPutCallsSnapshot()
+	require.Len(t, puts, 1)
+	require.True(t, strings.HasPrefix(puts[0], "backup/.gonimbus-preflight/preflight-"))
+	preconds := dst.conditionalPutPreconditionsSnapshot()
+	require.Len(t, preconds, 1)
+	require.True(t, preconds[0].IfAbsent)
+	require.Equal(t, puts, dst.deleteCallsSnapshot())
+	require.False(t, dst.hasObject(puts[0]))
+
+	preflight := requireRecord(t, stdout, output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), `"capability":"target.write"`)
+	require.Contains(t, string(preflight.Data), `"method":"PutObjectConditional(IfAbsent,0 bytes)"`)
+	require.Contains(t, string(preflight.Data), `"capability":"target.delete"`)
+	require.NotContains(t, stdout, "profile")
+	require.NotContains(t, stdout, "credential")
+}
+
+func TestTransferReflowCommand_DryRunS3DestinationWriteProbeRespectsReadOnly(t *testing.T) {
+	t.Setenv("GONIMBUS_READONLY", "1")
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source.txt", "payload", "src-etag", time.Time{})
+
+	stdout, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source.txt", "src-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/backup/",
+		"--dry-run",
+		"--parallel", "1",
+	)
+	require.NoError(t, err, stderr)
+	require.Empty(t, dst.conditionalPutCallsSnapshot())
+	require.Empty(t, dst.deleteCallsSnapshot())
+	preflight := requireRecord(t, stdout, output.TypePreflight, "")
+	require.Contains(t, string(preflight.Data), `"error_code":"READONLY"`)
+	require.Contains(t, string(preflight.Data), "refusing destination S3 write probe")
+}
+
+func TestTransferReflowCommand_AdversarialDestRelKeyConfinedForS3AndFileDest(t *testing.T) {
+	for _, destRel := range []string{"../../escape.txt", "/absolute.txt", "foo/../../bar.txt"} {
+		t.Run("s3/"+destRel, func(t *testing.T) {
+			src := newReflowMemoryProvider()
+			dst := newReflowMemoryProvider()
+			src.putFixture("source.txt", "payload", "src-etag", time.Time{})
+
+			_, stderr, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLineWithDestRel("source.txt", destRel, "src-etag", int64(len("payload")), "", ""),
+				"--stdin",
+				"--dest", "s3://dest-bucket/backup/",
+				"--parallel", "1",
+			)
+			require.NoError(t, err, stderr)
+			for _, key := range dst.putCallsSnapshot() {
+				require.True(t, strings.HasPrefix(key, "backup/"), "key %q must stay under destination prefix", key)
+			}
+		})
+
+		t.Run("file/"+destRel, func(t *testing.T) {
+			src := newReflowMemoryProvider()
+			src.putFixture("source.txt", "payload", "src-etag", time.Time{})
+			destDir := t.TempDir()
+
+			stdout, stderr, err := runTransferReflowWithMemorySourceAndRealFileDest(t, src, destDir, reflowInputLineWithDestRel("source.txt", destRel, "src-etag", int64(len("payload")), "", ""))
+			require.NoError(t, err, stderr)
+			complete := requireReflowData(t, stdout, "complete")
+			require.True(t, strings.HasPrefix(filepath.Clean(strings.TrimPrefix(complete.DestURI, "file://")), filepath.Clean(destDir)+string(filepath.Separator)))
+			require.NoFileExists(t, filepath.Join(destDir, "..", "escape.txt"))
+		})
+	}
 }
 
 func TestTransferReflowCommand_FileReflowInputRejectsSymlinkPaths(t *testing.T) {
@@ -3425,6 +3559,7 @@ type reflowMemoryProvider struct {
 	meta                map[string]provider.ObjectMeta
 	headCalls           []string
 	putCalls            []string
+	deleteCalls         []string
 	conditionalPutCalls []string
 	conditionalPreconds []provider.PutPrecondition
 	ifAbsentErr         error
@@ -3498,6 +3633,12 @@ func (p *reflowMemoryProvider) conditionalPutPreconditionsSnapshot() []provider.
 	return append([]provider.PutPrecondition(nil), p.conditionalPreconds...)
 }
 
+func (p *reflowMemoryProvider) deleteCallsSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.deleteCalls...)
+}
+
 func (p *reflowMemoryProvider) metaSnapshot(key string) provider.ObjectMeta {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -3553,6 +3694,15 @@ func (p *reflowMemoryProvider) PutObjectWithOptions(ctx context.Context, key str
 		return err
 	}
 	p.applyPutOptions(key, opts)
+	return nil
+}
+
+func (p *reflowMemoryProvider) DeleteObject(_ context.Context, key string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deleteCalls = append(p.deleteCalls, key)
+	delete(p.objects, key)
+	delete(p.meta, key)
 	return nil
 }
 

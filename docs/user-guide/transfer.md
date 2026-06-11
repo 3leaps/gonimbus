@@ -302,6 +302,11 @@ gonimbus content probe --stdin --config probe.yaml < uris.txt | \
     --rewrite-to '{business_date}/{store}/{file}'
 ```
 
+For S3 destinations, `transfer reflow --dry-run` performs one explicit
+conditional zero-byte write probe under `<dest>/.gonimbus-preflight/`, then
+deletes the probe object. Set `--readonly` or `GONIMBUS_READONLY=1` to suppress
+that provider-side mutation.
+
 ### Template Variables
 
 Templates use `{variable}` placeholders that are extracted from source paths or probe output:

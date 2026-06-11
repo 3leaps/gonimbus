@@ -132,7 +132,7 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 
 	objects := make([]provider.ObjectSummary, 0, end-start)
 	for _, k := range keys[start:end] {
-		full, err := p.readPath(k)
+		full, err := p.pathUnderRoot(p.realBaseDir, k)
 		if err != nil {
 			continue
 		}
@@ -709,7 +709,7 @@ func isDarwinSystemPathAlias(path string) bool {
 }
 
 func (p *Provider) collectKeys(prefix string) ([]string, error) {
-	root, err := p.fullPath(prefix)
+	root, err := p.pathUnderRoot(p.realBaseDir, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +735,7 @@ func (p *Provider) collectKeys(prefix string) ([]string, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		rel, err := filepath.Rel(p.baseDir, path)
+		rel, err := filepath.Rel(p.realBaseDir, path)
 		if err != nil {
 			return nil
 		}
