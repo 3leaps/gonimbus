@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
@@ -99,9 +99,6 @@ func runTree(cmd *cobra.Command, args []string) error {
 		observability.CLILogger.Error("Invalid URI", zap.String("uri", rawURI), zap.Error(err))
 		return exitError(foundry.ExitInvalidArgument, "Invalid URI", err)
 	}
-	if parsed.Provider != string(provider.ProviderS3) {
-		return exitError(foundry.ExitInvalidArgument, "Unsupported provider for tree", fmt.Errorf("provider %q is not supported", parsed.Provider))
-	}
 	if parsed.IsPattern() {
 		return exitError(foundry.ExitInvalidArgument, "tree requires a prefix URI (no glob pattern)", fmt.Errorf("patterns are not supported; append '/' and use --include/--exclude for traversal scoping"))
 	}
@@ -116,9 +113,9 @@ func runTree(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = prov.Close() }()
 
-	lister, ok := interface{}(prov).(provider.DelimiterLister)
-	if !ok {
-		return exitError(foundry.ExitInvalidArgument, "Provider does not support delimiter listing", fmt.Errorf("missing delimiter listing support"))
+	lister, err := providerdispatch.RequireCapability[provider.DelimiterLister](prov, "tree", parsed.Provider, "delimiter listing")
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Provider does not support delimiter listing", err)
 	}
 
 	if treeDepth <= 0 {
@@ -583,15 +580,16 @@ func summarizeDirectPrefix(
 	}, children, nil
 }
 
-func createTreeProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
-	cfg := s3.Config{
-		Bucket:         uri.Bucket,
-		Region:         treeRegion,
-		Endpoint:       treeEndpoint,
-		Profile:        treeProfile,
-		ForcePathStyle: treeEndpoint != "",
-	}
-	return s3.New(ctx, cfg)
+func createTreeProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Provider, error) {
+	return providerdispatch.NewSource(ctx, objURI, providerdispatch.SourceOptions{
+		Command: "tree",
+		S3: providerdispatch.S3Options{
+			Region:         treeRegion,
+			Endpoint:       treeEndpoint,
+			Profile:        treeProfile,
+			ForcePathStyle: treeEndpoint != "",
+		},
+	})
 }
 
 func outputTreeTable(rec *output.PrefixRecord) error {

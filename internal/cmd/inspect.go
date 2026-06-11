@@ -15,7 +15,6 @@ import (
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -91,15 +90,17 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "Invalid filter", err)
 	}
 
+	target := commandSourceTargetForRead(parsed)
+
 	// Create provider
-	prov, err := createInspectProvider(ctx, parsed)
+	prov, err := createInspectProvider(ctx, target.ProviderURI)
 	if err != nil {
 		observability.CLILogger.Error("Failed to create provider", zap.Error(err))
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}
 
 	// List objects
-	result, err := listObjectsDetailed(ctx, prov, parsed, filter)
+	result, err := listObjectsDetailed(ctx, prov, target.QueryURI, filter)
 	if err != nil {
 		observability.CLILogger.Error("Failed to list objects", zap.Error(err))
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to list objects", err)
@@ -148,18 +149,9 @@ func buildInspectFilter() (*match.CompositeFilter, error) {
 	return match.NewFilterFromConfig(cfg)
 }
 
-// createInspectProvider creates an S3 provider for inspect command.
-func createInspectProvider(ctx context.Context, uri *uri.ObjectURI) (*s3.Provider, error) {
-	cfg := s3.Config{
-		Bucket:   uri.Bucket,
-		Region:   inspectRegion,
-		Endpoint: inspectEndpoint,
-		Profile:  inspectProfile,
-		// Force path-style URLs when custom endpoint is set.
-		// S3-compatible services (moto, MinIO, etc.) require this.
-		ForcePathStyle: inspectEndpoint != "",
-	}
-	return s3.New(ctx, cfg)
+// createInspectProvider creates a provider for inspect command.
+func createInspectProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Provider, error) {
+	return newCommandSourceProvider(ctx, objURI, "inspect", inspectRegion, inspectProfile, inspectEndpoint)
 }
 
 type inspectListResult struct {

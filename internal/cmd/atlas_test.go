@@ -15,10 +15,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/atlas"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 func TestRunAtlasBuildAndStats_LocalArtifact(t *testing.T) {
@@ -40,7 +41,7 @@ shard_by: [event_date]
 `), 0644))
 
 	oldFactory := newAtlasBuildProvider
-	newAtlasBuildProvider = func(context.Context, s3.Config) (atlasBuildProvider, error) {
+	newAtlasBuildProvider = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (atlasBuildProvider, error) {
 		return fakeAtlasBuildProvider{
 			"prefix/a.json": []byte(`{"event_date":"2026-05-01"}`),
 			"prefix/b.json": []byte(`{"event_date":"2026-05-01","record":"b"}`),

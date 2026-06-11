@@ -16,11 +16,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	providers3 "github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -35,8 +35,8 @@ var (
 	enrichHeadRegion   string
 	enrichHeadEndpoint string
 
-	newEnrichHeadS3Provider = func(ctx context.Context, cfg providers3.Config) (provider.Provider, error) {
-		return providers3.New(ctx, cfg)
+	newEnrichHeadProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (provider.Provider, error) {
+		return providerdispatch.NewSource(ctx, src, opts)
 	}
 )
 
@@ -504,9 +504,7 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 	if err != nil {
 		return nil, fmt.Errorf("parse index base_uri: %w", err)
 	}
-	if parsed.Provider != string(provider.ProviderS3) || indexSet.Provider != string(provider.ProviderS3) {
-		return nil, fmt.Errorf("unsupported provider for enrich-with-head: %s", indexSet.Provider)
-	}
+	parsed.Provider = indexSet.Provider
 	region := strings.TrimSpace(opts.Region)
 	if region == "" {
 		region = indexSet.Region
@@ -515,12 +513,14 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 	if endpoint == "" {
 		endpoint = indexSet.Endpoint
 	}
-	return newEnrichHeadS3Provider(ctx, providers3.Config{
-		Bucket:         parsed.Bucket,
-		Region:         region,
-		Profile:        strings.TrimSpace(opts.Profile),
-		Endpoint:       endpoint,
-		ForcePathStyle: endpoint != "",
+	return newEnrichHeadProvider(ctx, parsed, providerdispatch.SourceOptions{
+		Command: "index enrich-with-head",
+		S3: providerdispatch.S3Options{
+			Region:         region,
+			Profile:        strings.TrimSpace(opts.Profile),
+			Endpoint:       endpoint,
+			ForcePathStyle: endpoint != "",
+		},
 	})
 }
 

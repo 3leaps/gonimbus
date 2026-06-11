@@ -12,9 +12,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/spf13/cobra"
 )
 
@@ -71,31 +70,32 @@ func init() {
 
 // newHubGetter creates a provider.ObjectGetter for reading from a hub.
 func newHubGetter(ctx context.Context, hub *hubDestSpec) (provider.ObjectGetter, error) {
-	switch hub.Provider {
-	case "s3":
-		p, err := s3.New(ctx, s3.Config{
-			Bucket:         hub.Bucket,
+	if hub.Provider == string(provider.ProviderFile) {
+		if err := os.MkdirAll(hub.BaseDir, 0o755); err != nil {
+			return nil, fmt.Errorf("access hub directory: %w", err)
+		}
+	}
+	p, err := providerdispatch.NewDestination(ctx, providerdispatch.DestinationOptions{
+		Command:     "index hydrate",
+		Provider:    hub.Provider,
+		S3Bucket:    hub.Bucket,
+		S3Prefix:    hub.Prefix,
+		FileBaseDir: hub.BaseDir,
+		S3: providerdispatch.S3Options{
 			Region:         hub.Region,
 			Endpoint:       hub.Endpoint,
 			Profile:        hub.Profile,
 			ForcePathStyle: hub.ForcePathStyle,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("create hub S3 provider: %w", err)
-		}
-		return p, nil
-	case "file":
-		if err := os.MkdirAll(hub.BaseDir, 0o755); err != nil {
-			return nil, fmt.Errorf("access hub directory: %w", err)
-		}
-		p, err := providerfile.New(providerfile.Config{BaseDir: hub.BaseDir})
-		if err != nil {
-			return nil, fmt.Errorf("create hub file provider: %w", err)
-		}
-		return p, nil
-	default:
-		return nil, fmt.Errorf("unsupported hub provider %q", hub.Provider)
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create hub provider: %w", err)
 	}
+	getter, err := providerdispatch.RequireCapability[provider.ObjectGetter](p, "index hydrate", hub.Provider, "ObjectGetter")
+	if err != nil {
+		return nil, err
+	}
+	return getter, nil
 }
 
 func runIndexHydrate(cmd *cobra.Command, _ []string) error {

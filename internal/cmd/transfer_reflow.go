@@ -1593,6 +1593,7 @@ func newSourceProvider(ctx context.Context, src *uri.ObjectURI) (provider.Provid
 	return providerdispatch.NewSource(ctx, src, providerdispatch.SourceOptions{
 		Command:             operationTransferReflow,
 		FileMetadataSidecar: reflowMetaSuffix,
+		FileSymlinkPolicy:   reflowSymlinks,
 		S3: providerdispatch.S3Options{
 			Region:         reflowSrcRegion,
 			Endpoint:       reflowSrcEndpoint,

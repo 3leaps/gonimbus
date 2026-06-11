@@ -13,12 +13,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/3leaps/gonimbus/internal/observability"
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/preflight"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 var transferCmd = &cobra.Command{
@@ -247,14 +249,17 @@ func createTransferWriter(m *manifest.TransferManifest, jobID string) (output.Wr
 	return w, cleanup, nil
 }
 
-func createTransferProvider(ctx context.Context, conn manifest.ConnectionConfig) (*s3.Provider, error) {
-	cfg := s3.Config{
+func createTransferProvider(ctx context.Context, conn manifest.ConnectionConfig) (provider.Provider, error) {
+	return providerdispatch.NewSource(ctx, &uri.ObjectURI{
+		Provider: conn.Provider,
 		Bucket:   conn.Bucket,
-		Region:   conn.Region,
-		Endpoint: conn.Endpoint,
-		Profile:  conn.Profile,
-		// Force path-style URLs when custom endpoint is set.
-		ForcePathStyle: conn.Endpoint != "",
-	}
-	return s3.New(ctx, cfg)
+	}, providerdispatch.SourceOptions{
+		Command: "transfer",
+		S3: providerdispatch.S3Options{
+			Region:         conn.Region,
+			Endpoint:       conn.Endpoint,
+			Profile:        conn.Profile,
+			ForcePathStyle: conn.Endpoint != "",
+		},
+	})
 }

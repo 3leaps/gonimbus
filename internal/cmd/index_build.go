@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
@@ -30,8 +31,8 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/scope"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 const operationIndexBuild = "index-build"
@@ -1083,20 +1084,27 @@ func compileScopePlan(ctx context.Context, m *manifest.IndexManifest) (*scope.Pl
 
 	var lister provider.PrefixLister
 	if scope.RequiresPrefixLister(m.Build.Scope) {
-		cfg := s3.Config{
-			Bucket:         m.Connection.Bucket,
-			Region:         m.Connection.Region,
-			Endpoint:       m.Connection.Endpoint,
-			Profile:        m.Connection.Profile,
-			ForcePathStyle: m.Connection.Endpoint != "",
-		}
-		prov, err := s3.New(ctx, cfg)
+		prov, err := providerdispatch.NewSource(ctx, &uri.ObjectURI{
+			Provider: m.Connection.Provider,
+			Bucket:   m.Connection.Bucket,
+		}, providerdispatch.SourceOptions{
+			Command: operationIndexBuild,
+			S3: providerdispatch.S3Options{
+				Region:         m.Connection.Region,
+				Endpoint:       m.Connection.Endpoint,
+				Profile:        m.Connection.Profile,
+				ForcePathStyle: m.Connection.Endpoint != "",
+			},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("create provider: %w", err)
 		}
 		defer func() { _ = prov.Close() }()
 
-		lister = prov
+		lister, err = providerdispatch.RequireCapability[provider.PrefixLister](prov, operationIndexBuild, m.Connection.Provider, "PrefixLister")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
@@ -1481,15 +1489,19 @@ func runCrawlForIndex(
 	filter *match.CompositeFilter,
 	crawlPrefixesOverride []string,
 ) (*indexBuildResult, error) {
-	// Create provider
-	cfg := s3.Config{
-		Bucket:         m.Connection.Bucket,
-		Region:         m.Connection.Region,
-		Endpoint:       m.Connection.Endpoint,
-		Profile:        m.Connection.Profile,
-		ForcePathStyle: m.Connection.Endpoint != "",
-	}
-	prov, err := s3.New(ctx, cfg)
+	// Create provider.
+	prov, err := providerdispatch.NewSource(ctx, &uri.ObjectURI{
+		Provider: m.Connection.Provider,
+		Bucket:   m.Connection.Bucket,
+	}, providerdispatch.SourceOptions{
+		Command: operationIndexBuild,
+		S3: providerdispatch.S3Options{
+			Region:         m.Connection.Region,
+			Endpoint:       m.Connection.Endpoint,
+			Profile:        m.Connection.Profile,
+			ForcePathStyle: m.Connection.Endpoint != "",
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create provider: %w", err)
 	}
@@ -1507,7 +1519,10 @@ func runCrawlForIndex(
 	if len(crawlPrefixesOverride) == 0 && m.Build != nil && m.Build.Scope != nil {
 		var lister provider.PrefixLister
 		if scope.RequiresPrefixLister(m.Build.Scope) {
-			lister = prov
+			lister, err = providerdispatch.RequireCapability[provider.PrefixLister](prov, operationIndexBuild, m.Connection.Provider, "PrefixLister")
+			if err != nil {
+				return nil, err
+			}
 		}
 		plan, err := scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
 		if err != nil {
