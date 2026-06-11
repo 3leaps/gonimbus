@@ -75,7 +75,7 @@ jobs:
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.3"
+          go-version: "1.26.4"
 ```
 
 The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is used
@@ -85,11 +85,11 @@ Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which o
 
 ### Pin Go to an exact patch release
 
-CI and release workflows pin `actions/setup-go` to `1.26.3` rather than the
+CI and release workflows pin `actions/setup-go` to `1.26.4` rather than the
 floating `1.26.x` selector. Vulnerability scans report standard-library CVEs
 against the Go toolchain used to build or scan the repo, so release builds and
 SBOM/vulnerability reports need a fixed patched toolchain for attributable
-results. Local scans should use Go `1.26.3` or newer on the 1.26 lane.
+results. Local scans should use Go `1.26.4` or newer on the 1.26 lane.
 
 ### Bash shell required for `run:` steps
 
@@ -186,7 +186,12 @@ make test       # CGO-enabled (default)
 make test-nocgo # CGO-disabled, matches CI
 ```
 
-`make prepush` runs `check-all`, so local pushes catch CI-sensitive test failures.
+`make prepush` delegates to the checked-in pre-push hook, which runs
+changed-file scoped `format`, `lint`, and `security` checks. Dependency
+vulnerability enforcement runs in the `Dependency Security` workflow on pull
+requests, pushes to `main`, scheduled daily scans, and manual dispatch; keep the
+`dependencies` category out of the per-push hook because goneat does not scope
+that category with `--new-issues-only`.
 
 ### Cloud Integration Testing
 

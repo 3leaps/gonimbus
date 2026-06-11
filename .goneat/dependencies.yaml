@@ -9,7 +9,7 @@
 #   2. Cooling policy is enabled with 7-day minimum age
 #   3. 3leaps and FulmenHQ packages are pre-trusted
 #   4. Test: goneat dependencies --licenses --cooling
-#   5. Makefile targets: make license-audit, make prepush
+#   5. Makefile targets: make license-audit; CI enforces the dependency gate
 #
 # ============================================================================
 version: v1
@@ -52,7 +52,7 @@ licenses:
 #
 # Commands:
 #   goneat dependencies --cooling
-#   make prepush (includes license-audit)
+#   make license-audit
 #
 cooling:
   enabled: true
@@ -85,7 +85,7 @@ cooling:
 #
 # Commands:
 #   goneat dependencies --licenses --cooling --vuln
-#   make prepush
+#   CI enforces the dependency gate
 #
 vulnerabilities:
   enabled: true

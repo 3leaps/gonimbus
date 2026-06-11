@@ -403,10 +403,7 @@ precommit:  ## Run pre-commit hooks
 	@echo "✅ Pre-commit checks passed"
 
 prepush: ## Run pre-push hooks
-	@echo "Running pre-push validation..."; \
-	$(GONEAT_RESOLVE); \
-	$$GONEAT assess --check --categories format,lint,security,dependencies --fail-on high --package-mode
-	@echo "✅ Pre-push checks passed"
+	@.goneat/hooks/pre-push
 
 # License compliance
 license-inventory: ## Generate CSV inventory of dependency licenses
