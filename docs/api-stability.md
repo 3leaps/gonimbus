@@ -82,7 +82,8 @@ compatibility window.
 
 - exported-symbol diff for Stable packages against the latest release tag. If
   a Stable API diff exists, the check fails unless the current `Unreleased`
-  changelog has a `Library API` entry acknowledging it.
+  changelog, or the section matching the current `VERSION` during release prep,
+  has a `Library API` entry acknowledging it.
 - manifest coverage for every package under `pkg/`, including a guard that only
   the documented Stable packages are covered by the diff gate.
 

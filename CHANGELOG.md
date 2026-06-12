@@ -15,6 +15,18 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-12
+
+**Pure-Go index defaults, resumable long-running operations, provider-dispatch
+reflow, and release-gate hardening.**
+
+v0.3.0 moves the default local index store to pure-Go SQLite, adds resumable
+failure handling for long-running index and reflow operations, expands
+provider-dispatched transfer reflow so local file trees can be copied into cloud
+object stores, and tightens release security gates. See
+[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) for the narrative
+walkthrough.
+
 ### Library API
 
 - **Added:** `pkg/provider` now exposes `ErrCredentialsRefreshFailed` and
@@ -23,9 +35,26 @@ changes.
   string matching. This is additive; existing provider implementations do not
   need changes unless they want to surface refresh failures through the new
   helper.
+- **Added:** `pkg/output` now exposes `ErrCodeTransient` for temporary network
+  and transport failures such as DNS errors, connection resets, mid-transfer
+  EOFs, I/O timeouts, and TLS handshake timeouts. Transfer and reflow JSONL
+  errors use this class so callers can distinguish retryable transport failures
+  from fatal or internal errors.
+- **No Stable break from provider dispatch:** the provider-dispatch work lives
+  under `internal/providerdispatch`. The Stable `pkg/uri` and
+  `pkg/provider/s3` surfaces are unchanged in v0.3.0.
 
 ### Added
 
+- **Pure-Go index-store default:** default builds now use the pure-Go
+  `modernc.org/sqlite` index-store driver, which simplifies static,
+  cross-compiled, and container builds (no C toolchain required). The
+  libsql/Turso driver remains available behind the explicit `gonimbus_libsql`
+  build tag.
+- **Sensitive local operation checkpoints:** `pkg/opcheckpoint` adds the
+  operation-checkpoint substrate for failed-resumable runs, including
+  credential-material scanning, lease files, and identity validation before
+  resume.
 - **Failed-resumable index discovery:** `index list` and `index stats --runs`
   now expose the latest run ID and a safe `--resume-run` command for
   failed-resumable index runs; `index stats` also reports a separate
@@ -41,6 +70,49 @@ changes.
   operation-checkpoint lease while they are running, so long index build,
   enrich-with-head, and transfer reflow resumes do not outlive the fixed lease
   claimed at startup.
+- **Provider-dispatched reflow:** command code now routes source and destination
+  construction through provider dispatch, allowing `transfer reflow` to copy
+  from `file://` local directory sources to S3 or S3-compatible destinations
+  with the same rewrite, metadata, collision, dry-run, checkpoint, and audit
+  machinery used for object-store sources.
+- **Transfer/reflow failure taxonomy:** transfer and reflow error records now
+  classify temporary network and transport failures as `TRANSIENT` and emit the
+  reflow reason `transient.network`.
+- **Dependency security workflow:** high-and-critical dependency enforcement
+  now runs in CI on pull requests, `main` pushes, a daily schedule, and manual
+  dispatch.
+
+### Changed
+
+- **Version bumped to `0.3.0`:** version stamping continues through `VERSION`,
+  `.fulmen/app.yaml`, the embedded app identity mirror, and
+  `internal/buildinfo/VERSION`.
+- **Local pre-push stays scoped:** `make prepush` and the installed pre-push hook
+  now run changed-file scoped format, lint, and security checks without the
+  unscopable dependency category. Dependency enforcement is centralized in the
+  CI workflow where clean-room scans are authoritative.
+- **CI and release toolchains use Go `1.26.4`:** release-lane workflows now use
+  the patched Go toolchain for the v0.3.0 build and dependency gates.
+
+### Fixed
+
+- **Resume collision false-conflicts:** transfer reflow no longer treats an
+  in-flight-at-interruption duplicate collision as a fatal conflict when the
+  duplicate source content is byte-identical to already completed destination
+  data.
+- **No more `[unknown]` for transient transport failures:** failed transfer and
+  reflow chunks now carry the machine-actionable `TRANSIENT` class for known
+  temporary network conditions instead of falling through to internal or unknown
+  surfaces.
+
+### Security
+
+- **Provider read confinement:** local file provider reads stay confined to the
+  resolved source root, and symlinks remain skipped by default unless
+  `--symlinks=follow` is explicitly selected for reflow.
+- **No high-or-critical dependency violations at the release gate:** the direct
+  `golang.org/x/net` dependency is updated to `v0.55.0`, CI/release builds use
+  Go `1.26.4`, and the dependency policy records no new suppressions.
 
 ## [0.2.3] - 2026-05-31
 

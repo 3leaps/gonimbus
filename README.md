@@ -97,11 +97,17 @@ Local directory sources are supported with `transfer reflow file://...`; hidden
 files and dot-directories are skipped by default unless `--hidden=include` is
 set. Indexes retain LIST-derived storage class and can be enriched with
 HEAD-derived archive/restore/content-type metadata via `index enrich-with-head`.
-`stream put` can now upload raw stdin or framed `stream get` batches, reflow can
+Local directory trees can also be backed up into object storage by piping
+`crawl --emit reflow-input` into `transfer reflow --stdin`, which preserves
+nested paths without rewrite templates. Long-running job-backed `index build`,
+`index enrich-with-head`, and `transfer reflow` runs are now failed-resumable:
+an interrupted run can be safely continued with `--resume-run <run_id>`.
+(Stdin-streamed reflow is not `--resume-run`-resumable.)
+`stream put` can upload raw stdin or framed `stream get` batches, reflow can
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD
-results. See [docs/releases/v0.2.3.md](docs/releases/v0.2.3.md) for the
-current operator notes.
+results. See [docs/releases/v0.3.0.md](docs/releases/v0.3.0.md) for the current
+operator notes.
 
 ### Outputs
 
@@ -131,6 +137,7 @@ For automated workflow testing and validation, see [fulseed](https://github.com/
 gonimbus tree <uri>            # Prefix summary (directory-like view)
 gonimbus inspect <uri>         # Quick inspection with filters
 gonimbus crawl --job <path>    # Full crawl to JSONL
+gonimbus atlas build --from-index <id> --output <dir> # Build content-addressed atlas artifacts
 
 # Index workflow (for large buckets)
 gonimbus index init            # Initialize local index database
@@ -139,8 +146,12 @@ gonimbus index build --background --job <path>  # Background build with job trac
 gonimbus index query <uri>     # Query indexed objects by pattern/storage class
 gonimbus index enrich-with-head <index-set-id>  # Cache HEAD-derived archive/restore metadata
 gonimbus index list            # List local indexes
+gonimbus index stats           # Show index statistics and resumable run state
 gonimbus index doctor          # Validate index integrity
 gonimbus index gc              # Clean up old indexes
+gonimbus index export          # Export an index run to a hub
+gonimbus index hydrate         # Download an index run from a hub
+gonimbus index hub             # Manage index hubs
 
 # Job management (for long-running builds)
 gonimbus index jobs list       # List running and recent jobs
@@ -159,9 +170,12 @@ gonimbus stream put <uri>      # Upload raw/framed stdin, multipart for large ob
 
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets
+gonimbus transfer reflow <source> --dest <uri> # Copy objects to a new key layout
 gonimbus inspect-pair --from-reflow <path> --expected-dest-prefix <uri> # Verify reflow writes
 gonimbus preflight --job <path> # Verify permissions before transfer
 gonimbus doctor                # Environment/auth checks
+gonimbus envinfo               # Environment summary for support/debugging
+gonimbus health                # Self-health check
 gonimbus serve                 # Run server mode
 gonimbus version               # Version info
 

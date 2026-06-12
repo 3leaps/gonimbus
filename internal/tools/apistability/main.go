@@ -181,7 +181,7 @@ func checkDiff(baseTag string) error {
 	}
 
 	sort.Strings(changes)
-	return fmt.Errorf("stable exported API changed relative to %s without an Unreleased Library API changelog entry:\n%s", baseTag, strings.Join(changes, "\n"))
+	return fmt.Errorf("stable exported API changed relative to %s without an Unreleased or current-release Library API changelog entry:\n%s", baseTag, strings.Join(changes, "\n"))
 }
 
 func latestReleaseTag() (string, error) {
@@ -478,11 +478,28 @@ func hasLibraryAPIChangelogEntry() bool {
 	if err != nil {
 		return false
 	}
-	return hasLibraryAPIChangelogText(string(data))
+	versionData, err := readRepoFile("VERSION")
+	if err != nil {
+		return hasLibraryAPIChangelogText(string(data))
+	}
+	return hasLibraryAPIChangelogTextForVersion(string(data), strings.TrimSpace(string(versionData)))
 }
 
 func hasLibraryAPIChangelogText(changelog string) bool {
-	section := unreleasedSection(changelog)
+	return hasLibraryAPIChangelogTextForVersion(changelog, "")
+}
+
+func hasLibraryAPIChangelogTextForVersion(changelog, version string) bool {
+	if hasLibraryAPIInSection(unreleasedSection(changelog)) {
+		return true
+	}
+	if version == "" {
+		return false
+	}
+	return hasLibraryAPIInSection(changelogSection(changelog, version))
+}
+
+func hasLibraryAPIInSection(section string) bool {
 	if section == "" {
 		return false
 	}
@@ -506,10 +523,15 @@ func hasLibraryAPIChangelogText(changelog string) bool {
 }
 
 func unreleasedSection(changelog string) string {
+	return changelogSection(changelog, "Unreleased")
+}
+
+func changelogSection(changelog, heading string) string {
 	lines := strings.Split(changelog, "\n")
 	start := -1
+	want := "## [" + heading + "]"
 	for i, line := range lines {
-		if strings.HasPrefix(line, "## [Unreleased]") {
+		if strings.HasPrefix(line, want) {
 			start = i + 1
 			break
 		}
