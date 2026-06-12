@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -85,6 +87,45 @@ func TestValidateTransferReflowArgs(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "do not provide source-uri arguments with --resume-run")
 	})
+}
+
+func TestReflowErrCodeTransientNetwork(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF},
+		{name: "dns", err: &net.DNSError{Name: "object-store.example", Err: "no such host"}},
+		{name: "connection reset", err: &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderS3, Err: syscall.ECONNRESET}},
+		{name: "tls handshake timeout text", err: errors.New("net/http: TLS handshake timeout")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, output.ErrCodeTransient, reflowErrCode(tt.err))
+		})
+	}
+}
+
+func TestReflowReasonForErrCodeTransient(t *testing.T) {
+	require.Equal(t, "transient.network", reflowReasonForErrCode(output.ErrCodeTransient))
+	require.Equal(t, "internal", reflowReasonForErrCode(output.ErrCodeInternal))
+}
+
+func TestEmitReflowErrorTransientNetworkSurface(t *testing.T) {
+	var stdout bytes.Buffer
+	w := output.NewJSONLWriter(&stdout, "job-123", "s3")
+	t.Cleanup(func() { _ = w.Close() })
+
+	err := emitReflowError(context.Background(), w, "source/file.xml", "copy failed", io.ErrUnexpectedEOF, map[string]any{"source_uri": "s3://source/source/file.xml", "dest_uri": "s3://dest/file.xml"})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	errData := requireErrorData(t, stdout.String())
+	require.Equal(t, output.ErrCodeTransient, errData.Code)
+	require.Equal(t, "source/file.xml", errData.Key)
+	require.Equal(t, "transfer_reflow", errData.Details["mode"])
+	require.Equal(t, "transient.network", errData.Details["reason"])
 }
 
 func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {

@@ -191,6 +191,9 @@ const (
 	// ErrCodeProviderUnavailable indicates provider or network availability issues.
 	ErrCodeProviderUnavailable = "PROVIDER_UNAVAILABLE"
 
+	// ErrCodeTransient indicates a temporary network or transport failure.
+	ErrCodeTransient = "TRANSIENT"
+
 	// ErrCodeAlreadyExists indicates a write was refused because the target exists.
 	ErrCodeAlreadyExists = "ALREADY_EXISTS"
 

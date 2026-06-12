@@ -3070,7 +3070,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
 						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 					}
-					_ = w.WriteAny(ctx, reflowRecordType, task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed"))
+					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+					rec.Reason = reflowReasonForErrCode(code)
+					_ = w.WriteAny(ctx, reflowRecordType, rec)
 					continue
 				}
 				if srcCfg.PreserveMode && task.SourceProvider == string(provider.ProviderFile) && destSpec.Provider == string(provider.ProviderFile) {
@@ -3670,6 +3672,9 @@ func emitReflowErrorWithCode(ctx context.Context, w output.Writer, code string, 
 		delete(details, "collision")
 	}
 	details["mode"] = "transfer_reflow"
+	if _, ok := details["reason"]; !ok {
+		details["reason"] = reflowReasonForErrCode(code)
+	}
 	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Key: key, Details: details, Collision: collision}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow error record", zap.Error(werr))
 	}
@@ -3689,7 +3694,32 @@ func reflowErrCode(err error) string {
 		return output.ErrCodeThrottled
 	case provider.IsProviderUnavailable(err):
 		return output.ErrCodeProviderUnavailable
+	case transfer.IsTransientNetworkError(err):
+		return output.ErrCodeTransient
 	default:
 		return output.ErrCodeInternal
+	}
+}
+
+func reflowReasonForErrCode(code string) string {
+	switch code {
+	case output.ErrCodeAccessDenied:
+		return "access_denied"
+	case output.ErrCodeNotFound:
+		return "not_found"
+	case output.ErrCodeTimeout:
+		return "timeout"
+	case output.ErrCodeThrottled:
+		return "provider.throttled"
+	case output.ErrCodeProviderUnavailable:
+		return "provider.unavailable"
+	case output.ErrCodeTransient:
+		return "transient.network"
+	case output.ErrCodeAlreadyExists:
+		return "already_exists"
+	case output.ErrCodeInvalidInput:
+		return "invalid_input"
+	default:
+		return "internal"
 	}
 }

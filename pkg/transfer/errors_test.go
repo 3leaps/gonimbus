@@ -3,6 +3,10 @@ package transfer
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -56,6 +60,26 @@ func TestClassifyErrCode_ContextCanceled(t *testing.T) {
 func TestClassifyErrCode_ContextDeadlineExceeded(t *testing.T) {
 	code := classifyErrCode(context.DeadlineExceeded)
 	assert.Equal(t, output.ErrCodeTimeout, code)
+}
+
+func TestClassifyErrCode_TransientNetwork(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF},
+		{name: "dns", err: &net.DNSError{Name: "object-store.example", Err: "no such host"}},
+		{name: "op error", err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}},
+		{name: "wrapped deadline", err: &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderS3, Err: os.ErrDeadlineExceeded}},
+		{name: "tls handshake timeout text", err: errors.New("net/http: TLS handshake timeout")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := classifyErrCode(tt.err)
+			assert.Equal(t, output.ErrCodeTransient, code)
+		})
+	}
 }
 
 func TestClassifyErrCode_UnknownError(t *testing.T) {

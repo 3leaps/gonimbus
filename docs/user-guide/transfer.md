@@ -208,6 +208,29 @@ Transfer emits JSONL records for each operation:
 }
 ```
 
+### Error Record and Failure Classes
+
+Per-object transfer and reflow failures are emitted as `gonimbus.error.v1`
+records with a machine-readable `code` and a human-readable `message`. The
+stable failure classes are:
+
+| Code                   | Meaning                                                                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACCESS_DENIED`        | Credentials or policy denied the operation.                                                                                             |
+| `NOT_FOUND`            | The source object, destination object, or bucket was missing for the attempted operation.                                               |
+| `TIMEOUT`              | The operation context expired or was canceled before completion.                                                                        |
+| `THROTTLED`            | The provider reported rate limiting.                                                                                                    |
+| `PROVIDER_UNAVAILABLE` | The provider service reported an availability failure.                                                                                  |
+| `TRANSIENT`            | A temporary network or transport failure, such as DNS failure, connection reset, mid-stream EOF, I/O timeout, or TLS handshake timeout. |
+| `ALREADY_EXISTS`       | An atomic destination create was refused because the object already exists.                                                             |
+| `INVALID_INPUT`        | The input record, template, metadata expression, or caller configuration was malformed.                                                 |
+| `INTERNAL`             | An unexpected Gonimbus failure that does not match a more specific class.                                                               |
+
+Use `TRANSIENT` for caller-side retry decisions when orchestrating reflow over
+flaky networks. Gonimbus v0.3.0 classifies these failures but does not add a new
+automatic retry policy inside `transfer reflow`; callers that own the broader
+pipeline can retry or resume based on the emitted class.
+
 ### Summary Record
 
 ```json
