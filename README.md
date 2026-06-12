@@ -97,6 +97,11 @@ Local directory sources are supported with `transfer reflow file://...`; hidden
 files and dot-directories are skipped by default unless `--hidden=include` is
 set. Indexes retain LIST-derived storage class and can be enriched with
 HEAD-derived archive/restore/content-type metadata via `index enrich-with-head`.
+Local directory trees can also be backed up into object storage by piping
+`crawl --emit reflow-input` into `transfer reflow --stdin`, which preserves
+nested paths without rewrite templates. Long-running `index build`,
+`index enrich-with-head`, and `transfer reflow` runs are now failed-resumable:
+an interrupted run can be safely continued with `--resume-run <run_id>`.
 `stream put` can upload raw stdin or framed `stream get` batches, reflow can
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD

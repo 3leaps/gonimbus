@@ -47,8 +47,10 @@ walkthrough.
 ### Added
 
 - **Pure-Go index-store default:** default builds now use the pure-Go
-  `modernc.org/sqlite` index-store driver. The libsql/Turso driver remains
-  available behind the explicit `gonimbus_libsql` build tag.
+  `modernc.org/sqlite` index-store driver, which simplifies static,
+  cross-compiled, and container builds (no C toolchain required). The
+  libsql/Turso driver remains available behind the explicit `gonimbus_libsql`
+  build tag.
 - **Sensitive local operation checkpoints:** `pkg/opcheckpoint` adds the
   operation-checkpoint substrate for failed-resumable runs, including
   credential-material scanning, lease files, and identity validation before
