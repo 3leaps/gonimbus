@@ -10,7 +10,9 @@ The gate uses a small repository-local Go checker at
 
 - `go/parser` and `go/ast` extract exported symbols from Stable packages.
 - `git archive <tag>` provides the baseline tree for the latest release tag.
-- `CHANGELOG.md` is parsed for an `Unreleased` `Library API` acknowledgement.
+- `CHANGELOG.md` is parsed for an `Unreleased` `Library API`
+  acknowledgement, or for the section matching the current `VERSION` during a
+  release-prep version cut.
 
 This avoids adding a new external tool dependency while still enforcing the
 protocol in local checks and CI. The check is intentionally soft: it does not
@@ -39,9 +41,10 @@ When a Stable exported API changes, add this section under `## [Unreleased]`:
 - Breaking: describe the Stable package change and the migration path.
 ```
 
-The checker only treats a non-empty `### Library API` subsection under
-`Unreleased` as an acknowledgement. General prose elsewhere in the changelog
-does not waive the gate.
+The checker treats a non-empty `### Library API` subsection under `Unreleased`
+as an acknowledgement. During a release-prep version cut, it also accepts the
+section matching the current `VERSION` after the release entry has been cut from
+`Unreleased`. General prose elsewhere in the changelog does not waive the gate.
 
 ## CI Behavior
 

@@ -78,6 +78,28 @@ Use a Library API subsection when needed.
 	}
 }
 
+func TestHasLibraryAPIChangelogEntryAcceptsCurrentReleaseSection(t *testing.T) {
+	body := `# Changelog
+
+## [Unreleased]
+
+## [0.3.0] - 2026-06-12
+
+### Library API
+
+- Added: provider credential-refresh sentinel.
+
+## [0.2.3] - 2026-05-31
+`
+
+	if !hasLibraryAPIChangelogTextForVersion(body, "0.3.0") {
+		t.Fatal("hasLibraryAPIChangelogTextForVersion() = false, want true for current release section")
+	}
+	if hasLibraryAPIChangelogTextForVersion(body, "0.3.1") {
+		t.Fatal("hasLibraryAPIChangelogTextForVersion() = true, want false for a different release section")
+	}
+}
+
 func TestDiffSnapshotsReportsStableSymbolChanges(t *testing.T) {
 	base := map[string]map[string]string{
 		"github.com/3leaps/gonimbus/pkg/uri": {
