@@ -19,68 +19,101 @@ export GONEAT_HOME
 # Detect dev mode: enabled if $REPO_ROOT/.goneat/dev-mode exists or env is set
 DEV_MODE=0
 if [ -f "$REPO_ROOT/.goneat/dev-mode" ] || [ "${GONEAT_DEV_MODE:-0}" = "1" ]; then
-  DEV_MODE=1
+	DEV_MODE=1
 fi
 
 echo "🚀 Running goneat pre-push validation..."
 
 # Robust binary discovery (prefer repo build first, then PATH/common locations)
 find_goneat_bin() {
-  if [ -x "$REPO_ROOT/dist/goneat" ]; then
-    echo "$REPO_ROOT/dist/goneat"
-    return 0
-  fi
-  local candidates=(
-    "$HOME/go/bin/goneat"
-    "/opt/homebrew/bin/goneat"
-    "/usr/local/bin/goneat"
-    "$HOME/.local/bin/goneat"
-    "$HOME/.goneat/bin/goneat"
-    "goneat"
-  )
-  for c in "${candidates[@]}"; do
-    if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
-      echo "$c"
-      return 0
-    fi
-  done
-  return 1
+	if [ -x "$REPO_ROOT/dist/goneat" ]; then
+		echo "$REPO_ROOT/dist/goneat"
+		return 0
+	fi
+	local candidates=(
+		"$HOME/go/bin/goneat"
+		"/opt/homebrew/bin/goneat"
+		"/usr/local/bin/goneat"
+		"$HOME/.local/bin/goneat"
+		"$HOME/.goneat/bin/goneat"
+		"goneat"
+	)
+	for c in "${candidates[@]}"; do
+		if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
+			echo "$c"
+			return 0
+		fi
+	done
+	return 1
 }
 
 GONEAT_BIN=""
 if BIN=$(find_goneat_bin); then
-  GONEAT_BIN="$BIN"
+	GONEAT_BIN="$BIN"
 fi
 
 if [ -z "$GONEAT_BIN" ]; then
-  if [ "$DEV_MODE" = "1" ]; then
-    echo "⚠️  goneat not found (dev mode). Using fallback validation"
-    echo "Skipping validation - goneat not available"
-    exit 0
-  else
-    echo "❌ goneat CLI not found. Pre-push validation requires goneat."
-    echo "👉 Install options:"
-    echo "   - Go:   go install github.com/fulmenhq/goneat@latest   (ensure \$GOPATH/bin in \$PATH)"
-    echo "   - Brew: brew install 3leaps/tap/goneat                (macOS, if tap available)"
-    echo "   - Releases: https://github.com/fulmenhq/goneat/releases"
-    echo "🔎 Searched: $REPO_ROOT/dist, $HOME/go/bin, /opt/homebrew/bin, /usr/local/bin, $HOME/.local/bin, $HOME/.goneat/bin"
-    echo "💡 Tip: export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\""
-    exit 1
-  fi
+	if [ "$DEV_MODE" = "1" ]; then
+		echo "⚠️  goneat not found (dev mode). Using fallback validation"
+		echo "Skipping validation - goneat not available"
+		exit 0
+	else
+		echo "❌ goneat CLI not found. Pre-push validation requires goneat."
+		echo "👉 Install options:"
+		echo "   - Go:   go install github.com/fulmenhq/goneat@latest   (ensure \$GOPATH/bin in \$PATH)"
+		echo "   - Brew: brew install 3leaps/tap/goneat                (macOS, if tap available)"
+		echo "   - Releases: https://github.com/fulmenhq/goneat/releases"
+		echo "🔎 Searched: $REPO_ROOT/dist, $HOME/go/bin, /opt/homebrew/bin, /usr/local/bin, $HOME/.local/bin, $HOME/.goneat/bin"
+		echo "💡 Tip: export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\""
+		exit 1
+	fi
 fi
 
 # Guardian enforcement for protected git push operations
 
 # Verify crucible sources are clean before pushing
 if [ -f "$REPO_ROOT/scripts/verify-crucible-clean.sh" ]; then
-  if ! "$REPO_ROOT/scripts/verify-crucible-clean.sh"; then
-    echo ""
-    echo "❌ Pre-push validation failed: Crucible sources are dirty"
-    exit 1
-  fi
+	if ! "$REPO_ROOT/scripts/verify-crucible-clean.sh"; then
+		echo ""
+		echo "❌ Pre-push validation failed: Crucible sources are dirty"
+		exit 1
+	fi
 fi
 
-# Use goneat's orchestrated assessment (manifest-driven)
-"$GONEAT_BIN" assess --hook pre-push --hook-manifest "$REPO_ROOT/.goneat/hooks.yaml" --staged-only --package-mode
+# Scope local pre-push checks to files touched by this branch/worktree. The
+# dependency vulnerability gate runs in CI because goneat does not currently
+# apply --new-issues-only filtering to dependency findings.
+changed_file_list="$(mktemp "${TMPDIR:-/tmp}/gonimbus-prepush.XXXXXX")"
+trap 'rm -f "$changed_file_list"' EXIT
+
+{
+	git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMRTUXB origin/main...HEAD 2>/dev/null || true
+	git -C "$REPO_ROOT" diff --cached --name-only --diff-filter=ACMRTUXB 2>/dev/null || true
+	git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMRTUXB 2>/dev/null || true
+} | sort -u >"$changed_file_list"
+
+ASSESS_ARGS=(
+	assess
+	--check
+	--categories format,lint,security
+	--fail-on high
+	--scope
+	--package-mode
+)
+
+include_count=0
+while IFS= read -r rel; do
+	[ -n "$rel" ] || continue
+	[ -f "$REPO_ROOT/$rel" ] || continue
+	ASSESS_ARGS+=(--include "$rel")
+	include_count=$((include_count + 1))
+done <"$changed_file_list"
+
+if [ "$include_count" -eq 0 ]; then
+	echo "No changed files to validate"
+	exit 0
+fi
+
+"$GONEAT_BIN" "${ASSESS_ARGS[@]}"
 
 echo "✅ Pre-push validation passed!"
