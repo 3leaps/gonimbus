@@ -112,6 +112,42 @@ func TestRunContentProbeUntilResolvedMissingRequiredQuarantine(t *testing.T) {
 	require.Equal(t, probe.TerminationStreamExhausted, got.audit.TerminationReason)
 }
 
+func TestRunContentProbeUntilResolvedDerivedFromMissingQuarantineSource(t *testing.T) {
+	data := []byte(`<record></record>`)
+	prov := newRangeProbeProvider("missing-date.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy:     probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "128", ChunkBytes: "16"},
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:      "date",
+			Type:      "xml_xpath",
+			XPath:     "//date",
+			Required:  true,
+			OnMissing: probe.OnMissingQuarantine,
+		}},
+		Derived: []probe.DerivedConfig{
+			{Name: "year", From: "date", Transform: probe.TransformSubstring, Args: map[string]any{"start": 0, "end": 4}},
+			{Name: "month", From: "date", Transform: probe.TransformSubstring, Args: map[string]any{"start": 5, "end": 7}},
+			{Name: "day", From: "date", Transform: probe.TransformSubstring, Args: map[string]any{"start": 8, "end": 10}},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "missing-date.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "quarantine", got.routingClass)
+	require.Equal(t, "_unresolved/", got.quarantinePrefix)
+	require.Equal(t, "_unresolved", got.vars["date"])
+	require.Equal(t, "_unresolved", got.vars["year"])
+	require.Equal(t, "_unresolved", got.vars["month"])
+	require.Equal(t, "_unresolved", got.vars["day"])
+	require.Equal(t, probe.TerminationStreamExhausted, got.audit.TerminationReason)
+}
+
 func TestRunContentProbeUntilResolvedTargetPastMaxBytesQuarantine(t *testing.T) {
 	data := []byte(`<root><pad>` + strings.Repeat("x", 80) + `</pad><date>2026-05-15</date></root>`)
 	prov := newRangeProbeProvider("past-max.xml", data)

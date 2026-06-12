@@ -232,6 +232,7 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 	if vars == nil {
 		vars = map[string]string{}
 	}
+	quarantinedSources := map[string]bool{}
 	for _, entry := range p.extractors {
 		if !entry.cfg.Required {
 			continue
@@ -243,6 +244,7 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 		case OnMissingQuarantine:
 			routingClass = "quarantine"
 			vars[entry.cfg.Name] = "_unresolved"
+			quarantinedSources[entry.cfg.Name] = true
 		default:
 			requiredFailed = true
 		}
@@ -264,8 +266,10 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 		if strings.TrimSpace(vars[entry.cfg.Name]) != "" {
 			continue
 		}
-		if err := failures[entry.cfg.Name]; err != nil && failureErr == nil {
-			failureErr = err
+		if quarantinedSources[entry.cfg.From] {
+			routingClass = "quarantine"
+			vars[entry.cfg.Name] = "_unresolved"
+			continue
 		}
 		switch entry.cfg.OnMissing {
 		case OnMissingQuarantine:
@@ -273,6 +277,9 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 			vars[entry.cfg.Name] = "_unresolved"
 		default:
 			requiredFailed = true
+		}
+		if err := failures[entry.cfg.Name]; err != nil && failureErr == nil {
+			failureErr = err
 		}
 	}
 	return routingClass, requiredFailed, failureErr

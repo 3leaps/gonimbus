@@ -392,6 +392,38 @@ func TestProber_DerivedOnMissingQuarantine(t *testing.T) {
 	require.NotContains(t, failureErr.Error(), "not-a-date")
 }
 
+func TestProber_DerivedFromMissingQuarantineSource(t *testing.T) {
+	cfg := Config{
+		QuarantinePrefix: "_unresolved/",
+		Extract: []ExtractorConfig{{
+			Name:      "date",
+			Type:      "xml_xpath",
+			XPath:     "//date",
+			Required:  true,
+			OnMissing: OnMissingQuarantine,
+		}},
+		Derived: []DerivedConfig{
+			{Name: "year", From: "date", Transform: TransformSubstring, Args: map[string]any{"start": 0, "end": 4}},
+			{Name: "month", From: "date", Transform: TransformSubstring, Args: map[string]any{"start": 5, "end": 7}},
+			{Name: "day", From: "date", Transform: TransformSubstring, Args: map[string]any{"start": 8, "end": 10}},
+		},
+	}
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	res, err := p.ProbeDetailed([]byte(`<record></record>`), 17, TerminationStreamExhausted)
+	require.NoError(t, err)
+	routingClass, requiredFailed, failureErr := p.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
+
+	require.Equal(t, "quarantine", routingClass)
+	require.False(t, requiredFailed)
+	require.NoError(t, failureErr)
+	require.Equal(t, "_unresolved", res.Vars["date"])
+	require.Equal(t, "_unresolved", res.Vars["year"])
+	require.Equal(t, "_unresolved", res.Vars["month"])
+	require.Equal(t, "_unresolved", res.Vars["day"])
+}
+
 func TestProber_DerivedRequiredMatrix(t *testing.T) {
 	requiredFalse := false
 	tests := []struct {
