@@ -13,6 +13,11 @@ var (
 	// ErrAccessDenied indicates insufficient permissions.
 	ErrAccessDenied = errors.New("access denied")
 
+	// ErrAnonymousReadOnly indicates an anonymous provider was asked to perform
+	// a mutating operation. It is joined with ErrAccessDenied by providers that
+	// support unsigned read-only construction.
+	ErrAnonymousReadOnly = errors.New("anonymous provider is read-only")
+
 	// ErrBucketNotFound indicates the bucket does not exist.
 	ErrBucketNotFound = errors.New("bucket not found")
 
@@ -78,6 +83,12 @@ func IsNotFound(err error) bool {
 // IsAccessDenied returns true if the error indicates insufficient permissions.
 func IsAccessDenied(err error) bool {
 	return errors.Is(err, ErrAccessDenied)
+}
+
+// IsAnonymousReadOnly returns true if the error indicates an anonymous provider
+// rejected a mutating operation.
+func IsAnonymousReadOnly(err error) bool {
+	return errors.Is(err, ErrAnonymousReadOnly)
 }
 
 // IsBucketNotFound returns true if the error indicates the bucket does not exist.

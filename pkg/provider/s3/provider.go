@@ -21,9 +21,10 @@ import (
 
 // Provider implements provider.Provider for AWS S3 and S3-compatible storage.
 type Provider struct {
-	client  *s3.Client
-	bucket  string
-	maxKeys int
+	client    *s3.Client
+	bucket    string
+	maxKeys   int
+	anonymous bool
 }
 
 // Ensure Provider implements the interfaces.
@@ -70,9 +71,10 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	}
 
 	return &Provider{
-		client:  client,
-		bucket:  cfg.Bucket,
-		maxKeys: maxKeys,
+		client:    client,
+		bucket:    cfg.Bucket,
+		maxKeys:   maxKeys,
+		anonymous: cfg.Anonymous,
 	}, nil
 }
 
@@ -99,19 +101,24 @@ func loadAWSConfig(ctx context.Context, cfg Config) (aws.Config, error) {
 		opts = append(opts, config.WithRegion(cfg.Region))
 	}
 
-	// Set profile if specified
-	if cfg.Profile != "" {
-		opts = append(opts, config.WithSharedConfigProfile(cfg.Profile))
-	}
-
-	// Use explicit credentials if provided
-	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
-		staticCreds := credentials.NewStaticCredentialsProvider(
+	var credsProvider aws.CredentialsProvider
+	switch {
+	case cfg.Anonymous:
+		credsProvider = aws.AnonymousCredentials{}
+	case cfg.CredentialsProvider != nil:
+		credsProvider = cfg.CredentialsProvider
+	case cfg.AccessKeyID != "" && cfg.SecretAccessKey != "":
+		credsProvider = credentials.NewStaticCredentialsProvider(
 			cfg.AccessKeyID,
 			cfg.SecretAccessKey,
 			"", // session token (empty for long-term credentials)
 		)
-		opts = append(opts, config.WithCredentialsProvider(staticCreds))
+	case cfg.Profile != "":
+		opts = append(opts, config.WithSharedConfigProfile(cfg.Profile))
+	}
+
+	if credsProvider != nil {
+		opts = append(opts, config.WithCredentialsProvider(credsProvider))
 	}
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, opts...)
@@ -339,6 +346,10 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 }
 
 func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	if err := p.guardWrite("PutObject", key); err != nil {
+		return err
+	}
+
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(p.bucket),
 		Key:           aws.String(key),
@@ -359,6 +370,10 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 }
 
 func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
+	if err := p.guardWrite("PutObjectConditional", key); err != nil {
+		return provider.PutResult{}, err
+	}
+
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
@@ -390,6 +405,10 @@ func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key stri
 //
 // This is used for write-probe preflight and future move operations.
 func (p *Provider) DeleteObject(ctx context.Context, key string) error {
+	if err := p.guardWrite("DeleteObject", key); err != nil {
+		return err
+	}
+
 	_, err := p.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)})
 	if err != nil {
 		return p.wrapError("DeleteObject", key, err)
@@ -405,6 +424,10 @@ func (p *Provider) CreateMultipartUpload(ctx context.Context, key string) (strin
 }
 
 func (p *Provider) CreateMultipartUploadWithOptions(ctx context.Context, key string, opts provider.PutOptions) (string, error) {
+	if err := p.guardWrite("CreateMultipartUpload", key); err != nil {
+		return "", err
+	}
+
 	input := &s3.CreateMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key)}
 	applyMultipartOptions(input, opts)
 	out, err := p.client.CreateMultipartUpload(ctx, input)
@@ -415,6 +438,10 @@ func (p *Provider) CreateMultipartUploadWithOptions(ctx context.Context, key str
 }
 
 func (p *Provider) UploadPart(ctx context.Context, key, uploadID string, partNumber int32, body io.Reader, size int64) (provider.PartETag, error) {
+	if err := p.guardWrite("UploadPart", key); err != nil {
+		return provider.PartETag{}, err
+	}
+
 	out, err := p.client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:        aws.String(p.bucket),
 		Key:           aws.String(key),
@@ -434,6 +461,10 @@ func (p *Provider) CompleteMultipartUpload(ctx context.Context, key, uploadID st
 }
 
 func (p *Provider) CompleteMultipartUploadConditional(ctx context.Context, key, uploadID string, parts []provider.PartETag, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if err := p.guardWrite("CompleteMultipartUpload", key); err != nil {
+		return provider.PutResult{}, err
+	}
+
 	if err := precond.Validate(); err != nil {
 		return provider.PutResult{}, p.wrapError("CompleteMultipartUpload", key, err)
 	}
@@ -441,6 +472,10 @@ func (p *Provider) CompleteMultipartUploadConditional(ctx context.Context, key, 
 }
 
 func (p *Provider) completeMultipartUpload(ctx context.Context, key, uploadID string, parts []provider.PartETag, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if err := p.guardWrite("CompleteMultipartUpload", key); err != nil {
+		return provider.PutResult{}, err
+	}
+
 	input := &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(p.bucket),
 		Key:      aws.String(key),
@@ -476,6 +511,10 @@ func (p *Provider) completeMultipartUpload(ctx context.Context, key, uploadID st
 
 // AbortMultipartUpload aborts a multipart upload.
 func (p *Provider) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	if err := p.guardWrite("AbortMultipartUpload", key); err != nil {
+		return err
+	}
+
 	_, err := p.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(p.bucket), Key: aws.String(key), UploadId: aws.String(uploadID)})
 	if err != nil {
 		return p.wrapError("AbortMultipartUpload", key, err)
@@ -494,6 +533,23 @@ func (p *Provider) Close() error {
 // This helper exists for probe operations.
 func (p *Provider) PutObjectEmpty(ctx context.Context, key string) error {
 	return p.PutObject(ctx, key, bytes.NewReader(nil), 0)
+}
+
+// guardWrite is the fail-closed chokepoint for anonymous providers. Every new
+// S3 mutating method must call it before constructing or issuing a request, and
+// TestAnonymousWriteMethodsFailClosedBeforeRequest must gain a row for that
+// method.
+func (p *Provider) guardWrite(op, key string) error {
+	if !p.anonymous {
+		return nil
+	}
+	return &provider.ProviderError{
+		Op:       op,
+		Provider: provider.ProviderS3,
+		Bucket:   p.bucket,
+		Key:      key,
+		Err:      errors.Join(provider.ErrAccessDenied, provider.ErrAnonymousReadOnly),
+	}
 }
 
 // wrapError converts S3 errors to provider errors with appropriate sentinel errors.
