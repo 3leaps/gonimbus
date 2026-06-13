@@ -32,6 +32,9 @@ changes.
 - **Go toolchain directive pinned:** `go.mod` now declares `toolchain go1.26.4`
   to match the CI, dependency-security, and release workflow Go pins used for
   v0.3.1 dependency evidence.
+- **AWS SDK family updated:** AWS SDK for Go v2 packages now track the latest
+  past-cooling v1.41.12 root SDK, S3 service v1.102.2, and smithy-go v1.27.2
+  family for the v0.3.1 dependency refresh.
 
 ## [0.3.0] - 2026-06-12
 
