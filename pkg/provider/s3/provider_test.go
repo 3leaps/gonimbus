@@ -14,9 +14,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -54,6 +56,14 @@ func TestConfig_Validate(t *testing.T) {
 			name: "valid minimal config",
 			config: Config{
 				Bucket: "my-bucket",
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid anonymous config",
+			config: Config{
+				Bucket:    "my-bucket",
+				Anonymous: true,
 			},
 			wantErr: "",
 		},
@@ -101,6 +111,34 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name: "anonymous with injected credentials rejected",
+			config: Config{
+				Bucket:              "my-bucket",
+				Anonymous:           true,
+				CredentialsProvider: testCredentialsProvider{},
+			},
+			wantErr: "cannot be combined with CredentialsProvider",
+		},
+		{
+			name: "anonymous with static credentials rejected",
+			config: Config{
+				Bucket:          "my-bucket",
+				Anonymous:       true,
+				AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
+				SecretAccessKey: "secret",
+			},
+			wantErr: "cannot be combined with AccessKeyID/SecretAccessKey",
+		},
+		{
+			name: "anonymous with profile rejected",
+			config: Config{
+				Bucket:    "my-bucket",
+				Anonymous: true,
+				Profile:   "default",
+			},
+			wantErr: "cannot be combined with Profile",
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +152,62 @@ func TestConfig_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testCredentialsProvider struct {
+	accessKeyID     string
+	secretAccessKey string
+	calls           *atomic.Int32
+}
+
+func (p testCredentialsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	if p.calls != nil {
+		p.calls.Add(1)
+	}
+	return aws.Credentials{
+		AccessKeyID:     p.accessKeyID,
+		SecretAccessKey: p.secretAccessKey,
+		Source:          "gonimbus-test",
+	}, nil
+}
+
+func TestConfigStringRedactsCredentials(t *testing.T) {
+	const (
+		accessKey = "AKIASTRING00000001"
+		secretKey = "secret-value-that-must-not-appear"
+	)
+	cfg := Config{
+		Bucket:              "test-bucket",
+		Region:              "us-east-1",
+		AccessKeyID:         accessKey,
+		SecretAccessKey:     secretKey,
+		CredentialsProvider: testCredentialsProvider{},
+	}
+
+	for _, formatted := range []string{
+		fmt.Sprintf("%+v", cfg),
+		fmt.Sprintf("%#v", cfg),
+		cfg.String(),
+	} {
+		require.NotContains(t, formatted, accessKey)
+		require.NotContains(t, formatted, secretKey)
+		require.Contains(t, formatted, "<redacted>")
+	}
+}
+
+func TestNewValidationErrorDoesNotLeakExplicitCredentials(t *testing.T) {
+	const (
+		accessKey = "AKIAERROR000000001"
+		secretKey = "secret-value-that-must-not-appear"
+	)
+
+	_, err := New(context.Background(), Config{
+		AccessKeyID:     accessKey,
+		SecretAccessKey: secretKey,
+	})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), accessKey)
+	require.NotContains(t, err.Error(), secretKey)
 }
 
 func TestConfigError_Error(t *testing.T) {
@@ -666,6 +760,231 @@ func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *
 	assert.Contains(t, got2.authorization, "Credential=AKIASECOND00000002/")
 	assert.Contains(t, got2.authorization, "/us-west-2/s3/aws4_request")
 	assert.Contains(t, got2.host, strings.TrimPrefix(server2.URL, "http://"))
+}
+
+func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAAMBIENT0000001")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret-that-must-not-sign")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	reqs := make(chan *http.Request, 5)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs <- r.Clone(context.Background())
+		w.Header().Set("ETag", `"read-etag"`)
+		w.Header().Set("Last-Modified", "Fri, 12 Jun 2026 21:00:00 GMT")
+
+		switch {
+		case r.Method == "GET" && r.URL.Query().Get("list-type") == "2":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>object.txt</Key><LastModified>2026-06-12T21:00:00.000Z</LastModified><ETag>&quot;read-etag&quot;</ETag><Size>5</Size></Contents></ListBucketResult>`))
+		case r.Method == "HEAD":
+			w.Header().Set("Content-Length", "5")
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "GET" && r.Header.Get("Range") != "":
+			require.Equal(t, "bytes=1-3", r.Header.Get("Range"))
+			w.Header().Set("Content-Length", "3")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("ell"))
+		case r.Method == "GET":
+			w.Header().Set("Content-Length", "5")
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("hello"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Anonymous:      true,
+	})
+	require.NoError(t, err)
+
+	list, err := p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Objects, 1)
+
+	head, err := p.Head(context.Background(), "object.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), head.Size)
+
+	body, size, err := p.GetObject(context.Background(), "object.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), size)
+	gotBody, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "hello", string(gotBody))
+
+	versionedBody, versionedMeta, err := p.GetObjectVersioned(context.Background(), "object.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), versionedMeta.Size)
+	require.NoError(t, versionedBody.Close())
+
+	rangeBody, rangeSize, err := p.GetRange(context.Background(), "object.txt", 1, 3)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), rangeSize)
+	gotRange, err := io.ReadAll(rangeBody)
+	require.NoError(t, err)
+	require.NoError(t, rangeBody.Close())
+	require.Equal(t, "ell", string(gotRange))
+
+	for i := 0; i < 5; i++ {
+		req := receiveRequest(t, reqs, fmt.Sprintf("anonymous read request %d", i+1))
+		require.Empty(t, req.Header.Get("Authorization"), "anonymous request was signed: %s", req.Header.Get("Authorization"))
+	}
+}
+
+func TestInjectedCredentialsProviderWinsOverStaticKeys(t *testing.T) {
+	var calls atomic.Int32
+	reqs := make(chan observedS3Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs <- observedS3Request{
+			host:          r.Host,
+			authorization: r.Header.Get("Authorization"),
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:              "test-bucket",
+		Region:              "us-east-1",
+		Endpoint:            server.URL,
+		ForcePathStyle:      true,
+		AccessKeyID:         "AKIASTATIC0000001",
+		SecretAccessKey:     "static-secret",
+		CredentialsProvider: testCredentialsProvider{accessKeyID: "AKIAINJECTED0001", secretAccessKey: "injected-secret", calls: &calls},
+	})
+	require.NoError(t, err)
+
+	_, err = p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, calls.Load(), int32(1))
+
+	req := receiveObservedRequest(t, reqs, "injected credentials")
+	require.Contains(t, req.authorization, "Credential=AKIAINJECTED0001/")
+	require.NotContains(t, req.authorization, "AKIASTATIC0000001")
+}
+
+func TestAnonymousWriteMethodsFailClosedBeforeRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Anonymous:      true,
+	})
+	require.NoError(t, err)
+
+	etag := "etag"
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "PutObject",
+			call: func() error {
+				return p.PutObject(context.Background(), "object.txt", strings.NewReader("body"), int64(len("body")))
+			},
+		},
+		{
+			name: "PutObjectWithOptions",
+			call: func() error {
+				return p.PutObjectWithOptions(context.Background(), "object.txt", strings.NewReader("body"), int64(len("body")), provider.PutOptions{ContentType: "text/plain"})
+			},
+		},
+		{
+			name: "PutObjectConditional",
+			call: func() error {
+				_, err := p.PutObjectConditional(context.Background(), "object.txt", strings.NewReader("body"), int64(len("body")), provider.PutPrecondition{IfAbsent: true})
+				return err
+			},
+		},
+		{
+			name: "PutObjectConditionalWithOptions",
+			call: func() error {
+				_, err := p.PutObjectConditionalWithOptions(context.Background(), "object.txt", strings.NewReader("body"), int64(len("body")), provider.PutPrecondition{IfMatchETag: &etag}, provider.PutOptions{ContentType: "text/plain"})
+				return err
+			},
+		},
+		{
+			name: "PutObjectEmpty",
+			call: func() error {
+				return p.PutObjectEmpty(context.Background(), "empty.txt")
+			},
+		},
+		{
+			name: "DeleteObject",
+			call: func() error {
+				return p.DeleteObject(context.Background(), "object.txt")
+			},
+		},
+		{
+			name: "CreateMultipartUpload",
+			call: func() error {
+				_, err := p.CreateMultipartUpload(context.Background(), "object.txt")
+				return err
+			},
+		},
+		{
+			name: "CreateMultipartUploadWithOptions",
+			call: func() error {
+				_, err := p.CreateMultipartUploadWithOptions(context.Background(), "object.txt", provider.PutOptions{ContentType: "text/plain"})
+				return err
+			},
+		},
+		{
+			name: "UploadPart",
+			call: func() error {
+				_, err := p.UploadPart(context.Background(), "object.txt", "upload-id", 1, strings.NewReader("part"), int64(len("part")))
+				return err
+			},
+		},
+		{
+			name: "CompleteMultipartUpload",
+			call: func() error {
+				_, err := p.CompleteMultipartUpload(context.Background(), "object.txt", "upload-id", []provider.PartETag{{PartNumber: 1, ETag: "part-etag"}})
+				return err
+			},
+		},
+		{
+			name: "CompleteMultipartUploadConditional",
+			call: func() error {
+				_, err := p.CompleteMultipartUploadConditional(context.Background(), "object.txt", "upload-id", []provider.PartETag{{PartNumber: 1, ETag: "part-etag"}}, provider.PutPrecondition{IfAbsent: true})
+				return err
+			},
+		},
+		{
+			name: "AbortMultipartUpload",
+			call: func() error {
+				return p.AbortMultipartUpload(context.Background(), "object.txt", "upload-id")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			require.Error(t, err)
+			require.True(t, provider.IsAnonymousReadOnly(err), "got %v", err)
+			require.True(t, provider.IsAccessDenied(err), "got %v", err)
+		})
+	}
+	require.Equal(t, int32(0), requests.Load())
 }
 
 func TestCreateMultipartUploadWithOptionsSendsMetadataHeaders(t *testing.T) {

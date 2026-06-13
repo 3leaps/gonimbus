@@ -15,6 +15,18 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- **Added:** `pkg/provider/s3.Config` now supports `Anonymous` unsigned
+  read-only construction and caller-injected `CredentialsProvider` values.
+  Anonymous reads send no `Authorization` header and never fall back to ambient
+  credentials; S3 write methods fail closed with `provider.ErrAnonymousReadOnly`
+  joined with `provider.ErrAccessDenied`. `pkg/provider` also adds the stable
+  `ErrAnonymousReadOnly` sentinel and `IsAnonymousReadOnly` helper. Credential
+  precedence is now explicit: injected provider, static keys, profile, then the
+  AWS SDK default chain. `Profile` is ignored when a higher-priority credential
+  source is configured; pass region and endpoint fields directly in that shape.
+
 ## [0.3.0] - 2026-06-12
 
 **Pure-Go index defaults, resumable long-running operations, provider-dispatch

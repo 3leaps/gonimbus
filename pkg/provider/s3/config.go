@@ -1,13 +1,21 @@
 package s3
 
+import (
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+)
+
 // Config configures an S3 provider.
 //
-// Authentication priority (AWS SDK v2 default chain):
-//  1. Explicit AccessKeyID/SecretAccessKey (if provided)
-//  2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-//  3. Shared credentials file (~/.aws/credentials)
-//  4. Shared config file (~/.aws/config) with profile
-//  5. EC2 instance metadata / ECS task role / EKS IRSA
+// Authentication priority:
+//  1. Anonymous unsigned reads when Anonymous is true; this is mutually
+//     exclusive with every credential source and never falls back to ambient
+//     credentials.
+//  2. Caller-injected CredentialsProvider, if provided.
+//  3. Explicit AccessKeyID/SecretAccessKey, if provided.
+//  4. Shared config Profile, if provided.
+//  5. AWS SDK v2 default credential chain.
 //
 // Region handling:
 //   - For AWS S3: If Region is empty and not set via environment/profile,
@@ -45,8 +53,23 @@ type Config struct {
 	// Leave empty to use the default profile or environment credentials.
 	Profile string
 
+	// Anonymous issues unsigned read requests for public buckets. It supports
+	// List, Head, GetObject, GetObjectVersioned, and GetRange only. Mutating
+	// methods fail closed with provider.ErrAnonymousReadOnly joined with
+	// provider.ErrAccessDenied. Anonymous is mutually exclusive with
+	// CredentialsProvider, AccessKeyID/SecretAccessKey, and Profile, and it
+	// never falls back to ambient environment, profile, or instance credentials.
+	Anonymous bool
+
+	// CredentialsProvider overrides credential resolution with caller-managed
+	// AWS credentials. It takes precedence over AccessKeyID/SecretAccessKey,
+	// Profile, and the SDK default chain. When set, Profile is not loaded for
+	// credentials or profile-derived non-credential config such as region; pass
+	// Region, Endpoint, and ForcePathStyle directly when those values are needed.
+	CredentialsProvider aws.CredentialsProvider
+
 	// AccessKeyID is an explicit access key. If set, SecretAccessKey must also be set.
-	// This takes precedence over the default credential chain.
+	// This takes precedence over Profile and the default credential chain.
 	AccessKeyID string
 
 	// SecretAccessKey is an explicit secret key. Required if AccessKeyID is set.
@@ -77,6 +100,17 @@ func (c *Config) Validate() error {
 		return &ConfigError{Field: "Bucket", Message: "bucket name is required"}
 	}
 
+	if c.Anonymous {
+		switch {
+		case c.CredentialsProvider != nil:
+			return &ConfigError{Field: "Anonymous", Message: "cannot be combined with CredentialsProvider"}
+		case c.AccessKeyID != "" || c.SecretAccessKey != "":
+			return &ConfigError{Field: "Anonymous", Message: "cannot be combined with AccessKeyID/SecretAccessKey"}
+		case c.Profile != "":
+			return &ConfigError{Field: "Anonymous", Message: "cannot be combined with Profile"}
+		}
+	}
+
 	// If one explicit credential is set, both must be set
 	if (c.AccessKeyID != "") != (c.SecretAccessKey != "") {
 		return &ConfigError{
@@ -86,6 +120,39 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// String returns a redacted representation of the config suitable for logs.
+func (c Config) String() string {
+	credsProvider := "<nil>"
+	if c.CredentialsProvider != nil {
+		credsProvider = fmt.Sprintf("<set:%T>", c.CredentialsProvider)
+	}
+	return fmt.Sprintf(
+		"s3.Config{Bucket:%q Region:%q Endpoint:%q Profile:%q Anonymous:%t CredentialsProvider:%s AccessKeyID:%s SecretAccessKey:%s ForcePathStyle:%t MaxKeys:%d}",
+		c.Bucket,
+		c.Region,
+		c.Endpoint,
+		c.Profile,
+		c.Anonymous,
+		credsProvider,
+		redactedCredential(c.AccessKeyID),
+		redactedCredential(c.SecretAccessKey),
+		c.ForcePathStyle,
+		c.MaxKeys,
+	)
+}
+
+// GoString returns a redacted representation for %#v formatting.
+func (c Config) GoString() string {
+	return c.String()
+}
+
+func redactedCredential(value string) string {
+	if value == "" {
+		return "<empty>"
+	}
+	return "<redacted>"
 }
 
 // ConfigError represents a configuration validation error.

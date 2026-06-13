@@ -7,12 +7,16 @@
 // so environment and shared-config reads happen during New when the SDK resolves
 // credentials, region, profile, and configured endpoints.
 //
-// Explicit AccessKeyID and SecretAccessKey values suppress SDK credential-chain
-// lookup for credentials only. They do not suppress ambient region, profile, or
-// endpoint configuration. Consumers that need hermetic endpoint behavior should
-// either pass a non-empty Config.Endpoint or set
-// AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true in their own process. See
-// docs/library-consumers.md for the full embedded-use contract.
+// Credential resolution is explicit: Anonymous unsigned reads, caller-injected
+// Config.CredentialsProvider, static keys, Profile, then the AWS SDK default
+// chain. Anonymous is read-only, sends no Authorization header, and is rejected
+// by all mutating methods with provider.ErrAnonymousReadOnly joined with
+// provider.ErrAccessDenied. Explicit AccessKeyID and SecretAccessKey values
+// suppress SDK credential-chain lookup for credentials only. They do not
+// suppress ambient region, profile, or endpoint configuration. Consumers that
+// need hermetic endpoint behavior should either pass a non-empty
+// Config.Endpoint or set AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true in their own
+// process. See docs/library-consumers.md for the full embedded-use contract.
 //
 // API stability: Stable. Breaking changes to exported symbols or documented
 // behavior follow the Library API protocol in docs/api-stability.md.

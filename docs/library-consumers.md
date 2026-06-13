@@ -53,6 +53,18 @@ redacted audit output from `transfer reflow`; it is not an accepted input URI.
 Use each provider package's explicit config type. For S3, construct
 `s3.Config` and pass it to `s3.New(ctx, cfg)`.
 
+S3 credential resolution is:
+
+1. `Anonymous: true` for unsigned read requests.
+2. `CredentialsProvider` for caller-managed AWS credential handles.
+3. `AccessKeyID` plus `SecretAccessKey`.
+4. `Profile`.
+5. The AWS SDK default credential chain.
+
+`Anonymous` is mutually exclusive with every credential source. It does not
+fall back to environment variables, profiles, or instance credentials, even
+when those are present in the embedding process.
+
 ```go
 package main
 
@@ -91,6 +103,45 @@ cfg := s3.Config{
 }
 provider, err := s3.New(ctx, cfg)
 ```
+
+For public buckets that allow unauthenticated reads, use `Anonymous`. This
+sends unsigned `List`, `Head`, `GetObject`, `GetObjectVersioned`, and
+`GetRange` requests with no `Authorization` header:
+
+```go
+cfg := s3.Config{
+	Bucket:    "public-bucket",
+	Region:    "us-east-1",
+	Anonymous: true,
+}
+provider, err := s3.New(ctx, cfg)
+```
+
+Anonymous does not enable anonymous writes. S3 write methods such as
+`PutObject`, `DeleteObject`, conditional PUT, and multipart upload fail closed
+with `provider.ErrAnonymousReadOnly` and classify as
+`provider.ErrAccessDenied`. Treat anonymous as "unsigned public read", not
+"public write".
+
+For applications that already manage AWS credential handles, inject an AWS SDK
+credentials provider:
+
+```go
+cfg := s3.Config{
+	Bucket:              "your-bucket-here",
+	Region:              "us-east-1",
+	CredentialsProvider: yourProvider,
+}
+provider, err := s3.New(ctx, cfg)
+```
+
+`CredentialsProvider` overrides credential resolution and skips lower-priority
+credential sources. If `Profile` is also set, gonimbus does not load that
+profile for credentials or profile-derived non-credential config such as
+region. Pass `Region`, `Endpoint`, and `ForcePathStyle` directly when those
+values are needed alongside an injected provider. Use injected credentials when
+the embedding application owns credential sources beyond simple static keys or
+shared AWS profiles.
 
 Multiple providers can coexist in one process. Each provider instance carries
 its own config and SDK client stack:
