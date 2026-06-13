@@ -27,6 +27,12 @@ changes.
   AWS SDK default chain. `Profile` is ignored when a higher-priority credential
   source is configured; pass region and endpoint fields directly in that shape.
 
+### Changed
+
+- **Go toolchain directive pinned:** `go.mod` now declares `toolchain go1.26.4`
+  to match the CI, dependency-security, and release workflow Go pins used for
+  v0.3.1 dependency evidence.
+
 ## [0.3.0] - 2026-06-12
 
 **Pure-Go index defaults, resumable long-running operations, provider-dispatch
