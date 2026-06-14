@@ -50,6 +50,15 @@ walkthrough.
   `golang.org/x/sys` now track past-cooling dependency versions for the v0.3.1
   package refresh.
 
+### Fixed
+
+- **Probe quarantine routing preserved for derived fields with missing
+  required sources:** when a required `derived` field depends on an extractor
+  configured with `on_missing: quarantine` and that source is missing, the
+  record now routes to quarantine instead of rendering with an unresolved
+  field. Adds prober and until-resolved regressions for date-derived partition
+  fields.
+
 ### Security
 
 - **Spoofable forwarded-IP trust removed from the default server stack:**

@@ -63,6 +63,14 @@ Gonimbus does not currently key access control, rate limiting, or audit logic
 on rewritten client IPs. Future proxy-aware behavior should be added as an
 explicit trusted-proxy configuration rather than implicit header trust.
 
+### Probe Quarantine Routing Fix
+
+`content probe` now preserves quarantine routing when a required `derived`
+field depends on a missing required extractor configured with
+`on_missing: quarantine`. The affected record routes to quarantine instead of
+rendering with an unresolved derived field, including until-resolved probe
+flows that derive date-style partition fields.
+
 ### Upgrade
 
 ```bash
