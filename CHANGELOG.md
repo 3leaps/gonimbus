@@ -15,6 +15,17 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-14
+
+**Embedded S3 auth controls, toolchain pinning, and dependency refresh.**
+
+v0.3.1 adds explicit embedded S3 credential modes for unsigned public reads and
+caller-managed AWS credential providers, pins the module toolchain directive to
+the release-lane Go patch version, and refreshes the past-cooling AWS SDK,
+smithy, routing, and platform dependencies. See
+[`docs/releases/v0.3.1.md`](docs/releases/v0.3.1.md) for the narrative
+walkthrough.
+
 ### Library API
 
 - **Added:** `pkg/provider/s3.Config` now supports `Anonymous` unsigned
@@ -38,6 +49,26 @@ changes.
 - **Routing and platform packages updated:** `github.com/go-chi/chi/v5` and
   `golang.org/x/sys` now track past-cooling dependency versions for the v0.3.1
   package refresh.
+
+### Fixed
+
+- **Probe quarantine routing preserved for derived fields with missing
+  required sources:** when a required `derived` field depends on an extractor
+  configured with `on_missing: quarantine` and that source is missing, the
+  record now routes to quarantine instead of rendering with an unresolved
+  field. Adds prober and until-resolved regressions for date-derived partition
+  fields.
+
+### Security
+
+- **Spoofable forwarded-IP trust removed from the default server stack:**
+  the server no longer installs `chi/middleware.RealIP`, so the default
+  request path does not rewrite `RemoteAddr` from caller-supplied
+  `X-Forwarded-For` or `X-Real-IP` headers.
+- **Anonymous S3 mode fails closed for writes:** S3 write methods return
+  `provider.ErrAnonymousReadOnly` joined with `provider.ErrAccessDenied`
+  before issuing provider requests when a provider is configured for unsigned
+  public reads.
 
 ## [0.3.0] - 2026-06-12
 
@@ -899,7 +930,9 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/3leaps/gonimbus/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/3leaps/gonimbus/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/3leaps/gonimbus/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/3leaps/gonimbus/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/3leaps/gonimbus/compare/v0.2.0...v0.2.1

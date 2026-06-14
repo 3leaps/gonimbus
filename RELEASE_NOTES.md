@@ -4,6 +4,188 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.1 (2026-06-14)
+
+**Embedded S3 Auth Controls and Dependency Refresh**
+
+v0.3.1 is a focused release for Go embedders and release operators. It adds
+explicit S3 construction modes for unsigned public reads and caller-managed AWS
+credential providers, pins the module toolchain directive to Go `1.26.4`, and
+refreshes the past-cooling AWS SDK, smithy, routing, and platform packages used
+by the release lane.
+
+### Embedded S3 Auth Controls
+
+`pkg/provider/s3.Config` now supports two explicit embedded-use credential
+shapes:
+
+- `Anonymous: true` for unsigned public-bucket reads.
+- `CredentialsProvider` for caller-managed AWS SDK credential handles.
+
+Credential precedence is now documented and enforced: anonymous reads, injected
+provider, static keys, profile, then the AWS SDK default chain. Anonymous mode
+is mutually exclusive with every credential source. It sends no
+`Authorization` header and does not fall back to ambient credentials, even when
+the embedding process has AWS environment variables, profiles, or instance
+credentials available.
+
+Anonymous mode is read-only. S3 write paths fail closed with
+`provider.ErrAnonymousReadOnly` joined with `provider.ErrAccessDenied` before
+issuing provider requests.
+
+See [docs/library-consumers.md](docs/library-consumers.md#credential-injection)
+for the supported embedded-use contract and examples.
+
+### Dependency and Toolchain Refresh
+
+The release pins `go.mod` to `toolchain go1.26.4`, matching the CI,
+dependency-security, and release workflow Go patch version.
+
+The dependency refresh is intentionally bounded to packages that cleared the
+release cooling policy:
+
+- AWS SDK for Go v2 root SDK `v1.41.12`, S3 service `v1.102.2`, and
+  smithy-go `v1.27.2` family.
+- `github.com/go-chi/chi/v5 v5.3.0`.
+- `golang.org/x/sys v0.46.0`.
+
+`golang.org/x/net v0.56.0` is deferred to v0.3.2 because its module timestamp
+was still inside the seven-day cooling window for this release. The v0.3.1
+release keeps `golang.org/x/net v0.55.0`, and dependency-security evidence
+remains clean at the high-and-critical gate.
+
+### Server Request IP Posture
+
+The default server router no longer installs `chi/middleware.RealIP`. That
+middleware rewrites `RemoteAddr` from caller-supplied forwarding headers; the
+default server path now leaves `RemoteAddr` as the network peer address.
+Gonimbus does not currently key access control, rate limiting, or audit logic
+on rewritten client IPs. Future proxy-aware behavior should be added as an
+explicit trusted-proxy configuration rather than implicit header trust.
+
+### Probe Quarantine Routing Fix
+
+`content probe` now preserves quarantine routing when a required `derived`
+field depends on a missing required extractor configured with
+`on_missing: quarantine`. The affected record routes to quarantine instead of
+rendering with an unresolved derived field, including until-resolved probe
+flows that derive date-style partition fields.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.1
+```
+
+CLI workflows remain compatible with v0.3.0. Go embedders using
+`pkg/provider/s3` can opt into the new anonymous and injected-credential modes;
+existing static-key, profile, and SDK-default-chain construction continues to
+work with the documented precedence.
+
+See [docs/releases/v0.3.1.md](docs/releases/v0.3.1.md) for the complete
+release notes.
+
+---
+
+## v0.3.0 (2026-06-12)
+
+**Pure-Go Index Defaults, Resumable Operations, Provider-Dispatched Reflow, and Release-Gate Hardening**
+
+v0.3.0 moves the default local index store to pure-Go SQLite, adds resumable
+failure handling for long-running index and reflow operations, expands
+provider-dispatched transfer reflow so local file trees can be copied into
+cloud object stores, and tightens release security gates.
+
+### Pure-Go Index Store by Default
+
+Default builds now use the pure-Go `modernc.org/sqlite` driver for local index
+stores. Local SQLite-backed index workflows work without CGO:
+
+```bash
+gonimbus index init
+gonimbus index build --job crawl-manifest.yaml
+gonimbus index query 's3://bucket/path/**/*.xml'
+```
+
+The libsql/Turso driver remains available for operators who need remote libsql
+databases:
+
+```bash
+go build -tags gonimbus_libsql ./cmd/gonimbus
+```
+
+### Resumable Long-Running Operations
+
+Long-running `index build`, `index enrich-with-head`, and `transfer reflow`
+runs now have a failed-resumable path for runtime interruptions. When a
+resumable runtime failure occurs, gonimbus writes a sensitive-local operation
+checkpoint outside the repository tree and prints a redacted resume summary.
+
+Examples:
+
+```bash
+gonimbus index build --resume-run <run_id>
+gonimbus index enrich-with-head --resume-run <run_id>
+gonimbus transfer reflow --resume-run <run_id>
+```
+
+The resume path validates checkpoint identity and current credentials before it
+makes data-plane calls or mutates run state.
+
+### Provider-Dispatched Reflow and Local Backup Pipe
+
+Command code now constructs providers through `internal/providerdispatch`,
+which gives `transfer reflow` the same source/destination capability checks
+across S3-compatible and local file providers.
+
+The practical operator result is that local directory trees can be selected by
+`crawl` and copied into object storage with normal reflow machinery:
+
+```bash
+gonimbus crawl --job backup-select.yaml --emit reflow-input \
+  | gonimbus transfer reflow --stdin \
+      --dest 's3://dest-bucket/landing/'
+```
+
+Hidden files and dot-directories are skipped by default. Symlinks are also
+skipped by default; `--symlinks=follow` must be selected explicitly when the
+operator wants resolved symlink targets included.
+
+### Resume Collision and Failure-Class Fixes
+
+v0.3.0 includes two reflow correctness fixes that matter for automation around
+long-running copies:
+
+- A resumed reflow no longer false-conflicts when the interrupted tail maps to
+  already completed, byte-identical destination data.
+- Temporary network and transport failures are classified as `TRANSIENT`
+  rather than falling through to internal or unknown surfaces.
+
+### Dependency Security Gate
+
+The local pre-push hook stays scoped to changed-file format, lint, and security
+checks. Dependency vulnerability enforcement runs in GitHub Actions on pull
+requests, pushes to `main`, a daily schedule, and manual dispatch.
+
+The release gate is clean at `fail_on=high`: `golang.org/x/net` is updated to
+`v0.55.0`, CI and release workflows use Go `1.26.4`, and no dependency
+suppressions are added.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.0
+```
+
+For local index workflows, the default binary no longer requires CGO.
+Operators using remote libsql/Turso indexes should build with
+`-tags gonimbus_libsql`.
+
+See [docs/releases/v0.3.0.md](docs/releases/v0.3.0.md) for the complete
+release notes.
+
+---
+
 ## v0.2.3 (2026-05-31)
 
 **Stream Put Completion, Reflow Freshness Arbitration, and API Guardrails**
@@ -107,163 +289,8 @@ release notes.
 
 ---
 
-## v0.2.2 (2026-05-26)
-
-**Index Archive Operations and Local-Tree Reflow**
-
-v0.2.2 improves two operator paths: using `transfer reflow` with local
-directory sources, and using indexes to plan work around storage class,
-archive, restore, and content-type state. It also moves CI and release builds
-to Go `1.26.3` with updated lint tooling.
-
-### Local-Tree Reflow
-
-`transfer reflow` now accepts `file://` sources and routes them through the
-same rewrite, collision, metadata, checkpoint, dry-run, and JSONL audit path
-used for object-store sources:
-
-```bash
-gonimbus transfer reflow 'file:///absolute/source-root/' \
-  --dest 's3://bucket/landing/' \
-  --rewrite-from '{path}/{file}' \
-  --rewrite-to '{path}/{file}' \
-  --dry-run
-```
-
-Local-tree reflow skips hidden files and dot-directories by default. Use
-`--hidden=include` only when those paths are expected at the destination, and
-pair dry-run review with explicit `--exclude` rules for non-hidden generated
-paths such as `node_modules/*`, `dist/*`, `target/*`, and log files.
-
-### Storage-Class Querying
-
-Index builds now retain LIST-derived provider storage class. Query JSONL emits
-`storage_class` when present, and `index query --storage-class` filters exact,
-case-sensitive values:
-
-```bash
-gonimbus index query 's3://bucket/prefix/' \
-  --storage-class GLACIER,DEEP_ARCHIVE
-```
-
-The flag is repeatable, accepts comma-separated values, and composes with
-canonical-by-ETag query mode.
-
-### HEAD Enrichment
-
-`index enrich-with-head` caches HEAD-derived archive and restore metadata on an
-existing index after applying candidate filters:
-
-```bash
-gonimbus index enrich-with-head idx_da038d8171b4a9ba \
-  --storage-class GLACIER,DEEP_ARCHIVE \
-  --pattern "**/*.xml" \
-  --parallel 32
-```
-
-The command writes `archive_status`, `restore_state`, `restore_expiry`,
-`content_type`, and `head_enriched_at`. It does not overwrite LIST-derived
-storage class, size, ETag, last-modified, or deleted-state fields. `index query`
-can emit the enriched fields and filter by `--enriched-after`.
-
-### Release Toolchain
-
-- CI and release workflows pin Go `1.26.3`.
-- CI uses `golangci-lint-action` v2.11.2 for the Go 1.26 lane.
-- Version identity is stamped as `0.2.2` across the repository and embedded
-  build identity.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.2
-```
-
-Existing object-store reflow and index query workflows remain compatible. For
-local-tree reflow, run `--dry-run` before the first write and review hidden path
-and exclude policy explicitly.
-
-See [docs/releases/v0.2.2.md](docs/releases/v0.2.2.md) for the complete
-release notes.
-
----
-
-## v0.2.1 (2026-05-22)
-
-**Reflow Destination Metadata — Explicit Control, Explicit Disclosure Discipline**
-
-v0.2.1 is a focused operator release for landing reflowed objects with durable destination metadata. It adds caller-controlled metadata, content-type and storage-class controls, per-object metadata derivation from source metadata and system fields, and a release-lane hardening pass. The headline is not only the feature surface: the disclosure posture is part of the contract. Destination metadata is durable and visible to destination readers, so v0.2.1 makes allow-list discipline and destination-system-metadata boundaries explicit.
-
-### Destination Metadata Controls
-
-`transfer reflow` can now set destination user metadata and selected destination PUT attributes directly:
-
-```bash
-gonimbus transfer reflow --stdin \
-  --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
-  --metadata-policy clear \
-  --metadata-set dataset=transactions \
-  --metadata-set owner=data-platform \
-  --preserve-content-type \
-  --destination-storage-class STANDARD_IA
-```
-
-`--metadata-policy clear|preserve|merge` controls source user-metadata handling. `clear` keeps the historic default: write only explicitly requested destination metadata. `preserve` copies source user metadata and fails the object on canonical key collisions. `merge` copies source metadata, then applies `--metadata-set` overrides. File destinations write metadata to cleartext `.gnb-meta.json` sidecars.
-
-### Per-Object Metadata Derivation
-
-When each destination object needs values derived from the corresponding source object, v0.2.1 adds explicit per-object rules:
-
-```bash
-gonimbus transfer reflow --stdin \
-  --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
-  --metadata-policy clear \
-  --metadata-set source-system=example \
-  --metadata-set-from-source-key source-md5=md5 \
-  --metadata-set-from-source-derived source-etag='system.etag' \
-  --metadata-set-from-source-derived broker-device='urldecode(meta.payload).device' \
-  --metadata-on-missing-source skip
-```
-
-Supported v1 expressions are deliberately small: JSON subfields (`meta.payload.device`), URL-decoded JSON subfields (`urldecode(meta.payload).device`), source system fields (`system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`), and one string-literal concatenation (`system.etag + "-src"`). JSON numbers preserve source precision via `json.Decoder.UseNumber`-style handling; JSON booleans render as `true` / `false`.
-
-`--metadata-on-missing-source skip|fail|empty` controls missing keys, invalid JSON, URL-decode failures, null values, arrays, and objects. The default `skip` omits only the affected destination key. `empty` writes an empty string. `fail` emits a redacted per-object `gonimbus.error.v1`; when paired with `--on-collision quarantine`, the object routes to the quarantine prefix with reason `metadata.derivation.quarantined`.
-
-### Security and Disclosure Posture
-
-This release treats metadata disclosure as an operator-visible headline:
-
-- **Destination metadata is durable and not redacted at destination.** Values supplied by `--metadata-set`, copied via `preserve`/`merge`, derived per object, preserved as content type, propagated as storage class, or written to local file sidecars are visible to destination readers with HEAD/GET or filesystem access.
-- **Use allow-lists for sensitive source buckets.** Prefer `--metadata-policy clear` plus explicit `--metadata-set`, `--metadata-set-from-source-key`, and `--metadata-set-from-source-derived` rules when source metadata may contain credential URIs, tokens, or other sensitive values. Gonimbus rejects wildcard metadata projection.
-- **Scalar-only derivation protects the allow-list boundary.** v1 writes only string, number, and boolean JSON subfield values. Null, arrays, and objects route through `--metadata-on-missing-source`, preventing accidental serialization of entire nested structures.
-- **Destination system metadata is not writable through derivation.** `system.<field>` reads source-side system fields as inputs, then writes a destination user-metadata key. It does not override destination ETag, LastModified, ContentLength, or other object-store-generated system fields. Content-Type and StorageClass are controlled only by their explicit flags.
-- **Failure paths redact raw source values.** Derivation-evaluation failures report destination key, expression, and reason kind without echoing the source metadata value in error JSONL, checkpoint rows, or default stderr.
-
-### Release Lane Hardening
-
-- CI and release workflows pin Go `1.25.10` for attributable vulnerability scans and SBOMs.
-- `make dependencies` emits stable SBOM and vulnerability-report artifacts under `sbom/`.
-- YAML formatting is pinned with `.yamlfmt` and `.yamllint` so local formatting and CI agree.
-- Index-store setup applies `busy_timeout` before WAL mode to reduce intermittent root DB open lock flakes.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.2.1
-```
-
-Reflow behavior remains opt-in: existing reflow runs that do not pass the new metadata flags keep writing destination objects without caller-controlled metadata. Review any new metadata rules as part of pipeline disclosure review before running against source buckets with sensitive metadata.
-
-See [docs/releases/v0.2.1.md](docs/releases/v0.2.1.md) for the complete release notes.
-
----
-
-For v0.1.8 and earlier release notes, see [docs/releases/](docs/releases/) or
+For v0.2.2 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
-<!-- v0.2.0 entry removed when v0.2.3 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.0.md -->
-<!-- v0.1.8 entry removed when v0.2.2 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.1.8.md -->
+<!-- v0.2.2 entry removed when v0.3.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.2.md -->
+<!-- v0.2.1 entry removed when v0.3.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.1.md -->
