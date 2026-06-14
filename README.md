@@ -68,6 +68,8 @@ make build
 
 - **S3/S3-compatible**: First-class support with access key/secret
 - **AWS profiles**: Assume-role chains, SSO, cached tokens
+- **Embedded S3 auth controls**: Anonymous public reads and injected AWS SDK
+  credential providers for Go library consumers
 - **GCS**: Roadmap (placeholder stub today; full provider tracked for a later release)
 
 ### Authentication
@@ -77,6 +79,9 @@ Uses SDK default auth chains - no reinventing the wheel:
 - AWS: env vars, shared config/credentials, profiles, SSO, web identity/IRSA
 - Enterprise SSO: `--profile` flag with `aws sso login` workflow
 - Raw keys supported as explicit fallback (Wasabi, DigitalOcean Spaces)
+- Library consumers can opt into unsigned public reads with
+  `s3.Config{Anonymous: true}` or inject caller-managed AWS SDK credentials
+  with `s3.Config.CredentialsProvider`
 
 See [docs/auth/aws-profiles.md](docs/auth/aws-profiles.md) for enterprise authentication patterns.
 
@@ -106,7 +111,7 @@ an interrupted run can be safely continued with `--resume-run <run_id>`.
 `stream put` can upload raw stdin or framed `stream get` batches, reflow can
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD
-results. See [docs/releases/v0.3.0.md](docs/releases/v0.3.0.md) for the current
+results. See [docs/releases/v0.3.1.md](docs/releases/v0.3.1.md) for the current
 operator notes.
 
 ### Outputs
