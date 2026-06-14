@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,6 +39,29 @@ func TestTelemetryHealthChecker(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "telemetry system not initialized")
 	})
+}
+
+func TestListenForServeSignalsReportsCleanShutdown(t *testing.T) {
+	errChan := make(chan error, 1)
+
+	err := listenForServeSignals(t.Context(), errChan, func(context.Context) error {
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.NoError(t, <-errChan)
+}
+
+func TestListenForServeSignalsReportsErrors(t *testing.T) {
+	errChan := make(chan error, 1)
+	wantErr := errors.New("signal listener failed")
+
+	err := listenForServeSignals(t.Context(), errChan, func(context.Context) error {
+		return wantErr
+	})
+
+	require.ErrorIs(t, err, wantErr)
+	require.ErrorIs(t, <-errChan, wantErr)
 }
 
 func TestIdentityHealthChecker(t *testing.T) {
