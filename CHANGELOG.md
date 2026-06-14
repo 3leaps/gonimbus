@@ -35,6 +35,9 @@ changes.
 - **AWS SDK family updated:** AWS SDK for Go v2 packages now track the latest
   past-cooling v1.41.12 root SDK, S3 service v1.102.2, and smithy-go v1.27.2
   family for the v0.3.1 dependency refresh.
+- **Routing and platform packages updated:** `github.com/go-chi/chi/v5` and
+  `golang.org/x/sys` now track past-cooling dependency versions for the v0.3.1
+  package refresh.
 
 ## [0.3.0] - 2026-06-12
 

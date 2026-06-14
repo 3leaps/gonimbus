@@ -13,7 +13,7 @@ require (
 	github.com/aws/smithy-go v1.27.2
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/fulmenhq/gofulmen v0.3.5
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
@@ -23,7 +23,7 @@ require (
 	github.com/tursodatabase/go-libsql v0.0.0-20260424063416-3051e37e6e04
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.55.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.46.0
 	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.51.0

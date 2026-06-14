@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
 	apperrors "github.com/3leaps/gonimbus/internal/errors"
@@ -36,9 +35,6 @@ func New(host string, port int) *Server {
 // NewWithOptions creates a new HTTP server instance with optional subsystems.
 func NewWithOptions(host string, port int, opts Options) *Server {
 	r := chi.NewRouter()
-
-	// Standard chi middleware
-	r.Use(middleware.RealIP)
 
 	// Our custom middleware in correct order (RequestID → Metrics → Logging → Recovery)
 	r.Use(servermw.RequestID)      // 1. Request ID (early for correlation)
