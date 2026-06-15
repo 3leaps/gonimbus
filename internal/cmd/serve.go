@@ -204,9 +204,8 @@ The server will cleanly shut down the HTTP server and flush logs on shutdown.`,
 
 		// Start signal listener in background
 		go func() {
-			if err := signals.Listen(cmd.Context()); err != nil {
+			if err := listenForServeSignals(cmd.Context(), errChan, signals.Listen); err != nil {
 				observability.ServerLogger.Error("Signal handler error", zap.Error(err))
-				errChan <- err
 			}
 		}()
 
@@ -217,6 +216,12 @@ The server will cleanly shut down the HTTP server and flush logs on shutdown.`,
 
 		return nil
 	},
+}
+
+func listenForServeSignals(ctx context.Context, errChan chan<- error, listen func(context.Context) error) error {
+	err := listen(ctx)
+	errChan <- err
+	return err
 }
 
 func init() {
