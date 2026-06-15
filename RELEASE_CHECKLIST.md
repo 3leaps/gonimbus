@@ -69,7 +69,13 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 
 ### Release Artifacts & Signing
 
-Follow the Fulmen "manifest-only" provenance pattern:
+Follow the release distribution handoff:
+
+1. **devlead** tags and pushes the release after clearance, then verifies CI.
+2. **maintainer** runs the signing and upload ceremony on the MFA-gated host.
+3. **devlead** publishes Homebrew and Scoop updates after uploaded assets are verified.
+
+The signing ceremony follows the Fulmen "manifest-only" provenance pattern:
 
 - Generate SHA256 + SHA512 manifests
 - Sign manifests with minisign (primary) and optionally PGP
@@ -103,6 +109,7 @@ Follow the Fulmen "manifest-only" provenance pattern:
 - [ ] Verify signatures: `make release-verify-signatures`
 - [ ] Copy release notes: `make release-notes RELEASE_TAG=v<version>`
 - [ ] Upload provenance assets: `make release-upload`
+- [ ] Preserve the package-manager URL and SHA256 block printed by `make release-upload`
 
 ### Tagging
 
@@ -120,6 +127,18 @@ Follow the Fulmen "manifest-only" provenance pattern:
 ### Distribution
 
 - [ ] Verify `go install github.com/3leaps/gonimbus/cmd/gonimbus@v<version>` works
+- [ ] Update `3leaps/homebrew-tap` `Formula/gonimbus.rb` from the uploaded release asset URLs and SHA256 values:
+  - [ ] macOS ARM64 asset present
+  - [ ] Linux AMD64 asset present
+  - [ ] Linux ARM64 asset present
+  - [ ] Intel macOS omitted unless the upstream release publishes `gonimbus-darwin-amd64`
+  - [ ] Formula license matches gonimbus (`Apache-2.0`)
+- [ ] Verify Homebrew install resolves and runs: `brew install 3leaps/tap/gonimbus && gonimbus version`
+- [ ] Update `3leaps/scoop-bucket` `bucket/gonimbus.json` from the uploaded release asset URLs and SHA256 values:
+  - [ ] Windows AMD64 asset present
+  - [ ] Windows ARM64 asset present
+  - [ ] `checkver` and `autoupdate` follow bucket convention
+- [ ] Verify Scoop install resolves and runs: `scoop install gonimbus && gonimbus version`
 - [ ] Test CLI commands work correctly
 
 ## Post-Release
