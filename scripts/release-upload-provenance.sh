@@ -21,6 +21,68 @@ if [[ ! -d "${SOURCE_DIR}" ]]; then
     exit 1
 fi
 
+print_distribution_details() {
+    local tag="$1"
+    local source_dir="$2"
+    local sums_file="${source_dir}/SHA256SUMS"
+
+    if [[ ! -f "${sums_file}" ]]; then
+        echo "ℹ️  Distribution details unavailable: ${sums_file} not found"
+        return 0
+    fi
+
+    if ! asset_urls="$(gh release view "${tag}" --json assets --jq '.assets[] | [.name, .url] | @tsv')" || [[ -z "${asset_urls}" ]]; then
+        echo "ℹ️  Distribution details unavailable: could not read uploaded release assets"
+        return 0
+    fi
+
+    asset_url() {
+        local name="$1"
+        awk -F '\t' -v name="${name}" '$1 == name {print $2; found=1; exit} END {exit found ? 0 : 1}' <<< "${asset_urls}"
+    }
+
+    asset_sha256() {
+        local name="$1"
+        awk -v name="${name}" '$2 == name || $2 == "*" name {print $1; found=1; exit} END {exit found ? 0 : 1}' "${sums_file}"
+    }
+
+    print_asset() {
+        local name="$1"
+        local url
+        local sha256
+
+        if ! url="$(asset_url "${name}")"; then
+            echo "# ${name}: uploaded asset URL not found"
+            return 0
+        fi
+        if ! sha256="$(asset_sha256 "${name}")"; then
+            echo "# ${name}: SHA256 not found in SHA256SUMS"
+            return 0
+        fi
+
+        echo "${name}"
+        echo "  url: ${url}"
+        echo "  sha256: ${sha256}"
+    }
+
+    cat << EOF
+
+Package-manager asset details:
+
+Homebrew (3leaps/homebrew-tap Formula/gonimbus.rb):
+EOF
+    print_asset "gonimbus-darwin-arm64"
+    print_asset "gonimbus-linux-amd64"
+    print_asset "gonimbus-linux-arm64"
+
+    cat << EOF
+
+Scoop (3leaps/scoop-bucket bucket/gonimbus.json):
+EOF
+    print_asset "gonimbus-windows-amd64.exe"
+    print_asset "gonimbus-windows-arm64.exe"
+}
+
 # Upload only provenance outputs (never binaries) to avoid clobbering CI-built assets.
 # Expected inputs:
 # - SHA256SUMS, SHA512SUMS
@@ -52,3 +114,4 @@ echo "→ Uploading ${#final_assets[@]} provenance asset(s) to ${TAG} (clobber)"
 gh release upload "${TAG}" "${final_assets[@]}" --clobber
 
 echo "✅ Upload complete"
+print_distribution_details "${TAG}" "${SOURCE_DIR}" || true
