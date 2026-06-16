@@ -736,6 +736,166 @@ func TestConfigUntilResolvedValidation(t *testing.T) {
 	}
 }
 
+func TestConfigXMLXPathPriorityValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "rejects xpath and priority together",
+			cfg: Config{Extract: []ExtractorConfig{{
+				Name:          "routing_date",
+				Type:          "xml_xpath",
+				XPath:         "//EntryDate",
+				XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			}}},
+			wantErr: "exactly one of xpath or xpath_priority",
+		},
+		{
+			name: "rejects blank priority candidate",
+			cfg: Config{Extract: []ExtractorConfig{{
+				Name:          "routing_date",
+				Type:          "xml_xpath",
+				XPathPriority: []string{"//EntryDate", " "},
+			}}},
+			wantErr: "xpath_priority[1] is required",
+		},
+		{
+			name: "rejects invalid priority candidate",
+			cfg: Config{Extract: []ExtractorConfig{{
+				Name:          "routing_date",
+				Type:          "xml_xpath",
+				XPathPriority: []string{"//EntryDate", "//Record/EntryDate"},
+			}}},
+			wantErr: "xpath_priority[1] invalid",
+		},
+		{
+			name: "accepts priority list",
+			cfg: Config{
+				Extract: []ExtractorConfig{{
+					Name:          "routing_date",
+					Type:          "xml_xpath",
+					XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+				}},
+			},
+		},
+		{
+			name: "rejects required priority without quarantine prefix",
+			cfg: Config{
+				Extract: []ExtractorConfig{{
+					Name:          "routing_date",
+					Type:          "xml_xpath",
+					XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+					Required:      true,
+					OnMissing:     OnMissingFail,
+				}},
+			},
+			wantErr: "quarantine_prefix is required when required xpath_priority extractors can quarantine truncated fallbacks",
+		},
+		{
+			name: "accepts required priority with fail and quarantine prefix",
+			cfg: Config{
+				QuarantinePrefix: "_unresolved/",
+				Extract: []ExtractorConfig{{
+					Name:          "routing_date",
+					Type:          "xml_xpath",
+					XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+					Required:      true,
+					OnMissing:     OnMissingFail,
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestProberXMLXPathPrioritySelectsHighestRank(t *testing.T) {
+	cfg := Config{
+		QuarantinePrefix: "_unresolved/",
+		Extract: []ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+		}},
+	}
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	data := []byte(`<Record><Header><WindowStartDate>2026-05-01</WindowStartDate></Header><Entry><EntryDate>2026-05-15</EntryDate></Entry></Record>`)
+	got, err := p.ProbeDetailed(data, int64(len(data)), TerminationAllRequiredResolved)
+	require.NoError(t, err)
+
+	require.Equal(t, "2026-05-15", got.Vars["routing_date"])
+	require.Len(t, got.Audit.Extractors, 1)
+	item := got.Audit.Extractors[0]
+	require.True(t, item.Resolved)
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 1, *item.ResolvedPriority)
+	require.Equal(t, "//EntryDate", item.ResolvedXPath)
+	require.False(t, item.TruncatedFallback)
+}
+
+func TestProberXMLXPathPriorityFallbackOnlyAtEOF(t *testing.T) {
+	cfg := Config{
+		QuarantinePrefix: "_unresolved/",
+		Extract: []ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+		}},
+	}
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	data := []byte(`<Record><Header><WindowStartDate>2026-05-01</WindowStartDate></Header></Record>`)
+	got, err := p.ProbeDetailed(data, int64(len(data)), TerminationStreamExhausted)
+	require.NoError(t, err)
+
+	require.Equal(t, "2026-05-01", got.Vars["routing_date"])
+	item := got.Audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.Equal(t, "//WindowStartDate", item.ResolvedXPath)
+	require.False(t, item.TruncatedFallback)
+	require.Zero(t, got.Audit.TruncatedFallbackCount)
+}
+
+func TestFinalizeAuditForTerminationMarksPriorityFallbackParseError(t *testing.T) {
+	priority := 2
+	bytesAtResolution := int64(64)
+	audit := ProbeAudit{
+		TerminationReason: TerminationParseError,
+		Extractors: []ExtractorAudit{{
+			Name:              "routing_date",
+			Type:              "xml_xpath",
+			Resolved:          true,
+			Required:          true,
+			ResolvedPriority:  &priority,
+			ResolvedXPath:     "//WindowStartDate",
+			BytesAtResolution: &bytesAtResolution,
+		}},
+	}
+
+	FinalizeAuditForTermination(&audit)
+
+	require.True(t, audit.Extractors[0].TruncatedFallback)
+	require.Equal(t, 1, audit.TruncatedFallbackCount)
+}
+
 func TestProbeDetailedAudit(t *testing.T) {
 	cfg := Config{
 		Extract: []ExtractorConfig{
