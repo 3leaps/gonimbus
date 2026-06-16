@@ -26,6 +26,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
@@ -915,6 +916,191 @@ func TestTransferReflowCommand_CollisionSkipDuplicateEmitsNestedCollision(t *tes
 	requireNoLegacyCollisionKeys(t, requireRecord(t, stdout, reflowRecordType, "skipped").Data)
 }
 
+func TestTransferReflowCommand_IfAbsentFallbackSkipsDuplicateAndSummarizes(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "same-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+	dst.putFixture("data/source/file.xml", "payload", "same-etag", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "same-etag", int64(len("payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), dst.mustObject("data/source/file.xml"))
+	require.Empty(t, dst.putCallsSnapshot())
+
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.duplicate", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionHeadFallback, "same-etag", int64(len("payload")))
+
+	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	require.Contains(t, string(warn.Data), ifAbsentFallbackWarning)
+	summary := requireReflowSummaryData(t, stdout)
+	require.NotNil(t, summary.DestIfAbsentHonored)
+	require.False(t, *summary.DestIfAbsentHonored)
+	require.Equal(t, string(preflight.IfAbsentProbeNotHonored), summary.DestIfAbsentProbeStatus)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["skipped"])
+}
+
+func TestTransferReflowCommand_IfAbsentFallbackFailConflictLeavesDestinationUnchanged(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+	dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "fail",
+	)
+	require.Error(t, err)
+	require.Equal(t, []byte("old payload"), dst.mustObject("data/source/file.xml"))
+
+	failed := requireReflowData(t, stdout, "failed")
+	require.Equal(t, "collision.exists.conflict", failed.Reason)
+	requireCollisionEqual(t, failed, collisionConflict, decisionHeadFallback, "old-etag", int64(len("old payload")))
+	summary := requireReflowSummaryData(t, stdout)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["failed"])
+	require.Equal(t, int64(1), summary.Errors)
+}
+
+func TestTransferReflowCommand_IfAbsentFallbackInconclusiveProbeFailsClosed(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.failDelete = true
+	dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "fail",
+	)
+	require.Error(t, err)
+	require.Equal(t, []byte("old payload"), dst.mustObject("data/source/file.xml"))
+
+	failed := requireReflowData(t, stdout, "failed")
+	require.Equal(t, "collision.exists.conflict", failed.Reason)
+	requireCollisionEqual(t, failed, collisionConflict, decisionHeadFallback, "old-etag", int64(len("old payload")))
+
+	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	require.Contains(t, string(warn.Data), `"dest_ifabsent_probe_status":"inconclusive"`)
+	require.Contains(t, string(warn.Data), `"dest_ifabsent_honored":null`)
+	summary := requireReflowSummaryData(t, stdout)
+	require.Nil(t, summary.DestIfAbsentHonored)
+	require.Equal(t, string(preflight.IfAbsentProbeInconclusive), summary.DestIfAbsentProbeStatus)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["failed"])
+	require.Equal(t, int64(1), summary.Collisions[collisionConflict])
+	require.Equal(t, int64(1), summary.Errors)
+}
+
+func TestTransferReflowCommand_IfAbsentFallbackQuarantineConflictLeavesDestinationUnchanged(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+	dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Time{})
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "quarantine",
+		"--collision-quarantine-prefix", "_conflict",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("old payload"), dst.mustObject("data/source/file.xml"))
+	require.Equal(t, []byte("new payload"), dst.mustObject("data/_conflict/source/file.xml"))
+
+	quarantined := requireReflowData(t, stdout, "quarantined")
+	require.Equal(t, "collision.conflict.quarantined", quarantined.Reason)
+	require.Equal(t, "quarantine", quarantined.RoutingClass)
+	require.Equal(t, "data/_conflict/source/file.xml", quarantined.DestKey)
+	requireCollisionEqual(t, quarantined, collisionQuarantined, decisionHeadFallback, "old-etag", int64(len("old payload")))
+	summary := requireReflowSummaryData(t, stdout)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["quarantined"])
+	require.Equal(t, int64(1), summary.Collisions[collisionQuarantined])
+}
+
+func TestTransferReflowCommand_IfAbsentFallbackOverwriteIfSourceNewerSkipsOlderSource(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+	dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "overwrite-if-source-newer",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("old payload"), dst.mustObject("data/source/file.xml"))
+
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.skipped_src_older", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionSrcOlder, decisionHeadFallback, "old-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, skipped, reasonSrcOlder, "2026-01-15T20:53:44Z", "2026-01-16T20:53:44Z")
+	summary := requireReflowSummaryData(t, stdout)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["skipped"])
+	require.Equal(t, int64(1), summary.Collisions[collisionSrcOlder])
+}
+
+func TestTransferReflowCommand_IfAbsentFallbackOverwriteIfSourceNewerReplacesNewerSource(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst := newReflowMemoryProvider()
+	dst.ignoreIfAbsent = true
+	dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+
+	stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "overwrite-if-source-newer",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("new payload"), dst.mustObject("data/source/file.xml"))
+
+	complete := requireReflowData(t, stdout, "complete")
+	requireCollisionEqual(t, complete, collisionOverwritten, decisionHeadFallback, "old-etag", int64(len("old payload")))
+	requireSourceNewerCollisionEqual(t, complete, reasonSrcNewer, "2026-01-15T20:53:44Z", "2026-01-14T20:53:44Z")
+	summary := requireReflowSummaryData(t, stdout)
+	require.True(t, summary.FallbackActive)
+	require.Equal(t, int64(1), summary.IfAbsentFallbackObjects)
+	require.Equal(t, int64(1), summary.Statuses["complete"])
+	require.Equal(t, int64(1), summary.Collisions[collisionOverwritten])
+}
+
 func TestTransferReflowCommand_CollisionSkipDuplicateComparesBodiesForS3DestWhenETagsDiffer(t *testing.T) {
 	sourceRoot := mustEvalSymlinks(t, t.TempDir())
 	sourcePath := filepath.Join(sourceRoot, "source", "file.xml")
@@ -929,7 +1115,7 @@ func TestTransferReflowCommand_CollisionSkipDuplicateComparesBodiesForS3DestWhen
 		"--parallel", "1",
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"data/source/file.xml"}, dst.conditionalPutCallsSnapshot())
+	require.Contains(t, dst.conditionalPutCallsSnapshot(), "data/source/file.xml")
 	require.Equal(t, []string{"data/source/file.xml"}, dst.headCallsSnapshot())
 	requireNoRecordType(t, stdout, output.TypeError)
 
@@ -3516,6 +3702,16 @@ type testErrorData struct {
 	Collision *collisionInfo `json:"collision"`
 }
 
+type testReflowSummaryData struct {
+	DestIfAbsentHonored     *bool            `json:"dest_ifabsent_honored"`
+	DestIfAbsentProbeStatus string           `json:"dest_ifabsent_probe_status"`
+	FallbackActive          bool             `json:"fallback_active"`
+	IfAbsentFallbackObjects int64            `json:"ifabsent_fallback_objects"`
+	Statuses                map[string]int64 `json:"statuses"`
+	Collisions              map[string]int64 `json:"collisions"`
+	Errors                  int64            `json:"errors"`
+}
+
 func requireRecord(t *testing.T, stdout string, recordType string, status string) testRecordEnvelope {
 	t.Helper()
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
@@ -3546,6 +3742,14 @@ func requireReflowData(t *testing.T, stdout string, status string) testReflowDat
 	t.Helper()
 	record := requireRecord(t, stdout, reflowRecordType, status)
 	var data testReflowData
+	require.NoError(t, json.Unmarshal(record.Data, &data))
+	return data
+}
+
+func requireReflowSummaryData(t *testing.T, stdout string) testReflowSummaryData {
+	t.Helper()
+	record := requireRecord(t, stdout, reflowSummaryRecordType, "")
+	var data testReflowSummaryData
 	require.NoError(t, json.Unmarshal(record.Data, &data))
 	return data
 }
@@ -3694,6 +3898,7 @@ type reflowMemoryProvider struct {
 	ignoreIfAbsent      bool
 	mutateBeforeIfMatch bool
 	failSidecars        bool
+	failDelete          bool
 }
 
 func newReflowMemoryProvider() *reflowMemoryProvider {
@@ -3829,6 +4034,9 @@ func (p *reflowMemoryProvider) DeleteObject(_ context.Context, key string) error
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.deleteCalls = append(p.deleteCalls, key)
+	if p.failDelete {
+		return errors.New("delete failed")
+	}
 	delete(p.objects, key)
 	delete(p.meta, key)
 	return nil

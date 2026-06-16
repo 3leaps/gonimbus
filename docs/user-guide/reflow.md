@@ -296,6 +296,13 @@ Real-world data has duplicates. The same file may appear in multiple folders due
 
 `--on-collision log` is a deprecated alias for `skip-if-duplicate`. For pipelines where duplicates are expected, `skip-if-duplicate` is the safest default.
 
+For S3-compatible destinations that do not honor `If-None-Match: *`, or where
+the IfAbsent semantics probe is inconclusive, non-overwrite collision modes use
+a HEAD/compare fallback before writing. The fallback keeps duplicate skips and
+conflict handling correct and surfaces the degraded capability in
+`gonimbus.warning.v1` and the final `gonimbus.reflow.summary.v1`; cross-process
+create-if-absent atomicity remains limited by the destination.
+
 ### Checkpoint and Resume
 
 Large reflow jobs (100K+ objects) benefit from checkpointing:

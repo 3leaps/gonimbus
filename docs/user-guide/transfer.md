@@ -624,6 +624,18 @@ Control behavior when destination objects already exist:
 
 `--on-collision log` remains a deprecated alias for `skip-if-duplicate` for one minor-version cycle.
 
+For S3-compatible destinations, Gonimbus probes whether `If-None-Match: *`
+is semantically honored before non-overwrite collision modes run. If the
+destination accepts a second IfAbsent write to the same probe key, or if the
+probe is inconclusive because writes are disabled or cleanup cannot be verified,
+Gonimbus routes `skip-if-duplicate`, `fail`, `quarantine`, and
+`overwrite-if-source-newer` through a HEAD/compare fallback before writing. The
+fallback preserves duplicate/conflict correctness and emits a once-per-run
+`gonimbus.warning.v1` plus a terminal `gonimbus.reflow.summary.v1` with
+`dest_ifabsent_honored`, `dest_ifabsent_probe_status`, `fallback_active`, and
+`ifabsent_fallback_objects`. It does not restore cross-process create-if-absent
+atomicity on destinations that do not enforce the precondition.
+
 For `quarantine`, provide a relative collision prefix:
 
 ```bash
@@ -666,7 +678,7 @@ This mode uses object-store `LastModified`, which is a provider write timestamp,
 
 The `collision` object also includes `src_last_modified`, `dest_last_modified_observed`, and `decision_reason` for this mode. Existing modes omit those fields.
 
-`decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, `quarantine_routed`, and `head_compare_then_conditional_overwrite`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
+`decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, `quarantine_routed`, `head_compare_then_conditional_overwrite`, and `head_compare_fallback`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
 
 ### Post-Reflow Verification
 
