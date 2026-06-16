@@ -170,6 +170,251 @@ func TestRunContentProbeUntilResolvedTargetPastMaxBytesQuarantine(t *testing.T) 
 	require.Equal(t, []rangeCall{{0, 15}, {16, 31}}, prov.ranges)
 }
 
+func TestRunContentProbeUntilResolvedPriorityWaitsForPrimaryAndDerivedUsesWinner(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header><pad>` + strings.Repeat("x", 80) + `</pad><entry><EntryDate>2027-06-15</EntryDate></entry></record>`)
+	prov := newRangeProbeProvider("priority.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy:     probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "256", ChunkBytes: "32"},
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+		Derived: []probe.DerivedConfig{{
+			Name:      "year",
+			From:      "routing_date",
+			Transform: probe.TransformSubstring,
+			Args:      map[string]any{"start": 0, "end": 4},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "priority.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "normal", got.routingClass)
+	require.Equal(t, "2027-06-15", got.vars["routing_date"])
+	require.Equal(t, "2027", got.vars["year"])
+	require.Equal(t, probe.TerminationAllRequiredResolved, got.audit.TerminationReason)
+	require.Greater(t, len(prov.ranges), 3)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 1, *item.ResolvedPriority)
+	require.Equal(t, "//EntryDate", item.ResolvedXPath)
+	require.False(t, item.TruncatedFallback)
+	require.Zero(t, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeUntilResolvedOptionalPriorityFallbackAtEarlyStopIsTruncated(t *testing.T) {
+	data := []byte(`<record><id>alpha</id><header><WindowStartDate>2026-05-01</WindowStartDate></header><pad>` + strings.Repeat("x", 80) + `</pad><entry><EntryDate>2027-06-15</EntryDate></entry></record>`)
+	prov := newRangeProbeProvider("optional-priority.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy: probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "256", ChunkBytes: "96"},
+		Extract: []probe.ExtractorConfig{
+			{
+				Name:      "id",
+				Type:      "regex",
+				Pattern:   `<id>([^<]+)</id>`,
+				Group:     1,
+				Required:  true,
+				OnMissing: probe.OnMissingFail,
+			},
+			{
+				Name:          "routing_date",
+				Type:          "xml_xpath",
+				XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+				Required:      false,
+			},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "optional-priority.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "normal", got.routingClass)
+	require.Equal(t, "alpha", got.vars["id"])
+	require.Equal(t, "2026-05-01", got.vars["routing_date"])
+	require.Equal(t, probe.TerminationAllRequiredResolved, got.audit.TerminationReason)
+	require.Len(t, prov.ranges, 1)
+	item := got.audit.Extractors[1]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.Equal(t, "//WindowStartDate", item.ResolvedXPath)
+	require.True(t, item.TruncatedFallback)
+	require.Equal(t, 1, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeUntilResolvedPriorityFallbackOnlyAtEOF(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header></record>`)
+	prov := newRangeProbeProvider("fallback-only.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy:     probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "256", ChunkBytes: "32"},
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "fallback-only.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "normal", got.routingClass)
+	require.Equal(t, "2026-05-01", got.vars["routing_date"])
+	require.Equal(t, probe.TerminationStreamExhausted, got.audit.TerminationReason)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.Equal(t, "//WindowStartDate", item.ResolvedXPath)
+	require.False(t, item.TruncatedFallback)
+	require.Zero(t, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeUntilResolvedPriorityFallbackAtExactLimitIsEOF(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header></record>`)
+	prov := newRangeProbeProvider("exact-limit.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy:     probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "79", ChunkBytes: "32"},
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+	}
+	require.Equal(t, int64(79), int64(len(data)))
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "exact-limit.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "normal", got.routingClass)
+	require.Equal(t, probe.TerminationStreamExhausted, got.audit.TerminationReason)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.False(t, item.TruncatedFallback)
+	require.Zero(t, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeUntilResolvedPriorityTruncatedFallbackQuarantines(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header><pad>` + strings.Repeat("x", 96) + `</pad><entry><EntryDate>2027-06-15</EntryDate></entry></record>`)
+	prov := newRangeProbeProvider("truncated.xml", data)
+	cfg := &probe.Config{
+		ReadStrategy:     probe.ReadStrategyConfig{Mode: probe.ReadStrategyUntilResolved, MaxBytes: "96", ChunkBytes: "32"},
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeUntilResolved(context.Background(), prov, "truncated.xml", p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "quarantine", got.routingClass)
+	require.Equal(t, "_unresolved/", got.quarantinePrefix)
+	require.Equal(t, "2026-05-01", got.vars["routing_date"])
+	require.Equal(t, probe.TerminationMaxBytesReached, got.audit.TerminationReason)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.True(t, item.TruncatedFallback)
+	require.Equal(t, 1, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeFixedWindowPriorityFallbackOnlyAtEOF(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header></record>`)
+	prov := newRangeProbeProvider("fixed-fallback-only.xml", data)
+	cfg := &probe.Config{
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "fixed-fallback-only.xml"}, p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "normal", got.routingClass)
+	require.Equal(t, "2026-05-01", got.vars["routing_date"])
+	require.Equal(t, probe.TerminationAllRequiredResolved, got.audit.TerminationReason)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.False(t, item.TruncatedFallback)
+	require.Zero(t, got.audit.TruncatedFallbackCount)
+}
+
+func TestRunContentProbeFixedWindowPriorityTruncatedFallbackQuarantines(t *testing.T) {
+	data := []byte(`<record><header><WindowStartDate>2026-05-01</WindowStartDate></header><pad>` + strings.Repeat("x", int(contentProbeMaxBytes)) + `</pad><entry><EntryDate>2027-06-15</EntryDate></entry></record>`)
+	prov := newRangeProbeProvider("fixed-truncated.xml", data)
+	cfg := &probe.Config{
+		QuarantinePrefix: "_unresolved/",
+		Extract: []probe.ExtractorConfig{{
+			Name:          "routing_date",
+			Type:          "xml_xpath",
+			XPathPriority: []string{"//EntryDate", "//WindowStartDate"},
+			Required:      true,
+			OnMissing:     probe.OnMissingFail,
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+	p, err := probe.New(*cfg)
+	require.NoError(t, err)
+
+	got, err := runContentProbeTask(context.Background(), prov, probeTask{Key: "fixed-truncated.xml"}, p, cfg, nil)
+
+	require.NoError(t, err)
+	require.Nil(t, got.extractErr)
+	require.Equal(t, "quarantine", got.routingClass)
+	require.Equal(t, "_unresolved/", got.quarantinePrefix)
+	require.Equal(t, "2026-05-01", got.vars["routing_date"])
+	require.Equal(t, probe.TerminationFixedWindow, got.audit.TerminationReason)
+	item := got.audit.Extractors[0]
+	require.NotNil(t, item.ResolvedPriority)
+	require.Equal(t, 2, *item.ResolvedPriority)
+	require.True(t, item.TruncatedFallback)
+	require.Equal(t, 1, got.audit.TruncatedFallbackCount)
+}
+
 func TestContentProbeDerivedFailureErrorOutputRedactsRawValue(t *testing.T) {
 	const marker = "SENSITIVE-MARKER-7f9a2c"
 	data := []byte(`date=` + marker)

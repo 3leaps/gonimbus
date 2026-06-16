@@ -61,8 +61,9 @@ Read strategies:
   resolve, max_bytes is reached, or the stream is exhausted
 
 until_resolved supports xml_xpath and regex extractors in this release.
-json_path remains available in fixed_window mode and is rejected under
-until_resolved. on_missing supports fail and quarantine; fallback is deferred.
+xml_xpath extractors may use xpath_priority for ordered fallback paths. json_path
+remains available in fixed_window mode and is rejected under until_resolved.
+on_missing supports fail and quarantine.
 
 Use --rewrite-from when derived fields reference source-key captures. The
 template is applied to the parsed object key, not the full URI, and its captures
@@ -383,7 +384,11 @@ func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task pr
 	if err != nil {
 		return nil, err
 	}
-	res, err := prober.ProbeDetailedWithVars(b, int64(len(b)), probe.TerminationAllRequiredResolved, initialVars)
+	termination := probe.TerminationAllRequiredResolved
+	if prober.HasPriorityExtractors() && fixedWindowHitBoundary(b, meta, contentProbeBytes) {
+		termination = probe.TerminationFixedWindow
+	}
+	res, err := prober.ProbeDetailedWithVars(b, int64(len(b)), termination, initialVars)
 	if err != nil {
 		return &contentProbeTaskResult{meta: meta, bytesRequested: contentProbeBytes, bytesRead: int64(len(b)), extractErr: err}, nil
 	}
@@ -408,7 +413,7 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 	}
 	readLimit := cfg.ReadStrategy.MaxBytesValue
 	exhaustsObject := false
-	if meta.Size > 0 && meta.Size < readLimit {
+	if meta.Size > 0 && meta.Size <= readLimit {
 		readLimit = meta.Size
 		exhaustsObject = true
 	}
@@ -461,8 +466,9 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		}
 		rememberBytesAtResolution(res, resolvedAt)
 		lastProbeRes = res
-		if prober.AllRequiredResolved(res.Vars) {
+		if prober.RequiredResolvedForTermination(res) {
 			res.Audit.TerminationReason = probe.TerminationAllRequiredResolved
+			probe.FinalizeAuditForTermination(&res.Audit)
 			applyBytesAtResolution(&res.Audit, resolvedAt)
 			routingClass, requiredFailed, failureErr := prober.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
 			if requiredFailed {
@@ -484,7 +490,7 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		start += int64(len(chunk))
 	}
 
-	if bytesRead >= cfg.ReadStrategy.MaxBytesValue {
+	if bytesRead >= cfg.ReadStrategy.MaxBytesValue && !exhaustsObject {
 		termination = probe.TerminationMaxBytesReached
 	}
 	res, err := prober.ProbeDetailedWithVars(buf, bytesRead, termination, initialVars)
@@ -501,6 +507,7 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		lastErr = err
 	}
 	res.Audit.TerminationReason = termination
+	probe.FinalizeAuditForTermination(&res.Audit)
 	applyBytesAtResolution(&res.Audit, resolvedAt)
 	routingClass, requiredFailed, failureErr := prober.ApplyMissingPoliciesDetailed(res.Vars, &res.Audit, res.Failures)
 	if requiredFailed {
@@ -529,8 +536,9 @@ func rememberBytesAtResolution(res *probe.Result, resolvedAt map[string]int64) {
 		if !item.Resolved || item.BytesAtResolution == nil {
 			continue
 		}
-		if _, ok := resolvedAt[item.Name]; !ok {
-			resolvedAt[item.Name] = *item.BytesAtResolution
+		key := auditResolutionKey(item)
+		if _, ok := resolvedAt[key]; !ok {
+			resolvedAt[key] = *item.BytesAtResolution
 		}
 	}
 }
@@ -540,12 +548,27 @@ func applyBytesAtResolution(audit *probe.ProbeAudit, resolvedAt map[string]int64
 		return
 	}
 	for i := range audit.Extractors {
-		at, ok := resolvedAt[audit.Extractors[i].Name]
+		at, ok := resolvedAt[auditResolutionKey(audit.Extractors[i])]
 		if !ok {
 			continue
 		}
 		audit.Extractors[i].BytesAtResolution = &at
 	}
+}
+
+func fixedWindowHitBoundary(data []byte, meta *provider.ObjectMeta, requested int64) bool {
+	bytesRead := int64(len(data))
+	if meta != nil && meta.Size > 0 {
+		return meta.Size > bytesRead
+	}
+	return requested > 0 && bytesRead >= requested
+}
+
+func auditResolutionKey(item probe.ExtractorAudit) string {
+	if item.ResolvedPriority != nil {
+		return fmt.Sprintf("%s#%d#%s", item.Name, *item.ResolvedPriority, item.ResolvedXPath)
+	}
+	return item.Name
 }
 
 func quarantinePrefixForRouting(routingClass string, cfg *probe.Config) string {

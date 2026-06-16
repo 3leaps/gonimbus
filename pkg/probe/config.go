@@ -60,7 +60,8 @@ type ExtractorConfig struct {
 	OnMissing string `json:"on_missing,omitempty" yaml:"on_missing,omitempty"`
 
 	// For type=xml_xpath.
-	XPath string `json:"xpath" yaml:"xpath"`
+	XPath         string   `json:"xpath" yaml:"xpath"`
+	XPathPriority []string `json:"xpath_priority,omitempty" yaml:"xpath_priority,omitempty"`
 
 	// For type=regex.
 	Pattern string `json:"pattern" yaml:"pattern"`
@@ -129,6 +130,7 @@ func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 	}
 
 	needsQuarantine := false
+	quarantineReason := ""
 	extractNames := map[string]int{}
 	seen := map[string]string{}
 	rewriteCaptureNames := map[string]int{}
@@ -177,11 +179,37 @@ func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 
 		switch e.Type {
 		case "xml_xpath":
-			if strings.TrimSpace(e.XPath) == "" {
+			hasXPath := strings.TrimSpace(e.XPath) != ""
+			hasPriority := len(e.XPathPriority) > 0
+			if hasXPath && hasPriority {
+				return fmt.Errorf("extract[%d] must set exactly one of xpath or xpath_priority for type=xml_xpath", i)
+			}
+			if !hasXPath && !hasPriority {
 				return fmt.Errorf("extract[%d].xpath is required for type=xml_xpath", i)
 			}
-			if _, err := CompileXMLXPath(e.XPath); err != nil {
-				return fmt.Errorf("extract[%d].xpath invalid: %w", i, err)
+			if hasXPath {
+				if _, err := CompileXMLXPath(e.XPath); err != nil {
+					return fmt.Errorf("extract[%d].xpath invalid: %w", i, err)
+				}
+			}
+			if hasPriority {
+				for j := range e.XPathPriority {
+					candidate := strings.TrimSpace(e.XPathPriority[j])
+					if candidate == "" {
+						return fmt.Errorf("extract[%d].xpath_priority[%d] is required for type=xml_xpath", i, j)
+					}
+					e.XPathPriority[j] = candidate
+					if _, err := CompileXMLXPath(candidate); err != nil {
+						return fmt.Errorf("extract[%d].xpath_priority[%d] invalid: %w", i, j, err)
+					}
+				}
+				c.Extract[i] = e
+				if e.Required {
+					needsQuarantine = true
+					if quarantineReason == "" {
+						quarantineReason = "required xpath_priority extractors can quarantine truncated fallbacks"
+					}
+				}
 			}
 		case "regex":
 			if strings.TrimSpace(e.Pattern) == "" {
@@ -215,6 +243,9 @@ func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 				return fmt.Errorf("extract[%d].on_missing=quarantine requires required=true", i)
 			}
 			needsQuarantine = true
+			if quarantineReason == "" {
+				quarantineReason = "a field uses on_missing=quarantine"
+			}
 		default:
 			return fmt.Errorf("extract[%d].on_missing %q is not supported", i, e.OnMissing)
 		}
@@ -268,6 +299,9 @@ func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 				return fmt.Errorf("derived[%d].on_missing=quarantine requires required=true", i)
 			}
 			needsQuarantine = true
+			if quarantineReason == "" {
+				quarantineReason = "a field uses on_missing=quarantine"
+			}
 		default:
 			return fmt.Errorf("derived[%d].on_missing %q is not supported", i, d.OnMissing)
 		}
@@ -275,7 +309,7 @@ func (c *Config) ValidateWithRewriteCaptures(rewriteCaptures []string) error {
 	c.QuarantinePrefix = strings.TrimSpace(c.QuarantinePrefix)
 	if needsQuarantine {
 		if c.QuarantinePrefix == "" {
-			return fmt.Errorf("quarantine_prefix is required when any extractor uses on_missing=quarantine")
+			return fmt.Errorf("quarantine_prefix is required when %s", quarantineReason)
 		}
 		if strings.HasPrefix(c.QuarantinePrefix, "/") {
 			return fmt.Errorf("quarantine_prefix must be a relative destination prefix")

@@ -195,7 +195,9 @@ Two operator choices matter here:
 
 `until_resolved` currently supports `xml_xpath` and `regex` extractors. `json_path` remains valid under `fixed_window`; combining it with `until_resolved` is rejected at config-load.
 
-Probe output under `until_resolved` gains a `probe` audit block capturing `bytes_read`, the per-extractor resolution state and `bytes_at_resolution`, and `termination_reason` (`all_required_resolved`, `max_bytes_reached`, `stream_exhausted`, or `parse_error`). The audit block is the operator's record of how much was actually read — useful for tuning `max_bytes` and `chunk_bytes` on subsequent runs.
+For XML documents with alternate date tags, `xml_xpath` can use `xpath_priority` instead of scalar `xpath`. The first path is authoritative for early termination; lower-priority matches are fallback evidence until EOF. If a required lower-priority value wins because `max_bytes` or the fixed-window boundary stopped the read before EOF, the probe marks `truncated_fallback: true` and routes the record to quarantine by default, so required `xpath_priority` configs need a top-level `quarantine_prefix` even when `on_missing` is `fail`. Optional priority extractors do not hold the stream open; optional lower-rank values emitted at that early-stop boundary are marked `truncated_fallback` for audit.
+
+Probe output gains a `probe` audit block capturing `bytes_read`, the per-extractor resolution state and `bytes_at_resolution`, priority fields (`resolved_priority`, `resolved_xpath`, `truncated_fallback`) when applicable, `truncated_fallback_count`, and `termination_reason` (`all_required_resolved`, `max_bytes_reached`, `stream_exhausted`, `parse_error`, or `fixed_window`). The audit block is the operator's record of how much was actually read — useful for tuning `max_bytes` and `chunk_bytes` on subsequent runs.
 
 ### Bulk Processing
 

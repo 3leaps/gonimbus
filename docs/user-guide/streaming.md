@@ -539,6 +539,34 @@ the head, the current path is `fixed_window` with a generous `--bytes`;
 streaming JSON support is being scoped separately and is not part of the
 GON-017 surface.
 
+For XML documents where the routing value may appear under one of several
+tag names, use `xpath_priority` instead of scalar `xpath`:
+
+```yaml
+quarantine_prefix: "_unresolved/"
+
+extract:
+  - name: business_date
+    type: xml_xpath
+    xpath_priority:
+      - //EntryDate
+      - //WindowStartDate
+    required: true
+    on_missing: quarantine
+```
+
+Priority candidates use the same narrow XPath grammar as `xpath`: `//TagName`
+or exact `/a/b/c` paths. Nested descendant paths such as `//Envelope/Date`
+are intentionally out of scope, so `//TagName` relies on tag-name uniqueness
+within the bytes read. When the first priority candidate is unresolved but a
+lower-rank candidate is visible, `until_resolved` keeps reading; only a rank-1
+match can stop the stream early. At EOF, a lower-rank value is accepted as the
+best observed value. At `max_bytes` or a fixed-window boundary, a lower-rank
+value is marked as a truncated fallback and routes to quarantine by default.
+Optional priority extractors do not hold the stream open after required fields
+are ready; if an optional lower-rank value is emitted at that early-stop
+boundary, it is marked as `truncated_fallback` and counted for audit.
+
 ##### `on_missing`: fail vs. quarantine
 
 When a required extractor does not resolve before the read budget is spent,
@@ -557,11 +585,14 @@ deterministic parallel landing zone for anomalies without disrupting the
 normal-routing flow. See [Reflow → Quarantine Routing](reflow.md#quarantine-routing)
 for the end-to-end pipeline view.
 
-`quarantine_prefix` is required when any extractor uses `on_missing:
-quarantine`. It sits at the **top level** of the probe config (sibling of
-`read_strategy` and `extract`), not nested under `read_strategy`. Trailing
-slashes are normalized: `"_unresolved"` and `"_unresolved/"` are equivalent
-and both emit as `"_unresolved/"`.
+`quarantine_prefix` is required when any field uses `on_missing: quarantine`
+or any required `xpath_priority` extractor is configured. Required priority
+extractors need the prefix even with `on_missing: fail`, because a lower-rank
+winner under a non-EOF termination routes to quarantine by default. The prefix
+sits at the **top level** of the probe config (sibling of `read_strategy` and
+`extract`), not nested under `read_strategy`. Trailing slashes are normalized:
+`"_unresolved"` and `"_unresolved/"` are equivalent and both emit as
+`"_unresolved/"`.
 
 ##### Probe Audit Block
 
@@ -572,6 +603,7 @@ recording what was actually read and which extractors resolved:
 "probe": {
   "bytes_read": 65536,
   "termination_reason": "all_required_resolved",
+  "truncated_fallback_count": 0,
   "extractors": [
     {
       "name": "business_date",
@@ -579,7 +611,9 @@ recording what was actually read and which extractors resolved:
       "resolved": true,
       "required": true,
       "on_missing": "quarantine",
-      "bytes_at_resolution": 65536
+      "bytes_at_resolution": 65536,
+      "resolved_priority": 1,
+      "resolved_xpath": "//EntryDate"
     }
   ]
 }
@@ -593,11 +627,20 @@ recording what was actually read and which extractors resolved:
 | `max_bytes_reached`     | The probe exhausted `max_bytes` before every required extractor resolved         |
 | `stream_exhausted`      | The object ended before every required extractor resolved                        |
 | `parse_error`           | A terminal parse failure prevented further extraction                            |
+| `fixed_window`          | A fixed-window probe stopped at the configured byte window                       |
 
 `bytes_at_resolution` is the cumulative byte offset (from object start) at
 the first chunk boundary where the extractor resolved — it is chunk-aligned,
-not the byte-precise position of the matching element. A `null` value means
-the extractor never resolved.
+not the byte-precise position of the matching element. For `xpath_priority`,
+it records the first observation of the final winning candidate, not the
+point where no higher-priority candidate could still appear. A `null` value
+means the extractor never resolved.
+
+Priority extractors add `resolved_priority` (1-based) and `resolved_xpath`.
+When `truncated_fallback` is true, the winning value came from a lower-rank
+candidate and the probe stopped before EOF. The top-level
+`truncated_fallback_count` is the number of extractor audit entries in that
+state.
 
 Two error shapes to be aware of when consuming probe output:
 
@@ -663,7 +706,7 @@ diagnostic context, not as the failure reason itself.
 ```
 
 `probe.termination_reason` is one of `all_required_resolved`,
-`max_bytes_reached`, `stream_exhausted`, or `parse_error`.
+`max_bytes_reached`, `stream_exhausted`, `parse_error`, or `fixed_window`.
 
 ### Bulk Input (`--stdin`)
 

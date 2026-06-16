@@ -12,6 +12,7 @@ const (
 	TerminationMaxBytesReached     = "max_bytes_reached"
 	TerminationStreamExhausted     = "stream_exhausted"
 	TerminationParseError          = "parse_error"
+	TerminationFixedWindow         = "fixed_window"
 )
 
 // Prober executes configured extractors against a byte window.
@@ -37,18 +38,30 @@ type ExtractorAudit struct {
 	Required          bool   `json:"required"`
 	OnMissing         string `json:"on_missing,omitempty"`
 	BytesAtResolution *int64 `json:"bytes_at_resolution"`
+	ResolvedPriority  *int   `json:"resolved_priority,omitempty"`
+	ResolvedXPath     string `json:"resolved_xpath,omitempty"`
+	TruncatedFallback bool   `json:"truncated_fallback,omitempty"`
 }
 
 type ProbeAudit struct {
-	Extractors        []ExtractorAudit `json:"extractors"`
-	BytesRead         int64            `json:"bytes_read"`
-	TerminationReason string           `json:"termination_reason"`
+	Extractors             []ExtractorAudit `json:"extractors"`
+	BytesRead              int64            `json:"bytes_read"`
+	TerminationReason      string           `json:"termination_reason"`
+	TruncatedFallbackCount int              `json:"truncated_fallback_count,omitempty"`
 }
 
 type Result struct {
 	Vars     map[string]string
 	Audit    ProbeAudit
 	Failures map[string]error
+}
+
+type extractorObservation struct {
+	value             string
+	resolved          bool
+	resolvedPriority  int
+	resolvedXPath     string
+	truncatedFallback bool
 }
 
 func New(cfg Config) (*Prober, error) {
@@ -81,11 +94,23 @@ func newValidatedProber(cfg Config) (*Prober, error) {
 		var ex extractor
 		switch e.Type {
 		case "xml_xpath":
-			x, err := CompileXMLXPath(e.XPath)
-			if err != nil {
-				return nil, err
+			if len(e.XPathPriority) > 0 {
+				paths := make([]*XMLXPath, 0, len(e.XPathPriority))
+				for _, candidate := range e.XPathPriority {
+					x, err := CompileXMLXPath(candidate)
+					if err != nil {
+						return nil, err
+					}
+					paths = append(paths, x)
+				}
+				ex = &xmlXPathPriorityExtractor{name: e.Name, xpaths: paths, exprs: append([]string(nil), e.XPathPriority...)}
+			} else {
+				x, err := CompileXMLXPath(e.XPath)
+				if err != nil {
+					return nil, err
+				}
+				ex = &xmlXPathExtractor{name: e.Name, xpath: x}
 			}
-			ex = &xmlXPathExtractor{name: e.Name, xpath: x}
 		case "regex":
 			re, err := regexp.Compile(e.Pattern)
 			if err != nil {
@@ -152,7 +177,7 @@ func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason s
 	audit := make([]ExtractorAudit, 0, len(p.extractors))
 	for _, entry := range p.extractors {
 		ex := entry.extractor
-		v, ok, err := ex.Extract(data)
+		obs, err := entry.observe(data, terminationReason)
 		if err != nil {
 			if incomplete != nil && incomplete(err) {
 				audit = append(audit, ExtractorAudit{
@@ -171,11 +196,11 @@ func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason s
 			Required:  entry.cfg.Required,
 			OnMissing: entry.cfg.OnMissing,
 		}
-		if !ok {
+		if !obs.resolved {
 			audit = append(audit, item)
 			continue
 		}
-		v = strings.TrimSpace(v)
+		v := strings.TrimSpace(obs.value)
 		if v == "" {
 			audit = append(audit, item)
 			continue
@@ -184,6 +209,12 @@ func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason s
 		at := bytesRead
 		item.Resolved = true
 		item.BytesAtResolution = &at
+		if obs.resolvedPriority > 0 {
+			priority := obs.resolvedPriority
+			item.ResolvedPriority = &priority
+			item.ResolvedXPath = obs.resolvedXPath
+			item.TruncatedFallback = obs.truncatedFallback
+		}
 		audit = append(audit, item)
 	}
 	for _, d := range p.derived {
@@ -201,9 +232,10 @@ func (p *Prober) probeDetailed(data []byte, bytesRead int64, terminationReason s
 		Vars:     out,
 		Failures: failures,
 		Audit: ProbeAudit{
-			Extractors:        audit,
-			BytesRead:         bytesRead,
-			TerminationReason: terminationReason,
+			Extractors:             audit,
+			BytesRead:              bytesRead,
+			TerminationReason:      terminationReason,
+			TruncatedFallbackCount: truncatedFallbackCount(audit),
 		},
 	}, nil
 }
@@ -222,9 +254,50 @@ func (p *Prober) AllRequiredResolved(vars map[string]string) bool {
 	return true
 }
 
+func (p *Prober) RequiredResolvedForTermination(res *Result) bool {
+	if res == nil {
+		return false
+	}
+	for _, entry := range p.extractors {
+		if !entry.cfg.Required {
+			continue
+		}
+		if strings.TrimSpace(res.Vars[entry.cfg.Name]) == "" {
+			return false
+		}
+		if entry.isPriority() {
+			if !auditTerminalReady(res.Audit, entry.cfg.Name) {
+				return false
+			}
+		}
+	}
+	for _, entry := range p.derived {
+		if entry.cfg.RequiredValue() && strings.TrimSpace(res.Vars[entry.cfg.Name]) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Prober) ApplyMissingPolicies(vars map[string]string, audit *ProbeAudit) (routingClass string, requiredFailed bool) {
 	routingClass, requiredFailed, _ = p.ApplyMissingPoliciesDetailed(vars, audit, nil)
 	return routingClass, requiredFailed
+}
+
+func FinalizeAuditForTermination(audit *ProbeAudit) {
+	if audit == nil {
+		return
+	}
+	for i := range audit.Extractors {
+		item := &audit.Extractors[i]
+		if item.ResolvedPriority == nil || *item.ResolvedPriority <= 1 {
+			continue
+		}
+		if isNonEOFPriorityTermination(audit.TerminationReason) || (audit.TerminationReason == TerminationAllRequiredResolved && !item.Required) {
+			item.TruncatedFallback = true
+		}
+	}
+	audit.TruncatedFallbackCount = truncatedFallbackCount(audit.Extractors)
 }
 
 func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *ProbeAudit, failures map[string]error) (routingClass string, requiredFailed bool, failureErr error) {
@@ -238,6 +311,9 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 			continue
 		}
 		if strings.TrimSpace(vars[entry.cfg.Name]) != "" {
+			if auditExtractorTruncatedFallback(audit, entry.cfg.Name) {
+				routingClass = "quarantine"
+			}
 			continue
 		}
 		switch entry.cfg.OnMissing {
@@ -285,6 +361,47 @@ func (p *Prober) ApplyMissingPoliciesDetailed(vars map[string]string, audit *Pro
 	return routingClass, requiredFailed, failureErr
 }
 
+func (e configuredExtractor) observe(data []byte, terminationReason string) (extractorObservation, error) {
+	if priority, ok := e.extractor.(*xmlXPathPriorityExtractor); ok {
+		return priority.Observe(data, terminationReason)
+	}
+	v, ok, err := e.extractor.Extract(data)
+	if err != nil {
+		return extractorObservation{}, err
+	}
+	return extractorObservation{value: v, resolved: ok}, nil
+}
+
+func (e configuredExtractor) isPriority() bool {
+	_, ok := e.extractor.(*xmlXPathPriorityExtractor)
+	return ok
+}
+
+func auditTerminalReady(audit ProbeAudit, name string) bool {
+	for _, item := range audit.Extractors {
+		if item.Name != name {
+			continue
+		}
+		if item.ResolvedPriority == nil {
+			return item.Resolved
+		}
+		return item.Resolved && *item.ResolvedPriority == 1
+	}
+	return false
+}
+
+func auditExtractorTruncatedFallback(audit *ProbeAudit, name string) bool {
+	if audit == nil {
+		return false
+	}
+	for _, item := range audit.Extractors {
+		if item.Name == name {
+			return item.TruncatedFallback
+		}
+	}
+	return false
+}
+
 func (p *Prober) UnresolvedResult(bytesRead int64, terminationReason string) *Result {
 	audit := make([]ExtractorAudit, 0, len(p.extractors))
 	for _, entry := range p.extractors {
@@ -320,9 +437,91 @@ func (p *Prober) HasRequiredExtractors() bool {
 	return false
 }
 
+func (p *Prober) HasPriorityExtractors() bool {
+	for _, entry := range p.extractors {
+		if entry.isPriority() {
+			return true
+		}
+	}
+	return false
+}
+
+func truncatedFallbackCount(audit []ExtractorAudit) int {
+	count := 0
+	for _, item := range audit {
+		if item.TruncatedFallback {
+			count++
+		}
+	}
+	return count
+}
+
 type xmlXPathExtractor struct {
 	name  string
 	xpath *XMLXPath
+}
+
+type xmlXPathPriorityExtractor struct {
+	name   string
+	xpaths []*XMLXPath
+	exprs  []string
+}
+
+func (e *xmlXPathPriorityExtractor) Name() string { return e.name }
+
+func (e *xmlXPathPriorityExtractor) Extract(data []byte) (string, bool, error) {
+	obs, err := e.Observe(data, "")
+	return obs.value, obs.resolved, err
+}
+
+func (e *xmlXPathPriorityExtractor) Observe(data []byte, terminationReason string) (extractorObservation, error) {
+	if len(e.xpaths) == 0 {
+		return extractorObservation{}, fmt.Errorf("xpath_priority is empty")
+	}
+	for i, x := range e.xpaths {
+		if x == nil {
+			return extractorObservation{}, fmt.Errorf("xpath_priority[%d] is nil", i)
+		}
+		v, ok, err := x.FindFirstText(data)
+		if err != nil {
+			if isIncompleteXMLError(err) {
+				continue
+			}
+			return extractorObservation{}, err
+		}
+		v = strings.TrimSpace(v)
+		if !ok || v == "" {
+			continue
+		}
+		priority := i + 1
+		return extractorObservation{
+			value:             v,
+			resolved:          true,
+			resolvedPriority:  priority,
+			resolvedXPath:     e.exprs[i],
+			truncatedFallback: priority > 1 && isNonEOFPriorityTermination(terminationReason),
+		}, nil
+	}
+	return extractorObservation{}, nil
+}
+
+func isIncompleteXMLError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "unexpected end") ||
+		strings.Contains(msg, "eof")
+}
+
+func isNonEOFPriorityTermination(terminationReason string) bool {
+	switch terminationReason {
+	case TerminationMaxBytesReached, TerminationFixedWindow, TerminationParseError:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *xmlXPathExtractor) Name() string { return e.name }

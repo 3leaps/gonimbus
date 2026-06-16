@@ -15,6 +15,20 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Priority XML XPath probe extraction:** `xml_xpath` extractors now support
+  `xpath_priority` for ordered fallback tags, with audit fields for
+  `resolved_priority`, `resolved_xpath`, `truncated_fallback`, and
+  `truncated_fallback_count`.
+
+### Fixed
+
+- **Truncated priority fallbacks fail closed:** lower-priority XPath values
+  observed before `max_bytes` or a fixed-window boundary now route to
+  quarantine by default instead of being treated as final normal-routing
+  matches.
+
 ## [0.3.1] - 2026-06-14
 
 **Embedded S3 auth controls, toolchain pinning, and dependency refresh.**

@@ -206,8 +206,13 @@
             "all_required_resolved",
             "max_bytes_reached",
             "stream_exhausted",
-            "parse_error"
+            "parse_error",
+            "fixed_window"
           ]
+        },
+        "truncated_fallback_count": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -251,6 +256,16 @@
             "null"
           ],
           "minimum": 0
+        },
+        "resolved_priority": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resolved_xpath": {
+          "type": "string"
+        },
+        "truncated_fallback": {
+          "type": "boolean"
         }
       }
     }
