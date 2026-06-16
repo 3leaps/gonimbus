@@ -69,10 +69,12 @@ func TestWriteProbe_MultipartAbort_Denied_Unit(t *testing.T) {
 
 type conditionalProbeProvider struct {
 	denyMultipartProvider
-	putKeys    []string
-	deleteKeys []string
-	preconds   []provider.PutPrecondition
-	objects    map[string]bool
+	putKeys        []string
+	deleteKeys     []string
+	preconds       []provider.PutPrecondition
+	objects        map[string]bool
+	ignoreIfAbsent bool
+	failDelete     bool
 }
 
 func (p *conditionalProbeProvider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
@@ -81,15 +83,60 @@ func (p *conditionalProbeProvider) PutObjectConditional(ctx context.Context, key
 	}
 	p.putKeys = append(p.putKeys, key)
 	p.preconds = append(p.preconds, precond)
-	if precond.IfAbsent && p.objects[key] {
+	if precond.IfAbsent && p.objects[key] && !p.ignoreIfAbsent {
 		return provider.PutResult{}, provider.ErrAlreadyExists
 	}
 	p.objects[key] = true
 	return provider.PutResult{ETag: "etag"}, nil
 }
 
+func TestProbeIfAbsentSemantics_DetectsHonoredAndCleansUp(t *testing.T) {
+	ctx := context.Background()
+	p := &conditionalProbeProvider{}
+
+	result := preflight.ProbeIfAbsentSemantics(ctx, p, preflight.Spec{ProbePrefix: ".gonimbus-preflight/"})
+	require.Equal(t, preflight.IfAbsentProbeHonored, result.Status)
+	require.NoError(t, result.Err)
+	require.Len(t, p.putKeys, 2)
+	require.Equal(t, p.putKeys[0], p.putKeys[1])
+	require.Equal(t, []string{p.putKeys[0]}, p.deleteKeys)
+	require.False(t, p.objects[p.putKeys[0]])
+	require.True(t, *result.Honored())
+}
+
+func TestProbeIfAbsentSemantics_DetectsNotHonoredAndCleansUp(t *testing.T) {
+	ctx := context.Background()
+	p := &conditionalProbeProvider{ignoreIfAbsent: true}
+
+	result := preflight.ProbeIfAbsentSemantics(ctx, p, preflight.Spec{ProbePrefix: ".gonimbus-preflight/"})
+	require.Equal(t, preflight.IfAbsentProbeNotHonored, result.Status)
+	require.NoError(t, result.Err)
+	require.Len(t, p.putKeys, 2)
+	require.Equal(t, p.putKeys[0], p.putKeys[1])
+	require.Equal(t, []string{p.putKeys[0]}, p.deleteKeys)
+	require.False(t, p.objects[p.putKeys[0]])
+	require.False(t, *result.Honored())
+}
+
+func TestProbeIfAbsentSemantics_CleanupFailureIsInconclusive(t *testing.T) {
+	ctx := context.Background()
+	p := &conditionalProbeProvider{failDelete: true}
+
+	result := preflight.ProbeIfAbsentSemantics(ctx, p, preflight.Spec{ProbePrefix: ".gonimbus-preflight/"})
+	require.Equal(t, preflight.IfAbsentProbeInconclusive, result.Status)
+	require.Error(t, result.Err)
+	require.Nil(t, result.Honored())
+	require.Len(t, p.putKeys, 2)
+	require.Equal(t, p.putKeys[0], p.putKeys[1])
+	require.Equal(t, []string{p.putKeys[0]}, p.deleteKeys)
+	require.True(t, p.objects[p.putKeys[0]])
+}
+
 func (p *conditionalProbeProvider) DeleteObject(ctx context.Context, key string) error {
 	p.deleteKeys = append(p.deleteKeys, key)
+	if p.failDelete {
+		return provider.ErrAccessDenied
+	}
 	delete(p.objects, key)
 	return nil
 }

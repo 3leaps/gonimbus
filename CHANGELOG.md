@@ -215,6 +215,12 @@ walkthrough.
   when timestamps are equal but sizes differ. Destination overwrite is guarded
   with the observed destination ETag so concurrent mutation yields a
   deterministic skipped record.
+- **IfAbsent capability-aware reflow fallback** — S3-compatible destinations
+  that do not honor `If-None-Match: *`, or whose semantic probe is inconclusive,
+  now route non-overwrite collision modes through a HEAD/compare fallback before
+  writing. Reflow emits a structured warning and terminal summary fields for the
+  destination IfAbsent probe status, fallback activation, and degraded-path
+  object count.
 - **Pair verification command** — `gonimbus inspect-pair` reads reflow JSONL and
   verifies terminal write claims against destination HEAD results, emitting
   per-object `gonimbus.inspect.pair.v1` records plus a summary record.

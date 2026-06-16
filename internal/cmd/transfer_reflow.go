@@ -45,6 +45,7 @@ const (
 	reflowRecordType        = "gonimbus.reflow.v1"
 	reflowRunRecordType     = "gonimbus.reflow.run.v1"
 	reflowSourceRecordType  = "gonimbus.reflow.source.v1"
+	reflowSummaryRecordType = "gonimbus.reflow.summary.v1"
 	reflowWarningRecord     = "gonimbus.warning.v1"
 	provenanceSchema        = "gonimbus.provenance.v1"
 	provenanceSchemaVer     = "1.0.0"
@@ -71,6 +72,8 @@ const (
 	decisionOverwrite       = "unconditional_overwrite"
 	decisionQuarantine      = "quarantine_routed"
 	decisionHeadCompare     = "head_compare_then_conditional_overwrite"
+	decisionHeadFallback    = "head_compare_fallback"
+	ifAbsentFallbackWarning = "REFLOW_IFABSENT_FALLBACK_ACTIVE"
 	reasonSrcNewer          = "src_newer"
 	reasonSrcOlder          = "src_older"
 	reasonEqualSizeDiffers  = "equal_time_size_differs"
@@ -324,6 +327,20 @@ type reflowRunRecord struct {
 	Metadata       *metadataRunConfig   `json:"metadata,omitempty"`
 }
 
+type reflowSummaryRecord struct {
+	DestURI                 string           `json:"dest_uri"`
+	DryRun                  bool             `json:"dry_run"`
+	OnCollision             string           `json:"on_collision"`
+	DestIfAbsentHonored     *bool            `json:"dest_ifabsent_honored"`
+	DestIfAbsentProbeStatus string           `json:"dest_ifabsent_probe_status,omitempty"`
+	FallbackActive          bool             `json:"fallback_active"`
+	IfAbsentFallbackObjects int64            `json:"ifabsent_fallback_objects"`
+	Statuses                map[string]int64 `json:"statuses,omitempty"`
+	Collisions              map[string]int64 `json:"collisions,omitempty"`
+	InvalidInputs           int64            `json:"invalid_inputs,omitempty"`
+	Errors                  int64            `json:"errors,omitempty"`
+}
+
 type reflowSourceRunRecord struct {
 	Provider   string `json:"provider"`
 	Bucket     string `json:"source_bucket,omitempty"`
@@ -342,6 +359,13 @@ type collisionConfig struct {
 	Mode             string
 	QuarantinePrefix string
 	DeprecatedLog    bool
+}
+
+type reflowIfAbsentCapability struct {
+	ProbeStatus    preflight.IfAbsentProbeStatus
+	Honored        *bool
+	FallbackActive bool
+	ProbeError     string
 }
 
 type collisionInfo struct {
@@ -511,6 +535,66 @@ func (a *reflowDestKeyArbiter) activeCount() int {
 	return len(a.gates)
 }
 
+type reflowRunStats struct {
+	mu              sync.Mutex
+	statuses        map[string]int64
+	collisions      map[string]int64
+	fallbackObjects int64
+}
+
+func newReflowRunStats() *reflowRunStats {
+	return &reflowRunStats{
+		statuses:   map[string]int64{},
+		collisions: map[string]int64{},
+	}
+}
+
+func (s *reflowRunStats) record(rec reflowRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec.Status != "" {
+		s.statuses[rec.Status]++
+	}
+	if rec.Collision != nil && rec.Collision.Kind != "" {
+		s.collisions[rec.Collision.Kind]++
+	}
+}
+
+func (s *reflowRunStats) recordFallbackObject() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fallbackObjects++
+}
+
+func (s *reflowRunStats) summary(destURI string, dryRun bool, collCfg collisionConfig, capability reflowIfAbsentCapability, invalidCount, errorCount int64) reflowSummaryRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return reflowSummaryRecord{
+		DestURI:                 destURI,
+		DryRun:                  dryRun,
+		OnCollision:             collCfg.Mode,
+		DestIfAbsentHonored:     capability.Honored,
+		DestIfAbsentProbeStatus: string(capability.ProbeStatus),
+		FallbackActive:          capability.FallbackActive,
+		IfAbsentFallbackObjects: s.fallbackObjects,
+		Statuses:                cloneInt64Map(s.statuses),
+		Collisions:              cloneInt64Map(s.collisions),
+		InvalidInputs:           invalidCount,
+		Errors:                  errorCount,
+	}
+}
+
+func cloneInt64Map(in map[string]int64) map[string]int64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 type provenanceConfig struct {
 	Mode              string
 	Suffix            string
@@ -610,8 +694,8 @@ func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath s
 	return info
 }
 
-func newSourceNewerCollisionInfo(kind string, destMeta *provider.ObjectMeta, srcLastModified time.Time, decisionReason string) *collisionInfo {
-	info := newCollisionInfo(kind, destMeta, decisionHeadCompare)
+func newSourceNewerCollisionInfo(kind string, destMeta *provider.ObjectMeta, srcLastModified time.Time, decisionPath string, decisionReason string) *collisionInfo {
+	info := newCollisionInfo(kind, destMeta, decisionPath)
 	if !srcLastModified.IsZero() {
 		t := srcLastModified.UTC()
 		info.SrcLastModified = &t
@@ -1826,6 +1910,77 @@ func runS3ReflowDryRunPreflight(ctx context.Context, w output.Writer, dst provid
 	return err
 }
 
+func collisionModeDependsOnIfAbsent(mode string) bool {
+	switch mode {
+	case reflowCollisionSkip, reflowCollisionFail, reflowCollisionQuar, reflowCollisionSrcNew:
+		return true
+	default:
+		return false
+	}
+}
+
+func reflowProbePrefix(dest *reflowDestSpec) string {
+	probePrefix := ""
+	if dest != nil {
+		probePrefix = strings.TrimPrefix(dest.Prefix, "/")
+	}
+	if probePrefix != "" && !strings.HasSuffix(probePrefix, "/") {
+		probePrefix += "/"
+	}
+	return probePrefix + ".gonimbus-preflight/"
+}
+
+func detectReflowIfAbsentCapability(ctx context.Context, dst provider.Provider, dest *reflowDestSpec, collCfg collisionConfig, dryRun bool) reflowIfAbsentCapability {
+	if dest == nil || dest.Provider != string(provider.ProviderS3) || !collisionModeDependsOnIfAbsent(collCfg.Mode) {
+		return reflowIfAbsentCapability{}
+	}
+	if dryRun || IsReadOnly() {
+		return reflowIfAbsentCapability{
+			ProbeStatus:    preflight.IfAbsentProbeInconclusive,
+			FallbackActive: true,
+			ProbeError:     "mutation disabled for dry-run or readonly mode",
+		}
+	}
+	result := preflight.ProbeIfAbsentSemantics(ctx, dst, preflight.Spec{
+		Mode:        preflight.ModeWriteProbe,
+		ProbePrefix: reflowProbePrefix(dest),
+	})
+	capability := reflowIfAbsentCapability{
+		ProbeStatus: result.Status,
+		Honored:     result.Honored(),
+		ProbeError:  "",
+	}
+	if result.Err != nil {
+		capability.ProbeError = result.Err.Error()
+	}
+	capability.FallbackActive = result.Status != preflight.IfAbsentProbeHonored
+	return capability
+}
+
+func emitIfAbsentFallbackWarning(ctx context.Context, w *output.JSONLWriter, collCfg collisionConfig, dest *reflowDestSpec, capability reflowIfAbsentCapability) error {
+	if !capability.FallbackActive {
+		return nil
+	}
+	details := map[string]any{
+		"on_collision":                    collCfg.Mode,
+		"fallback":                        "head_compare",
+		"dest_ifabsent_probe_status":      string(capability.ProbeStatus),
+		"dest_ifabsent_honored":           capability.Honored,
+		"cross_process_atomicity_limited": true,
+	}
+	if dest != nil {
+		details["provider"] = dest.Provider
+	}
+	if capability.ProbeError != "" {
+		details["probe_error"] = capability.ProbeError
+	}
+	return w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
+		Code:    ifAbsentFallbackWarning,
+		Message: "destination IfAbsent support was not verified; using head-compare fallback for non-overwrite collision handling",
+		Details: details,
+	})
+}
+
 func summarizeFileSource(ctx context.Context, root string, srcCfg reflowSourceConfig, summary *reflowFilePreflightSummary) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -2475,6 +2630,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
+	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
+	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
+		return exitError(foundry.ExitFileWriteError, "Failed to write IfAbsent fallback warning", err)
+	}
 
 	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
 		DestURI:        destURI,
@@ -2570,6 +2729,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		fatalMu      sync.Mutex
 		fatalErr     error
 	)
+	stats := newReflowRunStats()
+	writeReflowRecord := func(ctx context.Context, rec reflowRecord) {
+		stats.record(rec)
+		_ = w.WriteAny(ctx, reflowRecordType, rec)
+	}
 	recordFatalReflowError := func(err error) bool {
 		classification := classifyTransferReflowRunErrorWithConfig(err, checkpointCfg)
 		if !classification.Resumable {
@@ -2611,7 +2775,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source failure", err, map[string]any{"source_uri": srcAuditURI})
 						rec.Status = "failed"
 					}
-					_ = w.WriteAny(ctx, reflowRecordType, rec)
+					writeReflowRecord(ctx, rec)
 					continue
 				}
 
@@ -2665,7 +2829,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					if done {
 						rec := task.reflowRecord(dstURI, dstKey, "skipped")
 						rec.Reason = "resume." + status
-						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						writeReflowRecord(ctx, rec)
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "skipped", Reason: "resume." + status}); werr != nil {
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
@@ -2674,7 +2838,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				}
 
 				if reflowDryRun {
-					_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "planned"))
+					writeReflowRecord(ctx, task.reflowRecord(dstURI, dstKey, "planned"))
 					continue
 				}
 
@@ -2689,7 +2853,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						rec := task.reflowRecord(dstURI, dstKey, "failed")
 						rec.Reason = "source.path.validation_failed"
-						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						writeReflowRecord(ctx, rec)
 						continue
 					}
 					if hasSymlink {
@@ -2701,12 +2865,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						rec := task.reflowRecord(dstURI, dstKey, "failed")
 						rec.Reason = "source.symlink.refused"
-						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						writeReflowRecord(ctx, rec)
 						continue
 					}
 				}
 
-				_ = w.WriteAny(ctx, reflowRecordType, task.reflowRecord(dstURI, dstKey, "in_progress"))
+				writeReflowRecord(ctx, task.reflowRecord(dstURI, dstKey, "in_progress"))
 
 				srcETag := task.SourceETag
 				srcSize := task.SourceSize
@@ -2773,7 +2937,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 							rec.Reason = "metadata.quarantine_copy_failed"
 							rec.RoutingClass = "quarantine"
-							_ = w.WriteAny(ctx, reflowRecordType, rec)
+							writeReflowRecord(ctx, rec)
 							continue
 						}
 						if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
@@ -2791,7 +2955,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							rec.Bytes = bytes
 							rec.RoutingClass = "quarantine"
 							rec.Provenance = sidecarRef
-							_ = w.WriteAny(ctx, reflowRecordType, rec)
+							writeReflowRecord(ctx, rec)
 							continue
 						}
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes}); werr != nil {
@@ -2802,7 +2966,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						rec.Bytes = bytes
 						rec.RoutingClass = "quarantine"
 						rec.Provenance = sidecarRef
-						_ = w.WriteAny(ctx, reflowRecordType, rec)
+						writeReflowRecord(ctx, rec)
 						continue
 					}
 					errorCount.Add(1)
@@ -2853,7 +3017,20 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							gate.observed = true
 							err = &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
 						} else {
-							bytes, putResult, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true}, putOptions)
+							if ifAbsentCapability.FallbackActive {
+								stats.recordFallbackObject()
+								_, headErr := dst.Head(ctx, dstKey)
+								switch {
+								case headErr == nil:
+									err = &provider.ProviderError{Op: "Head", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
+								case provider.IsNotFound(headErr):
+									bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, putOptions)
+								default:
+									err = headErr
+								}
+							} else {
+								bytes, putResult, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfAbsent: true}, putOptions)
+							}
 							if err == nil || isConditionalExists(err) {
 								gate.observed = true
 								if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
@@ -2870,6 +3047,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					}
 					releaseGate()
 					if err != nil && isConditionalExists(err) {
+						collisionDecisionPath := decisionIfAbsentHead
+						sourceNewerDecisionPath := decisionHeadCompare
+						if ifAbsentCapability.FallbackActive {
+							collisionDecisionPath = decisionHeadFallback
+							sourceNewerDecisionPath = decisionHeadFallback
+						}
 						dstMeta, headErr := dst.Head(ctx, dstKey)
 						if headErr != nil {
 							if recordFatalReflowError(headErr) {
@@ -2889,7 +3072,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							continue
 						}
 						if dup {
-							collision = newCollisionInfo(collisionDuplicate, dstMeta, decisionIfAbsentHead)
+							collision = newCollisionInfo(collisionDuplicate, dstMeta, collisionDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
@@ -2903,7 +3086,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 									rec.Reason = "provenance.write_failed"
 									rec.Provenance = sidecarRef
-									_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+									writeReflowRecord(ctx, recordWithCollision(rec, collision))
 									continue
 								}
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.duplicate"}); werr != nil {
@@ -2912,7 +3095,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.duplicate"
 								rec.Provenance = sidecarRef
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
 
@@ -2924,7 +3107,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 							rec.Reason = "collision.exists.duplicate"
-							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+							writeReflowRecord(ctx, recordWithCollision(rec, collision))
 							continue
 						}
 
@@ -2938,7 +3121,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 								rec.Reason = "collision.missing_dest_last_modified"
-								_ = w.WriteAny(ctx, reflowRecordType, rec)
+								writeReflowRecord(ctx, rec)
 								continue
 							}
 
@@ -2952,7 +3135,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								shouldOverwrite = true
 							}
 							if !shouldOverwrite {
-								collision = newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, task.SourceLastMod, decisionReason)
+								collision = newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 								}
@@ -2961,14 +3144,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.skipped_src_older"
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
 
-							collision = newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, task.SourceLastMod, decisionReason)
+							collision = newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 							bytes, putResult, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, transfer.DefaultRetryBufferMaxMemoryBytes, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions)
 							if err != nil && isConditionalExists(err) {
-								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, reasonConcurrentMut)
+								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 								}
@@ -2977,7 +3160,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.skipped_concurrent_mutation"
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
 							if err == nil {
@@ -2986,7 +3169,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								}
 							}
 						} else if collCfg.Mode == reflowCollisionQuar {
-							collision = newCollisionInfo(collisionQuarantined, dstMeta, decisionQuarantine)
+							quarantineDecisionPath := decisionQuarantine
+							if ifAbsentCapability.FallbackActive {
+								quarantineDecisionPath = collisionDecisionPath
+							}
+							collision = newCollisionInfo(collisionQuarantined, dstMeta, quarantineDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
@@ -3007,7 +3194,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 								rec.Reason = "collision.quarantine_copy_failed"
 								rec.RoutingClass = "quarantine"
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
 							if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
@@ -3025,7 +3212,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								rec.Bytes = bytes
 								rec.RoutingClass = "quarantine"
 								rec.Provenance = sidecarRef
-								_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "collision.conflict.quarantined", Bytes: bytes}); werr != nil {
@@ -3036,10 +3223,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							rec.Bytes = bytes
 							rec.RoutingClass = "quarantine"
 							rec.Provenance = sidecarRef
-							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+							writeReflowRecord(ctx, recordWithCollision(rec, collision))
 							continue
 						} else {
-							collision = newCollisionInfo(collisionConflict, dstMeta, decisionIfAbsentHead)
+							collision = newCollisionInfo(collisionConflict, dstMeta, collisionDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
 								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 							}
@@ -3055,7 +3242,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 							rec.Reason = reason
-							_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+							writeReflowRecord(ctx, recordWithCollision(rec, collision))
 							continue
 						}
 					}
@@ -3072,7 +3259,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					}
 					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 					rec.Reason = reflowReasonForErrCode(code)
-					_ = w.WriteAny(ctx, reflowRecordType, rec)
+					writeReflowRecord(ctx, rec)
 					continue
 				}
 				if srcCfg.PreserveMode && task.SourceProvider == string(provider.ProviderFile) && destSpec.Provider == string(provider.ProviderFile) {
@@ -3100,7 +3287,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					rec.Reason = "provenance.write_failed"
 					rec.Bytes = bytes
 					rec.Provenance = sidecarRef
-					_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+					writeReflowRecord(ctx, recordWithCollision(rec, collision))
 					continue
 				}
 				if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "complete", Bytes: bytes}); werr != nil {
@@ -3109,7 +3296,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "complete")
 				rec.Bytes = bytes
 				rec.Provenance = sidecarRef
-				_ = w.WriteAny(ctx, reflowRecordType, recordWithCollision(rec, collision))
+				writeReflowRecord(ctx, recordWithCollision(rec, collision))
 			}
 		}()
 	}
@@ -3148,6 +3335,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	close(tasks)
 	wg.Wait()
+	_ = w.WriteAny(context.Background(), reflowSummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, invalidCount.Load(), errorCount.Load()))
 
 	fatalRunErr := currentFatalReflowError()
 	if fatalRunErr != nil || ctx.Err() != nil {

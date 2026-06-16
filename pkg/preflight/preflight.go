@@ -28,6 +28,33 @@ const (
 	ProbePutDelete      ProbeStrategy = "put-delete"
 )
 
+type IfAbsentProbeStatus string
+
+const (
+	IfAbsentProbeHonored      IfAbsentProbeStatus = "honored"
+	IfAbsentProbeNotHonored   IfAbsentProbeStatus = "not_honored"
+	IfAbsentProbeInconclusive IfAbsentProbeStatus = "inconclusive"
+)
+
+type IfAbsentSemanticsResult struct {
+	Status   IfAbsentProbeStatus
+	ProbeKey string
+	Err      error
+}
+
+func (r IfAbsentSemanticsResult) Honored() *bool {
+	switch r.Status {
+	case IfAbsentProbeHonored:
+		v := true
+		return &v
+	case IfAbsentProbeNotHonored:
+		v := false
+		return &v
+	default:
+		return nil
+	}
+}
+
 // Spec controls how preflight checks are executed.
 type Spec struct {
 	Mode          Mode
@@ -86,6 +113,63 @@ func Crawl(ctx context.Context, prov provider.Provider, prefixes []string, spec 
 	return rec, nil
 }
 
+func ProbeIfAbsentSemantics(ctx context.Context, prov provider.Provider, spec Spec) (result IfAbsentSemanticsResult) {
+	probePrefix := normalizedProbePrefix(spec.ProbePrefix)
+	key := probePrefix + "ifabsent-" + uuid.NewString()
+	result = IfAbsentSemanticsResult{Status: IfAbsentProbeInconclusive, ProbeKey: key}
+
+	deleter, ok := prov.(provider.ObjectDeleter)
+	if !ok {
+		result.Err = fmt.Errorf("provider does not support delete-object probe cleanup")
+		return
+	}
+	putter, ok := prov.(provider.ConditionalPutter)
+	if !ok {
+		result.Err = fmt.Errorf("provider does not support conditional put-object probes")
+		return
+	}
+
+	created := false
+	defer func() {
+		if !created {
+			return
+		}
+		if err := deleter.DeleteObject(ctx, key); err != nil {
+			result.Status = IfAbsentProbeInconclusive
+			result.Err = err
+		}
+	}()
+
+	if _, err := putter.PutObjectConditional(ctx, key, strings.NewReader(""), 0, provider.PutPrecondition{IfAbsent: true}); err != nil {
+		result.Err = err
+		return
+	}
+	created = true
+
+	if _, err := putter.PutObjectConditional(ctx, key, strings.NewReader(""), 0, provider.PutPrecondition{IfAbsent: true}); err != nil {
+		if provider.IsAlreadyExists(err) || provider.IsPreconditionFailed(err) {
+			result.Status = IfAbsentProbeHonored
+			result.Err = nil
+			return
+		}
+		result.Err = err
+		return
+	}
+
+	result.Status = IfAbsentProbeNotHonored
+	return
+}
+
+func normalizedProbePrefix(prefix string) string {
+	if prefix == "" {
+		prefix = "_gonimbus/probe/"
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return prefix
+}
+
 // WriteProbe validates that the provider appears to support writing to the
 // configured probe prefix.
 //
@@ -102,13 +186,7 @@ func WriteProbe(ctx context.Context, prov provider.Provider, spec Spec) (*output
 		return rec, nil
 	}
 
-	probePrefix := spec.ProbePrefix
-	if probePrefix == "" {
-		probePrefix = "_gonimbus/probe/"
-	}
-	if !strings.HasSuffix(probePrefix, "/") {
-		probePrefix += "/"
-	}
+	probePrefix := normalizedProbePrefix(spec.ProbePrefix)
 
 	key := probePrefix + "preflight-" + uuid.NewString()
 
