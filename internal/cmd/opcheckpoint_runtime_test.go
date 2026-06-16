@@ -124,6 +124,25 @@ func TestWriteOperationErrorSummaryIncludesResumeHintAndSortedProgress(t *testin
 	require.NotContains(t, text, "s3://")
 }
 
+func TestWriteOperationErrorSummaryIncludesCause(t *testing.T) {
+	var buf bytes.Buffer
+	writeOperationErrorSummaryWithCause(&buf, "Transfer reflow failed with resumable checkpoint", operationTransferReflow, "run_123", opcheckpoint.ErrorClassInterrupted, &opcheckpoint.ErrorCause{
+		Code:        "TRANSIENT",
+		Reason:      "transient.network",
+		Message:     "context deadline exceeded",
+		Resumable:   true,
+		Disposition: "aborted_resumable_checkpoint",
+	}, nil)
+
+	text := buf.String()
+	require.Contains(t, text, "  error_class: interrupted\n")
+	require.Contains(t, text, "  cause_code: TRANSIENT\n")
+	require.Contains(t, text, "  cause_reason: transient.network\n")
+	require.Contains(t, text, "  cause_message: context deadline exceeded\n")
+	require.Contains(t, text, "  cause_resumable: true\n")
+	require.Contains(t, text, "  cause_disposition: aborted_resumable_checkpoint\n")
+}
+
 func TestStopResumeLeaseHeartbeatReturnsLeaseLoss(t *testing.T) {
 	store := newRuntimeTestOperationStore(t)
 

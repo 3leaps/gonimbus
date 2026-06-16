@@ -19,11 +19,26 @@ type ErrorRecordData struct {
 	Operation     string           `json:"operation"`
 	RunID         string           `json:"run_id"`
 	ErrorClass    ErrorClass       `json:"error_class"`
+	Cause         *ErrorCause      `json:"cause,omitempty"`
 	Progress      map[string]int64 `json:"progress,omitempty"`
 	ResumeCommand string           `json:"resume_command,omitempty"`
 }
 
+// ErrorCause carries an additive, command-level classification of the root
+// failure that caused a resumable operation checkpoint.
+type ErrorCause struct {
+	Code        string `json:"code"`
+	Reason      string `json:"reason"`
+	Message     string `json:"message"`
+	Resumable   bool   `json:"resumable"`
+	Disposition string `json:"disposition"`
+}
+
 func NewErrorRecord(operation, runID string, class ErrorClass, progress map[string]int64, at time.Time) (ErrorRecord, error) {
+	return NewErrorRecordWithCause(operation, runID, class, nil, progress, at)
+}
+
+func NewErrorRecordWithCause(operation, runID string, class ErrorClass, cause *ErrorCause, progress map[string]int64, at time.Time) (ErrorRecord, error) {
 	operation = cleanSegment(operation)
 	runID = cleanSegment(runID)
 	if operation == "" {
@@ -46,6 +61,7 @@ func NewErrorRecord(operation, runID string, class ErrorClass, progress map[stri
 			Operation:     operation,
 			RunID:         runID,
 			ErrorClass:    class,
+			Cause:         cause,
 			Progress:      progress,
 			ResumeCommand: resumeCommand,
 		},
