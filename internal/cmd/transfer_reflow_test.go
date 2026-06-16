@@ -537,6 +537,57 @@ func TestTransferReflowOperationCauseRedactsSensitiveProviderError(t *testing.T)
 	require.Equal(t, "aborted_resumable_checkpoint", opErr.Cause.Disposition)
 }
 
+func TestTransferReflowPerObjectErrorRedactsSensitiveProviderError(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload-a", "etag-a", time.Now().UTC())
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return sensitiveNonResumableFailingGetProvider{Provider: src}, nil
+		},
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	for _, text := range []string{err.Error(), stdout.String(), stderr.String()} {
+		require.NotContains(t, text, "SENSITIVE-MARKER")
+		require.NotContains(t, text, "SENSITIVE-TOKEN")
+		require.NotContains(t, text, "token@example.invalid")
+		require.NotContains(t, text, "AKIASECRET")
+	}
+	require.NotContains(t, stdout.String(), opcheckpoint.ErrorRecordType)
+
+	errData := requireErrorData(t, stdout.String())
+	require.Equal(t, output.ErrCodeInternal, errData.Code)
+	require.Equal(t, "a.txt", errData.Key)
+	require.Equal(t, "copy failed: provider error redacted", errData.Message)
+}
+
+func TestReflowErrorMessageRedactsAllURLQueryValues(t *testing.T) {
+	err := errors.New("GET https://example.invalid/object?customCredential=SENSITIVE-MARKER&debug=VISIBLE failed")
+
+	msg := formatReflowErrorMessage("copy failed", err)
+
+	require.NotContains(t, msg, "SENSITIVE-MARKER")
+	require.NotContains(t, msg, "VISIBLE")
+	require.Contains(t, msg, "customCredential=%3Credacted%3E")
+	require.Contains(t, msg, "debug=%3Credacted%3E")
+}
+
 func TestTransferReflowCredentialRefreshListFailureWritesOperationCheckpoint(t *testing.T) {
 	withTransferReflowTestState(t)
 
@@ -706,6 +757,14 @@ type sensitiveDeadlineFailingGetProvider struct {
 
 func (p sensitiveDeadlineFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
 	return nil, 0, fmt.Errorf("GET https://token@example.invalid/object?X-Amz-Signature=SENSITIVE-MARKER&X-Amz-Credential=AKIASECRET&X-Amz-Security-Token=SENSITIVE-TOKEN: %w", context.DeadlineExceeded)
+}
+
+type sensitiveNonResumableFailingGetProvider struct {
+	provider.Provider
+}
+
+func (p sensitiveNonResumableFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("GET https://token@example.invalid/object?X-Amz-Signature=SENSITIVE-MARKER&X-Amz-Credential=AKIASECRET&X-Amz-Security-Token=SENSITIVE-TOKEN failed")
 }
 
 type legacyRefreshTextGetProvider struct {
@@ -3457,12 +3516,17 @@ func TestWriteProvenanceSidecarWarnsOnFailure(t *testing.T) {
 
 	destSpec, err := parseReflowDest("s3://bucket/dest/")
 	require.NoError(t, err)
-	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
+	sensitiveErr := errors.New("PUT https://token@example.invalid/sidecar?X-Amz-Signature=SENSITIVE-MARKER&custom=VISIBLE failed")
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: sensitiveErr}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.False(t, fatal)
 	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
-	require.Contains(t, stdout.String(), reflowWarningRecord)
-	require.Contains(t, stdout.String(), "PROVENANCE_WRITE_FAILED")
+	warn := requireRecord(t, stdout.String(), reflowWarningRecord, "")
+	require.Contains(t, string(warn.Data), "PROVENANCE_WRITE_FAILED")
+	require.Contains(t, string(warn.Data), "provenance sidecar write failed: provider error redacted")
+	require.NotContains(t, string(warn.Data), "SENSITIVE-MARKER")
+	require.NotContains(t, string(warn.Data), "token@example.invalid")
+	require.NotContains(t, string(warn.Data), "VISIBLE")
 }
 
 func TestWriteProvenanceSidecarFailsOnFailure(t *testing.T) {

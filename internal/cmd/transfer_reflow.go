@@ -1217,7 +1217,7 @@ func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err
 		details = map[string]any{}
 	}
 	details["mode"] = "transfer_reflow"
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInvalidInput, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Details: details}); werr != nil {
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInvalidInput, Message: formatReflowErrorMessage(msg, err), Details: details}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow config error record", zap.Error(werr))
 	}
 	return exitError(foundry.ExitInvalidArgument, msg, err)
@@ -1653,7 +1653,7 @@ func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg 
 	}
 	_ = w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
 		Code:    "PROVENANCE_WRITE_FAILED",
-		Message: fmt.Sprintf("provenance sidecar write failed: %s", err.Error()),
+		Message: formatReflowErrorMessage("provenance sidecar write failed", err),
 		Key:     sidecarKey,
 		Details: details,
 	})
@@ -2648,9 +2648,7 @@ func redactOperationCauseURL(raw string) string {
 	}
 	query := u.Query()
 	for key := range query {
-		if operationCauseSensitiveQueryKey(key) {
-			query.Set(key, "<redacted>")
-		}
+		query.Set(key, "<redacted>")
 	}
 	u.RawQuery = query.Encode()
 	return u.String() + trailing
@@ -4075,10 +4073,20 @@ func emitReflowErrorWithCode(ctx context.Context, w output.Writer, code string, 
 	if _, ok := details["reason"]; !ok {
 		details["reason"] = reflowReasonForErrCode(code)
 	}
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Key: key, Details: details, Collision: collision}); werr != nil {
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: formatReflowErrorMessage(msg, err), Key: key, Details: details, Collision: collision}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow error record", zap.Error(werr))
 	}
 	return nil
+}
+
+func formatReflowErrorMessage(msg string, err error) string {
+	if err == nil {
+		return msg
+	}
+	if msg == "" {
+		return sanitizeOperationCauseMessage(err)
+	}
+	return fmt.Sprintf("%s: %s", msg, sanitizeOperationCauseMessage(err))
 }
 
 func reflowErrCode(err error) string {
