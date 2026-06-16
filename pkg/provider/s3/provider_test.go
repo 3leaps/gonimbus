@@ -1290,3 +1290,93 @@ func BenchmarkCleanETag(b *testing.B) {
 		cleanETag(etag)
 	}
 }
+
+// newSigningObserverServer returns a fake S3 endpoint that records the
+// Authorization header of each request so a test can prove which credentials
+// signed it.
+func newSigningObserverServer(t *testing.T, ch chan<- observedS3Request) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch <- observedS3Request{host: r.Host, authorization: r.Header.Get("Authorization")}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
+	}))
+}
+
+// TestProfileCredentialsStillSign is the GON-045 AC#5 regression for the shared
+// config Profile auth path: a Config with only Profile set must resolve the
+// profile's keys from the shared credentials file and sign the request with
+// them. Hermetic — a temp credentials file, no ambient env/IMDS.
+func TestProfileCredentialsStillSign(t *testing.T) {
+	dir := t.TempDir()
+	credsFile := filepath.Join(dir, "credentials")
+	require.NoError(t, os.WriteFile(credsFile, []byte(
+		"[gon-test-profile]\n"+
+			"aws_access_key_id = AKIAPROFILE0000001\n"+
+			"aws_secret_access_key = profile-secret\n"), 0o600))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credsFile)
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config")) // absent → no ambient profile
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	// Neutralize ambient env credentials so the profile path is exercised.
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	reqs := make(chan observedS3Request, 2)
+	server := newSigningObserverServer(t, reqs)
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Profile:        "gon-test-profile",
+	})
+	require.NoError(t, err)
+	defer func() { _ = p.Close() }()
+
+	_, err = p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+
+	got := receiveObservedRequest(t, reqs, "profile endpoint")
+	assert.Contains(t, got.authorization, "Credential=AKIAPROFILE0000001/",
+		"profile credentials must sign the request")
+	assert.Contains(t, got.authorization, "/us-east-1/s3/aws4_request")
+}
+
+// TestDefaultChainEnvCredentialsStillSign is the GON-045 AC#5 regression for the
+// SDK default credential chain (environment leg): a Config with no explicit
+// credentials, Profile, or CredentialsProvider must fall through to the default
+// chain and sign with the ambient env credentials. IMDS and shared files are
+// disabled so the env leg is the only resolvable source.
+func TestDefaultChainEnvCredentialsStillSign(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials")) // absent
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))                  // absent
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAENVCHAIN000001")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "env-chain-secret")
+
+	reqs := make(chan observedS3Request, 2)
+	server := newSigningObserverServer(t, reqs)
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		// no AccessKeyID/SecretAccessKey, Profile, or CredentialsProvider → default chain
+	})
+	require.NoError(t, err)
+	defer func() { _ = p.Close() }()
+
+	_, err = p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+
+	got := receiveObservedRequest(t, reqs, "default-chain endpoint")
+	assert.Contains(t, got.authorization, "Credential=AKIAENVCHAIN000001/",
+		"default-chain env credentials must sign the request")
+	assert.Contains(t, got.authorization, "/us-east-1/s3/aws4_request")
+}
