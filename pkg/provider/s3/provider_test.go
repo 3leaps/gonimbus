@@ -699,24 +699,50 @@ type observedS3Request struct {
 	authorization string
 }
 
-func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *testing.T) {
-	newServer := func(ch chan<- observedS3Request) *httptest.Server {
-		t.Helper()
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ch <- observedS3Request{
-				host:          r.Host,
-				authorization: r.Header.Get("Authorization"),
-			}
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
-		}))
-	}
+func newObservedListServer(t *testing.T, ch chan<- observedS3Request) *httptest.Server {
+	t.Helper()
 
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch <- observedS3Request{
+			host:          r.Host,
+			authorization: r.Header.Get("Authorization"),
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
+	}))
+}
+
+func writeEmptyAWSConfigFiles(t *testing.T) (string, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config")
+	credentialsPath := filepath.Join(dir, "credentials")
+	require.NoError(t, os.WriteFile(configPath, nil, 0o600))
+	require.NoError(t, os.WriteFile(credentialsPath, nil, 0o600))
+	return configPath, credentialsPath
+}
+
+func setSterileAWSEnv(t *testing.T, configPath, credentialsPath string) {
+	t.Helper()
+
+	t.Setenv("AWS_CONFIG_FILE", configPath)
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credentialsPath)
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_SDK_LOAD_CONFIG", "1")
+	t.Setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+}
+
+func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *testing.T) {
 	reqs1 := make(chan observedS3Request, 2)
 	reqs2 := make(chan observedS3Request, 2)
-	server1 := newServer(reqs1)
+	server1 := newObservedListServer(t, reqs1)
 	defer server1.Close()
-	server2 := newServer(reqs2)
+	server2 := newObservedListServer(t, reqs2)
 	defer server2.Close()
 
 	provider1, err := New(context.Background(), Config{
@@ -760,6 +786,64 @@ func TestNew_MultiCredentialCoexistenceUsesIndependentEndpointAndCredentials(t *
 	assert.Contains(t, got2.authorization, "Credential=AKIASECOND00000002/")
 	assert.Contains(t, got2.authorization, "/us-west-2/s3/aws4_request")
 	assert.Contains(t, got2.host, strings.TrimPrefix(server2.URL, "http://"))
+}
+
+func TestProfileCredentialsSignRequests(t *testing.T) {
+	const profileName = "gonimbus-test-profile"
+	configPath, credentialsPath := writeEmptyAWSConfigFiles(t)
+	require.NoError(t, os.WriteFile(configPath, []byte(`[profile `+profileName+`]
+region = us-east-1
+aws_access_key_id = AKIAPROFILE0000001
+aws_secret_access_key = profile-secret
+`), 0o600))
+	setSterileAWSEnv(t, configPath, credentialsPath)
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	reqs := make(chan observedS3Request, 1)
+	server := newObservedListServer(t, reqs)
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Profile:        profileName,
+	})
+	require.NoError(t, err)
+
+	_, err = p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+
+	req := receiveObservedRequest(t, reqs, "profile credentials")
+	require.Contains(t, req.authorization, "Credential=AKIAPROFILE0000001/")
+	require.Contains(t, req.authorization, "/us-east-1/s3/aws4_request")
+}
+
+func TestDefaultChainEnvironmentCredentialsSignRequests(t *testing.T) {
+	configPath, credentialsPath := writeEmptyAWSConfigFiles(t)
+	setSterileAWSEnv(t, configPath, credentialsPath)
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIADEFAULT0000001")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "default-secret")
+
+	reqs := make(chan observedS3Request, 1)
+	server := newObservedListServer(t, reqs)
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+	})
+	require.NoError(t, err)
+
+	_, err = p.List(context.Background(), provider.ListOptions{})
+	require.NoError(t, err)
+
+	req := receiveObservedRequest(t, reqs, "default-chain environment credentials")
+	require.Contains(t, req.authorization, "Credential=AKIADEFAULT0000001/")
+	require.Contains(t, req.authorization, "/us-east-1/s3/aws4_request")
 }
 
 func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
