@@ -347,7 +347,11 @@ func closeResolvedIndexRun(resolved *resolvedIndexRun) {
 }
 
 func emitOperationErrorRecord(ctx context.Context, cmdOut jsonEncoder, operation, runID string, class opcheckpoint.ErrorClass, progress map[string]int64) error {
-	rec, err := opcheckpoint.NewErrorRecord(operation, runID, class, progress, time.Now().UTC())
+	return emitOperationErrorRecordWithCause(ctx, cmdOut, operation, runID, class, nil, progress)
+}
+
+func emitOperationErrorRecordWithCause(ctx context.Context, cmdOut jsonEncoder, operation, runID string, class opcheckpoint.ErrorClass, cause *opcheckpoint.ErrorCause, progress map[string]int64) error {
+	rec, err := opcheckpoint.NewErrorRecordWithCause(operation, runID, class, cause, progress, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -360,6 +364,10 @@ func emitOperationErrorRecord(ctx context.Context, cmdOut jsonEncoder, operation
 }
 
 func writeOperationErrorSummary(w io.Writer, title, operation, runID string, class opcheckpoint.ErrorClass, progress map[string]int64) {
+	writeOperationErrorSummaryWithCause(w, title, operation, runID, class, nil, progress)
+}
+
+func writeOperationErrorSummaryWithCause(w io.Writer, title, operation, runID string, class opcheckpoint.ErrorClass, cause *opcheckpoint.ErrorCause, progress map[string]int64) {
 	if w == nil {
 		return
 	}
@@ -371,6 +379,13 @@ func writeOperationErrorSummary(w io.Writer, title, operation, runID string, cla
 	_, _ = fmt.Fprintf(w, "  run_id: %s\n", runID)
 	_, _ = fmt.Fprintf(w, "  status: %s\n", indexstore.RunStatusFailedResumable)
 	_, _ = fmt.Fprintf(w, "  error_class: %s\n", class)
+	if cause != nil {
+		_, _ = fmt.Fprintf(w, "  cause_code: %s\n", cause.Code)
+		_, _ = fmt.Fprintf(w, "  cause_reason: %s\n", cause.Reason)
+		_, _ = fmt.Fprintf(w, "  cause_message: %s\n", cause.Message)
+		_, _ = fmt.Fprintf(w, "  cause_resumable: %t\n", cause.Resumable)
+		_, _ = fmt.Fprintf(w, "  cause_disposition: %s\n", cause.Disposition)
+	}
 	for _, key := range sortedProgressKeys(progress) {
 		_, _ = fmt.Fprintf(w, "  %s: %d\n", key, progress[key])
 	}

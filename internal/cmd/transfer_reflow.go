@@ -14,6 +14,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -2482,6 +2483,199 @@ func classifyTransferReflowRunErrorWithConfig(err error, _ transferReflowCheckpo
 	})
 }
 
+type reflowFatalRunError struct {
+	err   error
+	cause *opcheckpoint.ErrorCause
+}
+
+const reflowOperationCauseDisposition = "aborted_resumable_checkpoint"
+
+func reflowOperationErrorCause(err error, classification opcheckpoint.Classification) *opcheckpoint.ErrorCause {
+	if err == nil {
+		return nil
+	}
+	code := reflowErrCode(err)
+	reason := reflowReasonForErrCode(code)
+	if classification.Class == opcheckpoint.ErrorClassInterrupted && code == output.ErrCodeInternal {
+		code = output.ErrCodeTimeout
+		reason = "interrupted"
+		if errors.Is(err, context.Canceled) {
+			reason = "interrupted.canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			reason = "interrupted.deadline_exceeded"
+		}
+	}
+	return &opcheckpoint.ErrorCause{
+		Code:        code,
+		Reason:      reason,
+		Message:     sanitizeOperationCauseMessage(err),
+		Resumable:   classification.Resumable,
+		Disposition: reflowOperationCauseDisposition,
+	}
+}
+
+var (
+	operationCauseURLPattern       = regexp.MustCompile(`https?://[^\s"'<>]+`)
+	operationCauseBearerPattern    = regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^,\s;]+`)
+	operationCauseKeyValuePattern  = regexp.MustCompile(`(?i)\b(x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|x-goog-security-token|aws_secret_access_key|aws_session_token|access_token|refresh_token|sessiontoken|authtoken|client_secret|sig|token)\s*[:=]\s*[^,\s;&]+`)
+	operationCauseSensitiveNeedles = []string{
+		"x-amz-signature=",
+		"x-amz-credential=",
+		"x-amz-security-token=",
+		"x-goog-signature=",
+		"x-goog-credential=",
+		"x-goog-security-token=",
+		"authorization: bearer ",
+		"authtoken=",
+		"aws_secret_access_key",
+		"aws_session_token",
+		"sharedaccesssignature",
+	}
+)
+
+func sanitizeOperationCauseMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := compactOperationErrorMessage(err.Error())
+	if raw == "" {
+		return ""
+	}
+	if operationCauseContainsCredentialMaterial(raw) {
+		if root := operationCauseRootMessage(err); root != "" {
+			return compactOperationErrorMessage(root)
+		}
+		return "provider error redacted"
+	}
+	return redactOperationCauseMessage(raw)
+}
+
+func operationCauseRootMessage(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return context.Canceled.Error()
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded.Error()
+	case provider.IsCredentialsRefreshFailed(err), errors.Is(err, opcheckpoint.ErrCredentialsRefreshFailed):
+		return "failed to refresh cached credentials"
+	case provider.IsThrottled(err):
+		return provider.ErrThrottled.Error()
+	case provider.IsProviderUnavailable(err):
+		return provider.ErrProviderUnavailable.Error()
+	case provider.IsAccessDenied(err):
+		return provider.ErrAccessDenied.Error()
+	case provider.IsInvalidCredentials(err):
+		return provider.ErrInvalidCredentials.Error()
+	}
+	var providerErr *provider.ProviderError
+	if errors.As(err, &providerErr) && providerErr.Err != nil {
+		return operationCauseRootMessage(providerErr.Err)
+	}
+	return ""
+}
+
+func operationCauseContainsCredentialMaterial(message string) bool {
+	lower := strings.ToLower(message)
+	for _, needle := range operationCauseSensitiveNeedles {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	if strings.HasPrefix(lower, "sig=") || strings.Contains(lower, "?sig=") || strings.Contains(lower, "&sig=") {
+		return true
+	}
+	for _, match := range operationCauseURLPattern.FindAllString(message, -1) {
+		if operationCauseURLContainsCredentialMaterial(match) {
+			return true
+		}
+	}
+	return false
+}
+
+func operationCauseURLContainsCredentialMaterial(raw string) bool {
+	u, err := url.Parse(strings.TrimRight(raw, ".,);]'\":"))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if u.User != nil {
+		if u.User.Username() != "" {
+			return true
+		}
+		if password, ok := u.User.Password(); ok && password != "" {
+			return true
+		}
+	}
+	for key := range u.Query() {
+		if operationCauseSensitiveQueryKey(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactOperationCauseMessage(message string) string {
+	message = operationCauseBearerPattern.ReplaceAllString(message, "${1}<redacted>")
+	message = operationCauseKeyValuePattern.ReplaceAllStringFunc(message, func(match string) string {
+		for i, r := range match {
+			if r == '=' || r == ':' {
+				return strings.TrimSpace(match[:i]) + string(r) + "<redacted>"
+			}
+		}
+		return "<redacted>"
+	})
+	message = operationCauseURLPattern.ReplaceAllStringFunc(message, redactOperationCauseURL)
+	return compactOperationErrorMessage(message)
+}
+
+func redactOperationCauseURL(raw string) string {
+	trailing := ""
+	for raw != "" {
+		last := raw[len(raw)-1]
+		if !strings.ContainsRune(".,);]'\":", rune(last)) {
+			break
+		}
+		trailing = string(last) + trailing
+		raw = raw[:len(raw)-1]
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw + trailing
+	}
+	if u.User != nil {
+		u.User = url.User("<redacted>")
+	}
+	query := u.Query()
+	for key := range query {
+		if operationCauseSensitiveQueryKey(key) {
+			query.Set(key, "<redacted>")
+		}
+	}
+	u.RawQuery = query.Encode()
+	return u.String() + trailing
+}
+
+func operationCauseSensitiveQueryKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "x-amz-signature", "x-amz-credential", "x-amz-security-token",
+		"x-goog-signature", "x-goog-credential", "x-goog-security-token",
+		"sig", "token", "access_token", "refresh_token", "sessiontoken", "authtoken", "client_secret":
+		return true
+	default:
+		return false
+	}
+}
+
+func compactOperationErrorMessage(message string) string {
+	message = strings.Join(strings.Fields(strings.TrimSpace(message)), " ")
+	const maxOperationCauseMessageLen = 2048
+	if len(message) > maxOperationCauseMessageLen {
+		return message[:maxOperationCauseMessageLen] + "..."
+	}
+	return message
+}
+
 func transferReflowFatalExitCode(classification opcheckpoint.Classification) int {
 	if classification.Class == opcheckpoint.ErrorClassInterrupted {
 		return foundry.ExitSignalInt
@@ -2727,7 +2921,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		invalidCount atomic.Int64
 		errorCount   atomic.Int64
 		fatalMu      sync.Mutex
-		fatalErr     error
+		fatalRun     *reflowFatalRunError
 	)
 	stats := newReflowRunStats()
 	writeReflowRecord := func(ctx context.Context, rec reflowRecord) {
@@ -2741,16 +2935,19 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		}
 		fatalMu.Lock()
 		defer fatalMu.Unlock()
-		if fatalErr == nil {
-			fatalErr = err
+		if fatalRun == nil {
+			fatalRun = &reflowFatalRunError{
+				err:   err,
+				cause: reflowOperationErrorCause(err, classification),
+			}
 			cancelWork()
 		}
 		return true
 	}
-	currentFatalReflowError := func() error {
+	currentFatalReflowError := func() *reflowFatalRunError {
 		fatalMu.Lock()
 		defer fatalMu.Unlock()
-		return fatalErr
+		return fatalRun
 	}
 
 	tasks := make(chan reflowTask, reflowParallel*2)
@@ -3009,6 +3206,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						observed, observedErr := state.DestKeyObserved(ctx, dstKey)
 						if observedErr != nil {
 							releaseGate()
+							if recordFatalReflowError(observedErr) {
+								continue
+							}
 							errorCount.Add(1)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination arbitration state lookup failed", observedErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
@@ -3339,11 +3539,23 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 	fatalRunErr := currentFatalReflowError()
 	if fatalRunErr != nil || ctx.Err() != nil {
-		classifyErr := fatalRunErr
+		var cause *opcheckpoint.ErrorCause
+		classifyErr := error(nil)
+		if fatalRunErr != nil {
+			classifyErr = fatalRunErr.err
+			cause = fatalRunErr.cause
+		}
 		if classifyErr == nil {
 			classifyErr = ctx.Err()
 		}
 		classification := classifyTransferReflowRunErrorWithConfig(classifyErr, checkpointCfg)
+		if cause == nil {
+			cause = reflowOperationErrorCause(classifyErr, classification)
+		}
+		reportErr := classifyErr
+		if cause != nil && cause.Message != "" {
+			reportErr = errors.New(cause.Message)
+		}
 		checkpointWritten := false
 		if classification.Resumable && transferReflowCheckpointEligible(checkpointCfg) {
 			progress := transferReflowProgress(invalidCount.Load(), errorCount.Load())
@@ -3354,16 +3566,16 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			}
 			if checkpointErr := writeFailedResumableTransferReflowCheckpoint(context.Background(), state, jobID, checkpointCfg, classification.Class, progress); checkpointErr == nil {
 				checkpointWritten = true
-				writeOperationErrorSummary(cmd.ErrOrStderr(), "Transfer reflow failed with resumable checkpoint", operationTransferReflow, jobID, classification.Class, progress)
+				writeOperationErrorSummaryWithCause(cmd.ErrOrStderr(), "Transfer reflow failed with resumable checkpoint", operationTransferReflow, jobID, classification.Class, cause, progress)
 				enc := json.NewEncoder(cmd.OutOrStdout())
-				if emitErr := emitOperationErrorRecord(context.Background(), enc, operationTransferReflow, jobID, classification.Class, progress); emitErr != nil {
-					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation error record: %v", classifyErr, emitErr))
+				if emitErr := emitOperationErrorRecordWithCause(context.Background(), enc, operationTransferReflow, jobID, classification.Class, cause, progress); emitErr != nil {
+					return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation error record: %v", reportErr, emitErr))
 				}
 			} else {
-				return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation checkpoint: %v", classifyErr, checkpointErr))
+				return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), fmt.Errorf("%w; write operation checkpoint: %v", reportErr, checkpointErr))
 			}
 		}
-		return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), classifyErr)
+		return exitError(transferReflowFatalExitCode(classification), transferReflowFatalExitMessage(classification, checkpointWritten), reportErr)
 	}
 	if inputErr != nil {
 		return exitError(foundry.ExitInvalidArgument, "Failed to read input", inputErr)

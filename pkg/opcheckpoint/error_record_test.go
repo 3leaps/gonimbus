@@ -30,6 +30,30 @@ func TestNewErrorRecordBuildsRedactedResumeHint(t *testing.T) {
 	require.NotContains(t, strings.ToLower(string(data)), "secret")
 }
 
+func TestNewErrorRecordWithCauseIncludesClassifiedCause(t *testing.T) {
+	rec, err := NewErrorRecordWithCause(
+		"transfer-reflow",
+		"run_123",
+		ErrorClassInterrupted,
+		&ErrorCause{
+			Code:        "TRANSIENT",
+			Reason:      "transient.network",
+			Message:     "context deadline exceeded",
+			Resumable:   true,
+			Disposition: "aborted_resumable_checkpoint",
+		},
+		map[string]int64{"errors": 3},
+		time.Date(2026, 1, 1, 1, 2, 3, 0, time.UTC),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Data.Cause)
+	require.Equal(t, "TRANSIENT", rec.Data.Cause.Code)
+	require.Equal(t, "transient.network", rec.Data.Cause.Reason)
+	require.True(t, rec.Data.Cause.Resumable)
+	require.Equal(t, "aborted_resumable_checkpoint", rec.Data.Cause.Disposition)
+	require.Equal(t, int64(3), rec.Data.Progress["errors"])
+}
+
 func TestResumeCommandRejectsUnknownOperationAndInvalidRunID(t *testing.T) {
 	_, err := ResumeCommand("content-probe", "run_123")
 	require.Error(t, err)

@@ -358,6 +358,12 @@ func TestTransferReflowCancelledPositionalRunWritesOperationCheckpoint(t *testin
 	require.NoError(t, json.Unmarshal(record.Data, &opErr))
 	require.Equal(t, operationTransferReflow, opErr.Operation)
 	require.Equal(t, opcheckpoint.ErrorClassInterrupted, opErr.ErrorClass)
+	require.NotNil(t, opErr.Cause)
+	require.Equal(t, output.ErrCodeTimeout, opErr.Cause.Code)
+	require.Equal(t, "interrupted.canceled", opErr.Cause.Reason)
+	require.Equal(t, "context canceled", opErr.Cause.Message)
+	require.True(t, opErr.Cause.Resumable)
+	require.Equal(t, "aborted_resumable_checkpoint", opErr.Cause.Disposition)
 	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
 
 	opStore, err := openDefaultOperationCheckpointStore(context.Background())
@@ -407,6 +413,10 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 	require.Contains(t, stderr.String(), "Transfer reflow failed with resumable checkpoint")
 	require.Contains(t, stderr.String(), "status: failed-resumable")
 	require.Contains(t, stderr.String(), "error_class: credentials_refresh_failed")
+	require.Contains(t, stderr.String(), "cause_code: INTERNAL")
+	require.Contains(t, stderr.String(), "cause_reason: internal")
+	require.Contains(t, stderr.String(), "cause_resumable: true")
+	require.Contains(t, stderr.String(), "cause_disposition: aborted_resumable_checkpoint")
 	require.NotContains(t, stderr.String(), "Usage:")
 
 	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
@@ -414,6 +424,12 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 	require.NoError(t, json.Unmarshal(record.Data, &opErr))
 	require.Equal(t, operationTransferReflow, opErr.Operation)
 	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, opErr.ErrorClass)
+	require.NotNil(t, opErr.Cause)
+	require.Equal(t, output.ErrCodeInternal, opErr.Cause.Code)
+	require.Equal(t, "internal", opErr.Cause.Reason)
+	require.Contains(t, opErr.Cause.Message, "failed to refresh cached credentials")
+	require.True(t, opErr.Cause.Resumable)
+	require.Equal(t, "aborted_resumable_checkpoint", opErr.Cause.Disposition)
 	require.Equal(t, "gonimbus transfer reflow --resume-run "+opErr.RunID, opErr.ResumeCommand)
 	require.Contains(t, stderr.String(), "run_id: "+opErr.RunID)
 	require.Contains(t, stderr.String(), "resume_command: "+opErr.ResumeCommand)
@@ -424,6 +440,101 @@ func TestTransferReflowCredentialRefreshFailureWritesOperationCheckpoint(t *test
 	require.NoError(t, err)
 	require.Equal(t, opcheckpoint.StatusFailedResumable, env.Status)
 	require.Equal(t, opcheckpoint.ErrorClassCredentialsRefreshFailed, env.ErrorClass)
+}
+
+func TestTransferReflowTransientAbortWritesClassifiedOperationCause(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload-a", "etag-a", time.Now().UTC())
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return deadlineFailingGetProvider{Provider: src}, nil
+		},
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "2",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow cancelled")
+	require.NotContains(t, stdout.String(), output.TypeError)
+	require.Contains(t, stderr.String(), "Transfer reflow failed with resumable checkpoint")
+	require.Contains(t, stderr.String(), "error_class: interrupted")
+	require.Contains(t, stderr.String(), "cause_code: TRANSIENT")
+	require.Contains(t, stderr.String(), "cause_reason: transient.network")
+	require.Contains(t, stderr.String(), "cause_message: context deadline exceeded")
+	require.Contains(t, stderr.String(), "cause_resumable: true")
+	require.Contains(t, stderr.String(), "cause_disposition: aborted_resumable_checkpoint")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.Equal(t, operationTransferReflow, opErr.Operation)
+	require.Equal(t, opcheckpoint.ErrorClassInterrupted, opErr.ErrorClass)
+	require.NotNil(t, opErr.Cause)
+	require.Equal(t, output.ErrCodeTransient, opErr.Cause.Code)
+	require.Equal(t, "transient.network", opErr.Cause.Reason)
+	require.Equal(t, "context deadline exceeded", opErr.Cause.Message)
+	require.True(t, opErr.Cause.Resumable)
+	require.Equal(t, "aborted_resumable_checkpoint", opErr.Cause.Disposition)
+}
+
+func TestTransferReflowOperationCauseRedactsSensitiveProviderError(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload-a", "etag-a", time.Now().UTC())
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			return sensitiveDeadlineFailingGetProvider{Provider: src}, nil
+		},
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "2",
+		"s3://source-bucket/a.txt",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	for _, text := range []string{err.Error(), stdout.String(), stderr.String()} {
+		require.NotContains(t, text, "SENSITIVE-MARKER")
+		require.NotContains(t, text, "SENSITIVE-TOKEN")
+		require.NotContains(t, text, "token@example.invalid")
+		require.NotContains(t, text, "AKIASECRET")
+	}
+	require.Contains(t, err.Error(), "context deadline exceeded")
+	require.Contains(t, stderr.String(), "cause_message: context deadline exceeded")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.Equal(t, operationTransferReflow, opErr.Operation)
+	require.Equal(t, opcheckpoint.ErrorClassInterrupted, opErr.ErrorClass)
+	require.NotNil(t, opErr.Cause)
+	require.Equal(t, output.ErrCodeTransient, opErr.Cause.Code)
+	require.Equal(t, "transient.network", opErr.Cause.Reason)
+	require.Equal(t, "context deadline exceeded", opErr.Cause.Message)
+	require.True(t, opErr.Cause.Resumable)
+	require.Equal(t, "aborted_resumable_checkpoint", opErr.Cause.Disposition)
 }
 
 func TestTransferReflowCredentialRefreshListFailureWritesOperationCheckpoint(t *testing.T) {
@@ -579,6 +690,22 @@ type refreshFailingGetProvider struct {
 
 func (p refreshFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
 	return nil, 0, fmt.Errorf("s3 GetObject: failed to refresh cached credentials: %w", opcheckpoint.ErrCredentialsRefreshFailed)
+}
+
+type deadlineFailingGetProvider struct {
+	provider.Provider
+}
+
+func (p deadlineFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, context.DeadlineExceeded
+}
+
+type sensitiveDeadlineFailingGetProvider struct {
+	provider.Provider
+}
+
+func (p sensitiveDeadlineFailingGetProvider) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, fmt.Errorf("GET https://token@example.invalid/object?X-Amz-Signature=SENSITIVE-MARKER&X-Amz-Credential=AKIASECRET&X-Amz-Security-Token=SENSITIVE-TOKEN: %w", context.DeadlineExceeded)
 }
 
 type legacyRefreshTextGetProvider struct {
