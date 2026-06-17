@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -193,6 +194,25 @@ func TestConfigStringRedactsCredentials(t *testing.T) {
 		require.NotContains(t, formatted, secretKey)
 		require.Contains(t, formatted, "<redacted>")
 	}
+}
+
+func TestTransportTunedHTTPClientUsesClonedTransport(t *testing.T) {
+	require.Nil(t, transportTunedHTTPClient(Config{}))
+
+	client := transportTunedHTTPClient(Config{MaxIdleConnsPerHost: 32, MaxConnsPerHost: 64})
+	require.NotNil(t, client)
+	buildable, ok := client.(*awshttp.BuildableClient)
+	require.True(t, ok)
+
+	tr := buildable.GetTransport()
+	require.NotNil(t, tr)
+	require.Equal(t, 32, tr.MaxIdleConnsPerHost)
+	require.GreaterOrEqual(t, tr.MaxIdleConns, 32)
+	require.Equal(t, 64, tr.MaxConnsPerHost)
+
+	defaultTr := http.DefaultTransport.(*http.Transport)
+	require.NotSame(t, defaultTr, tr)
+	require.NotEqual(t, 32, defaultTr.MaxIdleConnsPerHost)
 }
 
 func TestNewValidationErrorDoesNotLeakExplicitCredentials(t *testing.T) {

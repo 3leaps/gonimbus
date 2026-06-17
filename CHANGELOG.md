@@ -15,6 +15,14 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- **Added:** `pkg/provider/s3.Config` now exposes optional
+  `MaxIdleConnsPerHost` and `MaxConnsPerHost` HTTP transport sizing fields.
+  Zero values preserve the AWS SDK defaults; transfer reflow uses the fields to
+  opt into resource-capped S3 client tuning without changing unrelated
+  provider construction paths.
+
 ### Added
 
 - **Priority XML XPath probe extraction:** `xml_xpath` extractors now support

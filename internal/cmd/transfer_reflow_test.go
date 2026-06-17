@@ -32,6 +32,7 @@ import (
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -127,6 +128,113 @@ func TestEmitReflowErrorTransientNetworkSurface(t *testing.T) {
 	require.Equal(t, "source/file.xml", errData.Key)
 	require.Equal(t, "transfer_reflow", errData.Details["mode"])
 	require.Equal(t, "transient.network", errData.Details["reason"])
+}
+
+func TestResolveReflowConcurrencyResourceCapFailLow(t *testing.T) {
+	cfg := resolveReflowConcurrency(1000, true, reflowResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return 0, "", errors.New("probe unavailable")
+		},
+		FDSoftLimit: func() (int64, error) {
+			return 4096, nil
+		},
+	})
+
+	require.Equal(t, 1000, cfg.RequestedCeiling)
+	require.Equal(t, 16, cfg.EffectiveCeiling)
+	require.Equal(t, "resource_capped:memory:conservative_default", cfg.CeilingReason)
+	require.Equal(t, 16, cfg.Initial)
+	require.True(t, cfg.AdaptiveEnabled)
+}
+
+func TestReflowConcurrencyLimiterThrottleAndConnectionFreeze(t *testing.T) {
+	limiter := newReflowConcurrencyLimiter(reflowConcurrencyConfig{
+		RequestedCeiling: 8,
+		EffectiveCeiling: 8,
+		CeilingReason:    "requested",
+		AdaptiveEnabled:  true,
+		Floor:            1,
+		Initial:          4,
+	})
+
+	limiter.observeThrottle()
+	snapshot := limiter.snapshot()
+	require.Equal(t, 2, snapshot.ConcurrencyFinal)
+	require.Equal(t, int64(1), snapshot.ConcurrencyThrottleBackoffs)
+
+	for i := 0; i < reflowConcurrencyThrottleCooldown+reflowConcurrencyCleanIncreaseEvery-1; i++ {
+		limiter.observeSuccess()
+	}
+	require.Equal(t, 2, limiter.snapshot().ConcurrencyFinal)
+
+	limiter.observeConnectionError()
+	for i := 0; i < reflowConcurrencyCleanIncreaseEvery-1; i++ {
+		limiter.observeSuccess()
+	}
+	snapshot = limiter.snapshot()
+	require.Equal(t, 2, snapshot.ConcurrencyFinal)
+	require.Equal(t, int64(1), snapshot.ConcurrencyConnectionErrorFreezes)
+
+	limiter.observeSuccess()
+	snapshot = limiter.snapshot()
+	require.Equal(t, 3, snapshot.ConcurrencyFinal)
+	require.Equal(t, int64(1), snapshot.ConcurrencyAdditiveIncreases)
+}
+
+func TestTransferReflowEmitsResourceClampConcurrencyFields(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Now())
+	dst := newReflowMemoryProvider()
+
+	probe := reflowResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 4, "test", nil
+		},
+		FDSoftLimit: func() (int64, error) {
+			return 4096, nil
+		},
+	}
+	stdout, stderr, err := runTransferReflowWithProvidersAndErrProbe(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""), probe, "--parallel", "100")
+	require.NoError(t, err)
+	require.Contains(t, stderr, "effective concurrency ceiling clamped to 1")
+
+	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	require.Contains(t, string(warn.Data), "REFLOW_CONCURRENCY_CEILING_CLAMPED")
+
+	run := requireRecord(t, stdout, reflowRunRecordType, "")
+	require.Contains(t, string(run.Data), `"concurrency_ceiling_requested":100`)
+	require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":1`)
+	require.Contains(t, string(run.Data), `"adaptive_enabled":true`)
+
+	summary := requireReflowSummaryData(t, stdout)
+	require.True(t, summary.AdaptiveEnabled)
+	require.Equal(t, 100, summary.ConcurrencyCeilingRequested)
+	require.Equal(t, 1, summary.ConcurrencyCeilingEffective)
+	require.Equal(t, "resource_capped:memory:test", summary.ConcurrencyCeilingReason)
+	require.LessOrEqual(t, summary.ConcurrencyMaxActive, 1)
+}
+
+func TestTransferReflowNoAdaptiveRunsFixedAtEffectiveCeiling(t *testing.T) {
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Now())
+	dst := newReflowMemoryProvider()
+
+	probe := reflowResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 12, "test", nil
+		},
+		FDSoftLimit: func() (int64, error) {
+			return 4096, nil
+		},
+	}
+	stdout, _, err := runTransferReflowWithProvidersAndErrProbe(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", ""), probe, "--parallel", "100", "--no-adaptive")
+	require.NoError(t, err)
+
+	summary := requireReflowSummaryData(t, stdout)
+	require.False(t, summary.AdaptiveEnabled)
+	require.Equal(t, 3, summary.ConcurrencyCeilingEffective)
+	require.Equal(t, 3, summary.ConcurrencyInitial)
+	require.Equal(t, 3, summary.ConcurrencyFinal)
 }
 
 func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {
@@ -3068,6 +3176,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowRewriteFrom, "rewrite-from", "", "")
 	cmd.Flags().StringVar(&reflowRewriteTo, "rewrite-to", "", "")
 	cmd.Flags().IntVar(&reflowParallel, "parallel", 16, "")
+	cmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "")
 	cmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "")
 	cmd.Flags().BoolVar(&reflowResume, "resume", false, "")
 	cmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "")
@@ -3111,6 +3220,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldRewriteFrom := reflowRewriteFrom
 	oldRewriteTo := reflowRewriteTo
 	oldParallel := reflowParallel
+	oldNoAdaptive := reflowNoAdaptive
 	oldDryRun := reflowDryRun
 	oldResume := reflowResume
 	oldResumeRun := reflowResumeRun
@@ -3143,6 +3253,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldDstProfile := reflowDstProfile
 	oldDstEndpoint := reflowDstEndpoint
 	oldStateStore := newReflowStateStore
+	oldResourceProbe := reflowResourceProbeForRun
 
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	appIdentity = &appidentity.Identity{
@@ -3154,6 +3265,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowRewriteFrom = ""
 	reflowRewriteTo = ""
 	reflowParallel = 16
+	reflowNoAdaptive = false
 	reflowDryRun = false
 	reflowResume = false
 	reflowResumeRun = ""
@@ -3185,6 +3297,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowDstRegion = ""
 	reflowDstProfile = ""
 	reflowDstEndpoint = ""
+	reflowResourceProbeForRun = defaultReflowResourceProbe()
 
 	t.Cleanup(func() {
 		appIdentity = oldIdentity
@@ -3193,6 +3306,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowRewriteFrom = oldRewriteFrom
 		reflowRewriteTo = oldRewriteTo
 		reflowParallel = oldParallel
+		reflowNoAdaptive = oldNoAdaptive
 		reflowDryRun = oldDryRun
 		reflowResume = oldResume
 		reflowResumeRun = oldResumeRun
@@ -3225,6 +3339,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowDstProfile = oldDstProfile
 		reflowDstEndpoint = oldDstEndpoint
 		newReflowStateStore = oldStateStore
+		reflowResourceProbeForRun = oldResourceProbe
 	})
 }
 
@@ -3624,7 +3739,15 @@ func runTransferReflowWithProviders(t *testing.T, src *reflowMemoryProvider, dst
 
 func runTransferReflowWithProvidersAndErr(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, extraArgs ...string) (string, string, error) {
 	t.Helper()
+	return runTransferReflowWithProvidersAndErrProbe(t, src, dst, input, reflowResourceProbe{}, extraArgs...)
+}
+
+func runTransferReflowWithProvidersAndErrProbe(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, probe reflowResourceProbe, extraArgs ...string) (string, string, error) {
+	t.Helper()
 	withTransferReflowTestState(t)
+	if probe.MemoryLimitBytes != nil || probe.FDSoftLimit != nil {
+		reflowResourceProbeForRun = probe
+	}
 
 	useTransferReflowProviderFactories(t, providerdispatch.Factories{
 		S3: func(context.Context, s3.Config) (provider.Provider, error) {
@@ -3894,13 +4017,24 @@ type testErrorData struct {
 }
 
 type testReflowSummaryData struct {
-	DestIfAbsentHonored     *bool            `json:"dest_ifabsent_honored"`
-	DestIfAbsentProbeStatus string           `json:"dest_ifabsent_probe_status"`
-	FallbackActive          bool             `json:"fallback_active"`
-	IfAbsentFallbackObjects int64            `json:"ifabsent_fallback_objects"`
-	Statuses                map[string]int64 `json:"statuses"`
-	Collisions              map[string]int64 `json:"collisions"`
-	Errors                  int64            `json:"errors"`
+	AdaptiveEnabled                   bool             `json:"adaptive_enabled"`
+	ConcurrencyFloor                  int              `json:"concurrency_floor"`
+	ConcurrencyInitial                int              `json:"concurrency_initial"`
+	ConcurrencyCeilingRequested       int              `json:"concurrency_ceiling_requested"`
+	ConcurrencyCeilingEffective       int              `json:"concurrency_ceiling_effective"`
+	ConcurrencyCeilingReason          string           `json:"concurrency_ceiling_reason"`
+	ConcurrencyFinal                  int              `json:"concurrency_final"`
+	ConcurrencyThrottleBackoffs       int64            `json:"concurrency_throttle_backoffs"`
+	ConcurrencyAdditiveIncreases      int64            `json:"concurrency_additive_increases"`
+	ConcurrencyConnectionErrorFreezes int64            `json:"concurrency_connection_error_freezes"`
+	ConcurrencyMaxActive              int              `json:"concurrency_max_active"`
+	DestIfAbsentHonored               *bool            `json:"dest_ifabsent_honored"`
+	DestIfAbsentProbeStatus           string           `json:"dest_ifabsent_probe_status"`
+	FallbackActive                    bool             `json:"fallback_active"`
+	IfAbsentFallbackObjects           int64            `json:"ifabsent_fallback_objects"`
+	Statuses                          map[string]int64 `json:"statuses"`
+	Collisions                        map[string]int64 `json:"collisions"`
+	Errors                            int64            `json:"errors"`
 }
 
 func requireRecord(t *testing.T, stdout string, recordType string, status string) testRecordEnvelope {

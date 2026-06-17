@@ -51,10 +51,12 @@ func TestNewSourceBuildsS3ProviderFromParsedURI(t *testing.T) {
 	p, err := NewSource(context.Background(), src, SourceOptions{
 		Command: "transfer-reflow",
 		S3: S3Options{
-			Region:         "us-east-1",
-			Profile:        "source-profile",
-			Endpoint:       "https://s3.example.test",
-			ForcePathStyle: true,
+			Region:              "us-east-1",
+			Profile:             "source-profile",
+			Endpoint:            "https://s3.example.test",
+			ForcePathStyle:      true,
+			MaxIdleConnsPerHost: 32,
+			MaxConnsPerHost:     32,
 		},
 	})
 
@@ -65,6 +67,8 @@ func TestNewSourceBuildsS3ProviderFromParsedURI(t *testing.T) {
 	require.Equal(t, "source-profile", got.Profile)
 	require.Equal(t, "https://s3.example.test", got.Endpoint)
 	require.True(t, got.ForcePathStyle)
+	require.Equal(t, 32, got.MaxIdleConnsPerHost)
+	require.Equal(t, 32, got.MaxConnsPerHost)
 }
 
 func TestNewSourceBuildsFileProviderFromParsedURI(t *testing.T) {
@@ -106,10 +110,12 @@ func TestNewDestinationBuildsS3Provider(t *testing.T) {
 		Provider: string(provider.ProviderS3),
 		S3Bucket: "dest-bucket",
 		S3: S3Options{
-			Region:         "us-west-2",
-			Profile:        "dest-profile",
-			Endpoint:       "https://dest.example.test",
-			ForcePathStyle: true,
+			Region:              "us-west-2",
+			Profile:             "dest-profile",
+			Endpoint:            "https://dest.example.test",
+			ForcePathStyle:      true,
+			MaxIdleConnsPerHost: 64,
+			MaxConnsPerHost:     64,
 		},
 	})
 
@@ -120,6 +126,8 @@ func TestNewDestinationBuildsS3Provider(t *testing.T) {
 	require.Equal(t, "dest-profile", got.Profile)
 	require.Equal(t, "https://dest.example.test", got.Endpoint)
 	require.True(t, got.ForcePathStyle)
+	require.Equal(t, 64, got.MaxIdleConnsPerHost)
+	require.Equal(t, 64, got.MaxConnsPerHost)
 }
 
 func TestNewDestinationBuildsFileProviderAndCreatesBaseDir(t *testing.T) {
