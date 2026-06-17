@@ -234,10 +234,18 @@ off when the destination throttles and ramping back up gradually when it stops.
 
 ```bash
 # Ask for up to 256 workers; the engine settles wherever the endpoint + host allow.
-gonimbus transfer reflow --manifest m.yaml --parallel 256
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest-bucket/reflowed/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{key}' \
+  --parallel 256 < reflow-input.jsonl
 
 # Fixed mode: run at the resource-capped effective ceiling, no adaptation.
-gonimbus transfer reflow --manifest m.yaml --parallel 64 --no-adaptive
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest-bucket/reflowed/' \
+  --rewrite-from '{key}' \
+  --rewrite-to '{key}' \
+  --parallel 64 --no-adaptive < reflow-input.jsonl
 ```
 
 - **Clamp is visible, never silent.** If the requested ceiling is reduced by the
