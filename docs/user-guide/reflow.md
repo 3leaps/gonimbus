@@ -234,17 +234,14 @@ off when the destination throttles and ramping back up gradually when it stops.
 
 ```bash
 # Ask for up to 256 workers; the engine settles wherever the endpoint + host allow.
+# (reflow-input.jsonl carries dest_rel_key per record, e.g. from `content probe --emit reflow-input`)
 gonimbus transfer reflow --stdin \
   --dest 's3://dest-bucket/reflowed/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{key}' \
   --parallel 256 < reflow-input.jsonl
 
 # Fixed mode: run at the resource-capped effective ceiling, no adaptation.
 gonimbus transfer reflow --stdin \
   --dest 's3://dest-bucket/reflowed/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{key}' \
   --parallel 64 --no-adaptive < reflow-input.jsonl
 ```
 
