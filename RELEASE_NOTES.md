@@ -4,6 +4,33 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.3 (TBD)
+
+**Adaptive Reflow Concurrency and Release Documentation**
+
+Draft release-notes slot for v0.3.3. Product and technical wording should be
+collapsed here from `docs/releases/v0.3.3.md` after cxotech and prodmktg finish
+the detailed doc pass.
+
+### Highlights
+
+- `transfer reflow --parallel` now acts as a requested ceiling with adaptive
+  concurrency enabled by default and `--no-adaptive` available for fixed-mode
+  operation at the resource-capped effective ceiling.
+- Priority XML XPath probe fallbacks now include audit fields and fail closed
+  to quarantine when lower-priority values are observed at a truncated read
+  boundary.
+- Transfer reflow now emits compact classified resumable abort causes and
+  redacts credential-bearing provider error details from published JSONL
+  surfaces.
+- S3 provider transport tuning is opt-in from transfer reflow and preserves the
+  AWS SDK buildable HTTP client stack.
+
+See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the draft detailed
+release notes.
+
+---
+
 ## v0.3.1 (2026-06-14)
 
 **Embedded S3 Auth Controls and Dependency Refresh**

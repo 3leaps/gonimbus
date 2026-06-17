@@ -15,6 +15,14 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-17
+
+**Adaptive transfer reflow concurrency, safer reflow error surfaces, priority
+probe fallbacks, and release-package docs.**
+
+Draft release package for v0.3.3. Final wording is being refined in
+`docs/releases/v0.3.3.md` and `RELEASE_NOTES.md`.
+
 ### Library API
 
 - **Added:** `pkg/provider/s3.Config` now exposes optional
@@ -29,6 +37,11 @@ changes.
   `xpath_priority` for ordered fallback tags, with audit fields for
   `resolved_priority`, `resolved_xpath`, `truncated_fallback`, and
   `truncated_fallback_count`.
+- **Adaptive transfer reflow concurrency:** `transfer reflow --parallel` now
+  acts as a requested ceiling by default. The effective ceiling is bounded by
+  resource caps, adaptive mode backs off on throttling and freezes ramp-up
+  during connection-error streaks, and run/summary output includes additive
+  `concurrency_*` fields for operator audit.
 
 ### Fixed
 
@@ -36,6 +49,13 @@ changes.
   observed before `max_bytes` or a fixed-window boundary now route to
   quarantine by default instead of being treated as final normal-routing
   matches.
+- **Reflow abort and per-object errors are classified and sanitized:** resumable
+  transfer-reflow aborts now emit a compact classified cause on the operation
+  error record, and published reflow error/warning messages redact provider URL
+  credential material.
+- **S3 signing coverage:** profile-based and SDK default-chain environment
+  credential paths now have hermetic SigV4 signing regressions alongside the
+  existing static-key coverage.
 
 ## [0.3.1] - 2026-06-14
 
@@ -958,7 +978,9 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/3leaps/gonimbus/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/3leaps/gonimbus/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/3leaps/gonimbus/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/3leaps/gonimbus/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/3leaps/gonimbus/compare/v0.2.2...v0.2.3

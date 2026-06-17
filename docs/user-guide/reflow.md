@@ -223,6 +223,23 @@ gonimbus content probe --stdin \
 
 The final stage copies objects from source to destination, rewriting keys using template variables that come from either path segments or probe-derived fields.
 
+### Adaptive Parallelism
+
+In v0.3.3, `transfer reflow --parallel` is treated as a requested ceiling. The
+run resolves a resource-capped effective ceiling, then adaptive mode controls
+active copy concurrency inside that ceiling. Use `--no-adaptive` when a fixed
+effective ceiling is required.
+
+Drafting slot for the short CLI-facing notes:
+
+- resource-cap clamp behavior
+- `--no-adaptive`
+- `concurrency_*` run and summary fields
+- link to the deeper throughput model
+
+See [Concurrency and Throughput](concurrency-and-throughput.md) for the
+provider-generalized model.
+
 ### Path-Only Reflow
 
 When the path structure is correct but needs reorganization:

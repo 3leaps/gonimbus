@@ -111,7 +111,10 @@ an interrupted run can be safely continued with `--resume-run <run_id>`.
 `stream put` can upload raw stdin or framed `stream get` batches, reflow can
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD
-results. See [docs/releases/v0.3.1.md](docs/releases/v0.3.1.md) for the current
+results. Adaptive `transfer reflow --parallel` behavior and throughput tuning
+are documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
+[docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
+See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the current
 operator notes.
 
 ### Outputs
