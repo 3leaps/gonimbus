@@ -6,28 +6,79 @@ This file contains release notes for up to the three most recent releases in rev
 
 ## v0.3.3 (TBD)
 
-**Adaptive Reflow Concurrency and Release Documentation**
+**Adaptive Reflow Concurrency and Reflow Surface Hardening**
 
-Draft release-notes slot for v0.3.3. Product and technical wording should be
-collapsed here from `docs/releases/v0.3.3.md` after cxotech and prodmktg finish
-the detailed doc pass.
+v0.3.3 makes large `transfer reflow` runs faster to right-size and safer to
+trust. `--parallel` becomes a requested ceiling that the engine adapts within —
+discovering an endpoint's sustainable rate on its own — while a resource-derived
+cap keeps even an extreme value from harming the host. The release also hardens
+the reflow surface: capability-aware collision fallback, fail-closed priority
+probe extraction, and classified, credential-redacted error output.
 
-### Highlights
+### Adaptive Reflow Concurrency
 
-- `transfer reflow --parallel` now acts as a requested ceiling with adaptive
-  concurrency enabled by default and `--no-adaptive` available for fixed-mode
-  operation at the resource-capped effective ceiling.
-- Priority XML XPath probe fallbacks now include audit fields and fail closed
-  to quarantine when lower-priority values are observed at a truncated read
-  boundary.
-- Transfer reflow now emits compact classified resumable abort causes and
-  redacts credential-bearing provider error details from published JSONL
-  surfaces.
-- S3 provider transport tuning is opt-in from transfer reflow and preserves the
-  AWS SDK buildable HTTP client stack.
+`transfer reflow --parallel` is now a **requested ceiling**, not a fixed worker
+count. A run resolves an effective ceiling — `min(--parallel, resource cap)`,
+where the cap is derived from available memory and the file-descriptor limit —
+then, in adaptive mode (the default), varies active concurrency within it using
+throttle-aware AIMD control. `--no-adaptive` runs fixed at the effective ceiling.
 
-See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the draft detailed
-release notes.
+```bash
+# Ask for up to 256 workers; the engine settles where the endpoint + host allow.
+gonimbus transfer reflow --manifest m.yaml --parallel 256
+```
+
+The clamp is never silent (`concurrency_ceiling_reason` plus a stderr notice),
+connection-error bursts freeze the ramp rather than cutting it, and additive
+`concurrency_*` run/summary fields record the rate a run converged to. On
+S3-compatible destinations, reflow opts into HTTP transport sizing derived from
+the effective ceiling so high concurrency reuses connections. See
+[Concurrency and Throughput](docs/user-guide/concurrency-and-throughput.md) for
+the provider-generalized model.
+
+### Capability-Aware Collision Fallback
+
+On S3-compatible stores that do not honor `If-None-Match: *`, no-overwrite
+collision modes previously risked a silent degrade to overwrite. Reflow now runs
+a semantic IfAbsent probe (`honored` / `not_honored` / `inconclusive`) and fails
+closed to a HEAD/compare fallback, emitting a structured warning and
+`gonimbus.reflow.summary.v1` audit fields for the probe status, fallback
+activation, and degraded-path object count.
+
+### Probe Priority Fallbacks
+
+`content probe` `xml_xpath` extractors accept `xpath_priority` for ordered
+fallback tags, with `resolved_priority`, `resolved_xpath`, `truncated_fallback`,
+and `truncated_fallback_count` audit fields. Lower-priority values observed at a
+truncated read boundary fail closed to quarantine rather than being accepted as
+final matches.
+
+### Reflow Error Classification and Redaction
+
+Resumable reflow aborts emit a compact classified cause for automation, and
+published reflow error/warning messages redact credential material from provider
+URLs — every URL query value is redacted by default — so credential-bearing
+provider errors do not leak into JSONL, logs, or CI artifacts.
+
+### Library API
+
+This release has additive Stable API changes and no Stable breaks:
+`pkg/provider/s3.Config` adds optional `MaxIdleConnsPerHost` and
+`MaxConnsPerHost` transport sizing fields. Zero values preserve the AWS SDK
+defaults.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.3
+```
+
+Existing `transfer reflow --parallel` invocations keep working; the value is now
+a requested ceiling, adaptive control is on by default, and `--no-adaptive`
+restores fixed-concurrency behavior at the resource-capped effective ceiling.
+
+See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the complete release
+notes.
 
 ---
 
