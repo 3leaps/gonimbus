@@ -15,10 +15,12 @@ import (
 
 // S3Options contains command-supplied S3 construction options.
 type S3Options struct {
-	Region         string
-	Profile        string
-	Endpoint       string
-	ForcePathStyle bool
+	Region              string
+	Profile             string
+	Endpoint            string
+	ForcePathStyle      bool
+	MaxIdleConnsPerHost int
+	MaxConnsPerHost     int
 }
 
 // SourceOptions contains source-provider construction policy.
@@ -87,11 +89,13 @@ func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (pro
 	switch src.Provider {
 	case string(provider.ProviderS3):
 		return factories.S3(ctx, s3.Config{
-			Bucket:         src.Bucket,
-			Region:         opts.S3.Region,
-			Endpoint:       opts.S3.Endpoint,
-			Profile:        opts.S3.Profile,
-			ForcePathStyle: opts.S3.ForcePathStyle,
+			Bucket:              src.Bucket,
+			Region:              opts.S3.Region,
+			Endpoint:            opts.S3.Endpoint,
+			Profile:             opts.S3.Profile,
+			ForcePathStyle:      opts.S3.ForcePathStyle,
+			MaxIdleConnsPerHost: opts.S3.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     opts.S3.MaxConnsPerHost,
 		})
 	case string(provider.ProviderFile):
 		baseDir := opts.FileBaseDir
@@ -113,11 +117,13 @@ func NewDestination(ctx context.Context, opts DestinationOptions) (provider.Prov
 	switch opts.Provider {
 	case string(provider.ProviderS3):
 		return factories.S3(ctx, s3.Config{
-			Bucket:         opts.S3Bucket,
-			Region:         opts.S3.Region,
-			Endpoint:       opts.S3.Endpoint,
-			Profile:        opts.S3.Profile,
-			ForcePathStyle: opts.S3.ForcePathStyle,
+			Bucket:              opts.S3Bucket,
+			Region:              opts.S3.Region,
+			Endpoint:            opts.S3.Endpoint,
+			Profile:             opts.S3.Profile,
+			ForcePathStyle:      opts.S3.ForcePathStyle,
+			MaxIdleConnsPerHost: opts.S3.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     opts.S3.MaxConnsPerHost,
 		})
 	case string(provider.ProviderFile):
 		if opts.FileBaseDir == "" {

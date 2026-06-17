@@ -83,6 +83,14 @@ type Config struct {
 	// MaxKeys is the default page size for List operations.
 	// Zero uses the provider default (1000). Values over 1000 are clamped.
 	MaxKeys int
+
+	// MaxIdleConnsPerHost optionally sizes the per-host idle HTTP connection
+	// pool for high-concurrency transfer paths. Zero leaves SDK defaults.
+	MaxIdleConnsPerHost int
+
+	// MaxConnsPerHost optionally caps total HTTP connections per host. Zero
+	// leaves SDK defaults.
+	MaxConnsPerHost int
 }
 
 // DefaultMaxKeys is the default page size for List operations.
@@ -129,7 +137,7 @@ func (c Config) String() string {
 		credsProvider = fmt.Sprintf("<set:%T>", c.CredentialsProvider)
 	}
 	return fmt.Sprintf(
-		"s3.Config{Bucket:%q Region:%q Endpoint:%q Profile:%q Anonymous:%t CredentialsProvider:%s AccessKeyID:%s SecretAccessKey:%s ForcePathStyle:%t MaxKeys:%d}",
+		"s3.Config{Bucket:%q Region:%q Endpoint:%q Profile:%q Anonymous:%t CredentialsProvider:%s AccessKeyID:%s SecretAccessKey:%s ForcePathStyle:%t MaxKeys:%d MaxIdleConnsPerHost:%d MaxConnsPerHost:%d}",
 		c.Bucket,
 		c.Region,
 		c.Endpoint,
@@ -140,6 +148,8 @@ func (c Config) String() string {
 		redactedCredential(c.SecretAccessKey),
 		c.ForcePathStyle,
 		c.MaxKeys,
+		c.MaxIdleConnsPerHost,
+		c.MaxConnsPerHost,
 	)
 }
 

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -120,6 +122,9 @@ func loadAWSConfig(ctx context.Context, cfg Config) (aws.Config, error) {
 	if credsProvider != nil {
 		opts = append(opts, config.WithCredentialsProvider(credsProvider))
 	}
+	if httpClient := transportTunedHTTPClient(cfg); httpClient != nil {
+		opts = append(opts, config.WithHTTPClient(httpClient))
+	}
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
@@ -130,6 +135,23 @@ func loadAWSConfig(ctx context.Context, cfg Config) (aws.Config, error) {
 	awsCfg.Region = resolveRegion(cfg.Region, cfg.Endpoint, awsCfg.Region)
 
 	return awsCfg, nil
+}
+
+func transportTunedHTTPClient(cfg Config) aws.HTTPClient {
+	if cfg.MaxIdleConnsPerHost <= 0 && cfg.MaxConnsPerHost <= 0 {
+		return nil
+	}
+	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		if cfg.MaxIdleConnsPerHost > 0 {
+			tr.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
+			if tr.MaxIdleConns < cfg.MaxIdleConnsPerHost {
+				tr.MaxIdleConns = cfg.MaxIdleConnsPerHost
+			}
+		}
+		if cfg.MaxConnsPerHost > 0 {
+			tr.MaxConnsPerHost = cfg.MaxConnsPerHost
+		}
+	})
 }
 
 // List returns a page of objects with the given prefix.
