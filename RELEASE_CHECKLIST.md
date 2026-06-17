@@ -32,6 +32,15 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] `README.md` reviewed and updated
 - [ ] Feature documentation added to `docs/` (if applicable)
 - [ ] CLI help text accurate
+- [ ] Release notes authored consistently across all public release surfaces:
+  - [ ] `CHANGELOG.md` has a section for the release version, with entries in
+        the correct version section
+  - [ ] `RELEASE_NOTES.md` has the current release summary for the GitHub
+        release body and recent-release landing page
+  - [ ] `docs/releases/v<version>.md` exists and carries the complete release
+        narrative derived from the current release notes
+  - [ ] The three surfaces agree on headline features, dates, upgrade guidance,
+        and user-visible compatibility notes
 
 ### Dependencies
 

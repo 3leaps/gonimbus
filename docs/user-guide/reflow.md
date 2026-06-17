@@ -223,6 +223,42 @@ gonimbus content probe --stdin \
 
 The final stage copies objects from source to destination, rewriting keys using template variables that come from either path segments or probe-derived fields.
 
+### Adaptive Parallelism
+
+As of v0.3.3, `--parallel` is a **requested ceiling, not a fixed worker count.**
+A run first resolves an **effective ceiling** = `min(--parallel, resource cap)`,
+where the resource cap is derived from available memory and the file-descriptor
+limit so a large `--parallel` can never exhaust the host. Adaptive mode (on by
+default) then varies the _active_ copy concurrency within that ceiling, backing
+off when the destination throttles and ramping back up gradually when it stops.
+
+```bash
+# Ask for up to 256 workers; the engine settles wherever the endpoint + host allow.
+# (reflow-input.jsonl carries dest_rel_key per record, e.g. from `content probe --emit reflow-input`)
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest-bucket/reflowed/' \
+  --parallel 256 < reflow-input.jsonl
+
+# Fixed mode: run at the resource-capped effective ceiling, no adaptation.
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest-bucket/reflowed/' \
+  --parallel 64 --no-adaptive < reflow-input.jsonl
+```
+
+- **Clamp is visible, never silent.** If the requested ceiling is reduced by the
+  resource cap, the run reports it via `concurrency_ceiling_reason` (e.g.
+  `resource_capped:memory:cgroup` or `resource_capped:fd`) plus a stderr notice —
+  so a lower-than-requested concurrency is explained, not guessed at.
+- **`--no-adaptive`** runs fixed at the **effective** ceiling (still resource-capped —
+  a fixed `--parallel 9385` is clamped too), for deterministic runs.
+- **The run summary carries the concurrency audit** — `concurrency_ceiling_requested`,
+  `concurrency_ceiling_effective`, `concurrency_ceiling_reason`, `concurrency_final`,
+  `concurrency_max_active`, and throttle/increase/freeze counters — so you can read the
+  settled concurrency and right-size the next run.
+
+See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
+provider-generalized model (resource cap, AIMD control, transport tuning).
+
 ### Path-Only Reflow
 
 When the path structure is correct but needs reorganization:
@@ -507,7 +543,8 @@ find /tmp/staging -type f | head -20
 ### Transfer Reflow
 
 - Throughput is network-bound (download + upload per object)
-- Parallel workers (`--parallel`, default 16) overlap I/O
+- Parallel workers overlap I/O; `--parallel` is a requested ceiling (default 16) that
+  adaptive mode tunes within the resource cap — see [Adaptive Parallelism](#adaptive-parallelism)
 - Cross-account transfers can't use server-side copy — plan for 2x bandwidth
 - Checkpoint/resume is essential for jobs exceeding 10K objects
 
