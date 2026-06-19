@@ -27,8 +27,9 @@ Experimental workflow surface:
 
 - `github.com/3leaps/gonimbus/pkg/reflow` exposes shared reflow workflow
   substrate. In v0.3.4 it starts with the adaptive concurrency resolver,
-  limiter, stats, and resource-cap probe used by CLI `transfer reflow`.
-  The full embeddable transfer-reflow runner is a later Experimental surface.
+  limiter, stats, resource-cap probe, and provider-error redaction helpers used
+  by CLI `transfer reflow`. The full embeddable transfer-reflow runner is a
+  later Experimental surface.
 
 Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
 notification protocol documented in [`docs/api-stability.md`](api-stability.md);
@@ -211,6 +212,13 @@ the embedding application's threat model.
 The supported library packages do not read `GONIMBUS_*` variables. Those belong
 to the gonimbus CLI configuration layer.
 
+Provider construction convenience APIs must not accept credential file paths
+from parsed object URIs or untrusted option maps. Credential material must come
+from typed injected handles, explicit operator-owned config, or documented SDK
+default credential chains. Some credential-file formats can execute commands
+while loading credentials, so treating URI-sourced or caller-option-sourced
+credential paths as config is a code-execution risk, not just a logging risk.
+
 ## Secret Handling
 
 Preferred: pass handles managed by the embedding application, such as AWS
@@ -223,6 +231,16 @@ construction.
 
 Not supported: storing secrets in recipes, examples, or other persisted
 gonimbus artifacts.
+
+## Reflow Redaction Boundary
+
+`pkg/reflow` redaction helpers define the sanitized provider-error surface used
+by CLI `transfer reflow` and future reflow engine callbacks. Records,
+warnings, summaries, and checkpoint/error payloads should cross public callback
+or storage boundaries only after provider errors have been sanitized with this
+surface. Raw `error` values remain useful for control flow, but callers should
+treat them as unredacted and not safe for logs unless they have been passed
+through the reflow redaction helpers.
 
 ## Dependency Boundary
 
