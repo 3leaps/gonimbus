@@ -689,7 +689,7 @@ func TestTransferReflowPerObjectErrorRedactsSensitiveProviderError(t *testing.T)
 func TestReflowErrorMessageRedactsAllURLQueryValues(t *testing.T) {
 	err := errors.New("GET https://example.invalid/object?customCredential=SENSITIVE-MARKER&debug=VISIBLE failed")
 
-	msg := formatReflowErrorMessage("copy failed", err)
+	msg := reflowpkg.FormatErrorMessage("copy failed", err)
 
 	require.NotContains(t, msg, "SENSITIVE-MARKER")
 	require.NotContains(t, msg, "VISIBLE")

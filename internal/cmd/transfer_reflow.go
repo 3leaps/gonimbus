@@ -14,7 +14,6 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1224,7 +1223,7 @@ func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err
 		details = map[string]any{}
 	}
 	details["mode"] = "transfer_reflow"
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInvalidInput, Message: formatReflowErrorMessage(msg, err), Details: details}); werr != nil {
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: output.ErrCodeInvalidInput, Message: reflowpkg.FormatErrorMessage(msg, err), Details: details}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow config error record", zap.Error(werr))
 	}
 	return exitError(foundry.ExitInvalidArgument, msg, err)
@@ -1660,7 +1659,7 @@ func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg 
 	}
 	_ = w.WriteAny(ctx, reflowWarningRecord, reflowWarning{
 		Code:    "PROVENANCE_WRITE_FAILED",
-		Message: formatReflowErrorMessage("provenance sidecar write failed", err),
+		Message: reflowpkg.FormatErrorMessage("provenance sidecar write failed", err),
 		Key:     sidecarKey,
 		Details: details,
 	})
@@ -1806,15 +1805,9 @@ func filePathContainsSymlink(path string) (bool, error) {
 	return false, nil
 }
 
-func redactedPathError(defaultMessage string, verboseMessage string) error {
-	if verbose && verboseMessage != "" {
-		return errors.New(verboseMessage)
-	}
-	return errors.New(defaultMessage)
-}
-
 func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.ObjectURI, dest *reflowDestSpec, srcCfg reflowSourceConfig) (reflowFilePreflightSummary, error) {
 	summary := reflowFilePreflightSummary{SourceRoot: filepath.Clean(parsed.Key)}
+	pathErrOpts := reflowpkg.PathErrorOptions{Verbose: verbose}
 	rec := &output.PreflightRecord{Mode: "reflow-file-source"}
 	add := func(capability string, allowed bool, method string, err error, detail string) {
 		result := output.PreflightCheckResult{Capability: capability, Allowed: allowed, Method: method, Detail: detail}
@@ -1829,13 +1822,13 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 
 	st, err := os.Stat(summary.SourceRoot)
 	if err != nil {
-		reportErr := redactedPathError("source root is not accessible", err.Error())
+		reportErr := reflowpkg.NewPathError("source root is not accessible", err.Error(), pathErrOpts)
 		add("source.file.stat", false, "Stat(source_root)", reportErr, "")
 		_ = w.WritePreflight(ctx, rec)
 		return summary, reportErr
 	}
 	if !st.IsDir() {
-		reportErr := redactedPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", summary.SourceRoot))
+		reportErr := reflowpkg.NewPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", summary.SourceRoot), pathErrOpts)
 		add("source.file.stat", false, "Stat(source_root)", reportErr, "")
 		_ = w.WritePreflight(ctx, rec)
 		return summary, reportErr
@@ -1843,7 +1836,7 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 	add("source.file.stat", true, "Stat(source_root)", nil, "")
 
 	if err := summarizeFileSource(ctx, summary.SourceRoot, srcCfg, &summary); err != nil {
-		reportErr := redactedPathError("source root could not be enumerated", err.Error())
+		reportErr := reflowpkg.NewPathError("source root could not be enumerated", err.Error(), pathErrOpts)
 		add("source.file.enumerate", false, "Walk(source_root)", reportErr, "")
 		_ = w.WritePreflight(ctx, rec)
 		return summary, reportErr
@@ -1853,7 +1846,7 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 	if dest.Provider == string(provider.ProviderFile) {
 		destRoot := filepath.Clean(dest.BaseDir)
 		if pathWithinRoot(summary.SourceRoot, destRoot) || pathWithinRoot(destRoot, summary.SourceRoot) {
-			err := redactedPathError("file source and destination paths overlap", fmt.Sprintf("file source and destination paths overlap: source=%s dest=%s", summary.SourceRoot, destRoot))
+			err := reflowpkg.NewPathError("file source and destination paths overlap", fmt.Sprintf("file source and destination paths overlap: source=%s dest=%s", summary.SourceRoot, destRoot), pathErrOpts)
 			add("destination.file.self_copy", false, "Compare(source_root,dest_root)", err, "")
 			_ = w.WritePreflight(ctx, rec)
 			return summary, err
@@ -1861,7 +1854,7 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 		add("destination.file.self_copy", true, "Compare(source_root,dest_root)", nil, "")
 
 		if err := ensureDirWritable(destRoot); err != nil {
-			reportErr := redactedPathError("file destination is not writable", err.Error())
+			reportErr := reflowpkg.NewPathError("file destination is not writable", err.Error(), pathErrOpts)
 			add("destination.file.write", false, "CreateTemp(dest_root)", reportErr, "")
 			_ = w.WritePreflight(ctx, rec)
 			return summary, reportErr
@@ -1870,7 +1863,7 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 
 		free, err := availableBytes(destRoot)
 		if err != nil {
-			reportErr := redactedPathError("file destination space could not be checked", err.Error())
+			reportErr := reflowpkg.NewPathError("file destination space could not be checked", err.Error(), pathErrOpts)
 			add("destination.file.space", false, "Statfs(dest_root)", reportErr, "")
 			_ = w.WritePreflight(ctx, rec)
 			return summary, reportErr
@@ -2539,170 +2532,10 @@ func reflowOperationErrorCause(err error, classification opcheckpoint.Classifica
 	return &opcheckpoint.ErrorCause{
 		Code:        code,
 		Reason:      reason,
-		Message:     sanitizeOperationCauseMessage(err),
+		Message:     reflowpkg.SanitizeOperationCauseMessage(err),
 		Resumable:   classification.Resumable,
 		Disposition: reflowOperationCauseDisposition,
 	}
-}
-
-var (
-	operationCauseURLPattern       = regexp.MustCompile(`https?://[^\s"'<>]+`)
-	operationCauseBearerPattern    = regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^,\s;]+`)
-	operationCauseKeyValuePattern  = regexp.MustCompile(`(?i)\b(x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|x-goog-security-token|aws_secret_access_key|aws_session_token|access_token|refresh_token|sessiontoken|authtoken|client_secret|sig|token)\s*[:=]\s*[^,\s;&]+`)
-	operationCauseSensitiveNeedles = []string{
-		"x-amz-signature=",
-		"x-amz-credential=",
-		"x-amz-security-token=",
-		"x-goog-signature=",
-		"x-goog-credential=",
-		"x-goog-security-token=",
-		"authorization: bearer ",
-		"authtoken=",
-		"aws_secret_access_key",
-		"aws_session_token",
-		"sharedaccesssignature",
-	}
-)
-
-func sanitizeOperationCauseMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	raw := compactOperationErrorMessage(err.Error())
-	if raw == "" {
-		return ""
-	}
-	if operationCauseContainsCredentialMaterial(raw) {
-		if root := operationCauseRootMessage(err); root != "" {
-			return compactOperationErrorMessage(root)
-		}
-		return "provider error redacted"
-	}
-	return redactOperationCauseMessage(raw)
-}
-
-func operationCauseRootMessage(err error) string {
-	switch {
-	case err == nil:
-		return ""
-	case errors.Is(err, context.Canceled):
-		return context.Canceled.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		return context.DeadlineExceeded.Error()
-	case provider.IsCredentialsRefreshFailed(err), errors.Is(err, opcheckpoint.ErrCredentialsRefreshFailed):
-		return "failed to refresh cached credentials"
-	case provider.IsThrottled(err):
-		return provider.ErrThrottled.Error()
-	case provider.IsProviderUnavailable(err):
-		return provider.ErrProviderUnavailable.Error()
-	case provider.IsAccessDenied(err):
-		return provider.ErrAccessDenied.Error()
-	case provider.IsInvalidCredentials(err):
-		return provider.ErrInvalidCredentials.Error()
-	}
-	var providerErr *provider.ProviderError
-	if errors.As(err, &providerErr) && providerErr.Err != nil {
-		return operationCauseRootMessage(providerErr.Err)
-	}
-	return ""
-}
-
-func operationCauseContainsCredentialMaterial(message string) bool {
-	lower := strings.ToLower(message)
-	for _, needle := range operationCauseSensitiveNeedles {
-		if strings.Contains(lower, needle) {
-			return true
-		}
-	}
-	if strings.HasPrefix(lower, "sig=") || strings.Contains(lower, "?sig=") || strings.Contains(lower, "&sig=") {
-		return true
-	}
-	for _, match := range operationCauseURLPattern.FindAllString(message, -1) {
-		if operationCauseURLContainsCredentialMaterial(match) {
-			return true
-		}
-	}
-	return false
-}
-
-func operationCauseURLContainsCredentialMaterial(raw string) bool {
-	u, err := url.Parse(strings.TrimRight(raw, ".,);]'\":"))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return false
-	}
-	if u.User != nil {
-		if u.User.Username() != "" {
-			return true
-		}
-		if password, ok := u.User.Password(); ok && password != "" {
-			return true
-		}
-	}
-	for key := range u.Query() {
-		if operationCauseSensitiveQueryKey(key) {
-			return true
-		}
-	}
-	return false
-}
-
-func redactOperationCauseMessage(message string) string {
-	message = operationCauseBearerPattern.ReplaceAllString(message, "${1}<redacted>")
-	message = operationCauseKeyValuePattern.ReplaceAllStringFunc(message, func(match string) string {
-		for i, r := range match {
-			if r == '=' || r == ':' {
-				return strings.TrimSpace(match[:i]) + string(r) + "<redacted>"
-			}
-		}
-		return "<redacted>"
-	})
-	message = operationCauseURLPattern.ReplaceAllStringFunc(message, redactOperationCauseURL)
-	return compactOperationErrorMessage(message)
-}
-
-func redactOperationCauseURL(raw string) string {
-	trailing := ""
-	for raw != "" {
-		last := raw[len(raw)-1]
-		if !strings.ContainsRune(".,);]'\":", rune(last)) {
-			break
-		}
-		trailing = string(last) + trailing
-		raw = raw[:len(raw)-1]
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return raw + trailing
-	}
-	if u.User != nil {
-		u.User = url.User("<redacted>")
-	}
-	query := u.Query()
-	for key := range query {
-		query.Set(key, "<redacted>")
-	}
-	u.RawQuery = query.Encode()
-	return u.String() + trailing
-}
-
-func operationCauseSensitiveQueryKey(key string) bool {
-	switch strings.ToLower(key) {
-	case "x-amz-signature", "x-amz-credential", "x-amz-security-token",
-		"x-goog-signature", "x-goog-credential", "x-goog-security-token",
-		"sig", "token", "access_token", "refresh_token", "sessiontoken", "authtoken", "client_secret":
-		return true
-	default:
-		return false
-	}
-}
-
-func compactOperationErrorMessage(message string) string {
-	message = strings.Join(strings.Fields(strings.TrimSpace(message)), " ")
-	const maxOperationCauseMessageLen = 2048
-	if len(message) > maxOperationCauseMessageLen {
-		return message[:maxOperationCauseMessageLen] + "..."
-	}
-	return message
 }
 
 func transferReflowFatalExitCode(classification opcheckpoint.Classification) int {
@@ -3880,12 +3713,13 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 }
 
 func enqueueFileReflowSource(ctx context.Context, parsed *uri.ObjectURI, srcCfg reflowSourceConfig, srcIdentity string, out chan<- reflowTask) (string, error) {
+	pathErrOpts := reflowpkg.PathErrorOptions{Verbose: verbose}
 	st, err := os.Stat(parsed.Key)
 	if err != nil {
-		return srcIdentity, redactedPathError("source root is not accessible", err.Error())
+		return srcIdentity, reflowpkg.NewPathError("source root is not accessible", err.Error(), pathErrOpts)
 	}
 	if !st.IsDir() {
-		return srcIdentity, redactedPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", parsed.Key))
+		return srcIdentity, reflowpkg.NewPathError("file source root must be a directory", fmt.Sprintf("file source root must be a directory: %s", parsed.Key), pathErrOpts)
 	}
 
 	root := filepath.Clean(parsed.Key)
@@ -4135,20 +3969,10 @@ func emitReflowErrorWithCode(ctx context.Context, w output.Writer, code string, 
 	if _, ok := details["reason"]; !ok {
 		details["reason"] = reflowReasonForErrCode(code)
 	}
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: formatReflowErrorMessage(msg, err), Key: key, Details: details, Collision: collision}); werr != nil {
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: reflowpkg.FormatErrorMessage(msg, err), Key: key, Details: details, Collision: collision}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit reflow error record", zap.Error(werr))
 	}
 	return nil
-}
-
-func formatReflowErrorMessage(msg string, err error) string {
-	if err == nil {
-		return msg
-	}
-	if msg == "" {
-		return sanitizeOperationCauseMessage(err)
-	}
-	return fmt.Sprintf("%s: %s", msg, sanitizeOperationCauseMessage(err))
 }
 
 func reflowErrCode(err error) string {
