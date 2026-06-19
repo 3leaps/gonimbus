@@ -31,6 +31,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -131,7 +132,7 @@ func TestEmitReflowErrorTransientNetworkSurface(t *testing.T) {
 }
 
 func TestResolveReflowConcurrencyResourceCapFailLow(t *testing.T) {
-	cfg := resolveReflowConcurrency(1000, true, reflowResourceProbe{
+	cfg := reflowpkg.ResolveConcurrency(1000, true, reflowpkg.ResourceProbe{
 		MemoryLimitBytes: func() (int64, string, error) {
 			return 0, "", errors.New("probe unavailable")
 		},
@@ -148,7 +149,7 @@ func TestResolveReflowConcurrencyResourceCapFailLow(t *testing.T) {
 }
 
 func TestReflowConcurrencyLimiterThrottleAndConnectionFreeze(t *testing.T) {
-	limiter := newReflowConcurrencyLimiter(reflowConcurrencyConfig{
+	limiter := reflowpkg.NewConcurrencyLimiter(reflowpkg.ConcurrencyConfig{
 		RequestedCeiling: 8,
 		EffectiveCeiling: 8,
 		CeilingReason:    "requested",
@@ -157,26 +158,26 @@ func TestReflowConcurrencyLimiterThrottleAndConnectionFreeze(t *testing.T) {
 		Initial:          4,
 	})
 
-	limiter.observeThrottle()
-	snapshot := limiter.snapshot()
+	limiter.ObserveThrottle()
+	snapshot := limiter.Snapshot()
 	require.Equal(t, 2, snapshot.ConcurrencyFinal)
 	require.Equal(t, int64(1), snapshot.ConcurrencyThrottleBackoffs)
 
-	for i := 0; i < reflowConcurrencyThrottleCooldown+reflowConcurrencyCleanIncreaseEvery-1; i++ {
-		limiter.observeSuccess()
+	for i := 0; i < 11; i++ {
+		limiter.ObserveSuccess()
 	}
-	require.Equal(t, 2, limiter.snapshot().ConcurrencyFinal)
+	require.Equal(t, 2, limiter.Snapshot().ConcurrencyFinal)
 
-	limiter.observeConnectionError()
-	for i := 0; i < reflowConcurrencyCleanIncreaseEvery-1; i++ {
-		limiter.observeSuccess()
+	limiter.ObserveConnectionError()
+	for i := 0; i < 7; i++ {
+		limiter.ObserveSuccess()
 	}
-	snapshot = limiter.snapshot()
+	snapshot = limiter.Snapshot()
 	require.Equal(t, 2, snapshot.ConcurrencyFinal)
 	require.Equal(t, int64(1), snapshot.ConcurrencyConnectionErrorFreezes)
 
-	limiter.observeSuccess()
-	snapshot = limiter.snapshot()
+	limiter.ObserveSuccess()
+	snapshot = limiter.Snapshot()
 	require.Equal(t, 3, snapshot.ConcurrencyFinal)
 	require.Equal(t, int64(1), snapshot.ConcurrencyAdditiveIncreases)
 }
@@ -186,7 +187,7 @@ func TestTransferReflowEmitsResourceClampConcurrencyFields(t *testing.T) {
 	src.putFixture("source/file.xml", "payload", "src-etag", time.Now())
 	dst := newReflowMemoryProvider()
 
-	probe := reflowResourceProbe{
+	probe := reflowpkg.ResourceProbe{
 		MemoryLimitBytes: func() (int64, string, error) {
 			return transfer.DefaultRetryBufferMaxMemoryBytes * 4, "test", nil
 		},
@@ -219,7 +220,7 @@ func TestTransferReflowNoAdaptiveRunsFixedAtEffectiveCeiling(t *testing.T) {
 	src.putFixture("source/file.xml", "payload", "src-etag", time.Now())
 	dst := newReflowMemoryProvider()
 
-	probe := reflowResourceProbe{
+	probe := reflowpkg.ResourceProbe{
 		MemoryLimitBytes: func() (int64, string, error) {
 			return transfer.DefaultRetryBufferMaxMemoryBytes * 12, "test", nil
 		},
@@ -3297,7 +3298,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowDstRegion = ""
 	reflowDstProfile = ""
 	reflowDstEndpoint = ""
-	reflowResourceProbeForRun = defaultReflowResourceProbe()
+	reflowResourceProbeForRun = reflowpkg.DefaultResourceProbe()
 
 	t.Cleanup(func() {
 		appIdentity = oldIdentity
@@ -3739,10 +3740,10 @@ func runTransferReflowWithProviders(t *testing.T, src *reflowMemoryProvider, dst
 
 func runTransferReflowWithProvidersAndErr(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, extraArgs ...string) (string, string, error) {
 	t.Helper()
-	return runTransferReflowWithProvidersAndErrProbe(t, src, dst, input, reflowResourceProbe{}, extraArgs...)
+	return runTransferReflowWithProvidersAndErrProbe(t, src, dst, input, reflowpkg.ResourceProbe{}, extraArgs...)
 }
 
-func runTransferReflowWithProvidersAndErrProbe(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, probe reflowResourceProbe, extraArgs ...string) (string, string, error) {
+func runTransferReflowWithProvidersAndErrProbe(t *testing.T, src *reflowMemoryProvider, dst *reflowMemoryProvider, input string, probe reflowpkg.ResourceProbe, extraArgs ...string) (string, string, error) {
 	t.Helper()
 	withTransferReflowTestState(t)
 	if probe.MemoryLimitBytes != nil || probe.FDSoftLimit != nil {

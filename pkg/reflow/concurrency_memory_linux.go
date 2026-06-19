@@ -1,6 +1,6 @@
 //go:build linux
 
-package cmd
+package reflow
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func defaultReflowPlatformMemoryLimitBytes() (int64, string, error) {
+func defaultPlatformMemoryLimitBytes() (int64, string, error) {
 	for _, candidate := range []struct {
 		path   string
 		source string

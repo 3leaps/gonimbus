@@ -23,10 +23,17 @@ Discouraged surfaces:
 - CLI command packages and server packages are not part of the library contract
 - Index-store packages are internal product substrate, not a stable embedding API
 
-Gonimbus is pre-v1.0. The packages above are Stable for embedded use, but
-breaking changes can still happen across minor versions with the notification
-protocol documented in [`docs/api-stability.md`](api-stability.md). Pin
-consumers to a specific gonimbus release.
+Experimental workflow surface:
+
+- `github.com/3leaps/gonimbus/pkg/reflow` exposes shared reflow workflow
+  substrate. In v0.3.4 it starts with the adaptive concurrency resolver,
+  limiter, stats, and resource-cap probe used by CLI `transfer reflow`.
+  The full embeddable transfer-reflow runner is a later Experimental surface.
+
+Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
+notification protocol documented in [`docs/api-stability.md`](api-stability.md);
+Experimental packages may change with only an in-release note. Pin consumers to
+a specific gonimbus release.
 
 ## URI Contract
 
@@ -259,6 +266,11 @@ Storageful public packages are:
 Those packages intentionally use local persistence substrates and are
 Experimental-tier. Import them only when your application deliberately wants
 gonimbus index or operation-checkpoint persistence.
+
+`pkg/reflow` is Experimental workflow substrate. It is not part of the
+recommended lightweight storage-free surface, and it has its own dependency
+boundary tests so it can remain free of CLI, provider-dispatch, and concrete
+provider SDK dependencies while the embeddable engine matures.
 
 ### Libsql Build Tag
 

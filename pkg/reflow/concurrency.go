@@ -1,4 +1,4 @@
-package cmd
+package reflow
 
 import (
 	"context"
@@ -13,26 +13,28 @@ import (
 )
 
 const (
-	reflowConcurrencyFloor              = 1
-	reflowConcurrencyDefaultInitial     = 16
-	reflowConcurrencyCleanIncreaseEvery = 8
-	reflowConcurrencyThrottleCooldown   = 4
-	reflowResourceDefaultMemoryLimit    = int64(1 << 30)
-	reflowResourceMemoryFraction        = 0.25
-	reflowResourceFDHeadroom            = 128
-	reflowResourceFDsPerCopy            = 1
-	reflowResourceMinCap                = 1
-	reflowResourceMaxCap                = int(^uint(0) >> 1)
+	concurrencyFloor              = 1
+	concurrencyDefaultInitial     = 16
+	concurrencyCleanIncreaseEvery = 8
+	concurrencyThrottleCooldown   = 4
+	resourceDefaultMemoryLimit    = int64(1 << 30)
+	resourceMemoryFraction        = 0.25
+	resourceFDHeadroom            = 128
+	resourceFDsPerCopy            = 1
+	resourceMinCap                = 1
+	resourceMaxCap                = int(^uint(0) >> 1)
 )
 
-var reflowResourceProbeForRun = defaultReflowResourceProbe()
-
-type reflowResourceProbe struct {
+// ResourceProbe supplies host resource limits used to clamp requested transfer
+// concurrency before any worker pools, queues, or retry buffers are created.
+type ResourceProbe struct {
 	MemoryLimitBytes func() (int64, string, error)
 	FDSoftLimit      func() (int64, error)
 }
 
-type reflowConcurrencyConfig struct {
+// ConcurrencyConfig is the resolved GON-048 concurrency contract. RequestedCeiling
+// is the user/operator ceiling; EffectiveCeiling is the resource-safe hard cap.
+type ConcurrencyConfig struct {
 	RequestedCeiling int
 	EffectiveCeiling int
 	CeilingReason    string
@@ -41,7 +43,8 @@ type reflowConcurrencyConfig struct {
 	Initial          int
 }
 
-type reflowConcurrencyStats struct {
+// ConcurrencyStats is embedded in reflow run and summary records.
+type ConcurrencyStats struct {
 	AdaptiveEnabled                   bool   `json:"adaptive_enabled"`
 	ConcurrencyFloor                  int    `json:"concurrency_floor"`
 	ConcurrencyInitial                int    `json:"concurrency_initial"`
@@ -55,10 +58,12 @@ type reflowConcurrencyStats struct {
 	ConcurrencyMaxActive              int    `json:"concurrency_max_active"`
 }
 
-type reflowConcurrencyLimiter struct {
+// ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
+// resource-derived effective ceiling.
+type ConcurrencyLimiter struct {
 	mu sync.Mutex
 
-	cfg       reflowConcurrencyConfig
+	cfg       ConcurrencyConfig
 	current   int
 	active    int
 	maxActive int
@@ -70,56 +75,59 @@ type reflowConcurrencyLimiter struct {
 	connectionFreezes int64
 }
 
-func defaultReflowResourceProbe() reflowResourceProbe {
-	return reflowResourceProbe{
-		MemoryLimitBytes: defaultReflowMemoryLimitBytes,
-		FDSoftLimit:      defaultReflowFDSoftLimit,
+// DefaultResourceProbe returns the platform probes used by transfer reflow.
+func DefaultResourceProbe() ResourceProbe {
+	return ResourceProbe{
+		MemoryLimitBytes: defaultMemoryLimitBytes,
+		FDSoftLimit:      defaultFDSoftLimit,
 	}
 }
 
-func defaultReflowMemoryLimitBytes() (int64, string, error) {
-	if limit, source, err := defaultReflowPlatformMemoryLimitBytes(); err == nil && limit > 0 {
+func defaultMemoryLimitBytes() (int64, string, error) {
+	if limit, source, err := defaultPlatformMemoryLimitBytes(); err == nil && limit > 0 {
 		return limit, source, nil
 	}
 	limit := debug.SetMemoryLimit(-1)
 	if limit > 0 && limit < math.MaxInt64 {
 		return limit, "runtime", nil
 	}
-	return reflowResourceDefaultMemoryLimit, "conservative_default", nil
+	return resourceDefaultMemoryLimit, "conservative_default", nil
 }
 
-func resolveReflowConcurrency(requested int, adaptiveEnabled bool, probe reflowResourceProbe) reflowConcurrencyConfig {
+// ResolveConcurrency clamps the requested ceiling by memory and FD limits before
+// the caller allocates concurrency-sized resources.
+func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe) ConcurrencyConfig {
 	if requested < 1 {
 		requested = 1
 	}
 	if probe.MemoryLimitBytes == nil {
-		probe.MemoryLimitBytes = defaultReflowMemoryLimitBytes
+		probe.MemoryLimitBytes = defaultMemoryLimitBytes
 	}
 	if probe.FDSoftLimit == nil {
-		probe.FDSoftLimit = defaultReflowFDSoftLimit
+		probe.FDSoftLimit = defaultFDSoftLimit
 	}
 
 	memoryLimit, memorySource, memoryErr := probe.MemoryLimitBytes()
 	if memoryLimit <= 0 || memoryErr != nil {
-		memoryLimit = reflowResourceDefaultMemoryLimit
+		memoryLimit = resourceDefaultMemoryLimit
 		memorySource = "conservative_default"
 	}
-	memoryBudget := int64(float64(memoryLimit) * reflowResourceMemoryFraction)
+	memoryBudget := int64(float64(memoryLimit) * resourceMemoryFraction)
 	if memoryBudget < transfer.DefaultRetryBufferMaxMemoryBytes {
 		memoryBudget = transfer.DefaultRetryBufferMaxMemoryBytes
 	}
 	memoryCap := int(memoryBudget / transfer.DefaultRetryBufferMaxMemoryBytes)
-	if memoryCap < reflowResourceMinCap {
-		memoryCap = reflowResourceMinCap
+	if memoryCap < resourceMinCap {
+		memoryCap = resourceMinCap
 	}
 
 	fdLimit, fdErr := probe.FDSoftLimit()
 	if fdLimit <= 0 || fdErr != nil {
-		fdLimit = int64(reflowResourceFDHeadroom + reflowResourceMinCap)
+		fdLimit = int64(resourceFDHeadroom + resourceMinCap)
 	}
-	fdCap := int((fdLimit - reflowResourceFDHeadroom) / reflowResourceFDsPerCopy)
-	if fdCap < reflowResourceMinCap {
-		fdCap = reflowResourceMinCap
+	fdCap := int((fdLimit - resourceFDHeadroom) / resourceFDsPerCopy)
+	if fdCap < resourceMinCap {
+		fdCap = resourceMinCap
 	}
 
 	effective := requested
@@ -132,8 +140,8 @@ func resolveReflowConcurrency(requested int, adaptiveEnabled bool, probe reflowR
 		effective = fdCap
 		reasons = append(reasons, "fd")
 	}
-	if effective < reflowResourceMinCap {
-		effective = reflowResourceMinCap
+	if effective < resourceMinCap {
+		effective = resourceMinCap
 	}
 	reason := "requested"
 	if len(reasons) > 0 {
@@ -142,20 +150,21 @@ func resolveReflowConcurrency(requested int, adaptiveEnabled bool, probe reflowR
 
 	initial := effective
 	if adaptiveEnabled {
-		initial = minInt(reflowConcurrencyDefaultInitial, effective)
+		initial = minInt(concurrencyDefaultInitial, effective)
 	}
 
-	return reflowConcurrencyConfig{
+	return ConcurrencyConfig{
 		RequestedCeiling: requested,
 		EffectiveCeiling: effective,
 		CeilingReason:    reason,
 		AdaptiveEnabled:  adaptiveEnabled,
-		Floor:            reflowConcurrencyFloor,
+		Floor:            concurrencyFloor,
 		Initial:          initial,
 	}
 }
 
-func newReflowConcurrencyLimiter(cfg reflowConcurrencyConfig) *reflowConcurrencyLimiter {
+// NewConcurrencyLimiter returns an AIMD limiter initialized from cfg.
+func NewConcurrencyLimiter(cfg ConcurrencyConfig) *ConcurrencyLimiter {
 	if cfg.EffectiveCeiling < 1 {
 		cfg.EffectiveCeiling = 1
 	}
@@ -168,10 +177,12 @@ func newReflowConcurrencyLimiter(cfg reflowConcurrencyConfig) *reflowConcurrency
 	if cfg.Initial > cfg.EffectiveCeiling {
 		cfg.Initial = cfg.EffectiveCeiling
 	}
-	return &reflowConcurrencyLimiter{cfg: cfg, current: cfg.Initial}
+	return &ConcurrencyLimiter{cfg: cfg, current: cfg.Initial}
 }
 
-func (l *reflowConcurrencyLimiter) acquire(ctx context.Context) (func(), error) {
+// Acquire waits until the current adaptive concurrency permits another active
+// copy and returns a release function for the acquired token.
+func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
 	for {
 		l.mu.Lock()
 		if l.active < l.current {
@@ -196,7 +207,9 @@ func (l *reflowConcurrencyLimiter) acquire(ctx context.Context) (func(), error) 
 	}
 }
 
-func (l *reflowConcurrencyLimiter) observeSuccess() {
+// ObserveSuccess records a successful provider operation and may additively
+// increase current concurrency after a clean streak.
+func (l *ConcurrencyLimiter) ObserveSuccess() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.cfg.AdaptiveEnabled || l.current >= l.cfg.EffectiveCeiling {
@@ -208,7 +221,7 @@ func (l *reflowConcurrencyLimiter) observeSuccess() {
 		return
 	}
 	l.clean++
-	if l.clean < reflowConcurrencyCleanIncreaseEvery {
+	if l.clean < concurrencyCleanIncreaseEvery {
 		return
 	}
 	l.current++
@@ -216,7 +229,8 @@ func (l *reflowConcurrencyLimiter) observeSuccess() {
 	l.clean = 0
 }
 
-func (l *reflowConcurrencyLimiter) observeThrottle() {
+// ObserveThrottle multiplicatively decreases current concurrency.
+func (l *ConcurrencyLimiter) ObserveThrottle() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.cfg.AdaptiveEnabled {
@@ -224,11 +238,13 @@ func (l *reflowConcurrencyLimiter) observeThrottle() {
 	}
 	l.current = maxInt(l.cfg.Floor, l.current/2)
 	l.clean = 0
-	l.cooldown = reflowConcurrencyThrottleCooldown
+	l.cooldown = concurrencyThrottleCooldown
 	l.throttleBackoffs++
 }
 
-func (l *reflowConcurrencyLimiter) observeConnectionError() {
+// ObserveConnectionError freezes additive increase without decreasing current
+// concurrency.
+func (l *ConcurrencyLimiter) ObserveConnectionError() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.cfg.AdaptiveEnabled {
@@ -238,10 +254,23 @@ func (l *reflowConcurrencyLimiter) observeConnectionError() {
 	l.connectionFreezes++
 }
 
-func (l *reflowConcurrencyLimiter) snapshot() reflowConcurrencyStats {
+// ObserveProviderResult maps provider outcomes onto the GON-048 signal model.
+func (l *ConcurrencyLimiter) ObserveProviderResult(err error) {
+	switch {
+	case err == nil:
+		l.ObserveSuccess()
+	case provider.IsThrottled(err):
+		l.ObserveThrottle()
+	case ConcurrencyConnectionError(err):
+		l.ObserveConnectionError()
+	}
+}
+
+// Snapshot returns a stable stats view for run and summary records.
+func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return reflowConcurrencyStats{
+	return ConcurrencyStats{
 		AdaptiveEnabled:                   l.cfg.AdaptiveEnabled,
 		ConcurrencyFloor:                  l.cfg.Floor,
 		ConcurrencyInitial:                l.cfg.Initial,
@@ -256,7 +285,9 @@ func (l *reflowConcurrencyLimiter) snapshot() reflowConcurrencyStats {
 	}
 }
 
-func reflowConcurrencyConnectionError(err error) bool {
+// ConcurrencyConnectionError reports provider/transport failures that freeze
+// additive increase without triggering multiplicative decrease.
+func ConcurrencyConnectionError(err error) bool {
 	return provider.IsProviderUnavailable(err) || transfer.IsTransientNetworkError(err)
 }
 
