@@ -37,6 +37,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -121,37 +122,38 @@ Errors are emitted on stdout as gonimbus.error.v1 records.
 }
 
 var (
-	reflowStdin       bool
-	reflowDest        string
-	reflowRewriteFrom string
-	reflowRewriteTo   string
-	reflowParallel    int
-	reflowNoAdaptive  bool
-	reflowDryRun      bool
-	reflowResume      bool
-	reflowResumeRun   string
-	reflowCheckpoint  string
-	reflowOverwrite   bool
-	reflowOnCollision string
-	reflowCollQuar    string
-	reflowProvenance  string
-	reflowProvRoot    string
-	reflowProvSuffix  string
-	reflowProvOnError string
-	reflowProvUnsafe  bool
-	reflowMetaPolicy  string
-	reflowMetaSets    []string
-	reflowMetaSrcKeys []string
-	reflowMetaDerived []string
-	reflowMetaMissing string
-	reflowMetaContent bool
-	reflowMetaStorage string
-	reflowMetaSuffix  string
-	reflowSymlinks    string
-	reflowHidden      string
-	reflowExcludes    []string
-	reflowPreserve    bool
-	reflowSrcFailure  string
+	reflowStdin               bool
+	reflowDest                string
+	reflowRewriteFrom         string
+	reflowRewriteTo           string
+	reflowParallel            int
+	reflowNoAdaptive          bool
+	reflowResourceProbeForRun = reflowpkg.DefaultResourceProbe()
+	reflowDryRun              bool
+	reflowResume              bool
+	reflowResumeRun           string
+	reflowCheckpoint          string
+	reflowOverwrite           bool
+	reflowOnCollision         string
+	reflowCollQuar            string
+	reflowProvenance          string
+	reflowProvRoot            string
+	reflowProvSuffix          string
+	reflowProvOnError         string
+	reflowProvUnsafe          bool
+	reflowMetaPolicy          string
+	reflowMetaSets            []string
+	reflowMetaSrcKeys         []string
+	reflowMetaDerived         []string
+	reflowMetaMissing         string
+	reflowMetaContent         bool
+	reflowMetaStorage         string
+	reflowMetaSuffix          string
+	reflowSymlinks            string
+	reflowHidden              string
+	reflowExcludes            []string
+	reflowPreserve            bool
+	reflowSrcFailure          string
 
 	reflowSrcRegion   string
 	reflowSrcProfile  string
@@ -326,7 +328,7 @@ type reflowRunRecord struct {
 	DryRun         bool   `json:"dry_run"`
 	Resume         bool   `json:"resume"`
 	Parallel       int    `json:"parallel"`
-	reflowConcurrencyStats
+	reflowpkg.ConcurrencyStats
 	Provenance *provenanceRunConfig `json:"provenance,omitempty"`
 	Metadata   *metadataRunConfig   `json:"metadata,omitempty"`
 }
@@ -335,7 +337,7 @@ type reflowSummaryRecord struct {
 	DestURI     string `json:"dest_uri"`
 	DryRun      bool   `json:"dry_run"`
 	OnCollision string `json:"on_collision"`
-	reflowConcurrencyStats
+	reflowpkg.ConcurrencyStats
 	DestIfAbsentHonored     *bool            `json:"dest_ifabsent_honored"`
 	DestIfAbsentProbeStatus string           `json:"dest_ifabsent_probe_status,omitempty"`
 	FallbackActive          bool             `json:"fallback_active"`
@@ -571,14 +573,14 @@ func (s *reflowRunStats) recordFallbackObject() {
 	s.fallbackObjects++
 }
 
-func (s *reflowRunStats) summary(destURI string, dryRun bool, collCfg collisionConfig, capability reflowIfAbsentCapability, concurrency reflowConcurrencyStats, invalidCount, errorCount int64) reflowSummaryRecord {
+func (s *reflowRunStats) summary(destURI string, dryRun bool, collCfg collisionConfig, capability reflowIfAbsentCapability, concurrency reflowpkg.ConcurrencyStats, invalidCount, errorCount int64) reflowSummaryRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return reflowSummaryRecord{
 		DestURI:                 destURI,
 		DryRun:                  dryRun,
 		OnCollision:             collCfg.Mode,
-		reflowConcurrencyStats:  concurrency,
+		ConcurrencyStats:        concurrency,
 		DestIfAbsentHonored:     capability.Honored,
 		DestIfAbsentProbeStatus: string(capability.ProbeStatus),
 		FallbackActive:          capability.FallbackActive,
@@ -1673,7 +1675,7 @@ func reflowToolVersion() string {
 	return "gonimbus " + version
 }
 
-func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMetadataConfig, concurrency reflowConcurrencyConfig) (provider.Provider, error) {
+func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMetadataConfig, concurrency reflowpkg.ConcurrencyConfig) (provider.Provider, error) {
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
@@ -1695,7 +1697,7 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 	})
 }
 
-func newSourceProvider(ctx context.Context, src *uri.ObjectURI, concurrency reflowConcurrencyConfig) (provider.Provider, error) {
+func newSourceProvider(ctx context.Context, src *uri.ObjectURI, concurrency reflowpkg.ConcurrencyConfig) (provider.Provider, error) {
 	if src == nil {
 		return nil, fmt.Errorf("source URI is nil")
 	}
@@ -2086,7 +2088,7 @@ func emitPreserveModeWarning(w io.Writer, srcProvider string, destProvider strin
 	}
 }
 
-func emitReflowConcurrencyClampWarning(ctx context.Context, w *output.JSONLWriter, stderr io.Writer, cfg reflowConcurrencyConfig) error {
+func emitReflowConcurrencyClampWarning(ctx context.Context, w *output.JSONLWriter, stderr io.Writer, cfg reflowpkg.ConcurrencyConfig) error {
 	if cfg.RequestedCeiling == cfg.EffectiveCeiling {
 		return nil
 	}
@@ -2772,8 +2774,8 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		destSpec.ForcePathStyle = reflowDstEndpoint != ""
 	}
 	destURI := destSpec.BaseURI
-	concurrencyCfg := resolveReflowConcurrency(reflowParallel, !reflowNoAdaptive, reflowResourceProbeForRun)
-	concurrencyLimiter := newReflowConcurrencyLimiter(concurrencyCfg)
+	concurrencyCfg := reflowpkg.ResolveConcurrency(reflowParallel, !reflowNoAdaptive, reflowResourceProbeForRun)
+	concurrencyLimiter := reflowpkg.NewConcurrencyLimiter(concurrencyCfg)
 
 	metaCfg, err := resolveMetadataConfig(cmd)
 	if err != nil {
@@ -2862,14 +2864,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 
 	_ = w.WriteAny(ctx, reflowRunRecordType, reflowRunRecord{
-		DestURI:                destURI,
-		CheckpointPath:         checkpointPath,
-		DryRun:                 reflowDryRun,
-		Resume:                 reflowResume,
-		Parallel:               reflowParallel,
-		reflowConcurrencyStats: concurrencyLimiter.snapshot(),
-		Provenance:             provCfg.runConfig(),
-		Metadata:               metaCfg.runConfig(),
+		DestURI:          destURI,
+		CheckpointPath:   checkpointPath,
+		DryRun:           reflowDryRun,
+		Resume:           reflowResume,
+		Parallel:         reflowParallel,
+		ConcurrencyStats: concurrencyLimiter.Snapshot(),
+		Provenance:       provCfg.runConfig(),
+		Metadata:         metaCfg.runConfig(),
 	})
 
 	if !reflowStdin {
@@ -2961,34 +2963,24 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		stats.record(rec)
 		_ = w.WriteAny(ctx, reflowRecordType, rec)
 	}
-	observeProviderResult := func(err error) {
-		switch {
-		case err == nil:
-			concurrencyLimiter.observeSuccess()
-		case provider.IsThrottled(err):
-			concurrencyLimiter.observeThrottle()
-		case reflowConcurrencyConnectionError(err):
-			concurrencyLimiter.observeConnectionError()
-		}
-	}
 	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions) (int64, error) {
-		release, err := concurrencyLimiter.acquire(ctx)
+		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, err
 		}
 		defer release()
 		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
-		observeProviderResult(err)
+		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, err
 	}
 	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
-		release, err := concurrencyLimiter.acquire(ctx)
+		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, provider.PutResult{}, err
 		}
 		defer release()
 		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
-		observeProviderResult(err)
+		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, result, err
 	}
 	recordFatalReflowError := func(err error) bool {
@@ -3146,7 +3138,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							task.SourceLastMod = meta.LastModified
 						}
 					} else if metaCfg.needsSourceHead() || needsSourceHeadForCollision {
-						observeProviderResult(err)
+						concurrencyLimiter.ObserveProviderResult(err)
 						if recordFatalReflowError(err) {
 							continue
 						}
@@ -3252,7 +3244,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 						}
 					} else if !provider.IsNotFound(headErr) {
-						observeProviderResult(headErr)
+						concurrencyLimiter.ObserveProviderResult(headErr)
 						if recordFatalReflowError(headErr) {
 							continue
 						}
@@ -3291,7 +3283,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								case provider.IsNotFound(headErr):
 									bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions)
 								default:
-									observeProviderResult(headErr)
+									concurrencyLimiter.ObserveProviderResult(headErr)
 									err = headErr
 								}
 							} else {
@@ -3321,7 +3313,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						dstMeta, headErr := dst.Head(ctx, dstKey)
 						if headErr != nil {
-							observeProviderResult(headErr)
+							concurrencyLimiter.ObserveProviderResult(headErr)
 							if recordFatalReflowError(headErr) {
 								continue
 							}
@@ -3331,7 +3323,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta)
 						if dupErr != nil {
-							observeProviderResult(dupErr)
+							concurrencyLimiter.ObserveProviderResult(dupErr)
 							if recordFatalReflowError(dupErr) {
 								continue
 							}
@@ -3603,7 +3595,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	close(tasks)
 	wg.Wait()
-	_ = w.WriteAny(context.Background(), reflowSummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.snapshot(), invalidCount.Load(), errorCount.Load()))
+	_ = w.WriteAny(context.Background(), reflowSummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
 
 	fatalRunErr := currentFatalReflowError()
 	if fatalRunErr != nil || ctx.Err() != nil {
