@@ -2,6 +2,10 @@
 
 This document describes the intended internal architecture for `gonimbus` as a hybrid **library + CLI + optional server** focused on **inspection/crawl/inventory** of cloud object storage.
 
+Core workflow architecture follows
+`docs/architecture/adr/ADR-0006-cli-as-adapter-over-library-engines.md`: the
+CLI is an adapter over embeddable engines for provider-general operations.
+
 ## High-Level Components
 
 ## Indexing (Crawl-Backed)
