@@ -14,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 )
 
 type inspectPairMockProvider struct {
@@ -254,7 +255,7 @@ func TestInspectPairFlagValidation(t *testing.T) {
 }
 
 func reflowLine(data map[string]any) string {
-	return otherLine(reflowRecordType, data)
+	return otherLine(reflowpkg.RecordType, data)
 }
 
 func otherLine(recordType string, data map[string]any) string {

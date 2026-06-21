@@ -17,6 +17,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -274,7 +275,7 @@ func parseInspectPairReflowLine(line string) (inspectPairReflowRecord, bool, err
 	if err := json.Unmarshal([]byte(line), &env); err != nil {
 		return inspectPairReflowRecord{}, false, err
 	}
-	if env.Type != reflowRecordType {
+	if env.Type != reflowpkg.RecordType {
 		return inspectPairReflowRecord{}, false, nil
 	}
 	var rec inspectPairReflowRecord
