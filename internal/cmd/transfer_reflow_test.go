@@ -199,10 +199,10 @@ func TestTransferReflowEmitsResourceClampConcurrencyFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stderr, "effective concurrency ceiling clamped to 1")
 
-	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
 	require.Contains(t, string(warn.Data), "REFLOW_CONCURRENCY_CEILING_CLAMPED")
 
-	run := requireRecord(t, stdout, reflowRunRecordType, "")
+	run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
 	require.Contains(t, string(run.Data), `"concurrency_ceiling_requested":100`)
 	require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":1`)
 	require.Contains(t, string(run.Data), `"adaptive_enabled":true`)
@@ -979,7 +979,7 @@ func TestTransferReflowCommand_ProvenanceDefaultOffWritesNoSidecar(t *testing.T)
 	require.NoError(t, err)
 	require.False(t, dst.hasObject("source/file.xml.gnb.json"))
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.NotContains(t, string(complete.Data), `"provenance"`)
 	require.NotContains(t, string(complete.Data), `"collision"`)
 	require.Empty(t, dst.headCallsSnapshot())
@@ -1000,7 +1000,7 @@ func TestTransferReflowCommand_ProvenanceLandedWritesSidecarAndRef(t *testing.T)
 	require.Contains(t, string(dst.mustObject("source/file.xml.gnb.json")), `"last_modified":"2026-01-15T20:53:44Z"`)
 	require.Contains(t, string(dst.mustObject("source/file.xml.gnb.json")), `"etag":"dest-source/file.xml"`)
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":`)
 	require.NotContains(t, string(complete.Data), `"collision"`)
 }
@@ -1017,9 +1017,9 @@ func TestTransferReflowCommand_ProvenanceMirroredRootFileWritesSidecarAndURI(t *
 	sidecar := readSidecar(t, dst, "source/file.xml.gnb.json")
 	require.Equal(t, "landed", sidecar["action"])
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":"`+sidecarRoot+`source/file.xml.gnb.json"}`)
-	run := requireRecord(t, stdout, reflowRunRecordType, "")
+	run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
 	require.Contains(t, string(run.Data), `"placement":{"mode":"mirrored-root","sidecar_root":"`+sidecarRoot+`"}`)
 }
 
@@ -1043,7 +1043,7 @@ func TestTransferReflowCommand_ProvenanceMirroredRootS3WritesUnderRootPrefix(t *
 	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/source/file.xml.gnb.json")
 	require.Equal(t, "landed", sidecar["action"])
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"key":"runs/run-001/sidecars/source/file.xml.gnb.json"`)
 	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
 }
@@ -1069,7 +1069,7 @@ func TestTransferReflowCommand_ProvenanceMirroredRootUsesMixedSegmentRenderedKey
 	sidecar := readSidecar(t, dst, "runs/run-001/sidecars/"+renderedKey+".gnb.json")
 	require.Equal(t, "landed", sidecar["action"])
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"dest_key":"data/`+renderedKey+`"`)
 	require.Contains(t, string(complete.Data), `"key":"runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
 	require.Contains(t, string(complete.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/`+renderedKey+`.gnb.json"`)
@@ -1091,7 +1091,7 @@ func TestTransferReflowCommand_ProvenanceDuplicateSkipOverwritesSidecar(t *testi
 	require.Equal(t, "skipped.duplicate", sidecar["action"])
 	require.Contains(t, string(dst.mustObject("source/file.xml.gnb.json")), `"etag":"same-etag"`)
 
-	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
+	skipped := requireRecord(t, stdout, reflowpkg.RecordType, "skipped")
 	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
 	require.Contains(t, string(skipped.Data), `"provenance":{"written":true,"key":"source/file.xml.gnb.json","uri":`)
 }
@@ -1120,7 +1120,7 @@ func TestTransferReflowCommand_ProvenanceMirroredRootDuplicateSkipOverwritesSide
 	require.Equal(t, "skipped.duplicate", sidecar["action"])
 	require.Contains(t, string(dst.mustObject("runs/run-001/sidecars/source/file.xml.gnb.json")), `"etag":"same-etag"`)
 
-	skipped := requireRecord(t, stdout, reflowRecordType, "skipped")
+	skipped := requireRecord(t, stdout, reflowpkg.RecordType, "skipped")
 	require.Contains(t, string(skipped.Data), `"reason":"collision.duplicate"`)
 	require.Contains(t, string(skipped.Data), `"key":"runs/run-001/sidecars/source/file.xml.gnb.json"`)
 	require.Contains(t, string(skipped.Data), `"uri":"s3://dest-bucket/runs/run-001/sidecars/source/file.xml.gnb.json"`)
@@ -1139,7 +1139,7 @@ func TestTransferReflowCommand_ProvenanceQuarantineWritesSidecarUnderPrefix(t *t
 	require.Contains(t, string(dst.mustObject("_unresolved/source/file.xml.gnb.json")), `"routing_class":"quarantine"`)
 	require.Contains(t, string(dst.mustObject("_unresolved/source/file.xml.gnb.json")), `"quarantine_prefix":"_unresolved"`)
 
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"_unresolved/source/file.xml.gnb.json"`)
 }
 
@@ -1154,9 +1154,9 @@ func TestTransferReflowCommand_ProvenanceWriteFailureWarnsAndCompletes(t *testin
 	require.True(t, dst.hasObject("source/file.xml"))
 	require.False(t, dst.hasObject("source/file.xml.gnb.json"))
 
-	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
 	require.Contains(t, string(warn.Data), "PROVENANCE_WRITE_FAILED")
-	complete := requireRecord(t, stdout, reflowRecordType, "complete")
+	complete := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json","uri":`)
 }
 
@@ -1174,7 +1174,7 @@ func TestTransferReflowCommand_ProvenanceWriteFailureFailsRecord(t *testing.T) {
 
 	errRecord := requireRecord(t, stdout, output.TypeError, "")
 	require.Contains(t, string(errRecord.Data), "provenance sidecar write failed")
-	failed := requireRecord(t, stdout, reflowRecordType, "failed")
+	failed := requireRecord(t, stdout, reflowpkg.RecordType, "failed")
 	require.Contains(t, string(failed.Data), `"reason":"provenance.write_failed"`)
 	require.Contains(t, string(failed.Data), `"provenance":{"written":false,"key":"source/file.xml.gnb.json","uri":`)
 }
@@ -1208,7 +1208,7 @@ func TestTransferReflowCommand_CollisionSkipDuplicateEmitsNestedCollision(t *tes
 	skipped := requireReflowData(t, stdout, "skipped")
 	require.Equal(t, "collision.duplicate", skipped.Reason)
 	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "same-etag", int64(len("payload")))
-	requireNoLegacyCollisionKeys(t, requireRecord(t, stdout, reflowRecordType, "skipped").Data)
+	requireNoLegacyCollisionKeys(t, requireRecord(t, stdout, reflowpkg.RecordType, "skipped").Data)
 }
 
 func TestTransferReflowCommand_IfAbsentFallbackSkipsDuplicateAndSummarizes(t *testing.T) {
@@ -1233,7 +1233,7 @@ func TestTransferReflowCommand_IfAbsentFallbackSkipsDuplicateAndSummarizes(t *te
 	require.Equal(t, "collision.duplicate", skipped.Reason)
 	requireCollisionEqual(t, skipped, collisionDuplicate, decisionHeadFallback, "same-etag", int64(len("payload")))
 
-	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
 	require.Contains(t, string(warn.Data), ifAbsentFallbackWarning)
 	summary := requireReflowSummaryData(t, stdout)
 	require.NotNil(t, summary.DestIfAbsentHonored)
@@ -1294,7 +1294,7 @@ func TestTransferReflowCommand_IfAbsentFallbackInconclusiveProbeFailsClosed(t *t
 	require.Equal(t, "collision.exists.conflict", failed.Reason)
 	requireCollisionEqual(t, failed, collisionConflict, decisionHeadFallback, "old-etag", int64(len("old payload")))
 
-	warn := requireRecord(t, stdout, reflowWarningRecord, "")
+	warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
 	require.Contains(t, string(warn.Data), `"dest_ifabsent_probe_status":"inconclusive"`)
 	require.Contains(t, string(warn.Data), `"dest_ifabsent_honored":null`)
 	summary := requireReflowSummaryData(t, stdout)
@@ -1430,7 +1430,7 @@ func TestTransferReflowCommand_CollisionZeroByteDuplicatePreservesObservedSize(t
 
 	skipped := requireReflowData(t, stdout, "skipped")
 	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "empty-etag", 0)
-	record := requireRecord(t, stdout, reflowRecordType, "skipped")
+	record := requireRecord(t, stdout, reflowpkg.RecordType, "skipped")
 	require.Contains(t, string(record.Data), `"dest_size_observed":0`)
 	requireNoLegacyCollisionKeys(t, record.Data)
 }
@@ -1615,12 +1615,12 @@ func TestTransferReflowCommand_FileSourceToFileDestCopiesTreeWithRedactedSourceU
 	require.NoError(t, err, stderr.String())
 	require.Equal(t, "payload", string(mustReadFile(t, filepath.Join(destDir, "nested", "file.txt"))))
 
-	complete := requireRecord(t, stdout.String(), reflowRecordType, "complete")
+	complete := requireRecord(t, stdout.String(), reflowpkg.RecordType, "complete")
 	require.Contains(t, string(complete.Data), `"source_uri":"file://local/nested/file.txt"`)
 	require.Contains(t, string(complete.Data), `"source_bucket":"local"`)
 	require.NotContains(t, string(complete.Data), srcDir)
 
-	source := requireRecord(t, stdout.String(), reflowSourceRecordType, "")
+	source := requireRecord(t, stdout.String(), reflowpkg.SourceRecordType, "")
 	require.Contains(t, string(source.Data), `"source_root":"`+srcDir+`"`)
 	preflight := requireRecord(t, stdout.String(), output.TypePreflight, "")
 	require.Contains(t, string(preflight.Data), `"capability":"source.file.enumerate"`)
@@ -2247,7 +2247,7 @@ func TestTransferReflowCommand_MarkDestKeyObservedFailureStillEmitsCompleteAndPr
 	require.NotNil(t, complete.Provenance)
 	require.True(t, complete.Provenance.Written)
 
-	require.Contains(t, stdout, reflowWarningRecord)
+	require.Contains(t, stdout, reflowpkg.WarningRecordType)
 	require.Contains(t, stdout, "REFLOW_ARBITRATION_STATE_WRITE_FAILED")
 	requireNoRecordType(t, stdout, output.TypeError)
 }
@@ -3636,8 +3636,8 @@ func TestWriteProvenanceSidecarWarnsOnFailure(t *testing.T) {
 	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: sensitiveErr}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorWarn, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.False(t, fatal)
-	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
-	warn := requireRecord(t, stdout.String(), reflowWarningRecord, "")
+	require.Equal(t, &reflowpkg.ProvenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
+	warn := requireRecord(t, stdout.String(), reflowpkg.WarningRecordType, "")
 	require.Contains(t, string(warn.Data), "PROVENANCE_WRITE_FAILED")
 	require.Contains(t, string(warn.Data), "provenance sidecar write failed: provider error redacted")
 	require.NotContains(t, string(warn.Data), "SENSITIVE-MARKER")
@@ -3655,7 +3655,7 @@ func TestWriteProvenanceSidecarFailsOnFailure(t *testing.T) {
 	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorFail, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.True(t, fatal)
-	require.Equal(t, &provenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
+	require.Equal(t, &reflowpkg.ProvenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
 	require.Contains(t, stdout.String(), output.TypeError)
 	require.Contains(t, stdout.String(), "provenance sidecar write failed")
 }
@@ -3994,27 +3994,27 @@ type testRecordEnvelope struct {
 }
 
 type testReflowData struct {
-	SourceURI    string         `json:"source_uri"`
-	SourceRoot   string         `json:"source_root"`
-	SourceKey    string         `json:"source_key"`
-	SourceETag   string         `json:"source_etag"`
-	SourceSize   int64          `json:"source_size_bytes"`
-	DestURI      string         `json:"dest_uri"`
-	DestKey      string         `json:"dest_key"`
-	Bytes        int64          `json:"bytes"`
-	Status       string         `json:"status"`
-	Reason       string         `json:"reason"`
-	RoutingClass string         `json:"routing_class"`
-	Collision    *collisionInfo `json:"collision"`
-	Provenance   *provenanceRef `json:"provenance"`
+	SourceURI    string                   `json:"source_uri"`
+	SourceRoot   string                   `json:"source_root"`
+	SourceKey    string                   `json:"source_key"`
+	SourceETag   string                   `json:"source_etag"`
+	SourceSize   int64                    `json:"source_size_bytes"`
+	DestURI      string                   `json:"dest_uri"`
+	DestKey      string                   `json:"dest_key"`
+	Bytes        int64                    `json:"bytes"`
+	Status       string                   `json:"status"`
+	Reason       string                   `json:"reason"`
+	RoutingClass string                   `json:"routing_class"`
+	Collision    *reflowpkg.CollisionInfo `json:"collision"`
+	Provenance   *reflowpkg.ProvenanceRef `json:"provenance"`
 }
 
 type testErrorData struct {
-	Code      string         `json:"code"`
-	Message   string         `json:"message"`
-	Key       string         `json:"key"`
-	Details   map[string]any `json:"details"`
-	Collision *collisionInfo `json:"collision"`
+	Code      string                   `json:"code"`
+	Message   string                   `json:"message"`
+	Key       string                   `json:"key"`
+	Details   map[string]any           `json:"details"`
+	Collision *reflowpkg.CollisionInfo `json:"collision"`
 }
 
 type testReflowSummaryData struct {
@@ -4066,7 +4066,7 @@ func requireRecord(t *testing.T, stdout string, recordType string, status string
 
 func requireReflowData(t *testing.T, stdout string, status string) testReflowData {
 	t.Helper()
-	record := requireRecord(t, stdout, reflowRecordType, status)
+	record := requireRecord(t, stdout, reflowpkg.RecordType, status)
 	var data testReflowData
 	require.NoError(t, json.Unmarshal(record.Data, &data))
 	return data
@@ -4074,7 +4074,7 @@ func requireReflowData(t *testing.T, stdout string, status string) testReflowDat
 
 func requireReflowSummaryData(t *testing.T, stdout string) testReflowSummaryData {
 	t.Helper()
-	record := requireRecord(t, stdout, reflowSummaryRecordType, "")
+	record := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
 	var data testReflowSummaryData
 	require.NoError(t, json.Unmarshal(record.Data, &data))
 	return data
@@ -4089,7 +4089,7 @@ func requireReflowRecords(t *testing.T, stdout string) []testReflowData {
 		}
 		var record testRecordEnvelope
 		require.NoError(t, json.Unmarshal([]byte(line), &record))
-		if record.Type != reflowRecordType {
+		if record.Type != reflowpkg.RecordType {
 			continue
 		}
 		var data testReflowData
