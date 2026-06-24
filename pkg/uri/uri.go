@@ -1,7 +1,7 @@
 // Package uri provides parsing of cloud object-storage URIs in the
 // scheme-bucket-key/prefix/pattern shape used throughout gonimbus.
 //
-// Supported schemes as of v0.2.x: s3, file.
+// Supported schemes as of v0.3.x: s3, gs, file.
 //
 // Glob pattern characters in the key, including *, ?, [, ], {, }, and **, are
 // recognized and surface via ObjectURI.IsPattern. The original pattern is
@@ -43,6 +43,7 @@ var (
 //
 // Example URIs:
 //   - s3://bucket/key/path.txt
+//   - gs://bucket/key/path.txt
 //   - s3://bucket/prefix/
 //   - s3://bucket/prefix/**/*.parquet
 //   - file:///absolute/path
@@ -74,13 +75,17 @@ func (u *ObjectURI) String() string {
 		}
 		return "file://" + key
 	}
+	scheme := u.Provider
+	if scheme == "gcs" {
+		scheme = "gs"
+	}
 	if u.Pattern != "" {
-		return fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, u.Pattern)
+		return fmt.Sprintf("%s://%s/%s", scheme, u.Bucket, u.Pattern)
 	}
 	if u.Key != "" {
-		return fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, u.Key)
+		return fmt.Sprintf("%s://%s/%s", scheme, u.Bucket, u.Key)
 	}
-	return fmt.Sprintf("%s://%s/", u.Provider, u.Bucket)
+	return fmt.Sprintf("%s://%s/", scheme, u.Bucket)
 }
 
 // IsPattern returns true if the URI contains glob pattern characters.
@@ -101,6 +106,7 @@ func (u *ObjectURI) IsPrefix() bool {
 //   - s3://bucket/key
 //   - s3://bucket/prefix/
 //   - s3://bucket/prefix/**/*.parquet
+//   - gs://bucket/key
 //   - file:///absolute/path
 //   - file:///absolute/path/
 //
@@ -117,12 +123,17 @@ func ParseURI(uri string) (*ObjectURI, error) {
 		return nil, fmt.Errorf("%w: missing scheme (expected s3://...)", ErrInvalidURI)
 	}
 
-	provider := strings.ToLower(uri[:schemeEnd])
-	if provider == "file" {
+	scheme := strings.ToLower(uri[:schemeEnd])
+	if scheme == "file" {
 		return parseFileURI(uri, schemeEnd)
 	}
-	if provider != "s3" {
-		return nil, fmt.Errorf("%w: %s (supported: s3, file)", ErrUnsupportedProvider, provider)
+	provider := scheme
+	if scheme == "gs" {
+		provider = "gcs"
+	} else if scheme == "gcs" {
+		return nil, fmt.Errorf("%w: gcs (use canonical gs:// for Google Cloud Storage; supported: s3, gs, file)", ErrUnsupportedProvider)
+	} else if scheme != "s3" {
+		return nil, fmt.Errorf("%w: %s (supported: s3, gs, file)", ErrUnsupportedProvider, scheme)
 	}
 
 	// Everything after ://

@@ -62,7 +62,7 @@ per-object reads confined to the canonical tree beneath that root.
 
 ## Adding Another Provider
 
-For a future provider such as `gcs://bucket/key`, expected touch points are:
+For a future provider such as `gs://bucket/key`, expected touch points are:
 
 1. Register the accepted scheme and URI semantics in `pkg/uri`.
 2. Add `pkg/provider/gcs` implementing `provider.Provider` and any needed

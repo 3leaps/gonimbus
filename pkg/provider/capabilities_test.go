@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,4 +55,18 @@ func TestPutPreconditionValidate(t *testing.T) {
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestUnsupportedPreconditionIsDistinctFromFailedPrecondition(t *testing.T) {
+	err := &ProviderError{
+		Op:       "PutObjectConditional",
+		Provider: ProviderGCS,
+		Bucket:   "bucket",
+		Key:      "object",
+		Err:      ErrUnsupportedPrecondition,
+	}
+
+	require.True(t, IsUnsupportedPrecondition(err))
+	require.True(t, errors.Is(err, ErrUnsupportedPrecondition))
+	require.False(t, IsPreconditionFailed(err))
 }

@@ -39,6 +39,12 @@ var (
 
 	// ErrPreconditionFailed indicates an atomic write predicate did not hold.
 	ErrPreconditionFailed = errors.New("write precondition failed")
+
+	// ErrUnsupportedPrecondition indicates a provider does not support the
+	// requested atomic write predicate. This is distinct from
+	// ErrPreconditionFailed, which means the provider supports the predicate but
+	// the predicate evaluated false.
+	ErrUnsupportedPrecondition = errors.New("unsupported write precondition")
 )
 
 // ProviderError wraps provider-specific errors with context.
@@ -125,4 +131,10 @@ func IsAlreadyExists(err error) bool {
 // IsPreconditionFailed returns true if the error indicates a write precondition failed.
 func IsPreconditionFailed(err error) bool {
 	return errors.Is(err, ErrPreconditionFailed)
+}
+
+// IsUnsupportedPrecondition returns true if the provider explicitly rejected a
+// write precondition it cannot honor atomically.
+func IsUnsupportedPrecondition(err error) bool {
+	return errors.Is(err, ErrUnsupportedPrecondition)
 }
