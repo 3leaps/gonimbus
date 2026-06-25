@@ -11,13 +11,16 @@ Initial SDK pins:
 | Module                              | Version    | Proxy publish time     |
 | ----------------------------------- | ---------- | ---------------------- |
 | `cloud.google.com/go/storage`       | `v1.62.3`  | `2026-06-04T04:52:32Z` |
-| `google.golang.org/api`             | `v0.286.0` | `2026-06-22T16:57:59Z` |
+| `google.golang.org/api`             | `v0.285.0` | `2026-06-16T17:20:33Z` |
 | `golang.org/x/oauth2`               | `v0.36.0`  | `2026-02-11T19:14:10Z` |
 | `github.com/fsouza/fake-gcs-server` | `v1.54.0`  | `2026-02-14T05:17:49Z` |
 
-The intake also moves `go` to `1.25.8` because `google.golang.org/api v0.286.0`
-declares that minimum. Changed transitive `x/*` modules observed during the
-pin:
+The intake also moves `go` to `1.25.8` because `google.golang.org/api v0.285.0`
+declares that minimum. `google.golang.org/api v0.286.0` was intentionally not
+selected because its proxy publish time (`2026-06-22T16:57:59Z`) was still
+inside the seven-day cooling window at review time, and Slice 0 has no critical
+fix requiring a dated override. Changed transitive `x/*` modules observed
+during the pin:
 
 | Module                          | Version   | Proxy publish time     |
 | ------------------------------- | --------- | ---------------------- |
