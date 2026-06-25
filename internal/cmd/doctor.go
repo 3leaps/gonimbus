@@ -26,12 +26,13 @@ import (
 )
 
 var (
-	doctorProvider  string
-	doctorProfile   string
-	doctorLogFormat string
-	doctorEndpoint  string
-	doctorRegion    string
-	doctorProbeURI  string
+	doctorProvider   string
+	doctorProfile    string
+	doctorLogFormat  string
+	doctorEndpoint   string
+	doctorRegion     string
+	doctorGCPProject string
+	doctorProbeURI   string
 
 	newDoctorProbeProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (doctorS3ProbeProvider, error) {
 		return providerdispatch.NewSource(ctx, src, opts)
@@ -46,6 +47,7 @@ var doctorCmd = &cobra.Command{
 Examples:
   gonimbus doctor                             # Full environment check
   gonimbus doctor --provider s3               # S3-specific checks
+  gonimbus doctor --provider gcs --probe-uri gs://bucket/prefix/
   gonimbus doctor --provider s3 --profile dev # Check specific AWS profile
   gonimbus doctor --provider s3 --endpoint https://s3.example.com --region us-east-1 --probe-uri s3://bucket/prefix/`,
 	Run: runDoctor,
@@ -53,11 +55,12 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(doctorCmd)
-	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "", "Run provider-specific checks (s3|file)")
+	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "", "Run provider-specific checks (s3|gcs|file)")
 	doctorCmd.Flags().StringVar(&doctorProfile, "profile", "", "AWS profile to check (requires --provider s3)")
 	doctorCmd.Flags().StringVar(&doctorEndpoint, "endpoint", "", "Custom S3 endpoint (requires --provider s3)")
 	doctorCmd.Flags().StringVar(&doctorRegion, "region", "", "AWS region (requires --provider s3)")
-	doctorCmd.Flags().StringVar(&doctorProbeURI, "probe-uri", "", "Opt-in read-only provider probe target (s3://bucket[/prefix-or-key] or file:///path, requires --provider)")
+	doctorCmd.Flags().StringVar(&doctorGCPProject, "gcp-project", "", "GCP project hint for GCS probes (requires --provider gcs)")
+	doctorCmd.Flags().StringVar(&doctorProbeURI, "probe-uri", "", "Opt-in read-only provider probe target (s3://bucket[/prefix-or-key], gs://bucket[/prefix-or-key], or file:///path, requires --provider)")
 	doctorCmd.Flags().StringVar(&doctorLogFormat, "log-format", diagnosticLogFormatPlain, "diagnostic output format (plain or structured)")
 }
 
@@ -184,10 +187,11 @@ func runDoctor(cmd *cobra.Command, args []string) {
 }
 
 type doctorS3Options struct {
-	Profile  string
-	Endpoint string
-	Region   string
-	Probe    *doctorProbeTarget
+	Profile    string
+	Endpoint   string
+	Region     string
+	GCPProject string
+	Probe      *doctorProbeTarget
 }
 
 type doctorProbeTarget struct {
@@ -222,19 +226,23 @@ func doctorS3OptionsFromFlags() (*doctorS3Options, error) {
 	if doctorRegion != "" && doctorProvider != "s3" {
 		return nil, fmt.Errorf("--region requires --provider s3")
 	}
+	if doctorGCPProject != "" && doctorProvider != string(provider.ProviderGCS) {
+		return nil, fmt.Errorf("--gcp-project requires --provider gcs")
+	}
 	if doctorProbeURI != "" && doctorProvider == "" {
 		return nil, fmt.Errorf("--probe-uri requires --provider")
 	}
 	switch doctorProvider {
-	case "", string(provider.ProviderS3), string(provider.ProviderFile):
+	case "", string(provider.ProviderS3), string(provider.ProviderGCS), string(provider.ProviderFile):
 	default:
 		return nil, fmt.Errorf("unsupported --provider %q", doctorProvider)
 	}
 
 	opts := &doctorS3Options{
-		Profile:  strings.TrimSpace(doctorProfile),
-		Endpoint: strings.TrimSpace(doctorEndpoint),
-		Region:   strings.TrimSpace(doctorRegion),
+		Profile:    strings.TrimSpace(doctorProfile),
+		Endpoint:   strings.TrimSpace(doctorEndpoint),
+		Region:     strings.TrimSpace(doctorRegion),
+		GCPProject: strings.TrimSpace(doctorGCPProject),
 	}
 	if strings.TrimSpace(doctorProbeURI) != "" {
 		probe, err := parseDoctorProbeURI(doctorProbeURI)
@@ -257,10 +265,6 @@ func parseDoctorProbeURI(raw string) (*doctorProbeTarget, error) {
 	if parsed.IsPattern() {
 		return nil, fmt.Errorf("--probe-uri does not accept glob patterns; provide a bucket, prefix, or exact key")
 	}
-	if parsed.Provider == string(provider.ProviderGCS) {
-		return nil, fmt.Errorf("unsupported provider %q for --probe-uri; GCS doctor support lands with provider dispatch wiring", parsed.Provider)
-	}
-
 	op := doctorProbeOpHeadObject
 	if parsed.IsPrefix() {
 		op = doctorProbeOpListObjects
@@ -408,6 +412,9 @@ func runDoctorProviderProbe(ctx context.Context, out *diagnosticPrinter, checkNu
 			Endpoint:       opts.Endpoint,
 			Profile:        opts.Profile,
 			ForcePathStyle: opts.Endpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: opts.GCPProject,
 		},
 	})
 	if err != nil {

@@ -35,7 +35,7 @@ func commandSourceTargetForRead(in *uri.ObjectURI) commandSourceTarget {
 	return commandSourceTarget{ProviderURI: providerURI, QueryURI: queryURI, ProviderID: commandSourceProviderID(providerURI)}
 }
 
-func newCommandSourceProvider(ctx context.Context, src *uri.ObjectURI, command, region, profile, endpoint string) (provider.Provider, error) {
+func newCommandSourceProviderWithGCSProject(ctx context.Context, src *uri.ObjectURI, command, region, profile, endpoint, gcpProject string) (provider.Provider, error) {
 	return providerdispatch.NewSource(ctx, src, providerdispatch.SourceOptions{
 		Command: command,
 		S3: providerdispatch.S3Options{
@@ -43,6 +43,9 @@ func newCommandSourceProvider(ctx context.Context, src *uri.ObjectURI, command, 
 			Endpoint:       endpoint,
 			Profile:        profile,
 			ForcePathStyle: endpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: strings.TrimSpace(gcpProject),
 		},
 	})
 }
@@ -56,6 +59,8 @@ func commandSourceProviderID(in *uri.ObjectURI) string {
 		return "file:" + filepath.Clean(in.Key)
 	case string(provider.ProviderS3):
 		return "s3:" + in.Bucket
+	case string(provider.ProviderGCS):
+		return "gcs:" + in.Bucket
 	default:
 		return in.Provider + ":" + in.Bucket + ":" + in.Key
 	}
@@ -72,4 +77,14 @@ func cloneObjectURI(in *uri.ObjectURI) *uri.ObjectURI {
 		out.Key = strings.TrimPrefix(out.Key, "/")
 	}
 	return &out
+}
+
+func commandOutputProviderForInputs(inputs []string, fallback string) string {
+	for _, raw := range inputs {
+		parsed, err := uri.ParseURI(strings.TrimSpace(raw))
+		if err == nil && parsed.Provider != "" {
+			return parsed.Provider
+		}
+	}
+	return fallback
 }

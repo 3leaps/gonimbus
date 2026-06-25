@@ -125,6 +125,25 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "valid GCS YAML manifest",
+			content: `version: "1.0"
+connection:
+  provider: gcs
+  bucket: test-bucket
+  project: test-project
+match:
+  includes:
+    - "**/*.json"
+`,
+			filename: "manifest.yaml",
+			wantErr:  false,
+			validate: func(t *testing.T, m *Manifest) {
+				assert.Equal(t, "gcs", m.Connection.Provider)
+				assert.Equal(t, "test-bucket", m.Connection.Bucket)
+				assert.Equal(t, "test-project", m.Connection.Project)
+			},
+		},
+		{
 			name:     "manifest with $schema field",
 			content:  manifestWithSchemaYAML(),
 			filename: "with-schema.yaml",

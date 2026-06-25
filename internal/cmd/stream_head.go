@@ -33,6 +33,7 @@ func init() {
 	streamHeadCmd.Flags().StringVarP(&streamGetRegion, "region", "r", "", "AWS region")
 	streamHeadCmd.Flags().StringVarP(&streamGetProfile, "profile", "p", "", "AWS profile")
 	streamHeadCmd.Flags().StringVar(&streamGetEndpoint, "endpoint", "", "Custom S3 endpoint")
+	streamHeadCmd.Flags().StringVar(&streamGetGCPProject, "gcp-project", "", "GCP project hint for GCS")
 }
 
 func runStreamHead(cmd *cobra.Command, args []string) error {
@@ -48,7 +49,7 @@ func runStreamHead(cmd *cobra.Command, args []string) error {
 	}
 
 	target := commandSourceTargetForRead(parsed)
-	prov, err := newCommandSourceProvider(ctx, target.ProviderURI, "stream head", streamGetRegion, streamGetProfile, streamGetEndpoint)
+	prov, err := newCommandSourceProviderWithGCSProject(ctx, target.ProviderURI, "stream head", streamGetRegion, streamGetProfile, streamGetEndpoint, streamGetGCPProject)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}

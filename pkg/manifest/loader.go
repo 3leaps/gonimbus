@@ -141,9 +141,9 @@ func validateConnectionSemantics(m *Manifest) error {
 		return errors.New("manifest is nil")
 	}
 	switch strings.TrimSpace(m.Connection.Provider) {
-	case "s3":
+	case "s3", "gcs":
 		if strings.TrimSpace(m.Connection.Bucket) == "" {
-			return fmt.Errorf("connection.bucket is required when connection.provider=s3")
+			return fmt.Errorf("connection.bucket is required when connection.provider=%s", m.Connection.Provider)
 		}
 	case "file":
 		baseDir := strings.TrimSpace(m.Connection.BaseDir)

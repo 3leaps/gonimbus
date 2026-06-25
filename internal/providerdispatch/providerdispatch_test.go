@@ -11,6 +11,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	"github.com/3leaps/gonimbus/pkg/provider/gcs"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -95,6 +96,36 @@ func TestNewSourceBuildsFileProviderFromParsedURI(t *testing.T) {
 	require.Equal(t, providerfile.SymlinkPolicyFollow, got.SymlinkPolicy)
 }
 
+func TestNewSourceBuildsGCSProviderFromParsedURI(t *testing.T) {
+	var got gcs.Config
+	restore := UseFactoriesForTest(Factories{
+		GCS: func(_ context.Context, cfg gcs.Config) (provider.Provider, error) {
+			got = cfg
+			return dispatchTestProvider{}, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	src := &uri.ObjectURI{Provider: string(provider.ProviderGCS), Bucket: "source-bucket", Key: "prefix/object.txt"}
+	p, err := NewSource(context.Background(), src, SourceOptions{
+		Command: "inspect",
+		GCS: GCSOptions{
+			Project:             "gcp-project",
+			Anonymous:           true,
+			MaxIdleConnsPerHost: 32,
+			MaxConnsPerHost:     64,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.Equal(t, "source-bucket", got.Bucket)
+	require.Equal(t, "gcp-project", got.Project)
+	require.True(t, got.Anonymous)
+	require.Equal(t, 32, got.MaxIdleConnsPerHost)
+	require.Equal(t, 64, got.MaxConnsPerHost)
+}
+
 func TestNewDestinationBuildsS3Provider(t *testing.T) {
 	var got s3.Config
 	restore := UseFactoriesForTest(Factories{
@@ -130,6 +161,31 @@ func TestNewDestinationBuildsS3Provider(t *testing.T) {
 	require.Equal(t, 64, got.MaxConnsPerHost)
 }
 
+func TestNewDestinationBuildsGCSProviderForReadOnlyDestinationInspection(t *testing.T) {
+	var got gcs.Config
+	restore := UseFactoriesForTest(Factories{
+		GCS: func(_ context.Context, cfg gcs.Config) (provider.Provider, error) {
+			got = cfg
+			return dispatchTestProvider{}, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	p, err := NewDestination(context.Background(), DestinationOptions{
+		Command:   "inspect-pair",
+		Provider:  string(provider.ProviderGCS),
+		GCSBucket: "dest-bucket",
+		GCS: GCSOptions{
+			Project: "gcp-project",
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.Equal(t, "dest-bucket", got.Bucket)
+	require.Equal(t, "gcp-project", got.Project)
+}
+
 func TestNewDestinationBuildsFileProviderAndCreatesBaseDir(t *testing.T) {
 	var got providerfile.Config
 	restore := UseFactoriesForTest(Factories{
@@ -158,12 +214,12 @@ func TestNewDestinationBuildsFileProviderAndCreatesBaseDir(t *testing.T) {
 }
 
 func TestNewSourceUnsupportedProviderFailsClosedWithContext(t *testing.T) {
-	_, err := NewSource(context.Background(), &uri.ObjectURI{Provider: "gcs", Bucket: "bucket"}, SourceOptions{Command: "transfer-reflow"})
+	_, err := NewSource(context.Background(), &uri.ObjectURI{Provider: "azure", Bucket: "bucket"}, SourceOptions{Command: "transfer-reflow"})
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "transfer-reflow")
 	require.Contains(t, err.Error(), "source")
-	require.Contains(t, err.Error(), "gcs")
+	require.Contains(t, err.Error(), "azure")
 }
 
 func TestRequireCapabilityFailsClosedWithCommandProviderAndCapability(t *testing.T) {

@@ -35,10 +35,11 @@ Behavior:
 }
 
 var (
-	streamGetRegion   string
-	streamGetProfile  string
-	streamGetEndpoint string
-	streamGetChunk    int
+	streamGetRegion     string
+	streamGetProfile    string
+	streamGetEndpoint   string
+	streamGetGCPProject string
+	streamGetChunk      int
 )
 
 func init() {
@@ -47,6 +48,7 @@ func init() {
 	streamGetCmd.Flags().StringVarP(&streamGetRegion, "region", "r", "", "AWS region")
 	streamGetCmd.Flags().StringVarP(&streamGetProfile, "profile", "p", "", "AWS profile")
 	streamGetCmd.Flags().StringVar(&streamGetEndpoint, "endpoint", "", "Custom S3 endpoint")
+	streamGetCmd.Flags().StringVar(&streamGetGCPProject, "gcp-project", "", "GCP project hint for GCS")
 	streamGetCmd.Flags().IntVar(&streamGetChunk, "chunk-bytes", 64*1024, "Chunk size in bytes")
 }
 
@@ -63,7 +65,7 @@ func runStreamGet(cmd *cobra.Command, args []string) error {
 	}
 
 	target := commandSourceTargetForRead(parsed)
-	prov, err := newCommandSourceProvider(ctx, target.ProviderURI, "stream get", streamGetRegion, streamGetProfile, streamGetEndpoint)
+	prov, err := newCommandSourceProviderWithGCSProject(ctx, target.ProviderURI, "stream get", streamGetRegion, streamGetProfile, streamGetEndpoint, streamGetGCPProject)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}

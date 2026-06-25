@@ -164,6 +164,13 @@ func TestDoctorS3OptionsRequireProviderS3(t *testing.T) {
 			},
 			want: "--probe-uri requires --provider",
 		},
+		{
+			name: "--gcp-project",
+			configure: func() {
+				doctorGCPProject = "gcp-project"
+			},
+			want: "--gcp-project requires --provider gcs",
+		},
 	}
 
 	for _, tt := range tests {
@@ -237,7 +244,7 @@ func TestParseDoctorProbeURI(t *testing.T) {
 		{name: "bucket slash", raw: "s3://bucket/", wantOp: doctorProbeOpListObjects, wantKey: ""},
 		{name: "prefix", raw: "s3://bucket/some/prefix/", wantOp: doctorProbeOpListObjects, wantKey: "some/prefix/"},
 		{name: "key", raw: "s3://bucket/some/key.xml", wantOp: doctorProbeOpHeadObject, wantKey: "some/key.xml"},
-		{name: "non s3", raw: "gs://bucket/key", wantErr: "unsupported provider"},
+		{name: "gcs key", raw: "gs://bucket/key", wantOp: doctorProbeOpHeadObject, wantKey: "key"},
 		{name: "glob", raw: "s3://bucket/prefix/**/*.xml", wantErr: "does not accept glob patterns"},
 		{name: "question glob", raw: "s3://bucket/foo?bar", wantErr: "does not accept glob patterns"},
 	}
@@ -257,6 +264,32 @@ func TestParseDoctorProbeURI(t *testing.T) {
 			require.Equal(t, tt.wantKey, got.URI.Key)
 		})
 	}
+}
+
+func TestRunDoctorGCSProbeDispatchesProjectOption(t *testing.T) {
+	probe, err := parseDoctorProbeURI("gs://bucket/some/prefix/")
+	require.NoError(t, err)
+	fake := &fakeDoctorProbeProvider{}
+	var gotSrc *uri.ObjectURI
+	var gotOpts providerdispatch.SourceOptions
+	withDoctorProbeProvider(t, fake, &gotSrc, &gotOpts)
+	cmd, stdout, stderr := testCommandBuffers()
+	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
+	require.NoError(t, err)
+
+	ok := runDoctorProviderProbe(context.Background(), out, 1, 1, &doctorS3Options{
+		GCPProject: "gcp-project",
+		Probe:      probe,
+	}, "")
+
+	require.True(t, ok)
+	require.Empty(t, stderr.String())
+	require.Contains(t, stdout.String(), "op=list_objects_v2")
+	require.Equal(t, string(provider.ProviderGCS), gotSrc.Provider)
+	require.Equal(t, "bucket", gotSrc.Bucket)
+	require.Equal(t, "gcp-project", gotOpts.GCS.Project)
+	require.Len(t, fake.listCalls, 1)
+	require.Equal(t, "some/prefix/", fake.listCalls[0].Prefix)
 }
 
 func TestRunDoctorS3ProbeDispatchesListForBucketAndPrefix(t *testing.T) {
@@ -532,17 +565,20 @@ func resetDoctorFlags(t *testing.T) {
 	oldProfile := doctorProfile
 	oldEndpoint := doctorEndpoint
 	oldRegion := doctorRegion
+	oldGCPProject := doctorGCPProject
 	oldProbeURI := doctorProbeURI
 	doctorProvider = ""
 	doctorProfile = ""
 	doctorEndpoint = ""
 	doctorRegion = ""
+	doctorGCPProject = ""
 	doctorProbeURI = ""
 	t.Cleanup(func() {
 		doctorProvider = oldProvider
 		doctorProfile = oldProfile
 		doctorEndpoint = oldEndpoint
 		doctorRegion = oldRegion
+		doctorGCPProject = oldGCPProject
 		doctorProbeURI = oldProbeURI
 	})
 }

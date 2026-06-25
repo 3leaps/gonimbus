@@ -46,7 +46,8 @@
         "provider": {
           "type": "string",
           "enum": [
-            "s3"
+            "s3",
+            "gcs"
           ],
           "description": "Storage provider type"
         },
@@ -64,6 +65,10 @@
         "region": {
           "type": "string",
           "description": "AWS region (e.g., us-east-1)"
+        },
+        "project": {
+          "type": "string",
+          "description": "GCP project hint for provider=gcs"
         },
         "endpoint": {
           "type": "string",

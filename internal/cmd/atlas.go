@@ -72,6 +72,7 @@ func init() {
 	atlasBuildCmd.Flags().StringP("region", "r", "", "AWS region override")
 	atlasBuildCmd.Flags().StringP("profile", "p", "", "AWS profile")
 	atlasBuildCmd.Flags().String("endpoint", "", "Custom S3 endpoint")
+	atlasBuildCmd.Flags().String("gcp-project", "", "GCP project hint for GCS")
 	atlasBuildCmd.Flags().Bool("json", false, "Output build summary as JSON")
 	_ = atlasBuildCmd.MarkFlagRequired("from-index")
 	_ = atlasBuildCmd.MarkFlagRequired("run")
@@ -90,6 +91,7 @@ func runAtlasBuild(cmd *cobra.Command, args []string) error {
 	region, _ := cmd.Flags().GetString("region")
 	profile, _ := cmd.Flags().GetString("profile")
 	endpoint, _ := cmd.Flags().GetString("endpoint")
+	gcpProject, _ := cmd.Flags().GetString("gcp-project")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
 	db, indexSet, err := openIndexDBByID(ctx, strings.TrimSpace(indexID))
@@ -153,6 +155,9 @@ func runAtlasBuild(cmd *cobra.Command, args []string) error {
 			Profile:        profile,
 			Endpoint:       endpoint,
 			ForcePathStyle: endpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: strings.TrimSpace(gcpProject),
 		},
 	})
 	if err != nil {

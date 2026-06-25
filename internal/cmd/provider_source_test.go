@@ -44,3 +44,19 @@ func TestCommandSourceTargetForReadS3PreservesBucketAndKey(t *testing.T) {
 	require.Equal(t, parsed, target.QueryURI)
 	require.Equal(t, "s3:bucket", target.ProviderID)
 }
+
+func TestCommandSourceTargetForReadGCSPreservesBucketAndKey(t *testing.T) {
+	parsed, err := uri.ParseURI("gs://bucket/prefix/object.txt")
+	require.NoError(t, err)
+
+	target := commandSourceTargetForRead(parsed)
+
+	require.Equal(t, parsed, target.ProviderURI)
+	require.Equal(t, parsed, target.QueryURI)
+	require.Equal(t, "gcs:bucket", target.ProviderID)
+}
+
+func TestCommandOutputProviderForInputsUsesFirstURIProvider(t *testing.T) {
+	require.Equal(t, string(provider.ProviderGCS), commandOutputProviderForInputs([]string{"gs://bucket/object.txt"}, string(provider.ProviderS3)))
+	require.Equal(t, string(provider.ProviderS3), commandOutputProviderForInputs([]string{`{"type":"gonimbus.index.object.v1"}`}, string(provider.ProviderS3)))
+}

@@ -33,6 +33,7 @@ Examples:
 
   # Read-safe: minimal non-mutating calls
   gonimbus preflight crawl s3://bucket/data/**/*.parquet --mode read-safe
+  gonimbus preflight crawl gs://bucket/data/**/*.parquet --mode read-safe
 
   # Write-probe: minimal opt-in side effects under probe prefix
   gonimbus preflight write s3://bucket/ --mode write-probe --probe-strategy multipart-abort
@@ -59,6 +60,7 @@ var (
 	preflightRegion        string
 	preflightProfile       string
 	preflightEndpoint      string
+	preflightGCPProject    string
 	preflightMode          string
 	preflightProbeStrategy string
 	preflightProbePrefix   string
@@ -75,6 +77,7 @@ func init() {
 		c.Flags().StringVarP(&preflightRegion, "region", "r", "", "AWS region")
 		c.Flags().StringVarP(&preflightProfile, "profile", "p", "", "AWS profile")
 		c.Flags().StringVar(&preflightEndpoint, "endpoint", "", "Custom S3 endpoint")
+		c.Flags().StringVar(&preflightGCPProject, "gcp-project", "", "GCP project hint for GCS")
 		c.Flags().StringVar(&preflightMode, "mode", "read-safe", "Preflight mode (plan-only|read-safe|write-probe)")
 		c.Flags().StringVar(&preflightProbeStrategy, "probe-strategy", "multipart-abort", "Write probe strategy (multipart-abort|put-delete)")
 		c.Flags().StringVar(&preflightProbePrefix, "probe-prefix", "_gonimbus/probe/", "Probe prefix for write probes")
@@ -233,6 +236,9 @@ func createPreflightProvider(ctx context.Context, objURI *uri.ObjectURI) (provid
 			Endpoint:       preflightEndpoint,
 			Profile:        preflightProfile,
 			ForcePathStyle: preflightEndpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: preflightGCPProject,
 		},
 	})
 }

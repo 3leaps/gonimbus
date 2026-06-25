@@ -78,6 +78,34 @@ func TestProviderReadOperationsWithFakeServer(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, rangeBody.Close())
 	require.Equal(t, []byte("bcd"), rangeBytes)
+
+	prefixes, err := p.ListCommonPrefixes(ctx, provider.ListCommonPrefixesOptions{Prefix: "page/", Delimiter: "/"})
+	require.NoError(t, err)
+	require.Empty(t, prefixes.Prefixes)
+
+	delimited, err := p.ListWithDelimiter(ctx, provider.ListWithDelimiterOptions{Prefix: "page/", Delimiter: "/"})
+	require.NoError(t, err)
+	require.Empty(t, delimited.CommonPrefixes)
+	require.Equal(t, []string{"page/a.txt", "page/b.txt", "page/c.txt"}, summaryKeys(delimited.Objects))
+}
+
+func TestProviderDelimiterListingWithFakeServer(t *testing.T) {
+	ctx := context.Background()
+	p := newFakeProvider(t, []fakestorage.Object{
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "root/a.txt"}, Content: []byte("a")},
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "root/child/b.txt"}, Content: []byte("b")},
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "root/child/c.txt"}, Content: []byte("c")},
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "root/other/d.txt"}, Content: []byte("d")},
+	})
+
+	prefixes, err := p.ListCommonPrefixes(ctx, provider.ListCommonPrefixesOptions{Prefix: "root/", Delimiter: "/"})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"root/child/", "root/other/"}, prefixes.Prefixes)
+
+	delimited, err := p.ListWithDelimiter(ctx, provider.ListWithDelimiterOptions{Prefix: "root/", Delimiter: "/"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"root/a.txt"}, summaryKeys(delimited.Objects))
+	require.ElementsMatch(t, []string{"root/child/", "root/other/"}, delimited.CommonPrefixes)
 }
 
 func TestProviderReadOperationsMapNotFound(t *testing.T) {
@@ -99,6 +127,8 @@ func TestProviderReadInterfacesOnlyForSlice1(t *testing.T) {
 	var p any = &Provider{}
 
 	require.Implements(t, (*provider.Provider)(nil), p)
+	require.Implements(t, (*provider.PrefixLister)(nil), p)
+	require.Implements(t, (*provider.DelimiterLister)(nil), p)
 	require.Implements(t, (*provider.ObjectGetter)(nil), p)
 	require.Implements(t, (*provider.VersionedGetter)(nil), p)
 	require.Implements(t, (*provider.ObjectRanger)(nil), p)
