@@ -201,6 +201,10 @@ func wrapGCSError(op, bucket, key string, err error) error {
 
 	var apiErr *googleapi.Error
 	if errors.As(err, &apiErr) {
+		if isGCSThrottleError(apiErr) {
+			wrapped.Err = provider.ErrThrottled
+			return wrapped
+		}
 		switch apiErr.Code {
 		case http.StatusUnauthorized:
 			wrapped.Err = provider.ErrInvalidCredentials
@@ -260,6 +264,28 @@ func isGCSCredentialRefreshFailure(err error) bool {
 		err = errors.Unwrap(err)
 	}
 	return false
+}
+
+func isGCSThrottleError(err *googleapi.Error) bool {
+	if err == nil {
+		return false
+	}
+	for _, item := range err.Errors {
+		if isGCSThrottleReason(item.Reason) || isGCSThrottleReason(item.Message) {
+			return true
+		}
+	}
+	return isGCSThrottleReason(err.Message) || isGCSThrottleReason(err.Body)
+}
+
+func isGCSThrottleReason(value string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", ""))
+	switch normalized {
+	case "ratelimitexceeded", "userratelimitexceeded", "quotaexceeded", "resourceexhausted":
+		return true
+	default:
+		return strings.Contains(normalized, "resourceexhausted")
+	}
 }
 
 func objectSummaryFromAttrs(attrs *storage.ObjectAttrs) provider.ObjectSummary {
