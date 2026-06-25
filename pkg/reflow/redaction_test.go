@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/api/googleapi"
+
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -125,6 +127,29 @@ func TestSanitizeOperationCauseMessageRedactsURLsWithoutCredentialMaterial(t *te
 	}
 	if !strings.Contains(got, "visible=%3Credacted%3E") {
 		t.Fatalf("sanitized URL did not redact query value: %q", got)
+	}
+}
+
+func TestSanitizeOperationCauseMessageRedactsGoogleAPIError(t *testing.T) {
+	err := &googleapi.Error{
+		Code:    403,
+		Message: "GET https://storage.googleapis.com/bucket/key?X-Goog-Signature=SECRET-SIG&X-Goog-Credential=SECRET-CRED failed for worker@project.iam.gserviceaccount.com with refresh_token=SECRET-REFRESH",
+		Body:    `{"error":"worker@project.iam.gserviceaccount.com SECRET-REFRESH"}`,
+	}
+
+	got := SanitizeOperationCauseMessage(err)
+	if got != "provider error redacted" {
+		t.Fatalf("SanitizeOperationCauseMessage() = %q, want provider error redacted", got)
+	}
+	for _, marker := range []string{
+		"SECRET-SIG",
+		"SECRET-CRED",
+		"SECRET-REFRESH",
+		"worker@project.iam.gserviceaccount.com",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("sanitized googleapi error leaked marker %q in %q", marker, got)
+		}
 	}
 }
 
