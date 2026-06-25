@@ -34,6 +34,7 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                         |
 | `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, and capability interfaces.          |
 | `github.com/3leaps/gonimbus/pkg/provider/file` | Stable       | Local filesystem provider construction with `Config` and `New`.         |
+| `github.com/3leaps/gonimbus/pkg/provider/gcs`  | Experimental | GCS provider contract surface while GON-004 implementation lands.       |
 | `github.com/3leaps/gonimbus/pkg/provider/s3`   | Stable       | AWS S3 and S3-compatible provider construction with `Config` and `New`. |
 | `github.com/3leaps/gonimbus/pkg/reflow`        | Experimental | Reflow workflow substrate, starting with adaptive concurrency controls. |
 | `github.com/3leaps/gonimbus/pkg/reflowstate`   | Experimental | Reflow checkpoint state substrate.                                      |

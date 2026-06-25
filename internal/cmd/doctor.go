@@ -257,6 +257,9 @@ func parseDoctorProbeURI(raw string) (*doctorProbeTarget, error) {
 	if parsed.IsPattern() {
 		return nil, fmt.Errorf("--probe-uri does not accept glob patterns; provide a bucket, prefix, or exact key")
 	}
+	if parsed.Provider == string(provider.ProviderGCS) {
+		return nil, fmt.Errorf("unsupported provider %q for --probe-uri; GCS doctor support lands with provider dispatch wiring", parsed.Provider)
+	}
 
 	op := doctorProbeOpHeadObject
 	if parsed.IsPrefix() {

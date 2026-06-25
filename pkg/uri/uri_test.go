@@ -112,6 +112,25 @@ func TestParseURI(t *testing.T) {
 			},
 		},
 		{
+			name: "gcs canonical gs scheme",
+			uri:  "gs://my-bucket/path/to/object.txt",
+			want: &ObjectURI{
+				Provider: "gcs",
+				Bucket:   "my-bucket",
+				Key:      "path/to/object.txt",
+			},
+		},
+		{
+			name: "gcs canonical gs scheme with glob pattern",
+			uri:  "gs://my-bucket/data/**/*.json",
+			want: &ObjectURI{
+				Provider: "gcs",
+				Bucket:   "my-bucket",
+				Key:      "data/",
+				Pattern:  "data/**/*.json",
+			},
+		},
+		{
 			name: "file absolute path",
 			uri:  "file:///foo/bar",
 			want: &ObjectURI{
@@ -151,10 +170,10 @@ func TestParseURI(t *testing.T) {
 			errContains: "missing scheme",
 		},
 		{
-			name:        "unsupported scheme",
+			name:        "gcs scheme alias rejected",
 			uri:         "gcs://my-bucket/path",
 			wantErr:     ErrUnsupportedProvider,
-			errContains: "gcs",
+			errContains: "use canonical gs://",
 		},
 		{
 			name:        "file relative path rejected",
@@ -246,6 +265,16 @@ func TestObjectURI_String(t *testing.T) {
 			name: "file root",
 			uri:  &ObjectURI{Provider: "file", Bucket: "local", Key: "/"},
 			want: "file:///",
+		},
+		{
+			name: "gcs bucket with key renders canonical gs scheme",
+			uri:  &ObjectURI{Provider: "gcs", Bucket: "bucket", Key: "path/to/file.txt"},
+			want: "gs://bucket/path/to/file.txt",
+		},
+		{
+			name: "gcs bucket with pattern renders canonical gs scheme",
+			uri:  &ObjectURI{Provider: "gcs", Bucket: "bucket", Key: "data/", Pattern: "data/**/*.csv"},
+			want: "gs://bucket/data/**/*.csv",
 		},
 	}
 
