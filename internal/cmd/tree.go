@@ -40,6 +40,7 @@ For wildcard-in-the-middle search, use indexing (v0.1.3).
 
 Examples:
   gonimbus tree s3://bucket/prefix/
+  gonimbus tree gs://bucket/prefix/
   gonimbus tree s3://bucket/prefix/ --max-objects 100000 --max-pages 500
   gonimbus tree s3://bucket/prefix/ --output table
 
@@ -53,6 +54,7 @@ var (
 	treeRegion     string
 	treeProfile    string
 	treeEndpoint   string
+	treeGCPProject string
 	treeDelimiter  string
 	treeMaxObjects int
 	treeMaxPages   int
@@ -75,6 +77,7 @@ func init() {
 	treeCmd.Flags().StringVarP(&treeRegion, "region", "r", "", "AWS region")
 	treeCmd.Flags().StringVarP(&treeProfile, "profile", "p", "", "AWS profile")
 	treeCmd.Flags().StringVar(&treeEndpoint, "endpoint", "", "Custom S3 endpoint")
+	treeCmd.Flags().StringVar(&treeGCPProject, "gcp-project", "", "GCP project hint for GCS")
 	treeCmd.Flags().StringVar(&treeDelimiter, "delimiter", "/", "Delimiter for common prefixes")
 	treeCmd.Flags().IntVar(&treeMaxObjects, "max-objects", 2_000_000, "Max direct objects to count before truncating")
 	treeCmd.Flags().IntVar(&treeMaxPages, "max-pages", 10_000, "Max listing pages before truncating")
@@ -588,6 +591,9 @@ func createTreeProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Pr
 			Endpoint:       treeEndpoint,
 			Profile:        treeProfile,
 			ForcePathStyle: treeEndpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: treeGCPProject,
 		},
 	})
 }

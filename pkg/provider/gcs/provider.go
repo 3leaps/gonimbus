@@ -26,6 +26,8 @@ type Provider struct {
 
 var (
 	_ provider.Provider        = (*Provider)(nil)
+	_ provider.PrefixLister    = (*Provider)(nil)
+	_ provider.DelimiterLister = (*Provider)(nil)
 	_ provider.ObjectGetter    = (*Provider)(nil)
 	_ provider.VersionedGetter = (*Provider)(nil)
 	_ provider.ObjectRanger    = (*Provider)(nil)
@@ -123,6 +125,69 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 		return nil, p.wrapError("Head", key, err)
 	}
 	return objectMetaFromAttrs(attrs), nil
+}
+
+// ListCommonPrefixes returns immediate child prefixes for prefix discovery.
+func (p *Provider) ListCommonPrefixes(ctx context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	delimiter := opts.Delimiter
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	iter := p.client.Bucket(p.bucket).Objects(ctx, &storage.Query{Prefix: opts.Prefix, Delimiter: delimiter})
+	pager := iterator.NewPager(iter, clampMaxKeys(opts.MaxKeys, p.maxKeys), opts.ContinuationToken)
+
+	var attrs []*storage.ObjectAttrs
+	nextToken, err := pager.NextPage(&attrs)
+	if err != nil {
+		return nil, p.wrapError("ListCommonPrefixes", "", err)
+	}
+
+	prefixes := make([]string, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr != nil && attr.Prefix != "" {
+			prefixes = append(prefixes, attr.Prefix)
+		}
+	}
+	return &provider.ListCommonPrefixesResult{
+		Prefixes:          prefixes,
+		ContinuationToken: nextToken,
+		IsTruncated:       nextToken != "",
+	}, nil
+}
+
+// ListWithDelimiter returns direct objects and immediate child prefixes.
+func (p *Provider) ListWithDelimiter(ctx context.Context, opts provider.ListWithDelimiterOptions) (*provider.ListWithDelimiterResult, error) {
+	delimiter := opts.Delimiter
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	iter := p.client.Bucket(p.bucket).Objects(ctx, &storage.Query{Prefix: opts.Prefix, Delimiter: delimiter})
+	pager := iterator.NewPager(iter, clampMaxKeys(opts.MaxKeys, p.maxKeys), opts.ContinuationToken)
+
+	var attrs []*storage.ObjectAttrs
+	nextToken, err := pager.NextPage(&attrs)
+	if err != nil {
+		return nil, p.wrapError("ListWithDelimiter", "", err)
+	}
+
+	objects := make([]provider.ObjectSummary, 0, len(attrs))
+	prefixes := make([]string, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr == nil {
+			continue
+		}
+		if attr.Prefix != "" {
+			prefixes = append(prefixes, attr.Prefix)
+			continue
+		}
+		objects = append(objects, objectSummaryFromAttrs(attr))
+	}
+	return &provider.ListWithDelimiterResult{
+		Objects:           objects,
+		CommonPrefixes:    prefixes,
+		ContinuationToken: nextToken,
+		IsTruncated:       nextToken != "",
+	}, nil
 }
 
 // GetObject downloads an object as a stream.

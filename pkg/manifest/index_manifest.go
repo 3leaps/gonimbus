@@ -48,6 +48,9 @@ type IndexConnectionConfig struct {
 	// Region is the AWS region. Optional.
 	Region string `json:"region,omitempty" yaml:"region,omitempty"`
 
+	// Project is the optional GCP project hint for provider=gcs.
+	Project string `json:"project,omitempty" yaml:"project,omitempty"`
+
 	// Endpoint is a custom endpoint URL for S3-compatible storage. Optional.
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
 

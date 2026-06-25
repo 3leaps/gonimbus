@@ -505,6 +505,9 @@ func createProvider(ctx context.Context, m *manifest.Manifest) (provider.Provide
 			Profile:        m.Connection.Profile,
 			ForcePathStyle: m.Connection.Endpoint != "",
 		},
+		GCS: providerdispatch.GCSOptions{
+			Project: m.Connection.Project,
+		},
 	}
 	if m.Connection.Provider == string(provider.ProviderFile) {
 		baseDir := filepath.Clean(m.Connection.BaseDir)

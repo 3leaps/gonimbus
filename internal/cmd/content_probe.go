@@ -36,7 +36,7 @@ type contentProbeProvider interface {
 }
 
 var newContentProbeProvider = func(ctx context.Context, src *uri.ObjectURI) (contentProbeProvider, error) {
-	return newCommandSourceProvider(ctx, src, "content probe", contentProbeRegion, contentProbeProfile, contentProbeEndpoint)
+	return newCommandSourceProviderWithGCSProject(ctx, src, "content probe", contentProbeRegion, contentProbeProfile, contentProbeEndpoint, contentProbeGCPProject)
 }
 
 var contentProbeCmd = &cobra.Command{
@@ -82,6 +82,7 @@ var (
 	contentProbeRegion      string
 	contentProbeProfile     string
 	contentProbeEndpoint    string
+	contentProbeGCPProject  string
 	contentProbeRewriteFrom string
 )
 
@@ -95,6 +96,7 @@ func init() {
 	contentProbeCmd.Flags().StringVarP(&contentProbeRegion, "region", "r", "", "AWS region")
 	contentProbeCmd.Flags().StringVarP(&contentProbeProfile, "profile", "p", "", "AWS profile")
 	contentProbeCmd.Flags().StringVar(&contentProbeEndpoint, "endpoint", "", "Custom S3 endpoint")
+	contentProbeCmd.Flags().StringVar(&contentProbeGCPProject, "gcp-project", "", "GCP project hint for GCS")
 	contentProbeCmd.Flags().StringVar(&contentProbeRewriteFrom, "rewrite-from", "", "Rewrite source template used to seed path captures before derived evaluation")
 	_ = contentProbeCmd.MarkFlagRequired("config")
 }
@@ -196,7 +198,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	}
 
 	jobID := uuid.New().String()
-	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, string(provider.ProviderS3))
+	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, commandOutputProviderForInputs(inputs, string(provider.ProviderS3)))
 	defer func() { _ = w.Close() }()
 
 	var (

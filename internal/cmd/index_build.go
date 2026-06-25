@@ -881,20 +881,18 @@ func validateEndpointURL(endpoint string) error {
 	return nil
 }
 
-func parseS3BaseURI(baseURI string) (bucket string, prefix string, err error) {
-	parsed, err := url.Parse(baseURI)
+func parseBaseURIForProvider(baseURI string, providerName string) (bucket string, prefix string, err error) {
+	parsed, err := uri.ParseURI(baseURI)
 	if err != nil {
 		return "", "", err
 	}
-	if parsed.Scheme != "s3" {
-		return "", "", fmt.Errorf("expected s3:// URI, got scheme %q", parsed.Scheme)
+	if parsed.Provider != providerName {
+		return "", "", fmt.Errorf("base_uri provider %q does not match connection.provider %q", parsed.Provider, providerName)
 	}
-	bucket = parsed.Host
-	prefix = strings.TrimPrefix(parsed.Path, "/")
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+	if !parsed.IsPrefix() {
 		return "", "", fmt.Errorf("base uri path must end with '/': %s", baseURI)
 	}
-	return bucket, prefix, nil
+	return parsed.Bucket, parsed.Key, nil
 }
 
 type indexBuildFilters struct {
@@ -1047,7 +1045,7 @@ func deriveCrawlPrefixesForPlan(m *manifest.IndexManifest) ([]string, error) {
 	if m == nil {
 		return nil, fmt.Errorf("nil manifest")
 	}
-	_, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	_, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return nil, err
 	}
@@ -1073,11 +1071,11 @@ func compileScopePlan(ctx context.Context, m *manifest.IndexManifest) (*scope.Pl
 	if m == nil || m.Build == nil || m.Build.Scope == nil {
 		return nil, nil
 	}
-	if m.Connection.Provider != "s3" {
+	if m.Connection.Provider != string(provider.ProviderS3) && m.Connection.Provider != string(provider.ProviderGCS) {
 		return nil, fmt.Errorf("scope plan not supported for provider %q", m.Connection.Provider)
 	}
 
-	_, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	_, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return nil, err
 	}
@@ -1094,6 +1092,9 @@ func compileScopePlan(ctx context.Context, m *manifest.IndexManifest) (*scope.Pl
 				Endpoint:       m.Connection.Endpoint,
 				Profile:        m.Connection.Profile,
 				ForcePathStyle: m.Connection.Endpoint != "",
+			},
+			GCS: providerdispatch.GCSOptions{
+				Project: m.Connection.Project,
 			},
 		})
 		if err != nil {
@@ -1501,13 +1502,16 @@ func runCrawlForIndex(
 			Profile:        m.Connection.Profile,
 			ForcePathStyle: m.Connection.Endpoint != "",
 		},
+		GCS: providerdispatch.GCSOptions{
+			Project: m.Connection.Project,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create provider: %w", err)
 	}
 	defer func() { _ = prov.Close() }()
 
-	baseBucket, basePrefix, err := parseS3BaseURI(m.Connection.BaseURI)
+	baseBucket, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("parse base_uri: %w", err)
 	}

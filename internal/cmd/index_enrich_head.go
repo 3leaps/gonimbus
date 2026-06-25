@@ -31,9 +31,10 @@ const (
 )
 
 var (
-	enrichHeadProfile  string
-	enrichHeadRegion   string
-	enrichHeadEndpoint string
+	enrichHeadProfile    string
+	enrichHeadRegion     string
+	enrichHeadEndpoint   string
+	enrichHeadGCPProject string
 
 	newEnrichHeadProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (provider.Provider, error) {
 		return providerdispatch.NewSource(ctx, src, opts)
@@ -63,6 +64,7 @@ func init() {
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadProfile, "profile", "", "AWS profile")
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadRegion, "region", "", "AWS region override")
 	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadEndpoint, "endpoint", "", "Custom S3 endpoint override")
+	indexEnrichWithHeadCmd.Flags().StringVar(&enrichHeadGCPProject, "gcp-project", "", "GCP project hint for GCS")
 }
 
 type enrichHeadCheckpointPayload struct {
@@ -520,6 +522,9 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 			Profile:        strings.TrimSpace(opts.Profile),
 			Endpoint:       endpoint,
 			ForcePathStyle: endpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: strings.TrimSpace(enrichHeadGCPProject),
 		},
 	})
 }

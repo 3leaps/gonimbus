@@ -65,6 +65,9 @@ type ConnectionConfig struct {
 	// Region is the AWS region (e.g., "us-east-1"). Optional.
 	Region string `json:"region,omitempty" yaml:"region,omitempty"`
 
+	// Project is the optional GCP project hint for provider=gcs.
+	Project string `json:"project,omitempty" yaml:"project,omitempty"`
+
 	// Endpoint is a custom endpoint URL for S3-compatible storage. Optional.
 	// Example: "https://s3.wasabisys.com"
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`

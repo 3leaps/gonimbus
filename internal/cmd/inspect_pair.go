@@ -45,6 +45,7 @@ var (
 	inspectPairRegion               string
 	inspectPairProfile              string
 	inspectPairEndpoint             string
+	inspectPairGCPProject           string
 )
 
 type inspectPairProviderFactory func(context.Context, inspectPairScope) (provider.Provider, error)
@@ -55,12 +56,17 @@ var newInspectPairProvider inspectPairProviderFactory = func(ctx context.Context
 		Provider:    scope.Provider,
 		S3Bucket:    scope.Bucket,
 		S3Prefix:    scope.Prefix,
+		GCSBucket:   scope.Bucket,
+		GCSPrefix:   scope.Prefix,
 		FileBaseDir: scope.FileRoot,
 		S3: providerdispatch.S3Options{
 			Region:         inspectPairRegion,
 			Endpoint:       inspectPairEndpoint,
 			Profile:        inspectPairProfile,
 			ForcePathStyle: inspectPairEndpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: inspectPairGCPProject,
 		},
 	})
 }
@@ -74,6 +80,7 @@ func init() {
 	inspectPairCmd.Flags().StringVarP(&inspectPairRegion, "region", "r", "", "AWS region for destination HEADs")
 	inspectPairCmd.Flags().StringVarP(&inspectPairProfile, "profile", "p", "", "AWS profile for destination HEADs")
 	inspectPairCmd.Flags().StringVar(&inspectPairEndpoint, "endpoint", "", "Custom S3 endpoint for destination HEADs")
+	inspectPairCmd.Flags().StringVar(&inspectPairGCPProject, "gcp-project", "", "GCP project hint for GCS destination HEADs")
 }
 
 type inspectPairOptions struct {
@@ -253,11 +260,10 @@ func parseInspectPairScopes(rawScopes []string) ([]inspectPairScope, error) {
 		if raw == "" {
 			return nil, fmt.Errorf("empty destination scope")
 		}
-		parsed, err := parseReflowDest(raw)
+		scope, err := parseInspectPairScope(raw)
 		if err != nil {
 			return nil, err
 		}
-		scope := inspectPairScope{Provider: parsed.Provider, Bucket: parsed.Bucket, Prefix: parsed.Prefix, FileRoot: parsed.BaseDir}
 		if scope.Provider == string(provider.ProviderFile) {
 			abs, err := filepath.Abs(scope.FileRoot)
 			if err != nil {
@@ -268,6 +274,21 @@ func parseInspectPairScopes(rawScopes []string) ([]inspectPairScope, error) {
 		scopes = append(scopes, scope)
 	}
 	return scopes, nil
+}
+
+func parseInspectPairScope(raw string) (inspectPairScope, error) {
+	parsedURI, err := uri.ParseURI(raw)
+	if err == nil && parsedURI.Provider == string(provider.ProviderGCS) {
+		if !parsedURI.IsPrefix() {
+			return inspectPairScope{}, fmt.Errorf("expected destination scope prefix URI ending with '/'")
+		}
+		return inspectPairScope{Provider: parsedURI.Provider, Bucket: parsedURI.Bucket, Prefix: parsedURI.Key}, nil
+	}
+	parsed, err := parseReflowDest(raw)
+	if err != nil {
+		return inspectPairScope{}, err
+	}
+	return inspectPairScope{Provider: parsed.Provider, Bucket: parsed.Bucket, Prefix: parsed.Prefix, FileRoot: parsed.BaseDir}, nil
 }
 
 func parseInspectPairReflowLine(line string) (inspectPairReflowRecord, bool, error) {
@@ -339,7 +360,7 @@ func matchInspectPairScope(dest *uri.ObjectURI, scopes []inspectPairScope) (insp
 			continue
 		}
 		switch scope.Provider {
-		case string(provider.ProviderS3):
+		case string(provider.ProviderS3), string(provider.ProviderGCS):
 			if dest.Bucket != scope.Bucket {
 				continue
 			}
@@ -420,6 +441,9 @@ func inspectPairPathWithinRoot(pathValue string, root string) bool {
 func inspectPairScopeString(scope inspectPairScope) string {
 	if scope.Provider == string(provider.ProviderFile) {
 		return fileURI(scope.FileRoot) + "/"
+	}
+	if scope.Provider == string(provider.ProviderGCS) {
+		return fmt.Sprintf("gs://%s/%s", scope.Bucket, scope.Prefix)
 	}
 	return fmt.Sprintf("%s://%s/%s", scope.Provider, scope.Bucket, scope.Prefix)
 }

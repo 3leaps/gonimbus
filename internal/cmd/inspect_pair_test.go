@@ -148,6 +148,44 @@ func TestInspectPairRejectsOutOfScopeBeforeProviderConstruction(t *testing.T) {
 	require.Equal(t, int64(3), summary.InvalidDest)
 }
 
+func TestInspectPairAcceptsGCSExpectedDestScope(t *testing.T) {
+	mock := &inspectPairMockProvider{
+		meta: map[string]provider.ObjectMeta{
+			"root/verified.txt": {ObjectSummary: provider.ObjectSummary{Key: "root/verified.txt", Size: 10, ETag: "abc123"}},
+		},
+		errs: map[string]error{},
+	}
+	input := reflowLine(map[string]any{
+		"status":            "complete",
+		"source_uri":        "s3://src/verified.txt",
+		"dest_uri":          "gs://dst/root/verified.txt",
+		"source_size_bytes": 10,
+		"source_etag":       "abc123",
+	}) + "\n"
+
+	var gotScope inspectPairScope
+	var stdout bytes.Buffer
+	err := runInspectPair(context.Background(), strings.NewReader(input), &stdout, inspectPairOptions{
+		UseStdin:             true,
+		ExpectedDestPrefixes: []string{"gs://dst/root/"},
+		ProviderFactory: func(_ context.Context, scope inspectPairScope) (provider.Provider, error) {
+			gotScope = scope
+			return mock, nil
+		},
+	})
+	require.NoError(t, err)
+
+	records, summary := decodeInspectPairOutput(t, stdout.String())
+	require.Len(t, records, 1)
+	require.Equal(t, "verified", records[0].Verdict)
+	require.Equal(t, "gs://dst/root/", records[0].ExpectedDestPrefix)
+	require.Equal(t, string(provider.ProviderGCS), gotScope.Provider)
+	require.Equal(t, "dst", gotScope.Bucket)
+	require.Equal(t, "root/", gotScope.Prefix)
+	require.Equal(t, []string{"root/verified.txt"}, mock.headCalls)
+	require.Equal(t, int64(1), summary.Verified)
+}
+
 func TestInspectPairFileSymlinkEscapeIsInvalidBeforeHead(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

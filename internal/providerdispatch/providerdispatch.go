@@ -9,6 +9,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	"github.com/3leaps/gonimbus/pkg/provider/gcs"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -23,10 +24,20 @@ type S3Options struct {
 	MaxConnsPerHost     int
 }
 
+// GCSOptions contains command-supplied GCS construction options.
+type GCSOptions struct {
+	Project              string
+	Anonymous            bool
+	MaxIdleConnsPerHost  int
+	MaxConnsPerHost      int
+	WriterChunkSizeBytes int
+}
+
 // SourceOptions contains source-provider construction policy.
 type SourceOptions struct {
 	Command               string
 	S3                    S3Options
+	GCS                   GCSOptions
 	FileMetadataSidecar   string
 	FileBaseDir           string
 	FileSymlinkPolicy     string
@@ -45,6 +56,9 @@ type DestinationOptions struct {
 	// construction uses the bucket; key prefixing remains with the caller.
 	S3Prefix    string
 	S3          S3Options
+	GCSBucket   string
+	GCSPrefix   string
+	GCS         GCSOptions
 	FileBaseDir string
 
 	FileMetadataSidecar string
@@ -54,12 +68,16 @@ type DestinationOptions struct {
 // to preserve their existing no-network provider stubs.
 type Factories struct {
 	S3   func(context.Context, s3.Config) (provider.Provider, error)
+	GCS  func(context.Context, gcs.Config) (provider.Provider, error)
 	File func(providerfile.Config) (provider.Provider, error)
 }
 
 var factories = Factories{
 	S3: func(ctx context.Context, cfg s3.Config) (provider.Provider, error) {
 		return s3.New(ctx, cfg)
+	},
+	GCS: func(ctx context.Context, cfg gcs.Config) (provider.Provider, error) {
+		return gcs.New(ctx, cfg)
 	},
 	File: func(cfg providerfile.Config) (provider.Provider, error) {
 		return providerfile.New(cfg)
@@ -72,6 +90,9 @@ func UseFactoriesForTest(next Factories) func() {
 	old := factories
 	if next.S3 != nil {
 		factories.S3 = next.S3
+	}
+	if next.GCS != nil {
+		factories.GCS = next.GCS
 	}
 	if next.File != nil {
 		factories.File = next.File
@@ -96,6 +117,15 @@ func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (pro
 			ForcePathStyle:      opts.S3.ForcePathStyle,
 			MaxIdleConnsPerHost: opts.S3.MaxIdleConnsPerHost,
 			MaxConnsPerHost:     opts.S3.MaxConnsPerHost,
+		})
+	case string(provider.ProviderGCS):
+		return factories.GCS(ctx, gcs.Config{
+			Bucket:               src.Bucket,
+			Project:              opts.GCS.Project,
+			Anonymous:            opts.GCS.Anonymous,
+			MaxIdleConnsPerHost:  opts.GCS.MaxIdleConnsPerHost,
+			MaxConnsPerHost:      opts.GCS.MaxConnsPerHost,
+			WriterChunkSizeBytes: opts.GCS.WriterChunkSizeBytes,
 		})
 	case string(provider.ProviderFile):
 		baseDir := opts.FileBaseDir
@@ -124,6 +154,19 @@ func NewDestination(ctx context.Context, opts DestinationOptions) (provider.Prov
 			ForcePathStyle:      opts.S3.ForcePathStyle,
 			MaxIdleConnsPerHost: opts.S3.MaxIdleConnsPerHost,
 			MaxConnsPerHost:     opts.S3.MaxConnsPerHost,
+		})
+	case string(provider.ProviderGCS):
+		bucket := opts.GCSBucket
+		if bucket == "" {
+			bucket = opts.S3Bucket
+		}
+		return factories.GCS(ctx, gcs.Config{
+			Bucket:               bucket,
+			Project:              opts.GCS.Project,
+			Anonymous:            opts.GCS.Anonymous,
+			MaxIdleConnsPerHost:  opts.GCS.MaxIdleConnsPerHost,
+			MaxConnsPerHost:      opts.GCS.MaxConnsPerHost,
+			WriterChunkSizeBytes: opts.GCS.WriterChunkSizeBytes,
 		})
 	case string(provider.ProviderFile):
 		if opts.FileBaseDir == "" {

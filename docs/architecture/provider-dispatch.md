@@ -16,6 +16,8 @@ construction:
 
 - `s3://bucket/key` constructs `pkg/provider/s3` with the command-supplied
   region, endpoint, profile, and path-style policy.
+- `gs://bucket/key` constructs `pkg/provider/gcs` with ADC or the provider's
+  typed auth options and any command-supplied GCP project hint.
 - `file:///absolute/path` constructs `pkg/provider/file` with an absolute local
   root and file-provider policy such as metadata sidecar suffix and source
   symlink behavior.
@@ -62,7 +64,7 @@ per-object reads confined to the canonical tree beneath that root.
 
 ## Adding Another Provider
 
-For a future provider such as `gs://bucket/key`, expected touch points are:
+For each additional object-store provider, expected touch points are:
 
 1. Register the accepted scheme and URI semantics in `pkg/uri`.
 2. Add `pkg/provider/gcs` implementing `provider.Provider` and any needed
@@ -77,15 +79,17 @@ For a future provider such as `gs://bucket/key`, expected touch points are:
 
 The transfer and read engines should not need copy-loop changes for providers
 that map cleanly to bucket/key objects plus the existing capability interfaces.
+GCS is the first post-S3 object-store registration through this checklist:
+`gs://` maps to internal provider id `gcs`, read commands construct it through
+`internal/providerdispatch`, and write-destination support remains gated on the
+provider's mutating capability interfaces.
 
 ## Known Limits
 
 Some command contracts remain S3-shaped even though construction now routes
-through the shared seam. Index build scope planning still validates an
-`s3://` `base_uri`; widening index-set identity and scope semantics for another
-provider is follow-up work. `transfer reflow` currently accepts the registered
-S3 and file schemes explicitly; adding a new provider still requires a URI
-registration and dispatch entry before that command can ingest it.
+through the shared seam. `transfer reflow` currently accepts S3 and file
+destinations explicitly; GCS destination writes require the GCS mutating
+capabilities and IfAbsent probe work before that command can write to `gs://`.
 
 File-source traversal has filesystem-specific policy that object stores do not:
 symlink handling, default hidden-path skipping, and local path disclosure

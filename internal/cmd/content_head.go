@@ -49,6 +49,7 @@ var (
 	contentHeadRegion      string
 	contentHeadProfile     string
 	contentHeadEndpoint    string
+	contentHeadGCPProject  string
 )
 
 const contentHeadMaxBytes = 10 * 1024 * 1024
@@ -61,6 +62,7 @@ func init() {
 	contentHeadCmd.Flags().StringVarP(&contentHeadRegion, "region", "r", "", "AWS region")
 	contentHeadCmd.Flags().StringVarP(&contentHeadProfile, "profile", "p", "", "AWS profile")
 	contentHeadCmd.Flags().StringVar(&contentHeadEndpoint, "endpoint", "", "Custom S3 endpoint")
+	contentHeadCmd.Flags().StringVar(&contentHeadGCPProject, "gcp-project", "", "GCP project hint for GCS")
 }
 
 func validateContentHeadArgs(cmd *cobra.Command, args []string) error {
@@ -120,7 +122,7 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 	}
 
 	jobID := uuid.New().String()
-	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, string(provider.ProviderS3))
+	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, commandOutputProviderForInputs(inputs, string(provider.ProviderS3)))
 	defer func() { _ = w.Close() }()
 
 	var (
@@ -139,7 +141,7 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 		}
 		provMu.Unlock()
 
-		pNew, err := newCommandSourceProvider(ctx, src, "content head", contentHeadRegion, contentHeadProfile, contentHeadEndpoint)
+		pNew, err := newCommandSourceProviderWithGCSProject(ctx, src, "content head", contentHeadRegion, contentHeadProfile, contentHeadEndpoint, contentHeadGCPProject)
 		if err != nil {
 			return nil, err
 		}

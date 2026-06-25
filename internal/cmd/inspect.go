@@ -23,10 +23,11 @@ var inspectCmd = &cobra.Command{
 	Short: "Quick inspection of object or prefix",
 	Long: `Inspect objects in cloud storage without a manifest file.
 
-Supports S3 URIs with optional glob patterns for filtering.
+Supports object-store URIs with optional glob patterns for filtering.
 
 Examples:
   gonimbus inspect s3://bucket/path/to/object.txt
+  gonimbus inspect gs://bucket/path/to/object.txt
   gonimbus inspect s3://bucket/prefix/
   gonimbus inspect s3://bucket/data/**/*.parquet
   gonimbus inspect s3://bucket/prefix/ --limit 10
@@ -36,11 +37,12 @@ Examples:
 }
 
 var (
-	inspectRegion   string
-	inspectProfile  string
-	inspectEndpoint string
-	inspectLimit    int
-	inspectJSON     bool
+	inspectRegion     string
+	inspectProfile    string
+	inspectEndpoint   string
+	inspectGCPProject string
+	inspectLimit      int
+	inspectJSON       bool
 	// Filter flags
 	inspectMinSize  string
 	inspectMaxSize  string
@@ -55,6 +57,7 @@ func init() {
 	inspectCmd.Flags().StringVarP(&inspectRegion, "region", "r", "", "AWS region")
 	inspectCmd.Flags().StringVarP(&inspectProfile, "profile", "p", "", "AWS profile")
 	inspectCmd.Flags().StringVar(&inspectEndpoint, "endpoint", "", "Custom S3 endpoint")
+	inspectCmd.Flags().StringVar(&inspectGCPProject, "gcp-project", "", "GCP project hint for GCS")
 	inspectCmd.Flags().IntVarP(&inspectLimit, "limit", "n", 100, "Max objects to list")
 	inspectCmd.Flags().BoolVar(&inspectJSON, "json", false, "Output as JSON")
 
@@ -151,7 +154,7 @@ func buildInspectFilter() (*match.CompositeFilter, error) {
 
 // createInspectProvider creates a provider for inspect command.
 func createInspectProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Provider, error) {
-	return newCommandSourceProvider(ctx, objURI, "inspect", inspectRegion, inspectProfile, inspectEndpoint)
+	return newCommandSourceProviderWithGCSProject(ctx, objURI, "inspect", inspectRegion, inspectProfile, inspectEndpoint, inspectGCPProject)
 }
 
 type inspectListResult struct {
