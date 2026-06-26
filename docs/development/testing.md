@@ -57,6 +57,53 @@ Moto is a best-effort AWS emulator and does not fully implement all S3 behaviors
 
 See [CI Configuration](ci.md#cloud-integration-testing) for detailed test strategy and moto limitations.
 
+### Real-cloud integration (bring-your-own bucket)
+
+The cloud lanes above run entirely against **local fakes** — moto for S3, an
+in-process `fake-gcs-server` for GCS — so they need no credentials and run for
+everyone, including fork PRs. Those fakes are the only cloud lanes CI runs.
+
+For higher-fidelity validation you can point the suite at a **real** bucket.
+This is **bring-your-own**: the project does not host a shared bucket, and none
+is exposed publicly. Supply your own bucket and credentials. (Developers
+collaborating with 3 Leaps may be granted access to internal QA buckets
+out-of-band; that access is never published here.) The real-cloud tests skip
+automatically when their environment is absent — they never fail for lack of a
+bucket.
+
+> **Credential discipline.** Credentials are read **only** from your ambient
+> environment — an AWS profile or the standard AWS credential chain for S3, or
+> Application Default Credentials / a key-file path you control for GCS.
+> gonimbus never accepts a credential path from a manifest, CLI flag, or config
+> file. See the provider security notes.
+
+#### S3-compatible (AWS, Wasabi, R2, MinIO, …)
+
+```bash
+export GONIMBUS_S3_TEST_BUCKET=<your-bucket>
+export GONIMBUS_S3_TEST_ENDPOINT=<your-endpoint>   # omit for AWS
+export GONIMBUS_S3_TEST_REGION=<your-region>
+export AWS_PROFILE=<your-profile>                  # or any standard AWS credential source
+
+make test-cloud-real         # real-bucket lane; skips when the vars are unset
+```
+
+#### GCS
+
+```bash
+export GONIMBUS_GCS_TEST_BUCKET=<your-bucket>
+export GOOGLE_APPLICATION_CREDENTIALS=<path-to-your-sa-key.json>
+#   — or — use Application Default Credentials:
+#   gcloud auth application-default login
+
+make test-cloud-real         # skips when the vars are unset
+```
+
+> **Status.** The hermetic fakes (moto, `fake-gcs-server`) are wired today. The
+> `make test-cloud-real` target and the GCS real lane land with the GCS
+> provider's real-cloud lane; until then this section defines the
+> bring-your-own contract those lanes implement.
+
 ### CLI Integration Tests
 
 CLI tests in `internal/cmd/inspect_cloudintegration_test.go` run the built binary via `exec.Command`. This approach:
