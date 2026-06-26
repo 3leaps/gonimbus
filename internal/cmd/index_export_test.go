@@ -33,6 +33,14 @@ func TestParseHubURI_S3NoTrailingSlash(t *testing.T) {
 	assert.Equal(t, "hub/prefix/", hub.Prefix)
 }
 
+func TestParseHubURI_GCS(t *testing.T) {
+	hub, err := parseHubURI("gs://my-bucket/hub/prefix/")
+	require.NoError(t, err)
+	assert.Equal(t, "gcs", hub.Provider)
+	assert.Equal(t, "my-bucket", hub.Bucket)
+	assert.Equal(t, "hub/prefix/", hub.Prefix)
+}
+
 func TestParseHubURI_File(t *testing.T) {
 	hub, err := parseHubURI("file:///data/index-hub/")
 	require.NoError(t, err)
@@ -53,7 +61,13 @@ func TestParseHubURI_Empty(t *testing.T) {
 }
 
 func TestParseHubURI_UnsupportedScheme(t *testing.T) {
-	_, err := parseHubURI("gs://bucket/prefix/")
+	_, err := parseHubURI("azure://bucket/prefix/")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported hub scheme")
+}
+
+func TestParseHubURI_RejectsNonCanonicalGCSScheme(t *testing.T) {
+	_, err := parseHubURI("gcs://bucket/prefix/")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported hub scheme")
 }

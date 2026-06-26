@@ -9,6 +9,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -24,6 +25,10 @@ const (
 	// ChunkSize. Each active writer allocates this much buffer memory unless a
 	// provider config overrides WriterChunkSizeBytes.
 	DefaultWriterChunkSizeBytes = 16 * 1024 * 1024
+
+	// MinWriterChunkSizeBytes is the GCS SDK's minimum resumable-upload chunk
+	// quantum. The SDK rounds positive chunk sizes up to this multiple.
+	MinWriterChunkSizeBytes = googleapi.MinUploadChunkSize
 )
 
 // Config configures a Google Cloud Storage provider.

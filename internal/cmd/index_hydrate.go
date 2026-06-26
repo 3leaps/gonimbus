@@ -53,7 +53,7 @@ Examples:
 func init() {
 	indexCmd.AddCommand(indexHydrateCmd)
 
-	indexHydrateCmd.Flags().String("hub", "", "Hub root URI (s3://bucket/prefix/ or file:///path/)")
+	indexHydrateCmd.Flags().String("hub", "", "Hub root URI (s3://bucket/prefix/, gs://bucket/prefix/, or file:///path/)")
 	indexHydrateCmd.Flags().String("index-set", "", "Index set ID to hydrate (required)")
 	indexHydrateCmd.Flags().String("run-id", "", "Specific run ID (default: resolve from latest.json)")
 	indexHydrateCmd.Flags().String("dest", "", "Local destination directory (required)")
@@ -62,6 +62,7 @@ func init() {
 	indexHydrateCmd.Flags().String("hub-profile", "", "AWS profile for hub source")
 	indexHydrateCmd.Flags().String("hub-region", "", "AWS region for hub source")
 	indexHydrateCmd.Flags().String("hub-endpoint", "", "Custom endpoint for hub source")
+	indexHydrateCmd.Flags().String("hub-gcp-project", "", "GCP project hint for GCS hub source")
 
 	_ = indexHydrateCmd.MarkFlagRequired("hub")
 	_ = indexHydrateCmd.MarkFlagRequired("index-set")
@@ -80,12 +81,17 @@ func newHubGetter(ctx context.Context, hub *hubDestSpec) (provider.ObjectGetter,
 		Provider:    hub.Provider,
 		S3Bucket:    hub.Bucket,
 		S3Prefix:    hub.Prefix,
+		GCSBucket:   hub.Bucket,
+		GCSPrefix:   hub.Prefix,
 		FileBaseDir: hub.BaseDir,
 		S3: providerdispatch.S3Options{
 			Region:         hub.Region,
 			Endpoint:       hub.Endpoint,
 			Profile:        hub.Profile,
 			ForcePathStyle: hub.ForcePathStyle,
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: strings.TrimSpace(hub.GCPProject),
 		},
 	})
 	if err != nil {
@@ -108,6 +114,7 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	hubProfile, _ := cmd.Flags().GetString("hub-profile")
 	hubRegion, _ := cmd.Flags().GetString("hub-region")
 	hubEndpoint, _ := cmd.Flags().GetString("hub-endpoint")
+	hubGCPProject, _ := cmd.Flags().GetString("hub-gcp-project")
 
 	// Validate index-set ID: hydrate requires full idx_<64hex> since hub paths are exact
 	if err := validateFullIndexSetID(indexSetFlag); err != nil {
@@ -129,6 +136,7 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	hub.Profile = hubProfile
 	hub.Region = hubRegion
 	hub.Endpoint = hubEndpoint
+	hub.GCPProject = strings.TrimSpace(hubGCPProject)
 	if hub.Endpoint != "" {
 		hub.ForcePathStyle = true
 	}

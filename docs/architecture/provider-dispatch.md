@@ -80,16 +80,24 @@ For each additional object-store provider, expected touch points are:
 The transfer and read engines should not need copy-loop changes for providers
 that map cleanly to bucket/key objects plus the existing capability interfaces.
 GCS is the first post-S3 object-store registration through this checklist:
-`gs://` maps to internal provider id `gcs`, read commands construct it through
-`internal/providerdispatch`, and write-destination support remains gated on the
-provider's mutating capability interfaces.
+`gs://` maps to internal provider id `gcs`, read/write commands construct it
+through `internal/providerdispatch`, and write paths fail closed unless the
+command-requested mutating capability is present.
+
+`transfer reflow` also passes its GON-048 concurrency ceiling into object-store
+HTTP transport sizing. For `gs://` destinations it explicitly sets the GCS
+writer chunk size to the SDK's minimum resumable-upload quantum, keeping
+destination writer memory explicit and bounded under the per-copy retry-buffer
+budget instead of relying on the SDK default chunk size.
 
 ## Known Limits
 
 Some command contracts remain S3-shaped even though construction now routes
-through the shared seam. `transfer reflow` currently accepts S3 and file
-destinations explicitly; GCS destination writes require the GCS mutating
-capabilities and IfAbsent probe work before that command can write to `gs://`.
+through the shared seam. GCS supports atomic create-if-absent via generation
+preconditions, but it does not expose the existing `IfMatchETag` overwrite
+predicate. `transfer reflow --on-collision=overwrite-if-source-newer` therefore
+fails closed for `gs://` destinations until the provider contract grows a
+generation-aware conditional overwrite predicate.
 
 File-source traversal has filesystem-specific policy that object stores do not:
 symlink handling, default hidden-path skipping, and local path disclosure

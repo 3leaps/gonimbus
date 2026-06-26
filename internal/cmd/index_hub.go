@@ -138,6 +138,7 @@ func init() {
 		cmd.Flags().String("hub-profile", "", "AWS profile for hub")
 		cmd.Flags().String("hub-region", "", "AWS region for hub")
 		cmd.Flags().String("hub-endpoint", "", "Custom endpoint for hub")
+		cmd.Flags().String("hub-gcp-project", "", "GCP project hint for GCS hub")
 	}
 
 	// init
@@ -215,6 +216,8 @@ func parseHubFlags(cmd *cobra.Command, args []string) (*hubDestSpec, error) {
 	hub.Profile, _ = cmd.Flags().GetString("hub-profile")
 	hub.Region, _ = cmd.Flags().GetString("hub-region")
 	hub.Endpoint, _ = cmd.Flags().GetString("hub-endpoint")
+	hub.GCPProject, _ = cmd.Flags().GetString("hub-gcp-project")
+	hub.GCPProject = strings.TrimSpace(hub.GCPProject)
 	if hub.Endpoint != "" {
 		hub.ForcePathStyle = true
 	}

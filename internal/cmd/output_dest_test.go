@@ -31,6 +31,13 @@ func TestParseOutputDest(t *testing.T) {
 			key:      "deep/path/file.jsonl",
 		},
 		{
+			name:     "gcs deep path",
+			uri:      "gs://bucket/deep/path/file.jsonl",
+			provider: string(provider.ProviderGCS),
+			bucket:   "bucket",
+			key:      "deep/path/file.jsonl",
+		},
+		{
 			name:     "file absolute path",
 			uri:      "file:///tmp/out.jsonl",
 			provider: string(provider.ProviderFile),
@@ -50,7 +57,7 @@ func TestParseOutputDest(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "unsupported scheme",
+			name:    "unsupported noncanonical gcs scheme",
 			uri:     "gcs://bucket/key.jsonl",
 			wantErr: true,
 		},

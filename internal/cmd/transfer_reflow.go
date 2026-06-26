@@ -36,6 +36,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	providergcs "github.com/3leaps/gonimbus/pkg/provider/gcs"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 	"github.com/3leaps/gonimbus/pkg/transfer"
@@ -148,12 +149,14 @@ var (
 	reflowPreserve            bool
 	reflowSrcFailure          string
 
-	reflowSrcRegion   string
-	reflowSrcProfile  string
-	reflowSrcEndpoint string
-	reflowDstRegion   string
-	reflowDstProfile  string
-	reflowDstEndpoint string
+	reflowSrcRegion     string
+	reflowSrcProfile    string
+	reflowSrcEndpoint   string
+	reflowSrcGCPProject string
+	reflowDstRegion     string
+	reflowDstProfile    string
+	reflowDstEndpoint   string
+	reflowDstGCPProject string
 )
 
 var (
@@ -213,9 +216,11 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "Source AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "Source AWS profile")
 	transferReflowCmd.Flags().StringVar(&reflowSrcEndpoint, "src-endpoint", "", "Source custom S3 endpoint")
+	transferReflowCmd.Flags().StringVar(&reflowSrcGCPProject, "src-gcp-project", "", "Source GCP project hint for GCS")
 	transferReflowCmd.Flags().StringVar(&reflowDstRegion, "dest-region", "", "Destination AWS region")
 	transferReflowCmd.Flags().StringVar(&reflowDstProfile, "dest-profile", "", "Destination AWS profile")
 	transferReflowCmd.Flags().StringVar(&reflowDstEndpoint, "dest-endpoint", "", "Destination custom S3 endpoint")
+	transferReflowCmd.Flags().StringVar(&reflowDstGCPProject, "dest-gcp-project", "", "Destination GCP project hint for GCS")
 
 	_ = viper.BindPFlag("on_collision", transferReflowCmd.Flags().Lookup("on-collision"))
 	_ = viper.BindPFlag("collision_quarantine_prefix", transferReflowCmd.Flags().Lookup("collision-quarantine-prefix"))
@@ -683,13 +688,14 @@ type reflowDestSpec struct {
 	Provider string
 	BaseURI  string
 
-	// S3 destination
+	// Object-store destination
 	Bucket         string
 	Prefix         string
 	Region         string
 	Profile        string
 	Endpoint       string
 	ForcePathStyle bool
+	GCPProject     string
 
 	// File destination
 	BaseDir string
@@ -714,7 +720,7 @@ func parseReflowDest(raw string) (*reflowDestSpec, error) {
 		return &reflowDestSpec{Provider: string(provider.ProviderFile), BaseURI: baseURI, BaseDir: baseDir}, nil
 	}
 
-	if parsed.Provider != string(provider.ProviderS3) {
+	if parsed.Provider != string(provider.ProviderS3) && parsed.Provider != string(provider.ProviderGCS) {
 		return nil, fmt.Errorf("provider %q is not supported", parsed.Provider)
 	}
 	if parsed.IsPattern() {
@@ -724,8 +730,16 @@ func parseReflowDest(raw string) (*reflowDestSpec, error) {
 		parsed.Key = strings.TrimSuffix(parsed.Key, "/") + "/"
 	}
 
-	baseURI := fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, parsed.Key)
+	baseURI := objectStoreURI(parsed.Provider, parsed.Bucket, parsed.Key)
 	return &reflowDestSpec{Provider: parsed.Provider, BaseURI: baseURI, Bucket: parsed.Bucket, Prefix: parsed.Key}, nil
+}
+
+func objectStoreURI(providerName, bucket, key string) string {
+	scheme := providerName
+	if scheme == string(provider.ProviderGCS) {
+		scheme = "gs"
+	}
+	return fmt.Sprintf("%s://%s/%s", scheme, bucket, key)
 }
 
 func fileURI(path string) string {
@@ -740,7 +754,7 @@ func buildReflowDestKey(dest *reflowDestSpec, destRel string) string {
 		return destRel
 	}
 	switch dest.Provider {
-	case string(provider.ProviderS3):
+	case string(provider.ProviderS3), string(provider.ProviderGCS):
 		key := strings.TrimPrefix(dest.Prefix+destRel, "/")
 		key = strings.ReplaceAll(key, "//", "/")
 		return key
@@ -761,8 +775,8 @@ func buildReflowDestURI(dest *reflowDestSpec, destKey string) string {
 		return ""
 	}
 	switch dest.Provider {
-	case string(provider.ProviderS3):
-		return fmt.Sprintf("%s://%s/%s", dest.Provider, dest.Bucket, destKey)
+	case string(provider.ProviderS3), string(provider.ProviderGCS):
+		return objectStoreURI(dest.Provider, dest.Bucket, destKey)
 	case string(provider.ProviderFile):
 		full := filepath.Join(dest.BaseDir, filepath.FromSlash(destKey))
 		return fileURI(full)
@@ -1096,6 +1110,9 @@ func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg c
 	}
 	if destProvider == "" {
 		destProvider = "destination"
+	}
+	if destProvider == string(provider.ProviderGCS) {
+		return fmt.Errorf("%s provider %q does not support ConditionalPutter.IfMatchETag required by --on-collision=%s", operationTransferReflow, destProvider, reflowCollisionSrcNew)
 	}
 	_, err := providerdispatch.RequireCapability[provider.ConditionalPutter](dst, operationTransferReflow, destProvider, "ConditionalPutter.IfMatchETag")
 	if err != nil {
@@ -1562,6 +1579,8 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 		Provider:            dest.Provider,
 		S3Bucket:            dest.Bucket,
 		S3Prefix:            dest.Prefix,
+		GCSBucket:           dest.Bucket,
+		GCSPrefix:           dest.Prefix,
 		FileBaseDir:         dest.BaseDir,
 		FileMetadataSidecar: metaCfg.MetadataSidecarSuffix,
 		S3: providerdispatch.S3Options{
@@ -1571,6 +1590,14 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 			ForcePathStyle:      dest.ForcePathStyle,
 			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
 			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project:             strings.TrimSpace(dest.GCPProject),
+			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
+			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+			// Keep destination writer memory explicit and bounded under the
+			// source-side retry-buffer budget that drives the concurrency cap.
+			WriterChunkSizeBytes: providergcs.MinWriterChunkSizeBytes,
 		},
 	})
 }
@@ -1588,6 +1615,11 @@ func newSourceProvider(ctx context.Context, src *uri.ObjectURI, concurrency refl
 			Endpoint:            reflowSrcEndpoint,
 			Profile:             reflowSrcProfile,
 			ForcePathStyle:      reflowSrcEndpoint != "",
+			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
+			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project:             strings.TrimSpace(reflowSrcGCPProject),
 			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
 			MaxConnsPerHost:     concurrency.EffectiveCeiling,
 		},
@@ -1760,7 +1792,7 @@ func runFileReflowPreflight(ctx context.Context, w output.Writer, parsed *uri.Ob
 	return summary, nil
 }
 
-func runS3ReflowDryRunPreflight(ctx context.Context, w output.Writer, dst provider.Provider, dest *reflowDestSpec) error {
+func runObjectStoreReflowDryRunPreflight(ctx context.Context, w output.Writer, dst provider.Provider, dest *reflowDestSpec) error {
 	probePrefix := strings.TrimPrefix(dest.Prefix, "/")
 	if probePrefix != "" && !strings.HasSuffix(probePrefix, "/") {
 		probePrefix += "/"
@@ -1777,7 +1809,7 @@ func runS3ReflowDryRunPreflight(ctx context.Context, w output.Writer, dst provid
 				Allowed:    false,
 				Method:     "PutObjectConditional(IfAbsent,0 bytes)+DeleteObject",
 				ErrorCode:  "READONLY",
-				Detail:     "readonly mode enabled: refusing destination S3 write probe",
+				Detail:     fmt.Sprintf("readonly mode enabled: refusing destination %s write probe", strings.ToUpper(dest.Provider)),
 			}},
 		}
 		return w.WritePreflight(ctx, rec)
@@ -1803,6 +1835,10 @@ func collisionModeDependsOnIfAbsent(mode string) bool {
 	}
 }
 
+func isObjectStoreProvider(providerName string) bool {
+	return providerName == string(provider.ProviderS3) || providerName == string(provider.ProviderGCS)
+}
+
 func reflowProbePrefix(dest *reflowDestSpec) string {
 	probePrefix := ""
 	if dest != nil {
@@ -1815,7 +1851,7 @@ func reflowProbePrefix(dest *reflowDestSpec) string {
 }
 
 func detectReflowIfAbsentCapability(ctx context.Context, dst provider.Provider, dest *reflowDestSpec, collCfg collisionConfig, dryRun bool) reflowIfAbsentCapability {
-	if dest == nil || dest.Provider != string(provider.ProviderS3) || !collisionModeDependsOnIfAbsent(collCfg.Mode) {
+	if dest == nil || !isObjectStoreProvider(dest.Provider) || !collisionModeDependsOnIfAbsent(collCfg.Mode) {
 		return reflowIfAbsentCapability{}
 	}
 	if dryRun || IsReadOnly() {
@@ -2015,9 +2051,11 @@ type transferReflowCheckpointConfig struct {
 	SrcRegion                 string   `json:"src_region,omitempty"`
 	SrcProfile                string   `json:"src_profile,omitempty"`
 	SrcEndpoint               string   `json:"src_endpoint,omitempty"`
+	SrcGCPProject             string   `json:"src_gcp_project,omitempty"`
 	DstRegion                 string   `json:"dest_region,omitempty"`
 	DstProfile                string   `json:"dest_profile,omitempty"`
 	DstEndpoint               string   `json:"dest_endpoint,omitempty"`
+	DstGCPProject             string   `json:"dest_gcp_project,omitempty"`
 }
 
 func transferReflowCheckpointConfigFromEffective(
@@ -2066,9 +2104,11 @@ func transferReflowCheckpointConfigFromEffective(
 		SrcRegion:                 reflowSrcRegion,
 		SrcProfile:                reflowSrcProfile,
 		SrcEndpoint:               reflowSrcEndpoint,
+		SrcGCPProject:             reflowSrcGCPProject,
 		DstRegion:                 reflowDstRegion,
 		DstProfile:                reflowDstProfile,
 		DstEndpoint:               reflowDstEndpoint,
+		DstGCPProject:             reflowDstGCPProject,
 	}
 }
 
@@ -2283,9 +2323,11 @@ func applyTransferReflowCheckpointConfig(cmd *cobra.Command, cfg transferReflowC
 		{"src-region", cfg.SrcRegion},
 		{"src-profile", cfg.SrcProfile},
 		{"src-endpoint", cfg.SrcEndpoint},
+		{"src-gcp-project", cfg.SrcGCPProject},
 		{"dest-region", cfg.DstRegion},
 		{"dest-profile", cfg.DstProfile},
 		{"dest-endpoint", cfg.DstEndpoint},
+		{"dest-gcp-project", cfg.DstGCPProject},
 	} {
 		if err := set(pair.name, pair.value); err != nil {
 			return err
@@ -2485,6 +2527,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		destSpec.Profile = reflowDstProfile
 		destSpec.ForcePathStyle = reflowDstEndpoint != ""
 	}
+	if destSpec.Provider == string(provider.ProviderGCS) {
+		destSpec.GCPProject = strings.TrimSpace(reflowDstGCPProject)
+	}
 	destURI := destSpec.BaseURI
 	concurrencyCfg := reflowpkg.ResolveConcurrency(reflowParallel, !reflowNoAdaptive, reflowResourceProbeForRun)
 	concurrencyLimiter := reflowpkg.NewConcurrencyLimiter(concurrencyCfg)
@@ -2565,8 +2610,8 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		})
 	}
 
-	if reflowDryRun && destSpec.Provider == string(provider.ProviderS3) {
-		if err := runS3ReflowDryRunPreflight(ctx, w, dstProv, destSpec); err != nil {
+	if reflowDryRun && isObjectStoreProvider(destSpec.Provider) {
+		if err := runObjectStoreReflowDryRunPreflight(ctx, w, dstProv, destSpec); err != nil {
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
