@@ -92,6 +92,7 @@ make test-cloud-real         # real-bucket lane; skips when the vars are unset
 
 ```bash
 export GONIMBUS_GCS_TEST_BUCKET=<your-bucket>
+export GONIMBUS_GCS_TEST_PROJECT=<your-project>     # optional project hint
 export GOOGLE_APPLICATION_CREDENTIALS=<path-to-your-sa-key.json>
 #   — or — use Application Default Credentials:
 #   gcloud auth application-default login
@@ -99,10 +100,9 @@ export GOOGLE_APPLICATION_CREDENTIALS=<path-to-your-sa-key.json>
 make test-cloud-real         # skips when the vars are unset
 ```
 
-> **Status.** The hermetic fakes (moto, `fake-gcs-server`) are wired today. The
-> `make test-cloud-real` target and the GCS real lane land with the GCS
-> provider's real-cloud lane; until then this section defines the
-> bring-your-own contract those lanes implement.
+The real GCS lane creates objects only under a generated test prefix inside
+your bucket and cleans up that prefix at test end. It does not create or delete
+the bucket.
 
 ### CLI Integration Tests
 

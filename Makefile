@@ -1,7 +1,7 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
-.PHONY: test-cloud moto-start moto-stop moto-status
+.PHONY: test-cloud test-cloud-real moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
@@ -360,6 +360,10 @@ test-cloud: sync-embedded-identity ## Run tests including cloud integration (req
 	fi
 	@echo "Running tests with cloud integration..."
 	MOTO_ENDPOINT=$(MOTO_ENDPOINT) $(GOTEST) ./... -v -tags=cloudintegration
+
+test-cloud-real: sync-embedded-identity ## Run opt-in real-cloud tests; skips when BYO env is unset
+	@echo "Running opt-in real-cloud integration tests..."
+	$(GOTEST) ./... -v -tags=cloudintegration -run 'RealCloud|RealGCS|RealS3'
 
 moto-start:  ## Start moto server for cloud integration tests
 	@if curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
