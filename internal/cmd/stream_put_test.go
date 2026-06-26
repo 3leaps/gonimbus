@@ -17,6 +17,21 @@ import (
 	"github.com/3leaps/gonimbus/pkg/stream"
 )
 
+func TestStreamPutParsesGCSDestinationRoot(t *testing.T) {
+	root, err := parseStreamPutDestRoot("gs://bucket/root/")
+	require.NoError(t, err)
+	require.Equal(t, string(provider.ProviderGCS), root.Provider)
+	require.Equal(t, "bucket", root.Bucket)
+	require.Equal(t, "root/", root.Prefix)
+
+	spec := root.objectSpec("object.bin")
+	require.Equal(t, string(provider.ProviderGCS), spec.Provider)
+	require.Equal(t, "bucket", spec.Bucket)
+	require.Equal(t, "root/object.bin", spec.Key)
+	require.Equal(t, "gs://bucket/root/object.bin", outputDestURI(spec))
+	require.Equal(t, string(provider.ProviderGCS), streamPutOutputProviderName("gs://bucket/root/object.bin"))
+}
+
 func TestStreamPutCommand_RawStdinWritesFileDestination(t *testing.T) {
 	resetStreamPutTestState(t)
 

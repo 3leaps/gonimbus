@@ -30,6 +30,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	"github.com/3leaps/gonimbus/pkg/provider/gcs"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
@@ -236,6 +237,33 @@ func TestTransferReflowNoAdaptiveRunsFixedAtEffectiveCeiling(t *testing.T) {
 	require.Equal(t, 3, summary.ConcurrencyCeilingEffective)
 	require.Equal(t, 3, summary.ConcurrencyInitial)
 	require.Equal(t, 3, summary.ConcurrencyFinal)
+}
+
+func TestNewDestProviderSetsMinimumGCSWriterChunkUnderRetryBufferBudget(t *testing.T) {
+	var got gcs.Config
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		GCS: func(_ context.Context, cfg gcs.Config) (provider.Provider, error) {
+			got = cfg
+			return newReflowMemoryProvider(), nil
+		},
+	})
+
+	dest := &reflowDestSpec{
+		Provider:   string(provider.ProviderGCS),
+		Bucket:     "dest-bucket",
+		Prefix:     "prefix/",
+		GCPProject: "gcp-project",
+	}
+	_, err := newDestProvider(context.Background(), dest, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{
+		EffectiveCeiling: 7,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "dest-bucket", got.Bucket)
+	require.Equal(t, "gcp-project", got.Project)
+	require.Equal(t, 7, got.MaxIdleConnsPerHost)
+	require.Equal(t, 7, got.MaxConnsPerHost)
+	require.Equal(t, gcs.MinWriterChunkSizeBytes, got.WriterChunkSizeBytes)
 }
 
 func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {
@@ -3481,6 +3509,17 @@ func TestParseReflowDestRejectsOutputOnlyFileLocalURI(t *testing.T) {
 	_, err := parseReflowDest("file://local/path")
 	require.Error(t, err)
 	require.ErrorIs(t, err, uri.ErrInvalidFileURI)
+}
+
+func TestParseReflowDestAcceptsGCSPrefix(t *testing.T) {
+	dest, err := parseReflowDest("gs://bucket/data")
+	require.NoError(t, err)
+	require.Equal(t, string(provider.ProviderGCS), dest.Provider)
+	require.Equal(t, "bucket", dest.Bucket)
+	require.Equal(t, "data/", dest.Prefix)
+	require.Equal(t, "gs://bucket/data/", dest.BaseURI)
+	require.Equal(t, "data/object.txt", buildReflowDestKey(dest, "object.txt"))
+	require.Equal(t, "gs://bucket/data/object.txt", buildReflowDestURI(dest, "data/object.txt"))
 }
 
 func TestValidateProvenanceConfigRejectsUnsafeSuffix(t *testing.T) {

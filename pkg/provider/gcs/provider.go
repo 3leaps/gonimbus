@@ -10,6 +10,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2"
+	googleoauth "golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -19,19 +20,27 @@ import (
 
 // Provider implements read operations for Google Cloud Storage.
 type Provider struct {
-	client  *storage.Client
-	bucket  string
-	maxKeys int
+	client               *storage.Client
+	bucket               string
+	maxKeys              int
+	anonymous            bool
+	writerChunkSizeBytes int
 }
 
 var (
-	_ provider.Provider        = (*Provider)(nil)
-	_ provider.PrefixLister    = (*Provider)(nil)
-	_ provider.DelimiterLister = (*Provider)(nil)
-	_ provider.ObjectGetter    = (*Provider)(nil)
-	_ provider.VersionedGetter = (*Provider)(nil)
-	_ provider.ObjectRanger    = (*Provider)(nil)
+	_ provider.Provider            = (*Provider)(nil)
+	_ provider.PrefixLister        = (*Provider)(nil)
+	_ provider.DelimiterLister     = (*Provider)(nil)
+	_ provider.ObjectGetter        = (*Provider)(nil)
+	_ provider.VersionedGetter     = (*Provider)(nil)
+	_ provider.ObjectRanger        = (*Provider)(nil)
+	_ provider.ObjectPutter        = (*Provider)(nil)
+	_ provider.ConditionalPutter   = (*Provider)(nil)
+	_ provider.MetadataAwarePutter = (*Provider)(nil)
+	_ provider.ObjectDeleter       = (*Provider)(nil)
 )
+
+var adcTokenSource = googleoauth.DefaultTokenSource
 
 // New creates a new GCS provider with the given configuration.
 func New(ctx context.Context, cfg Config) (*Provider, error) {
@@ -39,7 +48,10 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, err
 	}
 
-	clientOpts := clientOptionsForConfig(ctx, cfg)
+	clientOpts, err := clientOptionsForConfig(ctx, cfg)
+	if err != nil {
+		return nil, wrapGCSError("New", cfg.Bucket, "", err)
+	}
 	clientOpts = append(clientOpts, storage.WithJSONReads())
 
 	client, err := storage.NewClient(ctx, clientOpts...)
@@ -55,26 +67,36 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		maxKeys = MaxAllowedKeys
 	}
 
-	return &Provider{client: client, bucket: cfg.Bucket, maxKeys: maxKeys}, nil
+	return &Provider{
+		client:               client,
+		bucket:               cfg.Bucket,
+		maxKeys:              maxKeys,
+		anonymous:            cfg.Anonymous,
+		writerChunkSizeBytes: cfg.WriterChunkSizeBytes,
+	}, nil
 }
 
-func clientOptionsForConfig(ctx context.Context, cfg Config) []option.ClientOption {
+func clientOptionsForConfig(ctx context.Context, cfg Config) ([]option.ClientOption, error) {
 	httpClient := transportTunedHTTPClient(cfg)
 	if httpClient == nil {
-		return cfg.AuthClientOptions()
+		return cfg.AuthClientOptions(), nil
 	}
 
 	switch {
 	case cfg.Anonymous:
-		return []option.ClientOption{option.WithHTTPClient(httpClient)}
+		return []option.ClientOption{option.WithHTTPClient(httpClient)}, nil
 	case cfg.TokenSource != nil:
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
-		return []option.ClientOption{option.WithHTTPClient(oauth2.NewClient(ctx, cfg.TokenSource))}
+		return []option.ClientOption{option.WithHTTPClient(oauth2.NewClient(ctx, cfg.TokenSource))}, nil
 	default:
-		// WithHTTPClient takes precedence over ADC-related options. Keep ambient
-		// ADC on the SDK default transport until authenticated transport tuning
-		// can be added without changing credential resolution.
-		return nil
+		// Keep ADC ambient: callers can request transport sizing, but cannot
+		// provide credential file paths or endpoint overrides through Config.
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+		tokenSource, err := adcTokenSource(ctx, DefaultScopes()...)
+		if err != nil {
+			return nil, err
+		}
+		return []option.ClientOption{option.WithHTTPClient(oauth2.NewClient(ctx, tokenSource))}, nil
 	}
 }
 
@@ -231,6 +253,73 @@ func (p *Provider) GetRange(ctx context.Context, key string, start, endInclusive
 	return reader, length, nil
 }
 
+// PutObject uploads an object.
+func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	return p.PutObjectWithOptions(ctx, key, body, contentLength, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, _ int64, opts provider.PutOptions) error {
+	if err := p.guardWrite("PutObject", key); err != nil {
+		return err
+	}
+	writer := p.newWriter(ctx, p.client.Bucket(p.bucket).Object(key), opts)
+	if _, err := io.Copy(writer, body); err != nil {
+		_ = writer.Close()
+		return p.wrapError("PutObject", key, err)
+	}
+	if err := writer.Close(); err != nil {
+		return p.wrapError("PutObject", key, err)
+	}
+	return nil
+}
+
+func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	return p.PutObjectConditionalWithOptions(ctx, key, body, contentLength, precond, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, _ int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
+	if err := p.guardWrite("PutObjectConditional", key); err != nil {
+		return provider.PutResult{}, err
+	}
+	if err := precond.Validate(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if precond.IfMatchETag != nil {
+		return provider.PutResult{}, &provider.ProviderError{
+			Op:       "PutObjectConditional",
+			Provider: provider.ProviderGCS,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrUnsupportedPrecondition,
+		}
+	}
+
+	obj := p.client.Bucket(p.bucket).Object(key)
+	if precond.IfAbsent {
+		obj = obj.If(storage.Conditions{DoesNotExist: true})
+	}
+	writer := p.newWriter(ctx, obj, opts)
+	if _, err := io.Copy(writer, body); err != nil {
+		_ = writer.Close()
+		return provider.PutResult{}, p.wrapConditionalPutError(key, precond, err)
+	}
+	if err := writer.Close(); err != nil {
+		return provider.PutResult{}, p.wrapConditionalPutError(key, precond, err)
+	}
+	return putResultFromAttrs(writer.Attrs()), nil
+}
+
+// DeleteObject deletes an object.
+func (p *Provider) DeleteObject(ctx context.Context, key string) error {
+	if err := p.guardWrite("DeleteObject", key); err != nil {
+		return err
+	}
+	if err := p.client.Bucket(p.bucket).Object(key).Delete(ctx); err != nil {
+		return p.wrapError("DeleteObject", key, err)
+	}
+	return nil
+}
+
 // Close releases resources held by the SDK client.
 func (p *Provider) Close() error {
 	if p == nil || p.client == nil {
@@ -239,8 +328,58 @@ func (p *Provider) Close() error {
 	return p.client.Close()
 }
 
+func (p *Provider) newWriter(ctx context.Context, obj *storage.ObjectHandle, opts provider.PutOptions) *storage.Writer {
+	writer := obj.NewWriter(ctx)
+	if p.writerChunkSizeBytes > 0 {
+		writer.ChunkSize = p.writerChunkSizeBytes
+	}
+	if opts.ContentType != "" {
+		writer.ContentType = opts.ContentType
+	}
+	if len(opts.UserMetadata) > 0 {
+		writer.Metadata = opts.UserMetadata
+	}
+	if opts.StorageClass != "" {
+		writer.StorageClass = opts.StorageClass
+	}
+	return writer
+}
+
+// guardWrite is the fail-closed chokepoint for anonymous providers. Every GCS
+// mutating method must call it before constructing or issuing a request.
+func (p *Provider) guardWrite(op, key string) error {
+	if !p.anonymous {
+		return nil
+	}
+	return &provider.ProviderError{
+		Op:       op,
+		Provider: provider.ProviderGCS,
+		Bucket:   p.bucket,
+		Key:      key,
+		Err:      errors.Join(provider.ErrAccessDenied, provider.ErrAnonymousReadOnly),
+	}
+}
+
 func (p *Provider) wrapError(op, key string, err error) error {
 	return wrapGCSError(op, p.bucket, key, err)
+}
+
+func (p *Provider) wrapConditionalPutError(key string, precond provider.PutPrecondition, err error) error {
+	wrapped := p.wrapError("PutObjectConditional", key, err)
+	if !isGCSPreconditionFailure(err) {
+		return wrapped
+	}
+	if providerErr, ok := wrapped.(*provider.ProviderError); ok {
+		if precond.IfAbsent {
+			providerErr.Err = provider.ErrAlreadyExists
+			return providerErr
+		}
+		if precond.IfMatchETag != nil {
+			providerErr.Err = provider.ErrPreconditionFailed
+			return providerErr
+		}
+	}
+	return wrapped
 }
 
 func wrapGCSError(op, bucket, key string, err error) error {
@@ -353,6 +492,15 @@ func isGCSThrottleReason(value string) bool {
 	}
 }
 
+func isGCSPreconditionFailure(err error) bool {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+		return true
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "Precondition") || strings.Contains(errMsg, "conditionNotMet") || strings.Contains(errMsg, " 412")
+}
+
 func objectSummaryFromAttrs(attrs *storage.ObjectAttrs) provider.ObjectSummary {
 	if attrs == nil {
 		return provider.ObjectSummary{}
@@ -384,6 +532,16 @@ func generationString(generation int64) string {
 		return ""
 	}
 	return strconv.FormatInt(generation, 10)
+}
+
+func putResultFromAttrs(attrs *storage.ObjectAttrs) provider.PutResult {
+	if attrs == nil {
+		return provider.PutResult{}
+	}
+	return provider.PutResult{
+		ETag:    attrs.Etag,
+		Version: generationString(attrs.Generation),
+	}
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

@@ -53,7 +53,7 @@ Examples:
 func init() {
 	indexCmd.AddCommand(indexExportCmd)
 
-	indexExportCmd.Flags().String("hub", "", "Hub root URI (s3://bucket/prefix/ or file:///path/)")
+	indexExportCmd.Flags().String("hub", "", "Hub root URI (s3://bucket/prefix/, gs://bucket/prefix/, or file:///path/)")
 	indexExportCmd.Flags().String("index-set", "", "Index set ID to export (required)")
 	indexExportCmd.Flags().String("run-id", "", "Specific run ID to export (default: latest successful)")
 	indexExportCmd.Flags().String("db", "", "Explicit local DB path (overrides index-set lookup)")
@@ -62,6 +62,7 @@ func init() {
 	indexExportCmd.Flags().String("hub-profile", "", "AWS profile for hub destination")
 	indexExportCmd.Flags().String("hub-region", "", "AWS region for hub destination")
 	indexExportCmd.Flags().String("hub-endpoint", "", "Custom endpoint for hub destination")
+	indexExportCmd.Flags().String("hub-gcp-project", "", "GCP project hint for GCS hub destination")
 	addLatestPointerFlags(indexExportCmd)
 
 	_ = indexExportCmd.MarkFlagRequired("hub")
@@ -77,6 +78,7 @@ type hubDestSpec struct {
 	Profile        string
 	Endpoint       string
 	ForcePathStyle bool
+	GCPProject     string
 	BaseDir        string // for file:// hubs
 }
 
@@ -107,25 +109,33 @@ func parseHubURI(uri string) (*hubDestSpec, error) {
 		}, nil
 	}
 
-	if strings.HasPrefix(lower, "s3://") {
-		remainder := uri[len("s3://"):]
+	if strings.HasPrefix(lower, "s3://") || strings.HasPrefix(lower, "gs://") {
+		scheme := "s3"
+		providerName := string(provider.ProviderS3)
+		prefixLen := len("s3://")
+		if strings.HasPrefix(lower, "gs://") {
+			scheme = "gs"
+			providerName = string(provider.ProviderGCS)
+			prefixLen = len("gs://")
+		}
+		remainder := uri[prefixLen:]
 		slashIdx := strings.Index(remainder, "/")
 		if slashIdx == -1 {
-			return nil, fmt.Errorf("s3 hub URI must include a prefix path: %s", uri)
+			return nil, fmt.Errorf("%s hub URI must include a prefix path: %s", scheme, uri)
 		}
 		bucket := remainder[:slashIdx]
 		prefix := remainder[slashIdx+1:]
 		if bucket == "" {
-			return nil, fmt.Errorf("s3 hub URI missing bucket: %s", uri)
+			return nil, fmt.Errorf("%s hub URI missing bucket: %s", scheme, uri)
 		}
 		return &hubDestSpec{
-			Provider: "s3",
+			Provider: providerName,
 			Bucket:   bucket,
 			Prefix:   prefix,
 		}, nil
 	}
 
-	return nil, fmt.Errorf("unsupported hub scheme (supported: s3, file): %s", uri)
+	return nil, fmt.Errorf("unsupported hub scheme (supported: s3, gs, file): %s", uri)
 }
 
 // hubArtifactKey builds the full key for an artifact within the hub.
@@ -142,6 +152,7 @@ func newHubProvider(ctx context.Context, hub *hubDestSpec) (provider.ObjectPutte
 		Profile:        hub.Profile,
 		Endpoint:       hub.Endpoint,
 		ForcePathStyle: hub.ForcePathStyle,
+		GCPProject:     hub.GCPProject,
 		BaseDir:        hub.BaseDir,
 	}
 	return newOutputProvider(ctx, spec)
@@ -157,6 +168,7 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	hubProfile, _ := cmd.Flags().GetString("hub-profile")
 	hubRegion, _ := cmd.Flags().GetString("hub-region")
 	hubEndpoint, _ := cmd.Flags().GetString("hub-endpoint")
+	hubGCPProject, _ := cmd.Flags().GetString("hub-gcp-project")
 
 	// Parse hub destination
 	hub, err := parseHubURI(hubURI)
@@ -166,6 +178,7 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	hub.Profile = hubProfile
 	hub.Region = hubRegion
 	hub.Endpoint = hubEndpoint
+	hub.GCPProject = strings.TrimSpace(hubGCPProject)
 	if hub.Endpoint != "" {
 		hub.ForcePathStyle = true
 	}

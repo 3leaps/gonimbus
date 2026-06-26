@@ -35,15 +35,16 @@ const (
 var streamPutCmd = newStreamPutCommand()
 
 var (
-	streamPutRegion    string
-	streamPutProfile   string
-	streamPutEndpoint  string
-	streamPutFraming   string
-	streamPutOverwrite bool
-	streamPutDestFrame bool
-	streamPutFailFast  bool
-	streamPutPartSize  string
-	streamPutThreshold string
+	streamPutRegion     string
+	streamPutProfile    string
+	streamPutEndpoint   string
+	streamPutGCPProject string
+	streamPutFraming    string
+	streamPutOverwrite  bool
+	streamPutDestFrame  bool
+	streamPutFailFast   bool
+	streamPutPartSize   string
+	streamPutThreshold  string
 )
 
 func init() {
@@ -72,6 +73,7 @@ Framing modes:
 	cmd.Flags().StringVarP(&streamPutRegion, "region", "r", "", "AWS region")
 	cmd.Flags().StringVarP(&streamPutProfile, "profile", "p", "", "AWS profile")
 	cmd.Flags().StringVar(&streamPutEndpoint, "endpoint", "", "Custom S3 endpoint")
+	cmd.Flags().StringVar(&streamPutGCPProject, "gcp-project", "", "GCP project hint for GCS")
 	cmd.Flags().StringVar(&streamPutFraming, "framing", streamPutFramingRaw, "Input framing (raw or jsonl)")
 	cmd.Flags().BoolVar(&streamPutOverwrite, "overwrite", false, "Allow overwriting an existing destination object")
 	cmd.Flags().BoolVar(&streamPutDestFrame, "dest-from-frame", false, "Allow framed dest_key values under the CLI destination root")
@@ -435,6 +437,7 @@ type streamPutDestRoot struct {
 	Profile        string
 	Endpoint       string
 	ForcePathStyle bool
+	GCPProject     string
 }
 
 func runStreamPutFramed(ctx context.Context, cmd *cobra.Command, rawDest string, w *output.JSONLWriter, opts streamPutUploadOptions) error {
@@ -446,6 +449,7 @@ func runStreamPutFramed(ctx context.Context, cmd *cobra.Command, rawDest string,
 	root.Profile = streamPutProfile
 	root.Endpoint = streamPutEndpoint
 	root.ForcePathStyle = streamPutEndpoint != ""
+	root.GCPProject = streamPutGCPProject
 
 	provSpec := root.providerSpec()
 	putter, err := newOutputProvider(ctx, provSpec)
@@ -667,16 +671,24 @@ func parseStreamPutDestRoot(raw string) (streamPutDestRoot, error) {
 		}
 		return streamPutDestRoot{Provider: string(provider.ProviderFile), BaseDir: p, ExactKey: exactKey}, nil
 	}
-	if strings.HasPrefix(lower, "s3://") {
-		remainder := raw[len("s3://"):]
+	if strings.HasPrefix(lower, "s3://") || strings.HasPrefix(lower, "gs://") {
+		scheme := "s3"
+		providerName := string(provider.ProviderS3)
+		prefixLen := len("s3://")
+		if strings.HasPrefix(lower, "gs://") {
+			scheme = "gs"
+			providerName = string(provider.ProviderGCS)
+			prefixLen = len("gs://")
+		}
+		remainder := raw[prefixLen:]
 		slashIdx := strings.Index(remainder, "/")
 		if slashIdx == -1 {
-			return streamPutDestRoot{}, fmt.Errorf("s3 destination root must include a prefix or key: %s", raw)
+			return streamPutDestRoot{}, fmt.Errorf("%s destination root must include a prefix or key: %s", scheme, raw)
 		}
 		bucket := remainder[:slashIdx]
 		prefix := remainder[slashIdx+1:]
 		if bucket == "" {
-			return streamPutDestRoot{}, fmt.Errorf("s3 destination root missing bucket: %s", raw)
+			return streamPutDestRoot{}, fmt.Errorf("%s destination root missing bucket: %s", scheme, raw)
 		}
 		exactKey := ""
 		if prefix != "" && !strings.HasSuffix(prefix, "/") {
@@ -688,9 +700,9 @@ func parseStreamPutDestRoot(raw string) (streamPutDestRoot, error) {
 				prefix = parent + "/"
 			}
 		}
-		return streamPutDestRoot{Provider: string(provider.ProviderS3), Bucket: bucket, Prefix: prefix, ExactKey: exactKey}, nil
+		return streamPutDestRoot{Provider: providerName, Bucket: bucket, Prefix: prefix, ExactKey: exactKey}, nil
 	}
-	return streamPutDestRoot{}, fmt.Errorf("unsupported output scheme %q (supported: s3, file)", raw)
+	return streamPutDestRoot{}, fmt.Errorf("unsupported output scheme %q (supported: s3, gs, file)", raw)
 }
 
 func (r streamPutDestRoot) providerSpec() *outputDestSpec {
@@ -698,12 +710,12 @@ func (r streamPutDestRoot) providerSpec() *outputDestSpec {
 }
 
 func (r streamPutDestRoot) objectSpec(key string) *outputDestSpec {
-	spec := &outputDestSpec{Provider: r.Provider, Region: r.Region, Profile: r.Profile, Endpoint: r.Endpoint, ForcePathStyle: r.ForcePathStyle}
+	spec := &outputDestSpec{Provider: r.Provider, Region: r.Region, Profile: r.Profile, Endpoint: r.Endpoint, ForcePathStyle: r.ForcePathStyle, GCPProject: r.GCPProject}
 	switch r.Provider {
 	case string(provider.ProviderFile):
 		spec.BaseDir = r.BaseDir
 		spec.Key = filepath.FromSlash(key)
-	case string(provider.ProviderS3):
+	case string(provider.ProviderS3), string(provider.ProviderGCS):
 		spec.Bucket = r.Bucket
 		spec.Key = r.Prefix + key
 	}
@@ -741,6 +753,14 @@ func parseOutputLikeURI(raw string) (string, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "s3://") {
 		remainder := raw[len("s3://"):]
+		idx := strings.Index(remainder, "/")
+		if idx == -1 || idx == len(remainder)-1 {
+			return "", fmt.Errorf("source URI has no key")
+		}
+		return remainder[idx+1:], nil
+	}
+	if strings.HasPrefix(lower, "gs://") {
+		remainder := raw[len("gs://"):]
 		idx := strings.Index(remainder, "/")
 		if idx == -1 || idx == len(remainder)-1 {
 			return "", fmt.Errorf("source URI has no key")
@@ -792,6 +812,8 @@ func streamPutOutputProviderName(raw string) string {
 	switch {
 	case strings.HasPrefix(lower, "s3://"):
 		return string(provider.ProviderS3)
+	case strings.HasPrefix(lower, "gs://"):
+		return string(provider.ProviderGCS)
 	case strings.HasPrefix(lower, "file://"):
 		return string(provider.ProviderFile)
 	default:
@@ -804,6 +826,7 @@ func applyStreamPutProviderFlags(dest *outputDestSpec) {
 	dest.Profile = streamPutProfile
 	dest.Endpoint = streamPutEndpoint
 	dest.ForcePathStyle = streamPutEndpoint != ""
+	dest.GCPProject = streamPutGCPProject
 }
 
 func parseStreamPutSize(raw string, fallback int64) (int64, error) {
@@ -852,6 +875,8 @@ func outputDestURI(dest *outputDestSpec) string {
 	switch dest.Provider {
 	case string(provider.ProviderS3):
 		return fmt.Sprintf("s3://%s/%s", dest.Bucket, dest.Key)
+	case string(provider.ProviderGCS):
+		return fmt.Sprintf("gs://%s/%s", dest.Bucket, dest.Key)
 	case string(provider.ProviderFile):
 		return fileURI(filepath.Join(dest.BaseDir, dest.Key))
 	default:
