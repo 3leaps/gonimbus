@@ -537,7 +537,7 @@ continues to work under `fixed_window` and is rejected under
 `until_resolved`. For JSON-bodied content where the routing field sits past
 the head, the current path is `fixed_window` with a generous `--bytes`;
 streaming JSON support is being scoped separately and is not part of the
-GON-017 surface.
+current streaming-probe surface.
 
 For XML documents where the routing value may appear under one of several
 tag names, use `xpath_priority` instead of scalar `xpath`:

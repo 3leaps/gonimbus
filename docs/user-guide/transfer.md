@@ -660,7 +660,7 @@ Collision records include a nested `collision` object when a collision was actua
 }
 ```
 
-The nested `collision` field is omitted on the no-collision happy path. Older audit logs from the GON-020 Phase A migration window may also include legacy flat collision fields; current GON-026 Phase B output uses only the nested object.
+The nested `collision` field is omitted on the no-collision happy path. Audit logs from older gonimbus versions may also include legacy flat collision fields; current output uses only the nested object.
 
 `overwrite-if-source-newer` first attempts the same atomic IfAbsent write as the default mode. If a non-identical destination already exists, Gonimbus HEADs the destination, compares source and destination `LastModified`, and overwrites only when the source is newer or when both timestamps are equal but sizes differ. The overwrite PUT is guarded with the observed destination ETag (`IfMatch`), so a destination mutation between HEAD and PUT is reported as a deterministic skip with `reason: "collision.skipped_concurrent_mutation"` rather than retried as an unconditional overwrite.
 
@@ -860,22 +860,15 @@ No sidecar is written for `gonimbus.error.v1` records because there is no succes
 
 For production data lake landing zones where recursive listings should contain only data files, use a mirrored sidecar root:
 
-<!-- TODO(cxotech, v0.3.4 docs pass): rewrite-semantics fix. This example renders
-     {tenant}/{partition}/{subject}/{file} but uses a single-segment --rewrite-from
-     '{key}' that cannot bind those vars. Replace with a matching multi-segment
-     matcher (e.g. --rewrite-from '{tenant}/{partition}/{subject}/{file}') or the
-     stdin dest_rel_key form. The prose below references <rendered-key>. -->
-
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://bucket/data/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to 'tenant={tenant}/partition={partition}/{subject}/{file}' \
   --provenance sidecar \
-  --provenance-sidecar-root 's3://bucket/runs/run-001/sidecars/'
+  --provenance-sidecar-root 's3://bucket/runs/run-001/sidecars/' < reflow-input.jsonl
 ```
 
-With that placement, data lands under `s3://bucket/data/landing/<rendered-key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<rendered-key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
+Each reflow-input record carries its own `dest_rel_key`, so no rewrite template is
+needed here; data lands under `s3://bucket/data/landing/<dest_rel_key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<dest_rel_key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
 
 The sidecar key suffix is configurable:
 

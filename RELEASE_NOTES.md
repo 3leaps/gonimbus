@@ -85,8 +85,6 @@ throttle-aware AIMD control. `--no-adaptive` runs fixed at the effective ceiling
 # Ask for up to 256 workers; the engine settles where the endpoint + host allow.
 gonimbus transfer reflow --stdin \
   --dest 's3://dest-bucket/reflowed/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{key}' \
   --parallel 256 < reflow-input.jsonl
 ```
 
