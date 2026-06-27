@@ -641,8 +641,6 @@ For `quarantine`, provide a relative collision prefix:
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --on-collision quarantine \
   --collision-quarantine-prefix '_conflict/'
 ```
@@ -688,8 +686,6 @@ by the reflow audit stream:
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   < reflow-input.jsonl > reflow-output.jsonl
 
 gonimbus inspect-pair \
@@ -799,8 +795,6 @@ Use explicit metadata flags when destination consumers need durable object attri
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --metadata-policy clear \
   --metadata-set dataset=transactions \
   --metadata-set owner=data-platform \
@@ -823,8 +817,6 @@ Per-object metadata derivation is also available when destination metadata must 
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --metadata-policy clear \
   --metadata-set source-system=example \
   --metadata-set-from-source-key source-md5=md5 \
@@ -853,8 +845,6 @@ For local file destinations, Gonimbus stores destination metadata in a cleartext
 gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt |
   gonimbus transfer reflow --stdin \
     --dest 's3://dest/landing/' \
-    --rewrite-from '{key}' \
-    --rewrite-to '{business_date}/{key}' \
     --provenance sidecar
 ```
 
@@ -869,6 +859,12 @@ Sidecar mode writes one JSON object at `<dest-key>.gnb.json` by default. Each si
 No sidecar is written for `gonimbus.error.v1` records because there is no successful destination object to colocate with.
 
 For production data lake landing zones where recursive listings should contain only data files, use a mirrored sidecar root:
+
+<!-- TODO(cxotech, v0.3.4 docs pass): rewrite-semantics fix. This example renders
+     {tenant}/{partition}/{subject}/{file} but uses a single-segment --rewrite-from
+     '{key}' that cannot bind those vars. Replace with a matching multi-segment
+     matcher (e.g. --rewrite-from '{tenant}/{partition}/{subject}/{file}') or the
+     stdin dest_rel_key form. The prose below references <rendered-key>. -->
 
 ```bash
 gonimbus transfer reflow --stdin \
@@ -886,8 +882,6 @@ The sidecar key suffix is configurable:
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --provenance sidecar \
   --provenance-suffix '.audit.json' \
   --provenance-on-write-error warn

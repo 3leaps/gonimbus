@@ -4,6 +4,64 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.4 (2026-06-27)
+
+**Google Cloud Storage Provider and Library-Exposure Foundation**
+
+<!-- SCAFFOLD (golf-devlead): cxotech to finalize narrative + framing; prodmktg to
+     review the GCS headline; confirm the release date at tag time. -->
+
+v0.3.4 widens the provider matrix beyond S3 and `file://` for the first time:
+Google Cloud Storage (`gs://`) becomes a first-class crawl/inspect source and
+`transfer reflow` destination, reusing the same adaptive-concurrency and
+IfAbsent-capability model already documented for S3. The release also lands the
+Experimental `pkg/reflow` library-exposure foundation, with CLI behavior
+unchanged.
+
+### Google Cloud Storage provider
+
+`gs://` works as a source and reflow destination across
+inspect/index/tree/stream/content/doctor and `transfer reflow`. GCS reports the
+same IfAbsent honored/probe-status summary fields as S3, maps throttling
+(`RESOURCE_EXHAUSTED`/429/503) to `provider.ErrThrottled`, and plugs into the
+adaptive `--parallel` model. Authentication uses Application Default Credentials
+or service-account keys under the credential-source discipline (no URI- or
+manifest-sourced credential filepaths); `STORAGE_EMULATOR_HOST` is test-only.
+
+ETag-based `If-Match` conditional writes are unsupported (GCS uses generation
+preconditions), so `--on-collision overwrite-if-source-newer` is unavailable on
+GCS destinations and fails closed; IfAbsent `skip-if-duplicate` is supported.
+
+### Library-exposure foundation (Experimental)
+
+`pkg/reflow` exposes typed records, the adaptive-concurrency substrate, and
+provider-error redaction helpers as an Experimental surface; the CLI still drives
+the internal path. The migration completes in a later release.
+
+### Fixes and housekeeping
+
+- `--resume-run` restored across the v0.3.2 → v0.3.3 upgrade boundary
+  (op-checkpoint `no_adaptive` now omitted when unset; cross-version compat test).
+- Reflow probe operations now bounded by adaptive concurrency (probes back off
+  with copies under throttling; deadlock-free at the floor).
+- `golang.org/x/net` upgraded to v0.56.0.
+- Corrected broken `transfer reflow` rewrite examples in the shipped v0.2.1 /
+  v0.2.3 release notes.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.4
+```
+
+CLI workflows remain compatible with v0.3.3. The new `pkg/reflow` surface is
+Experimental.
+
+See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the complete release
+notes.
+
+---
+
 ## v0.3.3 (2026-06-17)
 
 **Adaptive Reflow Concurrency and Reflow Surface Hardening**
@@ -137,89 +195,6 @@ scoop install gonimbus
 See [docs/releases/v0.3.2.md](docs/releases/v0.3.2.md) for the complete
 release notes.
 
----
-
-## v0.3.1 (2026-06-14)
-
-**Embedded S3 Auth Controls and Dependency Refresh**
-
-v0.3.1 is a focused release for Go embedders and release operators. It adds
-explicit S3 construction modes for unsigned public reads and caller-managed AWS
-credential providers, pins the module toolchain directive to Go `1.26.4`, and
-refreshes the past-cooling AWS SDK, smithy, routing, and platform packages used
-by the release lane.
-
-### Embedded S3 Auth Controls
-
-`pkg/provider/s3.Config` now supports two explicit embedded-use credential
-shapes:
-
-- `Anonymous: true` for unsigned public-bucket reads.
-- `CredentialsProvider` for caller-managed AWS SDK credential handles.
-
-Credential precedence is now documented and enforced: anonymous reads, injected
-provider, static keys, profile, then the AWS SDK default chain. Anonymous mode
-is mutually exclusive with every credential source. It sends no
-`Authorization` header and does not fall back to ambient credentials, even when
-the embedding process has AWS environment variables, profiles, or instance
-credentials available.
-
-Anonymous mode is read-only. S3 write paths fail closed with
-`provider.ErrAnonymousReadOnly` joined with `provider.ErrAccessDenied` before
-issuing provider requests.
-
-See [docs/library-consumers.md](docs/library-consumers.md#credential-injection)
-for the supported embedded-use contract and examples.
-
-### Dependency and Toolchain Refresh
-
-The release pins `go.mod` to `toolchain go1.26.4`, matching the CI,
-dependency-security, and release workflow Go patch version.
-
-The dependency refresh is intentionally bounded to packages that cleared the
-release cooling policy:
-
-- AWS SDK for Go v2 root SDK `v1.41.12`, S3 service `v1.102.2`, and
-  smithy-go `v1.27.2` family.
-- `github.com/go-chi/chi/v5 v5.3.0`.
-- `golang.org/x/sys v0.46.0`.
-
-`golang.org/x/net v0.56.0` is deferred to v0.3.2 because its module timestamp
-was still inside the seven-day cooling window for this release. The v0.3.1
-release keeps `golang.org/x/net v0.55.0`, and dependency-security evidence
-remains clean at the high-and-critical gate.
-
-### Server Request IP Posture
-
-The default server router no longer installs `chi/middleware.RealIP`. That
-middleware rewrites `RemoteAddr` from caller-supplied forwarding headers; the
-default server path now leaves `RemoteAddr` as the network peer address.
-Gonimbus does not currently key access control, rate limiting, or audit logic
-on rewritten client IPs. Future proxy-aware behavior should be added as an
-explicit trusted-proxy configuration rather than implicit header trust.
-
-### Probe Quarantine Routing Fix
-
-`content probe` now preserves quarantine routing when a required `derived`
-field depends on a missing required extractor configured with
-`on_missing: quarantine`. The affected record routes to quarantine instead of
-rendering with an unresolved derived field, including until-resolved probe
-flows that derive date-style partition fields.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.1
-```
-
-CLI workflows remain compatible with v0.3.0. Go embedders using
-`pkg/provider/s3` can opt into the new anonymous and injected-credential modes;
-existing static-key, profile, and SDK-default-chain construction continues to
-work with the documented precedence.
-
-See [docs/releases/v0.3.1.md](docs/releases/v0.3.1.md) for the complete
-release notes.
-
 For v0.3.0 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
@@ -227,3 +202,4 @@ the [CHANGELOG](CHANGELOG.md).
 <!-- v0.2.3 entry removed when v0.3.2 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.3.md -->
 <!-- v0.2.2 entry removed when v0.3.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.2.md -->
 <!-- v0.2.1 entry removed when v0.3.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.1.md -->
+<!-- v0.3.1 entry removed when v0.3.4 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.1.md -->
