@@ -42,8 +42,9 @@ library, with the CLI behavior unchanged. See
   the data/decision-plane migration onto `pkg/reflow` completes in a later release.
 - **Added (Experimental):** `pkg/provider/gcs` — a Google Cloud Storage provider
   implementing the read (List/Head/Get/range) and reflow-destination
-  (Put + conditional IfAbsent) contracts, with throttling
-  (`RESOURCE_EXHAUSTED`/429/503) mapped to `provider.ErrThrottled`.
+  (Put + conditional IfAbsent) contracts, mapping `429` and
+  `403`+`RESOURCE_EXHAUSTED` to `provider.ErrThrottled` and `5xx` (incl. `503`)
+  to `provider.ErrProviderUnavailable`.
 
 ### Added
 

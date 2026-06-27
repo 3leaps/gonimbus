@@ -25,8 +25,9 @@ operating model.
 
 `gs://` works as a source and reflow destination across
 inspect/index/tree/stream/content/doctor and `transfer reflow`. GCS reports the
-same IfAbsent honored/probe-status summary fields as S3, maps throttling
-(`RESOURCE_EXHAUSTED`/429/503) to `provider.ErrThrottled`, and plugs into the
+same IfAbsent honored/probe-status summary fields as S3, maps `429` and
+`403`+`RESOURCE_EXHAUSTED` to `provider.ErrThrottled` (and `5xx`, including
+`503`, to `provider.ErrProviderUnavailable`), and plugs into the
 adaptive `--parallel` model. Authentication uses Application Default Credentials
 or service-account keys under the credential-source discipline (no URI- or
 manifest-sourced credential filepaths); `STORAGE_EMULATOR_HOST` is test-only.

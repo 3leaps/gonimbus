@@ -76,9 +76,10 @@ make build
 - **GCS (Google Cloud Storage)**: First-class `gs://` source and `transfer reflow`
   destination — read (List/Head/Get/range) and reflow-destination
   (Put + conditional IfAbsent). GCS reports the same IfAbsent honored/probe-status
-  fields as S3 and maps throttling (`RESOURCE_EXHAUSTED`/429/503) to
-  `provider.ErrThrottled`, so adaptive `--parallel` and the capability-aware
-  collision fallback apply unchanged. Authentication uses Application Default
+  fields as S3 and maps `429` and `403`+`RESOURCE_EXHAUSTED` to
+  `provider.ErrThrottled` (and `5xx`, including `503`, to
+  `provider.ErrProviderUnavailable`), so adaptive `--parallel` and the
+  capability-aware collision fallback apply unchanged. Authentication uses Application Default
   Credentials or service-account keys. **Not supported:** ETag-based `If-Match`
   conditional writes (GCS uses generation preconditions), so
   `--on-collision overwrite-if-source-newer` is unavailable on GCS destinations and
