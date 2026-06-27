@@ -17,6 +17,12 @@ unchanged.
 
 ### Google Cloud Storage provider
 
+A bucket living in GCS no longer needs separate tooling to inspect, index, or
+reflow: the same records, index hub, and content-aware reflow semantics now apply
+to `gs://`, and cross-provider reflow (S3 → GCS, `file://` → GCS, GCS → S3) works
+through the one dispatch seam. GCS extends the provider matrix without forking the
+operating model.
+
 `gs://` works as a source and reflow destination across
 inspect/index/tree/stream/content/doctor and `transfer reflow`. GCS reports the
 same IfAbsent honored/probe-status summary fields as S3, maps throttling
@@ -51,8 +57,9 @@ the internal path. The migration completes in a later release.
 go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.4
 ```
 
-CLI workflows remain compatible with v0.3.3. The new `pkg/reflow` surface is
-Experimental.
+CLI workflows remain compatible with v0.3.3. GCS is a first-class CLI and server
+capability; the **Experimental** label applies only to the new Go package import
+surfaces (`pkg/reflow` and direct `pkg/provider/gcs` imports).
 
 See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the complete release
 notes.
