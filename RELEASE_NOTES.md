@@ -8,9 +8,6 @@ This file contains release notes for up to the three most recent releases in rev
 
 **Google Cloud Storage Provider and Library-Exposure Foundation**
 
-<!-- SCAFFOLD (golf-devlead): cxotech to finalize narrative + framing; prodmktg to
-     review the GCS headline; confirm the release date at tag time. -->
-
 v0.3.4 widens the provider matrix beyond S3 and `file://` for the first time:
 Google Cloud Storage (`gs://`) becomes a first-class crawl/inspect source and
 `transfer reflow` destination, reusing the same adaptive-concurrency and
