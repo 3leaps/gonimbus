@@ -83,8 +83,8 @@ library, with the CLI behavior unchanged. See
 
 ### Documentation
 
-- New GCS quick-start in the user guide; README provider matrix updated to show
-  GCS as supported.
+- New GCS quick-start in the README and release notes; README provider matrix
+  updated to show GCS as supported.
 - Corrected broken `transfer reflow` rewrite examples (`--rewrite-from '{key}'`)
   in the shipped v0.2.1 / v0.2.3 release notes.
 
