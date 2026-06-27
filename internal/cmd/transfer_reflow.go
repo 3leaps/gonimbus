@@ -2018,13 +2018,17 @@ type transferReflowCheckpointPayload struct {
 }
 
 type transferReflowCheckpointConfig struct {
-	SourceURI                 string   `json:"source_uri"`
-	Stdin                     bool     `json:"stdin"`
-	Dest                      string   `json:"dest"`
-	RewriteFrom               string   `json:"rewrite_from"`
-	RewriteTo                 string   `json:"rewrite_to"`
-	Parallel                  int      `json:"parallel"`
-	NoAdaptive                bool     `json:"no_adaptive"`
+	SourceURI   string `json:"source_uri"`
+	Stdin       bool   `json:"stdin"`
+	Dest        string `json:"dest"`
+	RewriteFrom string `json:"rewrite_from"`
+	RewriteTo   string `json:"rewrite_to"`
+	Parallel    int    `json:"parallel"`
+	// omitempty so a default (adaptive) config re-fingerprints identically to a
+	// checkpoint written by an earlier release (v0.3.0–v0.3.2), where the field did
+	// not exist. Without it, v0.3.3 injected "no_adaptive":false and broke
+	// --resume-run across the upgrade boundary (ErrIdentityMismatch).
+	NoAdaptive                bool     `json:"no_adaptive,omitempty"`
 	DryRun                    bool     `json:"dry_run"`
 	CheckpointPath            string   `json:"checkpoint_path"`
 	Overwrite                 bool     `json:"overwrite"`
@@ -2740,6 +2744,24 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, result, err
 	}
+	// acquireProbeHead bounds a standalone provider HEAD probe on the adaptive
+	// concurrency limiter, mirroring the copy path. The slot is held only for the
+	// duration of the HEAD and is never held across a copy, so probe and copy
+	// acquisitions are strictly sequential, never nested — deadlock-free even when
+	// the adaptive `current` has backed off to the Floor (1). This closes the
+	// asymmetry where HEAD/collision probes ran unbounded at worker-count
+	// while only copies obeyed `current`; under throttling, backoff now actually
+	// reduces probe pressure (it already fed the throttle signal via
+	// ObserveProviderResult, but was not itself bounded). Bounding only — the
+	// existing ObserveProviderResult call sites are unchanged.
+	acquireProbeHead := func(ctx context.Context, p provider.Provider, key string) (*provider.ObjectMeta, error) {
+		release, err := concurrencyLimiter.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		return p.Head(ctx, key)
+	}
 	recordFatalReflowError := func(err error) bool {
 		classification := classifyTransferReflowRunErrorWithConfig(err, checkpointCfg)
 		if !classification.Resumable {
@@ -2886,7 +2908,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				var sourceMeta *provider.ObjectMeta
 				needsSourceHeadForCollision := collCfg.Mode == reflowCollisionSrcNew && task.SourceLastMod.IsZero()
 				if metaCfg.needsSourceHead() || srcETag == "" || srcSize == 0 || needsSourceHeadForCollision {
-					meta, err := src.Head(ctx, task.SourceKey)
+					meta, err := acquireProbeHead(ctx, src, task.SourceKey)
 					if err == nil {
 						sourceMeta = meta
 						srcETag = meta.ETag
@@ -2990,7 +3012,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				var bytes int64
 				var putResult provider.PutResult
 				if collCfg.Mode == reflowCollisionOver {
-					dstMeta, headErr := dst.Head(ctx, dstKey)
+					dstMeta, headErr := acquireProbeHead(ctx, dst, dstKey)
 					if headErr == nil {
 						kind := collisionConflict
 						if isDuplicateCollision(task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta) {
@@ -3033,7 +3055,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						} else {
 							if ifAbsentCapability.FallbackActive {
 								stats.recordFallbackObject()
-								_, headErr := dst.Head(ctx, dstKey)
+								_, headErr := acquireProbeHead(ctx, dst, dstKey)
 								switch {
 								case headErr == nil:
 									err = &provider.ProviderError{Op: "Head", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
@@ -3068,7 +3090,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							collisionDecisionPath = decisionHeadFallback
 							sourceNewerDecisionPath = decisionHeadFallback
 						}
-						dstMeta, headErr := dst.Head(ctx, dstKey)
+						dstMeta, headErr := acquireProbeHead(ctx, dst, dstKey)
 						if headErr != nil {
 							concurrencyLimiter.ObserveProviderResult(headErr)
 							if recordFatalReflowError(headErr) {
@@ -3078,7 +3100,16 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
-						dup, dupErr := isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta)
+						// Bound the body-compare GETs on the limiter too (held only for
+						// the comparison, never across a copy — sequential, deadlock-free).
+						dup, dupErr := func() (bool, error) {
+							release, acqErr := concurrencyLimiter.Acquire(ctx)
+							if acqErr != nil {
+								return false, acqErr
+							}
+							defer release()
+							return isDuplicateCollisionForReflow(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta)
+						}()
 						if dupErr != nil {
 							concurrencyLimiter.ObserveProviderResult(dupErr)
 							if recordFatalReflowError(dupErr) {

@@ -416,6 +416,62 @@ func TestTransferReflowCheckpointIdentityRejectsTamperedConfig(t *testing.T) {
 	require.ErrorIs(t, err, opcheckpoint.ErrIdentityMismatch)
 }
 
+// TestTransferReflowCheckpointNoAdaptiveOmitemptyCrossVersionCompat guards the
+// cross-version checkpoint-resume fix. v0.3.3 shipped the checkpoint `no_adaptive`
+// field WITHOUT omitempty, so a resumable checkpoint written by v0.3.0–v0.3.2
+// (where the field did not exist) re-fingerprinted under v0.3.3+ with `"no_adaptive":false`
+// injected into the canonical JSON → `--resume-run` failed `ErrIdentityMismatch`.
+// With omitempty, a default (adaptive) config omits the field again, restoring
+// cross-version fingerprint identity, while `--no-adaptive` runs stay distinct.
+func TestTransferReflowCheckpointNoAdaptiveOmitemptyCrossVersionCompat(t *testing.T) {
+	base := transferReflowCheckpointConfig{
+		SourceURI:               "s3://source-bucket/a.txt",
+		Dest:                    "file:///tmp/out/",
+		RewriteFrom:             "{key}",
+		RewriteTo:               "{key}",
+		Parallel:                16,
+		OnCollision:             reflowCollisionSkip,
+		Provenance:              provenanceModeNone,
+		ProvenanceSuffix:        provenanceSuffix,
+		ProvenanceOnWriteError:  provenanceErrorWarn,
+		MetadataPolicy:          metadataPolicyClear,
+		MetadataOnMissingSource: metadataMissingSkip,
+		MetadataSidecarSuffix:   providerfile.DefaultMetadataSidecarSuffix,
+		Symlinks:                reflowSymlinkSkip,
+		Hidden:                  reflowHiddenSkip,
+		OnSourceFailure:         reflowSourceFailSkip,
+	} // NoAdaptive defaults to false (adaptive enabled) — the earlier-release default.
+
+	raw, err := json.Marshal(base)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "no_adaptive",
+		"default (adaptive) config must omit no_adaptive so earlier-release checkpoints re-fingerprint identically")
+
+	// Earlier-release representation: the field simply did not exist in the canonical JSON.
+	var preGON048 map[string]any
+	require.NoError(t, json.Unmarshal(raw, &preGON048))
+	_, present := preGON048["no_adaptive"]
+	require.False(t, present)
+
+	fpNew, err := checkpointFingerprint(base)
+	require.NoError(t, err)
+	fpPre, err := checkpointFingerprint(preGON048)
+	require.NoError(t, err)
+	require.Equal(t, fpPre, fpNew,
+		"default config fingerprint must match the earlier-release (field-absent) fingerprint")
+
+	// --no-adaptive remains identity-bearing: a fixed-concurrency run is a distinct
+	// checkpoint identity and must not resume an adaptive run (or vice versa).
+	noAdaptive := base
+	noAdaptive.NoAdaptive = true
+	fpNoAdaptive, err := checkpointFingerprint(noAdaptive)
+	require.NoError(t, err)
+	require.NotEqual(t, fpNew, fpNoAdaptive)
+	rawNA, err := json.Marshal(noAdaptive)
+	require.NoError(t, err)
+	require.Contains(t, string(rawNA), `"no_adaptive":true`)
+}
+
 func TestTransferReflowFailedResumableCheckpointBindsStateIdentity(t *testing.T) {
 	withTransferReflowTestState(t)
 
@@ -2526,6 +2582,126 @@ func TestTransferReflowCommand_CollisionOverwriteEmitsNestedCollision(t *testing
 	requireCollisionEqual(t, complete, collisionConflict, decisionOverwrite, "dest-etag", int64(len("old payload")))
 }
 
+// TestTransferReflowCommand_ProbeGatingNoDeadlockAtConcurrencyFloor is the
+// regression guard for the probe-gating change. Standalone provider HEAD probes are
+// now bounded on the adaptive concurrency limiter (acquireProbeHead) the same as
+// copies, closing the asymmetry where probes ran unbounded at worker-count while
+// only copies obeyed `current`. The probe slot is acquired and released *before*
+// the copy slot, so probe and copy acquisitions are strictly sequential, never
+// nested. At the adaptive Floor (current==1, here pinned via --parallel 1) a
+// single worker must still make progress per object: HEAD (acquire/release) →
+// copy (acquire/release). If a future change instead holds the probe slot across
+// the copy acquisition, this exact configuration deadlocks — the copy could never
+// acquire the only slot the worker already holds for the probe. Execution is
+// bounded by a timeout so such a regression fails fast instead of hanging.
+func TestTransferReflowCommand_ProbeGatingNoDeadlockAtConcurrencyFloor(t *testing.T) {
+	withTransferReflowTestState(t)
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	const objects = 5
+	inputs := make([]string, 0, objects)
+	for i := 0; i < objects; i++ {
+		key := fmt.Sprintf("source/file-%d.xml", i)
+		src.putFixture(key, "new payload", "src-etag", time.Time{})
+		// Pre-populate the destination so each object takes the collision path,
+		// forcing a dst.Head probe followed by a copy under the held slot regime.
+		dst.putFixture(key, "old payload", "dest-etag", time.Time{})
+		inputs = append(inputs, reflowInputLine(key, "src-etag", int64(len("new payload")), "", ""))
+	}
+
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3:   func(context.Context, s3.Config) (provider.Provider, error) { return src, nil },
+		File: func(providerfile.Config) (provider.Provider, error) { return dst, nil },
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(strings.Join(inputs, "\n") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1", // EffectiveCeiling==1 → adaptive current pinned at Floor==1
+		"--on-collision", "overwrite", "--overwrite",
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("reflow deadlocked at concurrency floor (current==1): a probe slot is likely held across the copy acquisition")
+	}
+
+	// Every object exercised the gated probe (dst.Head) + copy path and completed.
+	require.Len(t, dst.headCallsSnapshot(), objects)
+	for i := 0; i < objects; i++ {
+		require.Equal(t, "new payload", string(dst.mustObject(fmt.Sprintf("source/file-%d.xml", i))))
+	}
+}
+
+// TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall is the
+// throttle-dimension companion to the deadlock guard above.
+// Real S3-compatible endpoints do not reliably throttle at the request rate
+// gonimbus can generate, so this exercises the
+// throttle path deterministically: a fraction of probe HEADs return ErrThrottled.
+// It asserts that (1) throttled probes drive AIMD backoff (the backoff counter is
+// positive) — confirming probe results feed the limiter — and (2) the run still
+// makes progress and completes for the non-throttled objects (no stall while
+// `current` is reduced and probes are bounded by it). It also documents the
+// behavior found while implementing this fix: throttled probe HEADs are NOT
+// retried (ErrThrottled classifies as a non-resumable runtime_failure), so the
+// throttled objects fail and the run exits with per-object errors rather than
+// aborting — the retry/transient-classification of probes is tracked separately.
+func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing.T) {
+	const objects = 40
+	const throttledHeads = 16
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	lines := make([]string, 0, objects)
+	for i := 0; i < objects; i++ {
+		key := fmt.Sprintf("source/file-%d.xml", i)
+		src.putFixture(key, "new payload", "src-etag", time.Time{})
+		// Collision path → exactly one dst.Head probe per object before the copy.
+		dst.putFixture(key, "old payload", "dest-etag", time.Time{})
+		lines = append(lines, reflowInputLine(key, "src-etag", int64(len("new payload")), "", ""))
+	}
+	dst.throttleHeadsRemaining = throttledHeads
+
+	// Generous resource probe so --parallel 8 is not clamped to the floor: backoff
+	// must start from a real ceiling, otherwise the throttle signal is meaningless.
+	probe := reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) { return 64 << 30, "test_override", nil },
+		FDSoftLimit:      func() (int64, error) { return 100000, nil },
+	}
+
+	stdout, _, err := runTransferReflowWithProvidersAndErrProbe(t, src, dst,
+		strings.Join(lines, "\n"), probe,
+		"--parallel", "8", "--on-collision", "overwrite", "--overwrite")
+	// Throttled probes are not retried → per-object errors, but the run must not
+	// abort or stall.
+	require.Error(t, err)
+
+	summary := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
+	var data struct {
+		ConcurrencyInitial          int            `json:"concurrency_initial"`
+		ConcurrencyFloor            int            `json:"concurrency_floor"`
+		ConcurrencyThrottleBackoffs int64          `json:"concurrency_throttle_backoffs"`
+		Statuses                    map[string]int `json:"statuses"`
+	}
+	require.NoError(t, json.Unmarshal(summary.Data, &data))
+
+	require.Equal(t, 8, data.ConcurrencyInitial, "ceiling must not be clamped to the floor")
+	require.Positive(t, data.ConcurrencyThrottleBackoffs, "throttled probe HEADs must drive AIMD backoff")
+	// Progress despite the reduced `current`: every non-throttled object completed
+	// (a stall from probe/copy slot nesting would strand these).
+	require.Equal(t, objects-throttledHeads, data.Statuses["complete"])
+}
+
 func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerReplacesWithIfMatch(t *testing.T) {
 	src := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
@@ -4264,6 +4440,11 @@ type reflowMemoryProvider struct {
 	mutateBeforeIfMatch bool
 	failSidecars        bool
 	failDelete          bool
+	// throttleHeadsRemaining, when > 0, makes the next N Head calls return
+	// provider.ErrThrottled (decrementing each time) before serving normally.
+	// Used to drive adaptive-concurrency backoff deterministically without a real
+	// throttling endpoint.
+	throttleHeadsRemaining int
 }
 
 func newReflowMemoryProvider() *reflowMemoryProvider {
@@ -4351,6 +4532,10 @@ func (p *reflowMemoryProvider) Head(_ context.Context, key string) (*provider.Ob
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.headCalls = append(p.headCalls, key)
+	if p.throttleHeadsRemaining > 0 {
+		p.throttleHeadsRemaining--
+		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
+	}
 	meta, ok := p.meta[key]
 	if !ok {
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
