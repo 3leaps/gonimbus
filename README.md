@@ -39,6 +39,9 @@ gonimbus version
 # Quick inspection of an S3 prefix
 gonimbus inspect s3://my-bucket/path/to/data/
 
+# ...or a Google Cloud Storage prefix (auth via Application Default Credentials)
+gonimbus inspect gs://my-bucket/path/to/data/
+
 # Run a crawl job from manifest
 gonimbus crawl --job crawl-manifest.yaml
 
@@ -70,13 +73,27 @@ make build
 - **AWS profiles**: Assume-role chains, SSO, cached tokens
 - **Embedded S3 auth controls**: Anonymous public reads and injected AWS SDK
   credential providers for Go library consumers
-- **GCS**: Roadmap (placeholder stub today; full provider tracked for a later release)
+- **GCS (Google Cloud Storage)**: First-class `gs://` source and `transfer reflow`
+  destination — read (List/Head/Get/range) and reflow-destination
+  (Put + conditional IfAbsent). GCS reports the same IfAbsent honored/probe-status
+  fields as S3 and maps `429` and `403`+`RESOURCE_EXHAUSTED` to
+  `provider.ErrThrottled` (and `5xx`, including `503`, to
+  `provider.ErrProviderUnavailable`), so adaptive `--parallel` and the
+  capability-aware collision fallback apply unchanged. Authentication uses Application Default
+  Credentials or service-account keys. **Not supported:** ETag-based `If-Match`
+  conditional writes (GCS uses generation preconditions), so
+  `--on-collision overwrite-if-source-newer` is unavailable on GCS destinations and
+  fails closed; IfAbsent-based `skip-if-duplicate` is fully supported
 
 ### Authentication
 
 Uses SDK default auth chains - no reinventing the wheel:
 
 - AWS: env vars, shared config/credentials, profiles, SSO, web identity/IRSA
+- GCS: Application Default Credentials (`gcloud auth application-default login`,
+  workload identity, or `GOOGLE_APPLICATION_CREDENTIALS` service-account key).
+  Credentials resolve from the environment only — gonimbus never accepts a
+  credential filepath from a URI or manifest (credential-source discipline)
 - Enterprise SSO: `--profile` flag with `aws sso login` workflow
 - Raw keys supported as explicit fallback (Wasabi, DigitalOcean Spaces)
 - Library consumers can opt into unsigned public reads with
@@ -114,7 +131,7 @@ use `overwrite-if-source-newer` for freshness-based collision handling, and
 results. Adaptive `transfer reflow --parallel` behavior and throughput tuning
 are documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the current
+See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the current
 operator notes.
 
 ### Outputs

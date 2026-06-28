@@ -641,8 +641,6 @@ For `quarantine`, provide a relative collision prefix:
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --on-collision quarantine \
   --collision-quarantine-prefix '_conflict/'
 ```
@@ -662,7 +660,7 @@ Collision records include a nested `collision` object when a collision was actua
 }
 ```
 
-The nested `collision` field is omitted on the no-collision happy path. Older audit logs from the GON-020 Phase A migration window may also include legacy flat collision fields; current GON-026 Phase B output uses only the nested object.
+The nested `collision` field is omitted on the no-collision happy path. Audit logs from older gonimbus versions may also include legacy flat collision fields; current output uses only the nested object.
 
 `overwrite-if-source-newer` first attempts the same atomic IfAbsent write as the default mode. If a non-identical destination already exists, Gonimbus HEADs the destination, compares source and destination `LastModified`, and overwrites only when the source is newer or when both timestamps are equal but sizes differ. The overwrite PUT is guarded with the observed destination ETag (`IfMatch`), so a destination mutation between HEAD and PUT is reported as a deterministic skip with `reason: "collision.skipped_concurrent_mutation"` rather than retried as an unconditional overwrite.
 
@@ -688,8 +686,6 @@ by the reflow audit stream:
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   < reflow-input.jsonl > reflow-output.jsonl
 
 gonimbus inspect-pair \
@@ -799,8 +795,6 @@ Use explicit metadata flags when destination consumers need durable object attri
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --metadata-policy clear \
   --metadata-set dataset=transactions \
   --metadata-set owner=data-platform \
@@ -823,8 +817,6 @@ Per-object metadata derivation is also available when destination metadata must 
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --metadata-policy clear \
   --metadata-set source-system=example \
   --metadata-set-from-source-key source-md5=md5 \
@@ -853,8 +845,6 @@ For local file destinations, Gonimbus stores destination metadata in a cleartext
 gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt |
   gonimbus transfer reflow --stdin \
     --dest 's3://dest/landing/' \
-    --rewrite-from '{key}' \
-    --rewrite-to '{business_date}/{key}' \
     --provenance sidecar
 ```
 
@@ -873,21 +863,18 @@ For production data lake landing zones where recursive listings should contain o
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://bucket/data/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to 'tenant={tenant}/partition={partition}/{subject}/{file}' \
   --provenance sidecar \
-  --provenance-sidecar-root 's3://bucket/runs/run-001/sidecars/'
+  --provenance-sidecar-root 's3://bucket/runs/run-001/sidecars/' < reflow-input.jsonl
 ```
 
-With that placement, data lands under `s3://bucket/data/landing/<rendered-key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<rendered-key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
+Each reflow-input record carries its own `dest_rel_key`, so no rewrite template is
+needed here; data lands under `s3://bucket/data/landing/<dest_rel_key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<dest_rel_key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
 
 The sidecar key suffix is configurable:
 
 ```bash
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
-  --rewrite-from '{key}' \
-  --rewrite-to '{business_date}/{key}' \
   --provenance sidecar \
   --provenance-suffix '.audit.json' \
   --provenance-on-write-error warn

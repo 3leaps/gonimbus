@@ -15,6 +15,79 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-27
+
+**Google Cloud Storage as a first-class source and reflow destination, plus the
+library-exposure foundation for the embeddable reflow engine.**
+
+v0.3.4 widens the provider matrix beyond S3 and `file://` for the first time: GCS
+(`gs://`) is now a first-class crawl/inspect source and `transfer reflow`
+destination, riding the existing provider-dispatch seam and the same adaptive-
+concurrency and IfAbsent-capability model documented for S3. This release also
+lands the structural groundwork for exposing the reflow engine as an embeddable
+library, with the CLI behavior unchanged. See
+[`docs/releases/v0.3.4.md`](docs/releases/v0.3.4.md) for the narrative walkthrough.
+
+### Library API
+
+- **Added (Experimental):** `pkg/reflow` now exposes the reflow engine's
+  lower-level building blocks — typed JSONL records (`Record`, `RunRecord`,
+  `SummaryRecord`, `SourceRunRecord`, `Warning`, `CollisionInfo`, `ProvenanceRef`,
+  and the run-config types), the adaptive-concurrency substrate
+  (`ConcurrencyLimiter`, `ConcurrencyConfig`, `ResolveConcurrency`,
+  `DefaultResourceProbe`), and provider-error redaction helpers
+  (`SanitizeOperationCauseMessage`, `FormatErrorMessage`, `NewPathError`). These
+  are **Experimental** per [`docs/api-stability.md`](docs/api-stability.md): the
+  `transfer reflow` CLI is unchanged and continues to drive the internal path;
+  the data/decision-plane migration onto `pkg/reflow` completes in a later release.
+- **Added (Experimental):** `pkg/provider/gcs` — a Google Cloud Storage provider
+  implementing the read (List/Head/Get/range) and reflow-destination
+  (Put + conditional IfAbsent) contracts, mapping `429` and
+  `403`+`RESOURCE_EXHAUSTED` to `provider.ErrThrottled` and `5xx` (incl. `503`)
+  to `provider.ErrProviderUnavailable`.
+
+### Added
+
+- **Google Cloud Storage provider:** `gs://` sources and reflow destinations
+  across inspect/index/tree/stream/content/doctor and `transfer reflow`. GCS
+  reports the same IfAbsent honored/probe-status summary fields as S3 and plugs
+  into the existing adaptive-concurrency model. Authentication follows Application
+  Default Credentials and service-account keys under the established
+  credential-source discipline (no URI- or manifest-sourced credential
+  filepaths); `STORAGE_EMULATOR_HOST` is honored for hermetic testing only. GCS
+  conditional writes support IfAbsent (skip-if-duplicate); ETag-based `If-Match`
+  preconditions are not supported (GCS uses generation preconditions), so
+  `--on-collision overwrite-if-source-newer` is unavailable on GCS destinations
+  and fails closed.
+- **Opt-in real-GCS test lane:** an opt-in integration lane validates the provider
+  against a real GCS bucket (bring-your-own; see
+  [`docs/development/testing.md`](docs/development/testing.md)), alongside the
+  hermetic `fake-gcs-server` lane that runs on every PR.
+
+### Changed
+
+- **Reflow probe operations are now bounded by adaptive concurrency.** Standalone
+  provider probes (source/destination HEADs and body-compare reads) acquire the
+  same adaptive-concurrency slots as copies, so backoff under provider throttling
+  reduces probe pressure as well as copy pressure. Acquisitions are sequential and
+  never nested (deadlock-free even at the concurrency floor).
+- **Dependencies:** `golang.org/x/net` upgraded to v0.56.0.
+
+### Fixed
+
+- **Checkpoint resume across versions:** the op-checkpoint `no_adaptive` config
+  field is now omitted when unset, restoring `--resume-run` for resumable
+  checkpoints written by pre-v0.3.3 builds (previously failed closed with an
+  identity mismatch). A cross-version fingerprint compatibility test guards the
+  boundary.
+
+### Documentation
+
+- New GCS quick-start in the README and release notes; README provider matrix
+  updated to show GCS as supported.
+- Corrected broken `transfer reflow` rewrite examples (`--rewrite-from '{key}'`)
+  in the shipped v0.2.1 / v0.2.3 release notes.
+
 ## [0.3.3] - 2026-06-17
 
 **Adaptive transfer reflow concurrency, safer reflow error surfaces, priority
@@ -1002,7 +1075,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/3leaps/gonimbus/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/3leaps/gonimbus/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/3leaps/gonimbus/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/3leaps/gonimbus/compare/v0.3.0...v0.3.1
