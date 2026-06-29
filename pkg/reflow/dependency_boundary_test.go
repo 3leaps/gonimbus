@@ -19,8 +19,8 @@ func TestDependencyBoundary(t *testing.T) {
 		"github.com/3leaps/gonimbus/pkg/provider/s3",
 		"github.com/3leaps/gonimbus/pkg/provider/gcs",
 		// Storageful packages must not enter the embeddable engine graph: the CLI
-		// wraps pkg/reflowstate behind the minimal CheckpointStore interface, so a
-		// Sumpter-style consumer never inherits sqlite/indexstore transitively.
+		// wraps pkg/reflowstate behind the minimal CheckpointStore interface, so an
+		// embedding/library consumer never inherits sqlite/indexstore transitively.
 		"github.com/3leaps/gonimbus/pkg/reflowstate",
 		"github.com/3leaps/gonimbus/pkg/indexstore",
 		"modernc.org/sqlite",
