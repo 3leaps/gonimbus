@@ -65,9 +65,9 @@ const (
 	metadataPolicyPreserve  = "preserve"
 	metadataPolicyMerge     = "merge"
 	metadataMissingSkip     = "skip"
-	metadataMissingFail     = "fail"
-	metadataMissingEmpty    = "empty"
-	metadataMaxPairBytes    = 2 * 1024
+	// metadataMaxTotalBytes mirrors the pkg/reflow S3 user-metadata budget; used
+	// by integration tests to construct oversized metadata. Enforcement lives in
+	// reflow.ValidateMetadataBudget.
 	metadataMaxTotalBytes   = 8 * 1024
 	storageClassPropagate   = "propagate"
 	reflowSymlinkSkip       = "skip"
@@ -361,7 +361,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if err := ensureMetadataCapability(dstProv, destSpec.Provider, metaCfg); err != nil {
 		return emitReflowConfigError(ctx, w, "Invalid metadata configuration", err, map[string]any{
 			"missing_capability": "MetadataAwarePutter",
-			"flags":              metaCfg.capabilityFlags(),
+			"flags":              metadataCapabilityFlags(metaCfg),
 			"provider":           destSpec.Provider,
 		})
 	}
@@ -391,7 +391,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		Parallel:         reflowParallel,
 		ConcurrencyStats: concurrencyLimiter.Snapshot(),
 		Provenance:       provCfg.runConfig(),
-		Metadata:         metaCfg.runConfig(),
+		Metadata:         metadataRunConfig(metaCfg),
 	})
 
 	if !reflowStdin {
@@ -666,7 +666,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				srcSize := task.SourceSize
 				var sourceMeta *provider.ObjectMeta
 				needsSourceHeadForCollision := collCfg.Mode == reflowCollisionSrcNew && task.SourceLastMod.IsZero()
-				if metaCfg.needsSourceHead() || srcETag == "" || srcSize == 0 || needsSourceHeadForCollision {
+				if metaCfg.NeedsSourceHead() || srcETag == "" || srcSize == 0 || needsSourceHeadForCollision {
 					meta, err := acquireProbeHead(ctx, src, task.SourceKey)
 					if err == nil {
 						sourceMeta = meta
@@ -675,7 +675,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						if !meta.LastModified.IsZero() {
 							task.SourceLastMod = meta.LastModified
 						}
-					} else if metaCfg.needsSourceHead() || needsSourceHeadForCollision {
+					} else if metaCfg.NeedsSourceHead() || needsSourceHeadForCollision {
 						concurrencyLimiter.ObserveProviderResult(err)
 						if recordFatalReflowError(err) {
 							continue
@@ -691,21 +691,21 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 					continue
 				}
-				putOptions, err := metaCfg.putOptions(sourceMeta)
+				putOptions, err := metaCfg.PutOptions(sourceMeta)
 				if err == nil && destSpec.Provider == string(provider.ProviderS3) {
-					err = validateMetadataBudget(putOptions.UserMetadata)
+					err = reflowpkg.ValidateMetadataBudget(putOptions.UserMetadata)
 				}
 				if err != nil {
 					details := map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI}
 					var budgetErr *metadataBudgetError
 					if errors.As(err, &budgetErr) {
-						for key, value := range budgetErr.details() {
+						for key, value := range budgetErr.Details() {
 							details[key] = value
 						}
 					}
 					var derivErr *metadataDerivationError
 					if errors.As(err, &derivErr) {
-						for key, value := range derivErr.details() {
+						for key, value := range derivErr.Details() {
 							details[key] = value
 						}
 					}
