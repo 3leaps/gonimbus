@@ -164,6 +164,11 @@ func baseParityConfig(dst *reflowMemoryProvider) reflowpkg.Config {
 		Destination: reflowpkg.Destination{Provider: dst, ProviderID: "s3", BaseURI: parityDestBase},
 		Rewrite:     reflowpkg.RewriteConfig{From: "{key}", To: "{key}"},
 		Collision:   reflowpkg.CollisionPolicy{Mode: "skip-if-duplicate"},
+		// Mirror the CLI cases' `--parallel 1` (adaptive default on) so the
+		// scaffold compares equivalent concurrency policy, not a library default.
+		// For requested=1 this resolves deterministically (effective ceiling 1,
+		// reason "requested") independent of the host resource probe.
+		Concurrency: reflowpkg.ResolveConcurrency(1, true, reflowpkg.DefaultResourceProbe()),
 	}
 }
 
