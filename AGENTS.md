@@ -17,7 +17,7 @@ See [3leaps-crucible agent-identity standard](https://crucible.3leaps.dev/reposi
 ## Read First
 
 1. **Confirm your role.** Roles are defined in [`config/agentic/roles/`](config/agentic/roles/). Default to `devlead` if unspecified.
-2. **Check `../AGENTS.gonimbus.local.md`** (one level _above_ the repo root) if present, for machine-specific instructions, credential guidance, and tactical session overrides. It is the final authority on local environment configuration. It lives outside the repository tree on purpose — local context never sits inside the working tree (a `.gitignore` entry is a convenience filter, not a security boundary), so it cannot be committed to this repository by accident.
+2. **Check for local guidance** if present, for machine-specific instructions, credential guidance, and tactical session overrides — the final authority on local environment configuration. Local context is kept out of the working tree on purpose (a `.gitignore` entry is a convenience filter, not a security boundary), so it cannot be committed to this repository by accident.
 3. **Follow the 3 Leaps OSS policies.** This repository conforms to the policies published at [`github.com/3leaps/oss-policies`](https://github.com/3leaps/oss-policies/). Read the policy named by an instruction — or the policy relevant to your task — by URL and follow it here. See **Confidentiality & OSS Surface** below.
 4. **Read `MAINTAINERS.md`** for human maintainer contacts.
 5. **Read files before editing them.**
@@ -43,7 +43,7 @@ material.
 - **No deny-lists in the repo.** State the principle and point to the canonical
   policy rather than publishing lists of specific terms to avoid — an in-repo
   deny-list is itself a disclosure. Machine-local, environment-specific detail
-  belongs in `../AGENTS.gonimbus.local.md`, outside the tree.
+  belongs in local guidance kept outside the tree.
 
 ## Quick Reference
 
@@ -98,7 +98,7 @@ These roles are specific to the gonimbus domain and defined here rather than in 
 
 ### Startup
 
-1. Read `../AGENTS.gonimbus.local.md` if present (outside the repo tree; machine-specific instructions, credential guidance, local overrides)
+1. Read local guidance if present (kept outside the repo tree; machine-specific instructions, credential guidance, local overrides)
 2. Identify your role from context or request assignment; read the role YAML from `config/agentic/roles/`
 3. Scan relevant code before making changes
 
@@ -198,7 +198,7 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 
 ## References
 
-- `../AGENTS.gonimbus.local.md` - Machine-specific instructions (outside the repo tree; read if present)
+- Local guidance - Machine-specific instructions (kept outside the repo tree; read if present)
 - `MAINTAINERS.md` - Human maintainers
 - `README.md` - Project overview
 - `docs/provenance.md` - Ecosystem heritage
