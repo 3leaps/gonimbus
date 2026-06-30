@@ -57,17 +57,27 @@ func dryRunConfig(sink EventSink) Config {
 }
 
 type copyMemoryProvider struct {
-	mu       sync.Mutex
-	objects  map[string][]byte
-	meta     map[string]provider.ObjectMeta
-	preconds []provider.PutPrecondition
+	mu           sync.Mutex
+	providerType provider.ProviderType
+	objects      map[string][]byte
+	meta         map[string]provider.ObjectMeta
+	preconds     []provider.PutPrecondition
+	putErrByKey  map[string]error
 }
 
 func newCopyMemoryProvider() *copyMemoryProvider {
 	return &copyMemoryProvider{
-		objects: map[string][]byte{},
-		meta:    map[string]provider.ObjectMeta{},
+		providerType: provider.ProviderS3,
+		objects:      map[string][]byte{},
+		meta:         map[string]provider.ObjectMeta{},
+		putErrByKey:  map[string]error{},
 	}
+}
+
+func newGCSCapabilityProvider() *copyMemoryProvider {
+	p := newCopyMemoryProvider()
+	p.providerType = provider.ProviderGCS
+	return p
 }
 
 func (p *copyMemoryProvider) putFixture(key, body, etag string) {
@@ -86,7 +96,7 @@ func (p *copyMemoryProvider) Head(_ context.Context, key string) (*provider.Obje
 	defer p.mu.Unlock()
 	meta, ok := p.meta[key]
 	if !ok {
-		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderS3, Key: key, Err: provider.ErrNotFound}
+		return nil, &provider.ProviderError{Op: "Head", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
 	}
 	return &meta, nil
 }
@@ -96,7 +106,7 @@ func (p *copyMemoryProvider) GetObject(_ context.Context, key string) (io.ReadCl
 	defer p.mu.Unlock()
 	body, ok := p.objects[key]
 	if !ok {
-		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderS3, Key: key, Err: provider.ErrNotFound}
+		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
 	}
 	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), nil
 }
@@ -130,16 +140,22 @@ func (p *copyMemoryProvider) PutObjectConditional(_ context.Context, key string,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preconds = append(p.preconds, precond)
+	if err := p.putErrByKey[key]; err != nil {
+		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: err}
+	}
 	if precond.IfAbsent {
 		if _, ok := p.objects[key]; ok {
-			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: provider.ProviderS3, Key: key, Err: provider.ErrAlreadyExists}
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrAlreadyExists}
 		}
 		etag := "dest-" + key
 		p.objects[key] = data
 		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag}}
 		return provider.PutResult{ETag: etag}, nil
 	}
-	return provider.PutResult{}, fmt.Errorf("unsupported precondition")
+	if precond.IfMatchETag != nil && p.providerType == provider.ProviderGCS {
+		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrUnsupportedPrecondition}
+	}
+	return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrUnsupportedPrecondition}
 }
 
 func (p *copyMemoryProvider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
@@ -211,6 +227,13 @@ func copyConfig(dst *copyMemoryProvider, sink EventSink) Config {
 	return cfg
 }
 
+func gcsCopyConfig(dst *copyMemoryProvider, sink EventSink) Config {
+	cfg := copyConfig(dst, sink)
+	cfg.Destination.ProviderID = string(provider.ProviderGCS)
+	cfg.Destination.BaseURI = "gs://dest-bucket/data/"
+	return cfg
+}
+
 func copySource(src *copyMemoryProvider, line string) RecordStreamSource {
 	return RecordStreamSource{
 		Records: strings.NewReader(line),
@@ -273,6 +296,100 @@ func TestRunnerCopyRecordStreamConditionalPut(t *testing.T) {
 	require.Equal(t, 1, summary.ConcurrencyMaxActive)
 	require.Len(t, dst.preconditions(), 3, "two preflight puts plus the object conditional put")
 	require.True(t, dst.preconditions()[2].IfAbsent)
+}
+
+func TestRunnerGCSCapabilityMatrixIfAbsentHonoredNoFallback(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newGCSCapabilityProvider()
+	src.putFixture("a/b.xml", "payload", "etag-a")
+	sink := &collectSink{}
+	runner, err := NewRunner(gcsCopyConfig(dst, sink))
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"etag-a","source_size_bytes":7,"dest_rel_key":"a/b.xml"}}`
+	summary, err := runner.Run(context.Background(), copySource(src, line))
+	require.NoError(t, err)
+
+	require.Equal(t, []byte("payload"), dst.body("data/a/b.xml"))
+	require.Empty(t, sink.warnings, "GCS-shaped IfAbsent-honored destination must not activate the head fallback")
+	require.Len(t, sink.records, 2)
+	require.Equal(t, "gs://dest-bucket/data/a/b.xml", sink.records[1].DestURI)
+	require.Equal(t, "honored", summary.DestIfAbsentProbeStatus)
+	require.NotNil(t, summary.DestIfAbsentHonored)
+	require.True(t, *summary.DestIfAbsentHonored)
+	require.False(t, summary.FallbackActive)
+	require.Zero(t, summary.IfAbsentFallbackObjects)
+	require.Len(t, dst.preconditions(), 3, "two preflight puts plus the object conditional put")
+	require.True(t, dst.preconditions()[2].IfAbsent)
+}
+
+func TestGCSCapabilityFixtureRejectsIfMatchETag(t *testing.T) {
+	dst := newGCSCapabilityProvider()
+	etag := "etag-a"
+	_, err := dst.PutObjectConditional(context.Background(), "data/a.xml", strings.NewReader("payload"), int64(len("payload")), provider.PutPrecondition{IfMatchETag: &etag})
+	require.ErrorIs(t, err, provider.ErrUnsupportedPrecondition)
+
+	var providerErr *provider.ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	require.Equal(t, provider.ProviderGCS, providerErr.Provider)
+	require.NotContains(t, err.Error(), "x-goog-signature")
+	require.NotContains(t, err.Error(), "x-goog-credential")
+	require.NotContains(t, strings.ToLower(err.Error()), "bearer")
+}
+
+func TestRunnerGCSCapabilityMatrixClassifiesProviderSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantCode   string
+		wantBack   int64
+		wantFreeze int64
+	}{
+		{
+			name:     "quota throttled",
+			err:      provider.ErrThrottled,
+			wantCode: ErrCodeThrottled,
+			wantBack: 1,
+		},
+		{
+			name:       "service unavailable",
+			err:        provider.ErrProviderUnavailable,
+			wantCode:   ErrCodeProviderUnavailable,
+			wantFreeze: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := newCopyMemoryProvider(), newGCSCapabilityProvider()
+			src.putFixture("a/b.xml", "payload", "etag-a")
+			dst.putErrByKey["data/a/b.xml"] = tc.err
+			sink := &collectSink{}
+			cfg := gcsCopyConfig(dst, sink)
+			cfg.Concurrency = ConcurrencyConfig{
+				RequestedCeiling: 4,
+				EffectiveCeiling: 4,
+				CeilingReason:    "test",
+				AdaptiveEnabled:  true,
+				Floor:            1,
+				Initial:          4,
+			}
+			runner, err := NewRunner(cfg)
+			require.NoError(t, err)
+
+			line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"etag-a","source_size_bytes":7,"dest_rel_key":"a/b.xml"}}`
+			summary, err := runner.Run(context.Background(), copySource(src, line))
+			var objectErr *ObjectErrorsError
+			require.ErrorAs(t, err, &objectErr)
+			require.Equal(t, int64(1), objectErr.Count)
+
+			require.Len(t, sink.errs, 1)
+			require.Equal(t, tc.wantCode, sink.errs[0].Code)
+			require.Equal(t, int64(1), summary.Errors)
+			require.Equal(t, int64(1), summary.Statuses["failed"])
+			require.Equal(t, "honored", summary.DestIfAbsentProbeStatus)
+			require.False(t, summary.FallbackActive)
+			require.Equal(t, tc.wantBack, summary.ConcurrencyThrottleBackoffs)
+			require.Equal(t, tc.wantFreeze, summary.ConcurrencyConnectionErrorFreezes)
+		})
+	}
 }
 
 func TestRunnerCopyValidatesMetadataBudgetBeforePut(t *testing.T) {
