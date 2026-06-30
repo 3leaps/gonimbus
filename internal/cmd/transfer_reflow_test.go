@@ -3341,6 +3341,12 @@ func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testin
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
 }
 
+func TestTransferReflowCollisionCapabilityRejectsGCSOverwriteIfSourceNewer(t *testing.T) {
+	err := ensureCollisionCapability(&mockProvider{}, string(provider.ProviderGCS), collisionConfig{Mode: reflowCollisionSrcNew})
+	require.ErrorContains(t, err, `provider "gcs" does not support ConditionalPutter.IfMatchETag`)
+	require.ErrorContains(t, err, "--on-collision=overwrite-if-source-newer")
+}
+
 func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
 	require.Contains(t, transferReflowCmd.Long, "durable destination metadata")
 	require.Contains(t, transferReflowCmd.Long, "--metadata-set-from-source-key")
