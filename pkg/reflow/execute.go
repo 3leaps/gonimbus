@@ -82,6 +82,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	}
 
 	stats := newRunStats()
+	sourceIdentity := ""
 	scanner := bufio.NewScanner(src.Records)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -92,7 +93,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		if line == "" {
 			continue
 		}
-		if err := r.executeInputLine(ctx, src, layout, rewrite, stats, capability, limiter, line); err != nil {
+		if err := r.executeInputLine(ctx, src, layout, rewrite, stats, capability, limiter, &sourceIdentity, line); err != nil {
 			return Summary{}, err
 		}
 	}
@@ -148,16 +149,20 @@ func (e *ObjectErrorsError) Error() string {
 	return fmt.Sprintf("reflow: completed with %d object error(s)", e.Count)
 }
 
-func (r *Runner) executeInputLine(ctx context.Context, src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, line string) error {
+func (r *Runner) executeInputLine(ctx context.Context, src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, sourceIdentity *string, line string) error {
 	in, err := parseReflowInputLine(line)
 	if err != nil {
 		stats.recordInvalidInput()
-		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Message: "invalid reflow input", Details: map[string]any{"error": err.Error()}})
+		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Message: FormatErrorMessage("invalid reflow input", err), Details: map[string]any{"error": err.Error()}})
+	}
+	if err := validateSourceIdentity(sourceIdentity, in); err != nil {
+		stats.recordInvalidInput()
+		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("invalid input", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
 	}
 	destRel, err := planDestRel(in, rewrite)
 	if err != nil {
 		stats.recordInvalidInput()
-		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: "destination mapping unavailable", Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
+		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("destination mapping unavailable", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
 	}
 	destKey := layout.DestKey(destRel)
 	destURI := layout.DestURI(destKey)
@@ -167,6 +172,24 @@ func (r *Runner) executeInputLine(ctx context.Context, src RecordStreamSource, l
 		return r.emitRecord(ctx, rec)
 	}
 	return r.copyAndEmit(ctx, src, layout, stats, capability, limiter, in, destKey, destURI)
+}
+
+func validateSourceIdentity(current *string, in reflowInput) error {
+	if current == nil {
+		return nil
+	}
+	identity := in.sourceIdentity()
+	if identity == "" {
+		return nil
+	}
+	if *current == "" {
+		*current = identity
+		return nil
+	}
+	if *current != identity {
+		return fmt.Errorf("multiple source roots are not supported: got %q expected %q", identity, *current)
+	}
+	return nil
 }
 
 func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, in reflowInput, destKey, destURI string) error {

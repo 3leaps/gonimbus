@@ -39,13 +39,15 @@ type reflowInput struct {
 }
 
 // parseReflowInputLine parses a single reflow-input JSONL line into the engine's
-// internal form. Any line that is not an acceptable S3 gonimbus.reflow.input.v1
-// record returns an error; the executor reports it as a per-record INVALID_INPUT
-// event (CLI-equivalent) and continues streaming.
+// internal form. It accepts the migrated S3 reflow-input record plus existing
+// exact-object stdin forms the command path already supports (S3 index-object
+// records and exact S3 URI lines). Anything else returns an error; the executor
+// reports it as a per-record INVALID_INPUT event (CLI-equivalent) and continues
+// streaming.
 func parseReflowInputLine(line string) (reflowInput, error) {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "{") {
-		return reflowInput{}, fmt.Errorf("reflow input must be a %s JSON record", ReflowInputRecordType)
+		return parseRawS3ObjectLine(line)
 	}
 	var env struct {
 		Type string          `json:"type"`
@@ -54,9 +56,17 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 	if err := json.Unmarshal([]byte(line), &env); err != nil {
 		return reflowInput{}, err
 	}
-	if env.Type != ReflowInputRecordType {
+	switch env.Type {
+	case ReflowInputRecordType:
+		return parseReflowInputData(env.Data)
+	case "gonimbus.index.object.v1":
+		return parseIndexObjectInputData(env.Data)
+	default:
 		return reflowInput{}, fmt.Errorf("unsupported record type %q; RecordStreamSource carries %s records", env.Type, ReflowInputRecordType)
 	}
+}
+
+func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 	var data struct {
 		SourceURI        string            `json:"source_uri"`
 		SourceKey        string            `json:"source_key"`
@@ -68,7 +78,7 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 		RoutingClass     string            `json:"routing_class"`
 		QuarantinePrefix string            `json:"quarantine_prefix"`
 	}
-	if err := json.Unmarshal(env.Data, &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		return reflowInput{}, err
 	}
 	if strings.TrimSpace(data.SourceURI) == "" {
@@ -118,6 +128,79 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 		RoutingClass:     routingClass,
 		QuarantinePrefix: quarantinePrefix,
 	}, nil
+}
+
+func parseIndexObjectInputData(raw json.RawMessage) (reflowInput, error) {
+	var data struct {
+		BaseURI      string    `json:"base_uri"`
+		Key          string    `json:"key"`
+		ETag         string    `json:"etag"`
+		SizeBytes    int64     `json:"size_bytes"`
+		LastModified time.Time `json:"last_modified"`
+		RelKey       string    `json:"rel_key"`
+		DeletedAt    *string   `json:"deleted_at"`
+	}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return reflowInput{}, err
+	}
+	if data.DeletedAt != nil {
+		return reflowInput{}, fmt.Errorf("deleted objects are not supported in reflow input")
+	}
+	base, err := uri.ParseURI(data.BaseURI)
+	if err != nil {
+		return reflowInput{}, fmt.Errorf("invalid base_uri: %w", err)
+	}
+	if base.Provider != string(provider.ProviderS3) {
+		return reflowInput{}, fmt.Errorf("RecordStreamSource base_uri must be an s3:// URI; %q sources use FileTreeSource or another Source form", base.Provider)
+	}
+	key := strings.TrimPrefix(strings.TrimSpace(data.Key), "/")
+	if key == "" {
+		key = strings.TrimPrefix(strings.TrimSpace(data.RelKey), "/")
+	}
+	if key == "" {
+		return reflowInput{}, fmt.Errorf("missing key in index record")
+	}
+	return reflowInput{
+		SourceProvider: string(provider.ProviderS3),
+		SourceBucket:   base.Bucket,
+		SourceURI:      fmt.Sprintf("s3://%s/%s", base.Bucket, key),
+		SourceKey:      key,
+		SourceETag:     data.ETag,
+		SourceSize:     data.SizeBytes,
+		SourceLastMod:  data.LastModified,
+		RoutingClass:   "normal",
+	}, nil
+}
+
+func parseRawS3ObjectLine(line string) (reflowInput, error) {
+	parsed, err := uri.ParseURI(line)
+	if err != nil {
+		return reflowInput{}, err
+	}
+	if parsed.Provider != string(provider.ProviderS3) {
+		return reflowInput{}, fmt.Errorf("unsupported provider %q", parsed.Provider)
+	}
+	if parsed.IsPrefix() || parsed.IsPattern() {
+		return reflowInput{}, fmt.Errorf("RecordStreamSource raw URI input must be an exact object URI")
+	}
+	key := strings.TrimPrefix(strings.TrimSpace(parsed.Key), "/")
+	if key == "" {
+		return reflowInput{}, fmt.Errorf("missing source key")
+	}
+	return reflowInput{
+		SourceProvider: string(provider.ProviderS3),
+		SourceBucket:   parsed.Bucket,
+		SourceURI:      fmt.Sprintf("s3://%s/%s", parsed.Bucket, key),
+		SourceKey:      key,
+		RoutingClass:   "normal",
+	}, nil
+}
+
+func (in reflowInput) sourceIdentity() string {
+	if in.SourceProvider == "" || in.SourceBucket == "" {
+		return ""
+	}
+	return in.SourceProvider + ":" + in.SourceBucket
 }
 
 // record builds the per-object reflow Record for this input at the given
