@@ -7,11 +7,17 @@
 // PrefixSource, FileTreeSource, RecordStreamSource), the structured Destination,
 // the EventSink event boundary, and the minimal CheckpointStore resume interface.
 //
-// The execution surface is a skeleton: Runner.Run returns ErrNotImplemented until
-// the data/decision plane migration lands; the CLI remains the execution path
-// meanwhile. Providers are injected as provider.Provider handles, so the engine
-// never imports a concrete provider, SDK, or the storageful (sqlite/index-store)
-// graph — enforced by the dependency-boundary test.
+// The execution surface is migrating incrementally. Runner.Run executes the
+// migrated paths — currently the dry-run plane over a RecordStreamSource: it
+// streams S3 reflow-input records, plans destination mappings, emits the typed
+// events, and returns an InvalidInputsError after the summary when a stream
+// carries invalid records (mirroring the command path's non-zero exit). Forms and
+// scenarios not yet migrated (the copy plane, object/prefix/file-tree sources)
+// return ErrNotImplemented, decided from the source form and config before any
+// stream bytes are read, so a caller can fall back to the CLI path with the same
+// Source. Providers are injected as provider.Provider handles, so the engine never
+// imports a concrete provider, SDK, or the storageful (sqlite/index-store) graph —
+// enforced by the dependency-boundary test.
 //
 // The package is Experimental; see docs/api-stability.md for the stability tiers.
 package reflow
