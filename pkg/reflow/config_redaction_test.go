@@ -61,6 +61,33 @@ func TestConfigStringRedactsInjectedHandles(t *testing.T) {
 	}
 }
 
+func TestConfigStringRedactsMetadataValues(t *testing.T) {
+	const metadataSecretSentinel = "SECRET-metadata-token-value"
+	cfg := Config{
+		Destination: Destination{Provider: sentinelProvider{}, ProviderID: "s3", BaseURI: "s3://bucket/base/"},
+		Metadata: MetadataPlan{
+			Policy: MetadataPolicyMerge,
+			Set: map[string]string{
+				"public-name": metadataSecretSentinel,
+			},
+			SourceKeyRules:          []MetadataSourceKeyRule{{DestKey: "from-source", SourceKey: "source-key", Raw: "from-source=source-key"}},
+			DerivedRules:            []MetadataDerivedRule{{DestKey: "derived", Expression: "system.etag", Raw: "derived=system.etag"}},
+			OnMissingSource:         MetadataOnMissingFail,
+			PreserveContentType:     true,
+			DestinationStorageClass: "STANDARD_IA",
+			MetadataSidecarSuffix:   ".metadata.json",
+		},
+	}
+	for _, got := range []string{cfg.String(), cfg.GoString(), fmt.Sprintf("%v", cfg), fmt.Sprintf("%#v", cfg)} {
+		if strings.Contains(got, metadataSecretSentinel) || strings.Contains(got, "system.etag") || strings.Contains(got, ".metadata.json") {
+			t.Fatalf("Config formatting leaked metadata configuration values: %q", got)
+		}
+		if !strings.Contains(got, "Policy:\"merge\"") || !strings.Contains(got, "Set:1") || !strings.Contains(got, "DerivedRules:1") {
+			t.Fatalf("Config formatting should keep value-free metadata shape: %q", got)
+		}
+	}
+}
+
 func TestSourceStringRedactsProviderHandle(t *testing.T) {
 	sources := []Source{
 		ObjectSource{Provider: sentinelProvider{}, URI: "s3://bucket/key"},

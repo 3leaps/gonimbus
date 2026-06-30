@@ -3,20 +3,15 @@ package reflow
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
-// ErrNotImplemented is returned by Runner.Run while the data/decision plane is
-// still driven by the command layer. Until the engine migration completes, the
-// CLI remains the execution path.
+// ErrNotImplemented is returned by Runner.Run for source forms or scenarios that
+// are still driven by the command layer.
 var ErrNotImplemented = errors.New("reflow: runner execution not yet implemented (engine migration in progress)")
 
 // Runner executes reflow runs against an injected destination/provider matrix.
-// Construct one with NewRunner.
-//
-// Experimental: the execution surface is a skeleton in this release — Run returns
-// ErrNotImplemented until the engine migration lands. The contract types
-// (Config, Source, Destination, EventSink, CheckpointStore, Summary) are shaped
-// to build against; see docs/api-stability.md.
+// Construct one with NewRunner. Experimental.
 type Runner struct {
 	cfg Config
 }
@@ -29,6 +24,15 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.Destination.ProviderID == "" {
 		return nil, errors.New("reflow: Config.Destination.ProviderID is required")
 	}
+	if cfg.Collision.Mode == "" {
+		cfg.Collision.Mode = CollisionSkipIfDuplicate
+	}
+	if cfg.Metadata.Policy == "" {
+		cfg.Metadata.Policy = MetadataPolicyClear
+	}
+	if err := cfg.Metadata.Validate(); err != nil {
+		return nil, fmt.Errorf("reflow: invalid Config.Metadata: %w", err)
+	}
 	return &Runner{cfg: cfg}, nil
 }
 
@@ -40,7 +44,7 @@ func (r *Runner) Config() Config { return r.cfg }
 // Warnings, Errors, and the terminal Summary — all redacted before delivery.
 //
 // Experimental: the engine migration is landing incrementally. Run executes the
-// migrated paths (currently the dry-run plane over a RecordStreamSource) and
+// migrated paths (currently dry-run and copy over a RecordStreamSource) and
 // returns ErrNotImplemented for forms and scenarios still driven by the command
 // layer, so callers can fall back to the CLI path for those.
 func (r *Runner) Run(ctx context.Context, src Source) (Summary, error) {

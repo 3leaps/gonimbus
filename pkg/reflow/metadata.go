@@ -52,6 +52,24 @@ type MetadataPlan struct {
 	MetadataSidecarSuffix   string
 }
 
+// String returns a value-free summary suitable for debug output. Metadata values
+// and derived expression text may reflect operator-sensitive configuration, so
+// they are never formatted by value.
+func (c MetadataPlan) String() string {
+	return fmt.Sprintf("reflow.MetadataPlan{Policy:%q, Set:%d, SourceKeyRules:%d, DerivedRules:%d, OnMissingSource:%q, PreserveContentType:%t, DestinationStorageClass:%s, MetadataSidecarSuffix:%s}",
+		c.Policy,
+		len(c.Set),
+		len(c.SourceKeyRules),
+		len(c.DerivedRules),
+		c.OnMissingSource,
+		c.PreserveContentType,
+		fieldPresence(c.DestinationStorageClass == ""),
+		fieldPresence(c.MetadataSidecarSuffix == ""))
+}
+
+// GoString implements fmt %#v with the same redaction as String.
+func (c MetadataPlan) GoString() string { return c.String() }
+
 // MetadataSourceKeyRule projects a single source user-metadata key onto a
 // destination user-metadata key.
 type MetadataSourceKeyRule struct {

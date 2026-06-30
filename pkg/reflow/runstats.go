@@ -3,14 +3,14 @@ package reflow
 import "sync"
 
 // runStats accumulates per-object outcomes into the terminal SummaryRecord. It is
-// safe for concurrent use so workers can record as they complete. The dry-run
-// plane records only statuses and collisions; the copy plane extends it with
-// error/fallback accounting as those paths migrate.
+// safe for concurrent use so workers can record as they complete.
 type runStats struct {
 	mu            sync.Mutex
 	statuses      map[string]int64
 	collisions    map[string]int64
 	invalidInputs int64
+	errors        int64
+	fallbackItems int64
 }
 
 func newRunStats() *runStats {
@@ -34,6 +34,18 @@ func (s *runStats) recordInvalidInput() {
 	s.invalidInputs++
 }
 
+func (s *runStats) recordError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errors++
+}
+
+func (s *runStats) recordFallbackObject() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fallbackItems++
+}
+
 // summary builds the terminal SummaryRecord for the run.
 func (s *runStats) summary(destURI, collisionMode string, dryRun bool, capability IfAbsentCapability, concurrency ConcurrencyStats) SummaryRecord {
 	s.mu.Lock()
@@ -46,9 +58,11 @@ func (s *runStats) summary(destURI, collisionMode string, dryRun bool, capabilit
 		DestIfAbsentHonored:     capability.Honored,
 		DestIfAbsentProbeStatus: string(capability.ProbeStatus),
 		FallbackActive:          capability.FallbackActive,
+		IfAbsentFallbackObjects: s.fallbackItems,
 		Statuses:                cloneInt64Map(s.statuses),
 		Collisions:              cloneInt64Map(s.collisions),
 		InvalidInputs:           s.invalidInputs,
+		Errors:                  s.errors,
 	}
 }
 

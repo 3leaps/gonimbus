@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
@@ -26,10 +27,7 @@ func (r *Runner) run(ctx context.Context, src Source) (Summary, error) {
 	}
 }
 
-// runRecordStream executes a preselected reflow-input stream. This slice
-// implements the dry-run plane — plan destination mappings, emit planned records,
-// no provider mutation, no checkpoint. The copy plane (non-dry-run) defers to the
-// command layer before any bytes are read.
+// runRecordStream executes a preselected reflow-input stream.
 //
 // The supported stream is processed record-by-record without materializing the
 // whole stream, so multi-million-object streams stay bounded in memory. A record
@@ -37,11 +35,17 @@ func (r *Runner) run(ctx context.Context, src Source) (Summary, error) {
 // missing both dest_rel_key and rewrite templates) is reported as a per-record
 // INVALID_INPUT event — matching the command path — rather than aborting the run.
 func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (Summary, error) {
-	if !r.cfg.DryRun {
-		return Summary{}, ErrNotImplemented
-	}
 	if src.Records == nil {
 		return Summary{}, errors.New("reflow: RecordStreamSource.Records is required")
+	}
+	if !r.cfg.DryRun && r.cfg.ReadOnly {
+		return Summary{}, errors.New("reflow: Config.ReadOnly requires DryRun for RecordStreamSource copy execution")
+	}
+	if !r.cfg.DryRun && !recordStreamCopyCollisionModeSupported(r.cfg.Collision.Mode) {
+		return Summary{}, ErrNotImplemented
+	}
+	if !r.cfg.DryRun && src.Resolve == nil {
+		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
 	}
 	layout, err := ParseDestLayout(r.cfg.Destination.BaseURI)
 	if err != nil {
@@ -52,16 +56,22 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		return Summary{}, err
 	}
 
-	capability := dryRunIfAbsentCapability(r.cfg.Destination.ProviderID, r.cfg.Collision.Mode)
-	concurrency := NewConcurrencyLimiter(r.cfg.Concurrency).Snapshot()
+	var capability IfAbsentCapability
+	if r.cfg.DryRun {
+		capability = dryRunIfAbsentCapability(r.cfg.Destination.ProviderID, r.cfg.Collision.Mode)
+	} else {
+		capability = liveIfAbsentCapability(ctx, r.cfg.Destination.Provider, layout, r.cfg.Collision.Mode, r.cfg.ReadOnly)
+	}
+	limiter := NewConcurrencyLimiter(r.cfg.Concurrency)
+	runConcurrency := limiter.Snapshot()
 
 	// Event order is irrelevant: an EventSink consumer is event-based, and the
 	// parity harness normalizes by sorting.
 	if err := r.emitRun(ctx, RunRecord{
 		DestURI:          layout.BaseURI,
-		DryRun:           true,
+		DryRun:           r.cfg.DryRun,
 		Parallel:         r.cfg.Concurrency.RequestedCeiling,
-		ConcurrencyStats: concurrency,
+		ConcurrencyStats: runConcurrency,
 	}); err != nil {
 		return Summary{}, err
 	}
@@ -82,7 +92,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		if line == "" {
 			continue
 		}
-		if err := r.planAndEmit(ctx, layout, rewrite, stats, line); err != nil {
+		if err := r.executeInputLine(ctx, src, layout, rewrite, stats, capability, limiter, line); err != nil {
 			return Summary{}, err
 		}
 	}
@@ -90,7 +100,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		return Summary{}, err
 	}
 
-	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, true, capability, concurrency)
+	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, capability, limiter.Snapshot())
 	if err := r.emitSummary(ctx, summary); err != nil {
 		return Summary{}, err
 	}
@@ -99,7 +109,21 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		// on invalid inputs. The Summary is returned alongside the error.
 		return Summary{SummaryRecord: summary}, &InvalidInputsError{Count: summary.InvalidInputs}
 	}
+	if summary.Errors > 0 {
+		// Mirror the command path, which writes the summary and then exits non-zero
+		// when object-level errors occurred. The Summary is returned alongside the error.
+		return Summary{SummaryRecord: summary}, &ObjectErrorsError{Count: summary.Errors}
+	}
 	return Summary{SummaryRecord: summary}, nil
+}
+
+func recordStreamCopyCollisionModeSupported(mode string) bool {
+	switch mode {
+	case CollisionSkipIfDuplicate, CollisionFail:
+		return true
+	default:
+		return false
+	}
 }
 
 // InvalidInputsError reports that a run completed and emitted its terminal summary
@@ -113,10 +137,18 @@ func (e *InvalidInputsError) Error() string {
 	return fmt.Sprintf("reflow: completed with %d invalid input(s)", e.Count)
 }
 
-// planAndEmit plans one reflow-input line and emits its planned record, or emits
-// a CLI-equivalent INVALID_INPUT event when the record cannot be parsed or mapped.
-// It returns an error only when the EventSink itself fails.
-func (r *Runner) planAndEmit(ctx context.Context, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, line string) error {
+// ObjectErrorsError reports that a run completed and emitted its terminal summary
+// but encountered one or more object-level errors. The Summary is still returned
+// with it. It mirrors the command path, which exits non-zero when per-object
+// errors occur, so a library caller does not observe success for a run the CLI
+// reports as failed.
+type ObjectErrorsError struct{ Count int64 }
+
+func (e *ObjectErrorsError) Error() string {
+	return fmt.Sprintf("reflow: completed with %d object error(s)", e.Count)
+}
+
+func (r *Runner) executeInputLine(ctx context.Context, src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, line string) error {
 	in, err := parseReflowInputLine(line)
 	if err != nil {
 		stats.recordInvalidInput()
@@ -129,9 +161,287 @@ func (r *Runner) planAndEmit(ctx context.Context, layout DestLayout, rewrite *tr
 	}
 	destKey := layout.DestKey(destRel)
 	destURI := layout.DestURI(destKey)
-	rec := in.record(destURI, destKey, "planned")
+	if r.cfg.DryRun {
+		rec := in.record(destURI, destKey, "planned")
+		stats.record(rec)
+		return r.emitRecord(ctx, rec)
+	}
+	return r.copyAndEmit(ctx, src, layout, stats, capability, limiter, in, destKey, destURI)
+}
+
+func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, in reflowInput, destKey, destURI string) error {
+	sourceURI := sanitizeSourceURI(in.SourceURI)
+	sourceProvider, err := src.Resolve(ctx, in.SourceURI)
+	if err != nil {
+		return r.recordObjectError(ctx, stats, in, destURI, destKey, "failed to connect to provider", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+	}
+
+	if r.cfg.Checkpoint != nil {
+		done, status, err := r.cfg.Checkpoint.ItemDone(ctx, sourceURI, destURI)
+		if err != nil {
+			return r.recordObjectError(ctx, stats, in, destURI, destKey, "checkpoint read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+		}
+		if done {
+			rec := in.record(destURI, destKey, "skipped")
+			rec.Reason = "resume." + status
+			stats.record(rec)
+			if err := r.checkpointItem(ctx, in, destURI, destKey, "skipped", rec.Reason, 0, "", ""); err != nil {
+				return err
+			}
+			return r.emitRecord(ctx, rec)
+		}
+	}
+
+	inProgress := in.record(destURI, destKey, "in_progress")
+	stats.record(inProgress)
+	if err := r.emitRecord(ctx, inProgress); err != nil {
+		return err
+	}
+
+	sourceETag := in.SourceETag
+	sourceSize := in.SourceSize
+	var sourceMeta *provider.ObjectMeta
+	if r.cfg.Metadata.NeedsSourceHead() || sourceETag == "" || sourceSize == 0 {
+		meta, err := limitedHead(ctx, limiter, sourceProvider, in.SourceKey)
+		if err != nil {
+			return r.recordObjectError(ctx, stats, in, destURI, destKey, "source metadata read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+		}
+		sourceMeta = meta
+		sourceETag = meta.ETag
+		sourceSize = meta.Size
+	}
+
+	putOptions, err := r.cfg.Metadata.PutOptions(sourceMeta)
+	if err == nil && layout.ProviderID == string(provider.ProviderS3) {
+		err = ValidateMetadataBudget(putOptions.UserMetadata)
+	}
+	if err != nil {
+		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
+		var budgetErr *MetadataBudgetError
+		if errors.As(err, &budgetErr) {
+			for k, v := range budgetErr.Details() {
+				details[k] = v
+			}
+		}
+		var derivErr *MetadataDerivationError
+		if errors.As(err, &derivErr) {
+			for k, v := range derivErr.Details() {
+				details[k] = v
+			}
+		}
+		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "destination metadata options failed", err, details, nil)
+	}
+
+	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, in.withSourceMeta(sourceETag, sourceSize), destKey, putOptions)
+	if err != nil {
+		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
+		msg := "copy failed"
+		if collision != nil {
+			msg = "collision"
+		}
+		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, msg, err, details, collision)
+	}
+
+	if r.cfg.Checkpoint != nil {
+		if err := r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey); err != nil {
+			return err
+		}
+		if err := r.cfg.Checkpoint.NoteDestKeySource(ctx, destKey, sourceURI, sourceETag, sourceSize); err != nil {
+			return err
+		}
+		if err := r.checkpointItem(ctx, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, status, reason, bytes, "", ""); err != nil {
+			return err
+		}
+	}
+	_ = putResult
+	rec := in.withSourceMeta(sourceETag, sourceSize).record(destURI, destKey, status)
+	rec.Reason = reason
+	rec.Bytes = bytes
+	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
+}
+
+func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	dst := r.cfg.Destination.Provider
+	if r.cfg.Collision.Mode == CollisionOverwrite {
+		bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+		return bytes, provider.PutResult{}, nil, "complete", "", err
+	}
+	if r.cfg.Checkpoint != nil {
+		observed, err := r.cfg.Checkpoint.DestKeyObserved(ctx, destKey)
+		if err != nil {
+			return 0, provider.PutResult{}, nil, "", "", err
+		}
+		if observed {
+			dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+			if headErr != nil {
+				return 0, provider.PutResult{}, nil, "", "", headErr
+			}
+			return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionIfAbsentHead)
+		}
+	}
+
+	if capability.FallbackActive {
+		stats.recordFallbackObject()
+		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+		switch {
+		case headErr == nil:
+			return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionHeadFallback)
+		case provider.IsNotFound(headErr):
+			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+			return bytes, provider.PutResult{}, nil, "complete", "", err
+		default:
+			return 0, provider.PutResult{}, nil, "", "", headErr
+		}
+	}
+
+	bytes, result, err := limitedCopyConditional(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts)
+	if err == nil {
+		return bytes, result, nil, "complete", "", nil
+	}
+	if !isConditionalExists(err) {
+		return 0, provider.PutResult{}, nil, "", "", err
+	}
+	dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+	if headErr != nil {
+		return 0, provider.PutResult{}, nil, "", "", headErr
+	}
+	return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionIfAbsentHead)
+}
+
+func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	duplicate, err := isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
+	if err != nil {
+		return 0, provider.PutResult{}, nil, "", "", err
+	}
+	if duplicate {
+		collision := newCollisionInfo(collisionDuplicate, dstMeta, decisionPath)
+		if err := r.noteCollision(ctx, destKey, "duplicate", in, dstMeta); err != nil {
+			return 0, provider.PutResult{}, nil, "", "", err
+		}
+		if r.cfg.Collision.Mode == CollisionSkipIfDuplicate || r.cfg.Collision.Mode == CollisionQuarantine || r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
+			return 0, provider.PutResult{}, collision, "skipped", "collision.duplicate", nil
+		}
+		return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with identical content: %s", destKey)
+	}
+
+	collision := newCollisionInfo(collisionConflict, dstMeta, decisionPath)
+	if err := r.noteCollision(ctx, destKey, "conflict", in, dstMeta); err != nil {
+		return 0, provider.PutResult{}, nil, "", "", err
+	}
+	if r.cfg.Collision.Mode == CollisionFail {
+		return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with different content: %s", destKey)
+	}
+	return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with different content: %s", destKey)
+}
+
+func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in reflowInput, destURI, destKey, msg string, err error, details map[string]any, collision *CollisionInfo) error {
+	stats.recordError()
+	code := reflowErrCode(err)
+	if details == nil {
+		details = map[string]any{}
+	}
+	if _, ok := details["mode"]; !ok {
+		details["mode"] = "transfer_reflow"
+	}
+	if _, ok := details["reason"]; !ok {
+		details["reason"] = reflowReasonForErrCode(code)
+	}
+	if err := r.emitError(ctx, ErrorEvent{Code: code, Key: in.SourceKey, Message: FormatErrorMessage(msg, err), Details: details, Collision: collision}); err != nil {
+		return err
+	}
+	if err := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); err != nil {
+		return err
+	}
+	rec := in.record(destURI, destKey, "failed")
+	rec.Reason = failedRecordReason(code, collision)
+	rec = recordWithCollision(rec, collision)
+	stats.record(rec)
+	return r.emitRecord(ctx, rec)
+}
+
+func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Provider, key string) (*provider.ObjectMeta, error) {
+	release, err := limiter.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	meta, err := p.Head(ctx, key)
+	limiter.ObserveProviderResult(err)
+	return meta, err
+}
+
+func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions) (int64, error) {
+	release, err := limiter.Acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
+	limiter.ObserveProviderResult(err)
+	return bytes, err
+}
+
+func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+	release, err := limiter.Acquire(ctx)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+	defer release()
+	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
+	limiter.ObserveProviderResult(err)
+	return bytes, result, err
+}
+
+func failedRecordReason(code string, collision *CollisionInfo) string {
+	if collision == nil {
+		return reflowReasonForErrCode(code)
+	}
+	if collision.Kind == collisionDuplicate {
+		return "collision.exists.duplicate"
+	}
+	return "collision.exists.conflict"
+}
+
+func (r *Runner) checkpointItem(ctx context.Context, in reflowInput, destURI, destKey, status, reason string, bytes int64, errorCode, errorMessage string) error {
+	if r.cfg.Checkpoint == nil {
+		return nil
+	}
+	return r.cfg.Checkpoint.UpsertItem(ctx, CheckpointItem{
+		SourceURI:    sanitizeSourceURI(in.SourceURI),
+		DestURI:      sanitizeSourceURI(destURI),
+		SourceKey:    in.SourceKey,
+		DestKey:      destKey,
+		SourceETag:   in.SourceETag,
+		SourceSize:   in.SourceSize,
+		Status:       status,
+		Reason:       reason,
+		Bytes:        bytes,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+}
+
+func (r *Runner) noteCollision(ctx context.Context, destKey, kind string, in reflowInput, dstMeta *provider.ObjectMeta) error {
+	if r.cfg.Checkpoint == nil || dstMeta == nil {
+		return nil
+	}
+	return r.cfg.Checkpoint.NoteCollision(ctx, CheckpointCollision{
+		DestKey:    destKey,
+		Kind:       kind,
+		SourceURI:  sanitizeSourceURI(in.SourceURI),
+		SourceETag: in.SourceETag,
+		SourceSize: in.SourceSize,
+		DestETag:   dstMeta.ETag,
+		DestSize:   dstMeta.Size,
+	})
+}
+
+func (in reflowInput) withSourceMeta(etag string, size int64) reflowInput {
+	in.SourceETag = etag
+	in.SourceSize = size
+	return in
 }
 
 // planDestRel resolves the destination-relative key for an input, mirroring the

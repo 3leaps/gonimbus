@@ -10,10 +10,11 @@ const ErrorEventType = "gonimbus.error.v1"
 // engine before delivery, so a sink may log or persist them without further
 // scrubbing.
 type ErrorEvent struct {
-	Code    string         `json:"code"`
-	Key     string         `json:"key,omitempty"`
-	Message string         `json:"message"`
-	Details map[string]any `json:"details,omitempty"`
+	Code      string         `json:"code"`
+	Key       string         `json:"key,omitempty"`
+	Message   string         `json:"message"`
+	Details   map[string]any `json:"details,omitempty"`
+	Collision any            `json:"collision,omitempty"`
 }
 
 // EventSink receives typed engine events. The engine applies its redaction

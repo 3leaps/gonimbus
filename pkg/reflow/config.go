@@ -8,9 +8,9 @@ import "fmt"
 // Config implements redacted String/GoString so debug logging cannot dump an
 // injected provider or credential handle.
 //
-// This skeleton carries the structural knobs. Metadata, provenance, and
-// file-source policy fields are added alongside their decision logic rather than
-// designed speculatively here. Experimental.
+// This surface carries the structural knobs that have migrated into the engine.
+// Provenance and file-source policy fields are added alongside their decision
+// logic rather than designed speculatively here. Experimental.
 type Config struct {
 	// Destination is the structured reflow target.
 	Destination Destination
@@ -25,6 +25,8 @@ type Config struct {
 	DryRun bool
 	// ReadOnly blocks provider-side mutations, including write-probe preflight.
 	ReadOnly bool
+	// Metadata controls destination metadata and storage-class PUT options.
+	Metadata MetadataPlan
 	// Checkpoint, when non-nil, enables resume via an embedder-supplied store.
 	Checkpoint CheckpointStore
 	// Events, when non-nil, receives typed redacted engine events.
@@ -40,6 +42,9 @@ type RewriteConfig struct {
 
 // CollisionPolicy selects how the engine handles an existing destination object.
 // Mode is one of skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer.
+// The copy-plane migration currently executes skip-if-duplicate and fail;
+// other non-dry-run modes return ErrNotImplemented until their command-path
+// semantics migrate.
 type CollisionPolicy struct {
 	Mode             string
 	QuarantinePrefix string
@@ -48,8 +53,8 @@ type CollisionPolicy struct {
 // String returns a redacted summary; it never recurses into the injected
 // provider handle or the checkpoint/event sinks.
 func (c Config) String() string {
-	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, Checkpoint:%s, Events:%s}",
-		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly,
+	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, Metadata:%+v, Checkpoint:%s, Events:%s}",
+		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly, c.Metadata,
 		ifacePresence(c.Checkpoint == nil), ifacePresence(c.Events == nil))
 }
 
@@ -60,6 +65,13 @@ func (c Config) GoString() string { return c.String() }
 func ifacePresence(isNil bool) string {
 	if isNil {
 		return "<nil>"
+	}
+	return "<set>"
+}
+
+func fieldPresence(isEmpty bool) string {
+	if isEmpty {
+		return "<empty>"
 	}
 	return "<set>"
 }

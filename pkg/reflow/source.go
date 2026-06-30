@@ -37,11 +37,11 @@ type FileTreeSource struct {
 // library equivalent of `crawl --emit reflow-input | transfer reflow --stdin`.
 //
 // The engine consumes the stream record-by-record (it never materializes the
-// whole stream). The current implementation executes the dry-run plane for S3
-// gonimbus.reflow.input.v1 records; Resolve is reserved for the copy plane, where
-// records may span buckets/providers and a source provider is obtained per record.
-// Until then Resolve may be nil and is not invoked, and a record outside the
-// supported subset surfaces as an INVALID_INPUT event rather than being planned.
+// whole stream). The current implementation executes the dry-run and copy planes
+// for S3 gonimbus.reflow.input.v1 records. Dry-run does not invoke Resolve; copy
+// execution requires it so a source provider is obtained per record. A record
+// outside the supported subset surfaces as an INVALID_INPUT event rather than
+// being planned.
 type RecordStreamSource struct {
 	Records io.Reader
 	Resolve SourceResolver
