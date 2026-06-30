@@ -154,9 +154,7 @@ type parityCase struct {
 	source  func(src *reflowMemoryProvider) reflowpkg.Source
 	// expectInvalidInputs marks a case whose stream contains invalid records: both
 	// paths must report failure (CLI non-zero exit, library InvalidInputsError),
-	// and the representation-stable events (run/source/record/warning/summary) must
-	// match. Per-error event equivalence (output.ErrorRecord vs ErrorEvent) is a
-	// CLI-as-adapter convergence and is excluded here.
+	// and all engine events, including gonimbus.error.v1, must match.
 	expectInvalidInputs bool
 }
 
@@ -164,6 +162,30 @@ const (
 	parityDestBase = "s3://dest-bucket/data/"
 	paritySrcKey   = "source/file.xml"
 )
+
+func reflowInputLineForBucket(bucket string, key string, etag string, size int64, routingClass string, quarantinePrefix string) string {
+	data := map[string]any{
+		"source_uri":        "s3://" + bucket + "/" + key,
+		"source_key":        key,
+		"source_etag":       etag,
+		"source_size_bytes": size,
+		"dest_rel_key":      key,
+		"vars": map[string]string{
+			"key": key,
+		},
+	}
+	if routingClass != "" {
+		data["routing_class"] = routingClass
+	}
+	if quarantinePrefix != "" {
+		data["quarantine_prefix"] = quarantinePrefix
+	}
+	line, err := json.Marshal(map[string]any{"type": "gonimbus.reflow.input.v1", "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(line)
+}
 
 func baseParityConfig(dst *reflowMemoryProvider) reflowpkg.Config {
 	return reflowpkg.Config{
@@ -270,20 +292,48 @@ var reflowParityCases = []parityCase{
 		},
 		expectInvalidInputs: true,
 	},
-}
-
-// withoutErrorEvents drops gonimbus.error.v1 events. Their representation differs
-// between the command path (output.ErrorRecord) and the engine (ErrorEvent) until
-// the CLI-as-adapter slice routes CLI output through the engine's EventSink.
-func withoutErrorEvents(events []normalizedEvent) []normalizedEvent {
-	out := make([]normalizedEvent, 0, len(events))
-	for _, e := range events {
-		if e.Type == reflowpkg.ErrorEventType {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
+	{
+		name: "mixed_reflow_and_index_object_same_bucket",
+		seed: func(src, _ *reflowMemoryProvider) {
+			src.putFixture(paritySrcKey, "payload", "etag-a", time.Time{})
+			src.putFixture("file.txt", "payload-b", "etag-b", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		},
+		input: strings.Join([]string{
+			reflowInputLine(paritySrcKey, "etag-a", int64(len("payload")), "", ""),
+			reflowIndexObjectInputLine("file.txt", "etag-b", int64(len("payload-b")), "2026-01-15T20:53:44Z"),
+		}, "\n"),
+		cliArgs: []string{"--stdin", "--dest", parityDestBase, "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1"},
+		config:  baseParityConfig,
+		source: func(src *reflowMemoryProvider) reflowpkg.Source {
+			return parityRecordStream(src, strings.Join([]string{
+				reflowInputLine(paritySrcKey, "etag-a", int64(len("payload")), "", ""),
+				reflowIndexObjectInputLine("file.txt", "etag-b", int64(len("payload-b")), "2026-01-15T20:53:44Z"),
+			}, "\n"))
+		},
+	},
+	{
+		name: "different_s3_bucket_invalid_before_planning_dry_run",
+		seed: func(src, _ *reflowMemoryProvider) {
+			src.putFixture(paritySrcKey, "payload", "etag-a", time.Time{})
+		},
+		input: strings.Join([]string{
+			reflowInputLine(paritySrcKey, "etag-a", int64(len("payload")), "", ""),
+			reflowInputLineForBucket("other-bucket", "other/file.xml", "etag-b", int64(len("payload")), "", ""),
+		}, "\n"),
+		cliArgs: []string{"--stdin", "--dest", parityDestBase, "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1", "--dry-run"},
+		config: func(dst *reflowMemoryProvider) reflowpkg.Config {
+			cfg := baseParityConfig(dst)
+			cfg.DryRun = true
+			return cfg
+		},
+		source: func(src *reflowMemoryProvider) reflowpkg.Source {
+			return parityRecordStream(src, strings.Join([]string{
+				reflowInputLine(paritySrcKey, "etag-a", int64(len("payload")), "", ""),
+				reflowInputLineForBucket("other-bucket", "other/file.xml", "etag-b", int64(len("payload")), "", ""),
+			}, "\n"))
+		},
+		expectInvalidInputs: true,
+	},
 }
 
 // TestReflowCLILibraryParity captures the CLI golden output for each case and
@@ -319,8 +369,7 @@ func TestReflowCLILibraryParity(t *testing.T) {
 				require.Error(t, cliErr, "CLI must report failure on invalid inputs")
 				var invErr *reflowpkg.InvalidInputsError
 				require.ErrorAs(t, runErr, &invErr, "library must report invalid-inputs failure, not success")
-				require.Equal(t, withoutErrorEvents(cliEvents), withoutErrorEvents(sink.normalized()),
-					"CLI and library must emit equivalent run/warning/summary events on invalid input")
+				require.Equal(t, cliEvents, sink.normalized(), "CLI and library must emit equivalent events on invalid input")
 				return
 			}
 

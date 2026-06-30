@@ -358,6 +358,22 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if err != nil {
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to destination provider", err)
 	}
+	defer func() {
+		provMu.Lock()
+		toCloseSrc := srcProv
+		toCloseDst := dstProv
+		toCloseSidecar := sidecarProv
+		provMu.Unlock()
+		if toCloseSrc != nil {
+			_ = toCloseSrc.Close()
+		}
+		if toCloseDst != nil {
+			_ = toCloseDst.Close()
+		}
+		if toCloseSidecar != nil && toCloseSidecar != toCloseDst {
+			_ = toCloseSidecar.Close()
+		}
+	}()
 	if err := ensureMetadataCapability(dstProv, destSpec.Provider, metaCfg); err != nil {
 		return emitReflowConfigError(ctx, w, "Invalid metadata configuration", err, map[string]any{
 			"missing_capability": "MetadataAwarePutter",
@@ -376,6 +392,18 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if reflowDryRun && isObjectStoreProvider(destSpec.Provider) {
 		if err := runObjectStoreReflowDryRunPreflight(ctx, w, dstProv, destSpec); err != nil {
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
+		}
+	}
+	reflowInput := cmd.InOrStdin()
+	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
+	reflowInput = enginePlan.input
+	if enginePlan.enabled {
+		_, runErr := runTransferReflowViaEngine(ctx, enginePlan, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		if runErr == nil {
+			return nil
+		}
+		if !errors.Is(runErr, reflowpkg.ErrNotImplemented) {
+			return transferReflowEngineTerminalError(runErr)
 		}
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
@@ -455,22 +483,6 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		src, dst, _, err := getProviders(srcURI)
 		return src, dst, err
 	}
-	defer func() {
-		provMu.Lock()
-		toCloseSrc := srcProv
-		toCloseDst := dstProv
-		toCloseSidecar := sidecarProv
-		provMu.Unlock()
-		if toCloseSrc != nil {
-			_ = toCloseSrc.Close()
-		}
-		if toCloseDst != nil {
-			_ = toCloseDst.Close()
-		}
-		if toCloseSidecar != nil && toCloseSidecar != toCloseDst {
-			_ = toCloseSidecar.Close()
-		}
-	}()
 
 	var (
 		invalidCount atomic.Int64
@@ -1112,7 +1124,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	var inputErr error
 	srcIdentity := ""
 	if reflowStdin {
-		s := bufio.NewScanner(cmd.InOrStdin())
+		s := bufio.NewScanner(reflowInput)
 		s.Buffer(make([]byte, 64*1024), 1024*1024)
 		for s.Scan() {
 			line := strings.TrimSpace(s.Text())
