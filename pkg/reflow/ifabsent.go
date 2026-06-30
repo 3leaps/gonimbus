@@ -1,6 +1,9 @@
 package reflow
 
 import (
+	"context"
+	"strings"
+
 	"github.com/3leaps/gonimbus/pkg/preflight"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -57,6 +60,40 @@ func dryRunIfAbsentCapability(providerID, mode string) IfAbsentCapability {
 		FallbackActive: true,
 		ProbeError:     "mutation disabled for dry-run or readonly mode",
 	}
+}
+
+func liveIfAbsentCapability(ctx context.Context, dst provider.Provider, layout DestLayout, mode string, readOnly bool) IfAbsentCapability {
+	if !isObjectStoreProviderID(layout.ProviderID) || !collisionModeDependsOnIfAbsent(mode) {
+		return IfAbsentCapability{}
+	}
+	if readOnly {
+		return IfAbsentCapability{
+			ProbeStatus:    preflight.IfAbsentProbeInconclusive,
+			FallbackActive: true,
+			ProbeError:     "mutation disabled for dry-run or readonly mode",
+		}
+	}
+	result := preflight.ProbeIfAbsentSemantics(ctx, dst, preflight.Spec{
+		Mode:        preflight.ModeWriteProbe,
+		ProbePrefix: reflowProbePrefix(layout),
+	})
+	capability := IfAbsentCapability{
+		ProbeStatus: result.Status,
+		Honored:     result.Honored(),
+	}
+	if result.Err != nil {
+		capability.ProbeError = SanitizeOperationCauseMessage(result.Err)
+	}
+	capability.FallbackActive = result.Status != preflight.IfAbsentProbeHonored
+	return capability
+}
+
+func reflowProbePrefix(layout DestLayout) string {
+	prefix := strings.TrimPrefix(layout.Prefix, "/")
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return prefix + ".gonimbus-preflight/"
 }
 
 // fallbackWarning builds the IfAbsent head-compare fallback warning, or nil when

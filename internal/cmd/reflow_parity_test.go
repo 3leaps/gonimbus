@@ -25,10 +25,10 @@ import (
 // provider-touching engine code moves, so the comparison is ready to assert as the
 // runner is implemented.
 //
-// While Runner.Run is a skeleton (returns ErrNotImplemented), the harness captures
-// the CLI golden output and exercises the library seam (NewRunner validation +
-// provider-handle injection), then short-circuits the comparison. The comparison
-// activates automatically once Run emits events.
+// For scenarios Runner.Run has not migrated yet, the harness captures the CLI
+// golden output and exercises the library seam (NewRunner validation +
+// provider-handle injection), then short-circuits on ErrNotImplemented. The
+// comparison activates automatically for each scenario once Run emits events.
 
 // presentationDropKeys are payload fields that legitimately differ between the CLI
 // and library paths (or run-to-run) and are removed before comparison. Semantic
@@ -287,8 +287,9 @@ func withoutErrorEvents(events []normalizedEvent) []normalizedEvent {
 }
 
 // TestReflowCLILibraryParity captures the CLI golden output for each case and
-// exercises the library seam. While Runner.Run is a skeleton it short-circuits the
-// comparison; once Run emits events the require.Equal asserts CLI<->library parity.
+// exercises the library seam. For not-yet-migrated scenarios it short-circuits on
+// ErrNotImplemented; once Run emits events the require.Equal asserts CLI<->library
+// parity.
 func TestReflowCLILibraryParity(t *testing.T) {
 	for _, tc := range reflowParityCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -310,7 +311,7 @@ func TestReflowCLILibraryParity(t *testing.T) {
 
 			_, runErr := runner.Run(context.Background(), tc.source(srcLib))
 			if errors.Is(runErr, reflowpkg.ErrNotImplemented) {
-				t.Logf("library runner is a skeleton; captured %d CLI golden events. Parity comparison activates with the engine migration.", len(cliEvents))
+				t.Logf("library runner has not migrated this scenario; captured %d CLI golden events. Parity comparison activates when the scenario migrates.", len(cliEvents))
 				return
 			}
 
@@ -323,7 +324,12 @@ func TestReflowCLILibraryParity(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, runErr)
+			if cliErr != nil {
+				var objectErr *reflowpkg.ObjectErrorsError
+				require.ErrorAs(t, runErr, &objectErr, "library must report object-error failure when CLI fails")
+			} else {
+				require.NoError(t, runErr)
+			}
 			require.Equal(t, cliEvents, sink.normalized(), "CLI and library must emit equivalent normalized events")
 		})
 	}

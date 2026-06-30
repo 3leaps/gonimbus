@@ -33,13 +33,15 @@ func TestSanitizeDetailsLeavesBenignVerbatim(t *testing.T) {
 
 func TestSanitizeDetailsRedactsSensitiveFields(t *testing.T) {
 	in := map[string]any{
-		"source_uri": "https://host/obj?X-Amz-Signature=sig",
-		"note":       "token=supersecretvalue please ignore",
-		"nested":     map[string]any{"dest_uri": "https://h/o?sig=zzz"},
+		"source_uri":    "https://host/obj?X-Amz-Signature=sig",
+		"note":          "token=supersecretvalue please ignore",
+		"authorization": "bare-token-value",
+		"nested":        map[string]any{"dest_uri": "https://h/o?sig=zzz"},
 	}
 	out := sanitizeDetails(in)
 	require.NotContains(t, out["source_uri"].(string), "sig=sig")
 	require.NotContains(t, out["note"].(string), "supersecretvalue")
+	require.Equal(t, "redacted", out["authorization"])
 	require.NotContains(t, out["nested"].(map[string]any)["dest_uri"].(string), "zzz")
 }
 

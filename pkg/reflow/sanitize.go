@@ -42,6 +42,9 @@ func sanitizeDetails(details map[string]any) map[string]any {
 func sanitizeDetailValue(key string, value any) any {
 	switch v := value.(type) {
 	case string:
+		if sensitiveDetailKey(key) && v != "" {
+			return "redacted"
+		}
 		if uriDetailKeys[strings.ToLower(key)] {
 			return sanitizeSourceURI(v)
 		}
@@ -65,4 +68,13 @@ func sanitizeDetailValue(key string, value any) any {
 	default:
 		return value
 	}
+}
+
+func sensitiveDetailKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return strings.Contains(key, "authorization") ||
+		strings.Contains(key, "credential") ||
+		strings.Contains(key, "secret") ||
+		strings.Contains(key, "signature") ||
+		strings.Contains(key, "token")
 }
