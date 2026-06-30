@@ -35,8 +35,13 @@ type FileTreeSource struct {
 
 // RecordStreamSource reflows a preselected stream of reflow-input records — the
 // library equivalent of `crawl --emit reflow-input | transfer reflow --stdin`.
-// Because records may span buckets/providers, source providers are obtained
-// per-record through Resolve.
+//
+// The engine consumes the stream record-by-record (it never materializes the
+// whole stream). The current implementation executes the dry-run plane for S3
+// gonimbus.reflow.input.v1 records; Resolve is reserved for the copy plane, where
+// records may span buckets/providers and a source provider is obtained per record.
+// Until then Resolve may be nil and is not invoked, and a record outside the
+// supported subset surfaces as an INVALID_INPUT event rather than being planned.
 type RecordStreamSource struct {
 	Records io.Reader
 	Resolve SourceResolver

@@ -152,6 +152,12 @@ type parityCase struct {
 	cliArgs []string
 	config  func(dst *reflowMemoryProvider) reflowpkg.Config
 	source  func(src *reflowMemoryProvider) reflowpkg.Source
+	// expectInvalidInputs marks a case whose stream contains invalid records: both
+	// paths must report failure (CLI non-zero exit, library InvalidInputsError),
+	// and the representation-stable events (run/source/record/warning/summary) must
+	// match. Per-error event equivalence (output.ErrorRecord vs ErrorEvent) is a
+	// CLI-as-adapter convergence and is excluded here.
+	expectInvalidInputs bool
 }
 
 const (
@@ -243,6 +249,41 @@ var reflowParityCases = []parityCase{
 			return parityRecordStream(src, reflowInputLine(paritySrcKey, "src-etag", int64(len("new payload")), "", ""))
 		},
 	},
+	{
+		// A reflow-input record without dest_rel_key and no rewrite templates is
+		// invalid: both paths emit the run/warning/summary, count the invalid input,
+		// and report failure.
+		name: "invalid_input_missing_dest_rel_key_dry_run",
+		seed: func(src, _ *reflowMemoryProvider) {
+			src.putFixture(paritySrcKey, "payload", "etag-a", time.Time{})
+		},
+		input:   reflowInputLineNoDestRel(paritySrcKey, "etag-a", int64(len("payload"))),
+		cliArgs: []string{"--stdin", "--dest", parityDestBase, "--parallel", "1", "--dry-run"},
+		config: func(dst *reflowMemoryProvider) reflowpkg.Config {
+			cfg := baseParityConfig(dst)
+			cfg.DryRun = true
+			cfg.Rewrite = reflowpkg.RewriteConfig{}
+			return cfg
+		},
+		source: func(src *reflowMemoryProvider) reflowpkg.Source {
+			return parityRecordStream(src, reflowInputLineNoDestRel(paritySrcKey, "etag-a", int64(len("payload"))))
+		},
+		expectInvalidInputs: true,
+	},
+}
+
+// withoutErrorEvents drops gonimbus.error.v1 events. Their representation differs
+// between the command path (output.ErrorRecord) and the engine (ErrorEvent) until
+// the CLI-as-adapter slice routes CLI output through the engine's EventSink.
+func withoutErrorEvents(events []normalizedEvent) []normalizedEvent {
+	out := make([]normalizedEvent, 0, len(events))
+	for _, e := range events {
+		if e.Type == reflowpkg.ErrorEventType {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // TestReflowCLILibraryParity captures the CLI golden output for each case and
@@ -254,7 +295,7 @@ func TestReflowCLILibraryParity(t *testing.T) {
 			// CLI golden output.
 			srcCLI, dstCLI := newReflowMemoryProvider(), newReflowMemoryProvider()
 			tc.seed(srcCLI, dstCLI)
-			stdout, _, _ := runTransferReflowWithProviderFactory(t, srcCLI, dstCLI, tc.input, tc.cliArgs...)
+			stdout, _, cliErr := runTransferReflowWithProviderFactory(t, srcCLI, dstCLI, tc.input, tc.cliArgs...)
 			cliEvents := normalizeReflowStdout(t, stdout)
 			require.NotEmpty(t, cliEvents, "CLI path should emit normalized reflow events")
 
@@ -272,6 +313,16 @@ func TestReflowCLILibraryParity(t *testing.T) {
 				t.Logf("library runner is a skeleton; captured %d CLI golden events. Parity comparison activates with the engine migration.", len(cliEvents))
 				return
 			}
+
+			if tc.expectInvalidInputs {
+				require.Error(t, cliErr, "CLI must report failure on invalid inputs")
+				var invErr *reflowpkg.InvalidInputsError
+				require.ErrorAs(t, runErr, &invErr, "library must report invalid-inputs failure, not success")
+				require.Equal(t, withoutErrorEvents(cliEvents), withoutErrorEvents(sink.normalized()),
+					"CLI and library must emit equivalent run/warning/summary events on invalid input")
+				return
+			}
+
 			require.NoError(t, runErr)
 			require.Equal(t, cliEvents, sink.normalized(), "CLI and library must emit equivalent normalized events")
 		})
