@@ -334,6 +334,30 @@ conditional zero-byte write probe under `<dest>/.gonimbus-preflight/`, then
 deletes the probe object. Set `--readonly` or `GONIMBUS_READONLY=1` to suppress
 that provider-side mutation.
 
+### Large Reflow Writes
+
+For S3-compatible destinations, reflow automatically switches large destination
+writes to multipart upload through the shared transfer uploader. The default
+threshold is 64 MiB and the default part size is 8 MiB; very large known-size
+objects increase part size automatically when needed to stay within provider
+part-count limits. Normal reflow use does not require a separate multipart flag.
+
+Multipart writes keep the same operator contract as smaller writes: collision
+policy still gates the destination, IfAbsent-capable destinations complete
+conditionally for no-overwrite modes, metadata/provenance options still apply,
+and terminal reflow records still describe the per-object outcome. Multipart
+ETags remain provider-specific, so use `inspect-pair` and size-authoritative
+records for verification instead of treating multipart ETags as portable content
+hashes.
+
+Before sustained large reflows, verify host headroom for active part buffers,
+checkpoint files, retry/temp spooling, and normal system temp usage. Keep temp
+locations outside the repository working tree. Also configure destination
+lifecycle cleanup for incomplete multipart uploads, such as an S3
+`AbortIncompleteMultipartUpload` rule; Gonimbus aborts uploads on controlled
+failure paths, but lifecycle cleanup is the backstop for killed processes or
+provider-side partial state.
+
 ### Template Variables
 
 Templates use `{variable}` placeholders that are extracted from source paths or probe output:

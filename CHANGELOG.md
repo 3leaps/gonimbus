@@ -41,9 +41,9 @@ content-probe terminal records and throttled provider probes. See
 ### Added
 
 - **Multipart upload primitive shared by reflow and index export:** large
-  provider writes now use multipart upload after the configured threshold, with
-  disk-spooled parts, bounded part sizing, abort-on-failure cleanup, and
-  conditional completion for IfAbsent-capable destinations.
+  provider writes now use multipart upload after the default threshold, with
+  bounded part sizing, abort-on-failure cleanup, and conditional completion for
+  IfAbsent-capable destinations.
 - **`index export` large-artifact support:** exported hub artifacts, including a
   large `index.db`, can be written to S3-compatible hubs through multipart upload
   instead of failing at the provider's single-PUT limit.
@@ -80,6 +80,9 @@ content-probe terminal records and throttled provider probes. See
 ### Documentation
 
 - Added this v0.3.5 release page and refreshed rolling release notes.
+- Added operator guidance for large `index export` and `transfer reflow`
+  multipart writes, including scratch/local-disk planning, multipart ETag
+  posture, and provider lifecycle cleanup for incomplete multipart uploads.
 - Updated the current-release README pointer for multipart and embeddable-engine
   operator notes.
 - Clarified that manifest `path_template` supports a full-source-key

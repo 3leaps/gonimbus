@@ -132,7 +132,10 @@ an interrupted run can be safely continued with `--resume-run <run_id>`.
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD
 results. Large `index export` artifacts and reflow writes use multipart upload
-for S3-compatible destinations when they cross the configured threshold.
+for S3-compatible destinations when they cross the default threshold; see
+[Local Index](docs/user-guide/index.md#large-hub-exports) and
+[Reflow](docs/user-guide/reflow.md#large-object-writes-and-multipart-upload)
+for local-resource and lifecycle guidance.
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).

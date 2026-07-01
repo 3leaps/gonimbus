@@ -19,8 +19,8 @@ back to per-object failure handling.
 
 ### Multipart for large exports and reflow writes
 
-Large writes now use a shared multipart primitive in `pkg/transfer`. Once an
-upload crosses the multipart threshold, Gonimbus spools parts to disk, uploads
+Large writes now use a shared multipart primitive in `pkg/transfer`. Once a
+known-size write crosses the default 64 MiB multipart threshold, Gonimbus uploads
 bounded parts, completes conditionally when the destination supports IfAbsent,
 and aborts the multipart upload on every failure path it controls.
 
@@ -60,8 +60,9 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.5
 ```
 
 Existing CLI workflows remain compatible with v0.3.4. Operators planning large
-multipart writes should size local scratch space for part spooling and configure
-provider lifecycle cleanup for incomplete multipart uploads, such as S3
+multipart writes should verify local disk headroom for the index database,
+checkpoint files, and any retry/temp spooling, and configure provider lifecycle
+cleanup for incomplete multipart uploads, such as S3
 `AbortIncompleteMultipartUpload` lifecycle rules.
 
 See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the complete release

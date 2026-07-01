@@ -32,6 +32,10 @@ pattern in `ObjectURI.Pattern` and expose the strongest listing prefix in
 `ObjectURI.Key`. Escaped glob metacharacters are treated as literal key
 characters.
 
+For workflow embedding, `pkg/reflow` exposes the Experimental reflow engine used
+by the migrated stdin `transfer reflow` subset. Treat it as a pinned-release
+surface until it is promoted from Experimental to Stable.
+
 Gonimbus is pre-v1.0. Public packages are intended for library use, but breaking
 changes may still happen across minor versions. Pin applications to specific
 release tags.

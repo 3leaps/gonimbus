@@ -259,6 +259,41 @@ gonimbus transfer reflow --stdin \
 See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
 provider-generalized model (resource cap, AIMD control, transport tuning).
 
+### Large-Object Writes and Multipart Upload
+
+For S3-compatible destinations, `transfer reflow` automatically uses multipart
+upload for large destination writes through the shared transfer uploader. The
+default multipart threshold is 64 MiB and the default part size is 8 MiB; very
+large known-size objects increase part size automatically when needed to stay
+within provider part-count limits. There is no separate reflow flag to turn this
+on for normal use.
+
+Multipart preserves the reflow safety posture:
+
+- Collision policy still applies before the write path decides whether an object
+  may land.
+- IfAbsent-capable destinations use conditional multipart completion for
+  no-overwrite modes.
+- Metadata, content-type preservation, destination storage class, provenance
+  sidecars, and summary records continue to describe the same per-object
+  decision.
+- Multipart-form ETags are not treated as blind byte-equality proof. Use size
+  checks, explicit comparison records, and `inspect-pair` for verification.
+
+Plan local resources for the full run, not just one object. Reflow streams
+known-size provider objects through bounded multipart parts and does not keep a
+second full local copy of every object. The host still needs memory for active
+parts, retry buffers for smaller/non-multipart writes, checkpoint storage when
+enabled, and normal system temp space. Keep temp locations outside the repository
+working tree; the upload helper rejects repo-local temp roots.
+
+Provider cleanup is a required operating backstop for large reflow runs.
+Gonimbus aborts multipart uploads on failure paths it controls, but a killed
+process, host failure, or provider-side partial state can leave incomplete
+multipart uploads behind. Configure lifecycle cleanup on the destination, such
+as an S3 `AbortIncompleteMultipartUpload` rule, before running repeated large
+reflows.
+
 ### Path-Only Reflow
 
 When the path structure is correct but needs reorganization:

@@ -26,10 +26,10 @@ Discouraged surfaces:
 Experimental workflow surface:
 
 - `github.com/3leaps/gonimbus/pkg/reflow` exposes shared reflow workflow
-  substrate. In v0.3.4 it starts with the adaptive concurrency resolver,
-  limiter, stats, resource-cap probe, and provider-error redaction helpers used
-  by CLI `transfer reflow`. The full embeddable transfer-reflow runner is a
-  later Experimental surface.
+  substrate and the migrated stdin reflow execution subset. As of v0.3.5 it
+  includes metadata planning, dry-run planning, record-stream copy execution,
+  collision decisions, adaptive concurrency, typed run/summary records, and the
+  provider-error redaction helpers used by CLI `transfer reflow`.
 
 Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
 notification protocol documented in [`docs/api-stability.md`](api-stability.md);
@@ -241,6 +241,24 @@ or storage boundaries only after provider errors have been sanitized with this
 surface. Raw `error` values remain useful for control flow, but callers should
 treat them as unredacted and not safe for logs unless they have been passed
 through the reflow redaction helpers.
+
+## Experimental Reflow Engine
+
+`pkg/reflow` is the first workflow-oriented library surface in Gonimbus. It is
+useful when an embedding application wants the same reflow decision engine that
+the CLI uses for stdin record-stream copy runs, while still owning provider
+construction, orchestration, logging, and release pinning.
+
+The package remains **Experimental**. Embedders should pin an exact Gonimbus
+release and expect the API to evolve until at least one downstream embedder has
+exercised the engine in production-shaped workflows and the package is promoted
+through the stability process. Experimental changes are called out in release
+notes; they do not carry the Stable advance-notice guarantee.
+
+Use the CLI when you want a supported operator interface. Use `pkg/reflow` when
+you are building a Go application that needs to compose the reflow data and
+decision plane directly. Do not import `internal/cmd` to reuse CLI behavior;
+that path is intentionally private and outside the library contract.
 
 ## Dependency Boundary
 
