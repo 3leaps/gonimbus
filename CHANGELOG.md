@@ -15,6 +15,76 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-01
+
+**Multipart export and reflow for large objects, the migrated Experimental
+reflow engine, and hardened probe/error paths.**
+
+v0.3.5 makes the large-object path practical across the workflows operators use
+for reorganization: `index export` and `transfer reflow` now share the same
+multipart upload primitive and can cross the >5 GiB single-PUT boundary. The
+release also completes the v0.3.4 `pkg/reflow` migration for the stdin reflow
+subset, so that CLI path now runs through the Experimental embeddable engine
+instead of a CLI-only implementation. Error handling is tightened around
+content-probe terminal records and throttled provider probes. See
+[`docs/releases/v0.3.5.md`](docs/releases/v0.3.5.md) for the narrative walkthrough.
+
+### Library API
+
+- **Changed (Experimental):** `pkg/reflow` now owns the migrated stdin reflow
+  execution subset, including metadata planning, dry-run planning, record-stream
+  copy execution, collision decisions, adaptive concurrency, and typed run /
+  summary records. The package remains **Experimental** per
+  [`docs/api-stability.md`](docs/api-stability.md); there are no Stable library
+  API breaks in this release.
+
+### Added
+
+- **Multipart upload primitive shared by reflow and index export:** large
+  provider writes now use multipart upload after the configured threshold, with
+  disk-spooled parts, bounded part sizing, abort-on-failure cleanup, and
+  conditional completion for IfAbsent-capable destinations.
+- **`index export` large-artifact support:** exported hub artifacts, including a
+  large `index.db`, can be written to S3-compatible hubs through multipart upload
+  instead of failing at the provider's single-PUT limit.
+- **`transfer reflow` large-object support:** reflowed objects can use multipart
+  upload through the shared transfer primitive, while retaining collision policy,
+  metadata, storage-class, and provenance behavior.
+- **GCS capability-matrix coverage:** the reflow engine now has GCS-shaped
+  capability fixtures proving that provider-agnostic gating handles GCS
+  destination semantics.
+
+### Changed
+
+- **CLI-as-adapter reflow path:** stdin `transfer reflow` records for the
+  migrated subset now route through `pkg/reflow`, while unsupported forms stay on
+  the legacy path until later migration work.
+- **Multipart dedup posture:** multipart-form ETags are never treated as blind
+  byte equality for collision decisions; size/ETag verification records keep the
+  comparison explicit.
+
+### Fixed
+
+- **Content-probe terminal error preservation:** `content probe` now recognizes
+  `gonimbus.error.v1` input records as already-terminal records, re-emits them
+  without minting an `INTERNAL` wrapper, and preserves retryable `TRANSIENT`
+  codes.
+- **Content-probe error sanitization:** content-probe error messages now use the
+  same provider-error sanitizer as reflow, and parser diagnostics no longer
+  carry raw input JSONL lines forward in `details.input`.
+- **Throttled probe retry:** standalone reflow probe operations now retry
+  throttled HEAD/body-compare attempts through the adaptive limiter before
+  falling back to the existing per-object failure behavior when the bounded retry
+  budget is exhausted. The checkpoint/resume classifier boundary is unchanged.
+
+### Documentation
+
+- Added this v0.3.5 release page and refreshed rolling release notes.
+- Updated the current-release README pointer for multipart and embeddable-engine
+  operator notes.
+- Clarified that manifest `path_template` supports a full-source-key
+  placeholder, distinct from `transfer reflow` rewrite templates.
+
 ## [0.3.4] - 2026-06-27
 
 **Google Cloud Storage as a first-class source and reflow destination, plus the
@@ -1075,7 +1145,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/3leaps/gonimbus/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/3leaps/gonimbus/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/3leaps/gonimbus/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/3leaps/gonimbus/compare/v0.3.1...v0.3.2

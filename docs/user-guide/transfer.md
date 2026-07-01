@@ -98,7 +98,11 @@ The `path_template` field transforms source keys to target keys during transfer.
 | ------------ | ----------------------- | --------------------------- | -------------- |
 | `{filename}` | Final path segment      | `a/b/c.txt`                 | `c.txt`        |
 | `{dir[n]}`   | Nth directory (0-based) | `a/b/c.txt` with `{dir[0]}` | `a`            |
-| `{key}`      | Full source key         | `a/b/c.txt`                 | `a/b/c.txt`    |
+
+Manifest `path_template` also supports a full-source-key placeholder for simple
+prefixing use cases. Prefer named directory placeholders in examples so the
+mapping is explicit and does not get copied into `transfer reflow`
+`--rewrite-from` templates, which use a different matcher.
 
 ### Examples
 
@@ -126,7 +130,7 @@ transfer:
 # Source: data/file.json
 # Target: archive/2024/data/file.json
 transfer:
-  path_template: "archive/2024/{key}"
+  path_template: "archive/2024/{dir[0]}/{filename}"
 ```
 
 **Remove middle layers:**
