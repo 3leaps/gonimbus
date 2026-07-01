@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -2651,21 +2652,14 @@ func TestTransferReflowCommand_ProbeGatingNoDeadlockAtConcurrencyFloor(t *testin
 }
 
 // TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall is the
-// throttle-dimension companion to the deadlock guard above.
-// Real S3-compatible endpoints do not reliably throttle at the request rate
-// gonimbus can generate, so this exercises the
-// throttle path deterministically: a fraction of probe HEADs return ErrThrottled.
-// It asserts that (1) throttled probes drive AIMD backoff (the backoff counter is
-// positive) — confirming probe results feed the limiter — and (2) the run still
-// makes progress and completes for the non-throttled objects (no stall while
-// `current` is reduced and probes are bounded by it). It also documents the
-// behavior found while implementing this fix: throttled probe HEADs are NOT
-// retried (ErrThrottled classifies as a non-resumable runtime_failure), so the
-// throttled objects fail and the run exits with per-object errors rather than
-// aborting — the retry/transient-classification of probes is tracked separately.
+// throttle-dimension companion to the deadlock guard above. Real S3-compatible
+// endpoints do not reliably throttle at the request rate gonimbus can generate,
+// so this exercises the throttle path deterministically: a burst of probe HEADs
+// return ErrThrottled before serving normally. Throttled probe attempts must
+// drive AIMD backoff, then retry and complete without stalling.
 func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing.T) {
 	const objects = 40
-	const throttledHeads = 16
+	const throttledObjects = 16
 	src := newReflowMemoryProvider()
 	dst := newReflowMemoryProvider()
 	lines := make([]string, 0, objects)
@@ -2674,9 +2668,11 @@ func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing
 		src.putFixture(key, "new payload", "src-etag", time.Time{})
 		// Collision path → exactly one dst.Head probe per object before the copy.
 		dst.putFixture(key, "old payload", "dest-etag", time.Time{})
+		if i < throttledObjects {
+			dst.throttleHeadsByKey[key] = 1
+		}
 		lines = append(lines, reflowInputLine(key, "src-etag", int64(len("new payload")), "", ""))
 	}
-	dst.throttleHeadsRemaining = throttledHeads
 
 	// Generous resource probe so --parallel 8 is not clamped to the floor: backoff
 	// must start from a real ceiling, otherwise the throttle signal is meaningless.
@@ -2688,9 +2684,7 @@ func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing
 	stdout, _, err := runTransferReflowWithProvidersAndErrProbe(t, src, dst,
 		strings.Join(lines, "\n"), probe,
 		"--parallel", "8", "--on-collision", "overwrite", "--overwrite")
-	// Throttled probes are not retried → per-object errors, but the run must not
-	// abort or stall.
-	require.Error(t, err)
+	require.NoError(t, err)
 
 	summary := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
 	var data struct {
@@ -2703,9 +2697,47 @@ func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing
 
 	require.Equal(t, 8, data.ConcurrencyInitial, "ceiling must not be clamped to the floor")
 	require.Positive(t, data.ConcurrencyThrottleBackoffs, "throttled probe HEADs must drive AIMD backoff")
-	// Progress despite the reduced `current`: every non-throttled object completed
-	// (a stall from probe/copy slot nesting would strand these).
-	require.Equal(t, objects-throttledHeads, data.Statuses["complete"])
+	require.Equal(t, objects, data.Statuses["complete"])
+	require.Len(t, dst.headCallsSnapshot(), objects+throttledObjects)
+}
+
+func TestTransferReflowCommand_ProbeThrottleExhaustionFailsObjectNonResumable(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Time{})
+	dst.throttleHeadsRemaining = reflowprobe.MaxAttempts
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""), "--on-collision", "overwrite", "--overwrite")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.Equal(t, "old payload", string(dst.mustObject("source/file.xml")))
+	require.Len(t, dst.headCallsSnapshot(), reflowprobe.MaxAttempts)
+
+	summary := requireReflowSummaryData(t, stdout)
+	require.Equal(t, int64(1), summary.Errors)
+	require.Zero(t, summary.Statuses["complete"])
+	errRecord := requireErrorData(t, stdout)
+	require.Equal(t, output.ErrCodeThrottled, errRecord.Code)
+	require.NotContains(t, stdout, opcheckpoint.ErrorRecordType)
+}
+
+func TestTransferReflowCommand_BodyCompareThrottleRetriesAndFindsDuplicate(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "same payload", "src-etag", time.Time{})
+	dst.putFixture("source/file.xml", "same payload", "dest-etag", time.Time{})
+	dst.throttleGetsRemaining = 1
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("same payload")), "", ""))
+	require.NoError(t, err)
+	require.Equal(t, "same payload", string(dst.mustObject("source/file.xml")))
+
+	summary := requireReflowSummaryData(t, stdout)
+	require.Positive(t, summary.ConcurrencyThrottleBackoffs)
+	skipped := requireReflowData(t, stdout, "skipped")
+	require.Equal(t, "collision.duplicate", skipped.Reason)
+	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "dest-etag", int64(len("same payload")))
 }
 
 func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerReplacesWithIfMatch(t *testing.T) {
@@ -4457,12 +4489,19 @@ type reflowMemoryProvider struct {
 	// Used to drive adaptive-concurrency backoff deterministically without a real
 	// throttling endpoint.
 	throttleHeadsRemaining int
+	// throttleHeadsByKey makes each listed key throttle independently for the
+	// configured number of Head calls.
+	throttleHeadsByKey map[string]int
+	// throttleGetsRemaining, when > 0, makes the next N GetObject calls return
+	// provider.ErrThrottled before serving normally.
+	throttleGetsRemaining int
 }
 
 func newReflowMemoryProvider() *reflowMemoryProvider {
 	return &reflowMemoryProvider{
-		objects: map[string][]byte{},
-		meta:    map[string]provider.ObjectMeta{},
+		objects:            map[string][]byte{},
+		meta:               map[string]provider.ObjectMeta{},
+		throttleHeadsByKey: map[string]int{},
 	}
 }
 
@@ -4544,6 +4583,10 @@ func (p *reflowMemoryProvider) Head(_ context.Context, key string) (*provider.Ob
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.headCalls = append(p.headCalls, key)
+	if p.throttleHeadsByKey[key] > 0 {
+		p.throttleHeadsByKey[key]--
+		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
+	}
 	if p.throttleHeadsRemaining > 0 {
 		p.throttleHeadsRemaining--
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
@@ -4558,6 +4601,10 @@ func (p *reflowMemoryProvider) Head(_ context.Context, key string) (*provider.Ob
 func (p *reflowMemoryProvider) GetObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.throttleGetsRemaining > 0 {
+		p.throttleGetsRemaining--
+		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
+	}
 	body, ok := p.objects[key]
 	if !ok {
 		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}

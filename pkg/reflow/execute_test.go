@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/stretchr/testify/require"
 )
@@ -57,12 +58,14 @@ func dryRunConfig(sink EventSink) Config {
 }
 
 type copyMemoryProvider struct {
-	mu           sync.Mutex
-	providerType provider.ProviderType
-	objects      map[string][]byte
-	meta         map[string]provider.ObjectMeta
-	preconds     []provider.PutPrecondition
-	putErrByKey  map[string]error
+	mu                     sync.Mutex
+	providerType           provider.ProviderType
+	objects                map[string][]byte
+	meta                   map[string]provider.ObjectMeta
+	preconds               []provider.PutPrecondition
+	putErrByKey            map[string]error
+	throttleHeadsRemaining int
+	throttleGetsRemaining  int
 }
 
 func newCopyMemoryProvider() *copyMemoryProvider {
@@ -94,6 +97,10 @@ func (p *copyMemoryProvider) List(context.Context, provider.ListOptions) (*provi
 func (p *copyMemoryProvider) Head(_ context.Context, key string) (*provider.ObjectMeta, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.throttleHeadsRemaining > 0 {
+		p.throttleHeadsRemaining--
+		return nil, &provider.ProviderError{Op: "Head", Provider: p.providerType, Key: key, Err: provider.ErrThrottled}
+	}
 	meta, ok := p.meta[key]
 	if !ok {
 		return nil, &provider.ProviderError{Op: "Head", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
@@ -104,6 +111,10 @@ func (p *copyMemoryProvider) Head(_ context.Context, key string) (*provider.Obje
 func (p *copyMemoryProvider) GetObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.throttleGetsRemaining > 0 {
+		p.throttleGetsRemaining--
+		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: p.providerType, Key: key, Err: provider.ErrThrottled}
+	}
 	body, ok := p.objects[key]
 	if !ok {
 		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
@@ -439,6 +450,65 @@ func TestRunnerCopyCollisionFailReturnsObjectError(t *testing.T) {
 	require.Equal(t, int64(1), summary.Errors)
 	require.Equal(t, int64(1), summary.Statuses["failed"])
 	require.Equal(t, int64(1), summary.Collisions["conflict"])
+}
+
+func TestRunnerProbeHeadThrottleRetriesAndCompletes(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "same payload", "src-etag")
+	dst.putFixture("data/a/b.xml", "same payload", "dest-etag")
+	dst.throttleHeadsRemaining = 2
+	sink := &collectSink{}
+	runner, err := NewRunner(copyConfig(dst, sink))
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":12,"dest_rel_key":"a/b.xml"}}`
+	summary, err := runner.Run(context.Background(), copySource(src, line))
+	require.NoError(t, err)
+
+	require.Equal(t, int64(2), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.Statuses["skipped"])
+	require.Equal(t, int64(1), summary.Collisions["duplicate"])
+}
+
+func TestRunnerProbeHeadThrottleExhaustionFailsObject(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "new payload", "src-etag")
+	dst.putFixture("data/a/b.xml", "old payload", "dest-etag")
+	dst.throttleHeadsRemaining = reflowprobe.MaxAttempts
+	sink := &collectSink{}
+	runner, err := NewRunner(copyConfig(dst, sink))
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":11,"dest_rel_key":"a/b.xml"}}`
+	summary, err := runner.Run(context.Background(), copySource(src, line))
+	var objectErr *ObjectErrorsError
+	require.ErrorAs(t, err, &objectErr)
+	require.Equal(t, int64(1), objectErr.Count)
+
+	require.Len(t, sink.errs, 1)
+	require.Equal(t, ErrCodeThrottled, sink.errs[0].Code)
+	require.Equal(t, int64(reflowprobe.MaxAttempts), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.Errors)
+	require.Equal(t, int64(1), summary.Statuses["failed"])
+	require.Equal(t, []byte("old payload"), dst.body("data/a/b.xml"), "failed probe must not overwrite the existing object")
+}
+
+func TestRunnerBodyCompareThrottleRetriesAndFindsDuplicate(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "same payload", "src-etag")
+	dst.putFixture("data/a/b.xml", "same payload", "dest-etag")
+	dst.throttleGetsRemaining = 1
+	sink := &collectSink{}
+	runner, err := NewRunner(copyConfig(dst, sink))
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":12,"dest_rel_key":"a/b.xml"}}`
+	summary, err := runner.Run(context.Background(), copySource(src, line))
+	require.NoError(t, err)
+
+	require.Equal(t, int64(1), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.Statuses["skipped"])
+	require.Equal(t, int64(1), summary.Collisions["duplicate"])
 }
 
 func (s *collectSink) emitted() bool {
