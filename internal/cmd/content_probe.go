@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -650,12 +652,22 @@ func enqueueContentProbeInput(
 		}
 		if err := json.Unmarshal([]byte(line), &env); err != nil {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "invalid json input", err, map[string]any{"input": line})
+			_ = emitContentProbeInputError(context.Background(), w, "", "invalid json input", err, map[string]any{"input_kind": "jsonl"})
+			return nil
+		}
+		if env.Type == output.TypeError {
+			if err := emitContentProbeErrorPassthrough(context.Background(), w, env.Data); err != nil {
+				invalidCount.Add(1)
+				_ = emitContentProbeInputError(context.Background(), w, "", "invalid json input", err, map[string]any{"input_kind": "jsonl", "record_type": output.TypeError})
+				return nil
+			}
+			errorCount.Add(1)
 			return nil
 		}
 		if env.Type != "gonimbus.index.object.v1" {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "unsupported json input", fmt.Errorf("unsupported json record type %q", env.Type), map[string]any{"input": line})
+			recordType := sanitizeContentProbeDetailString(env.Type)
+			_ = emitContentProbeInputError(context.Background(), w, "", "unsupported json input", fmt.Errorf("unsupported json record type %q", recordType), map[string]any{"input_kind": "jsonl", "record_type": recordType})
 			return nil
 		}
 		var data struct {
@@ -668,7 +680,7 @@ func enqueueContentProbeInput(
 		}
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "invalid json input", err, map[string]any{"input": line})
+			_ = emitContentProbeInputError(context.Background(), w, "", "invalid json input", err, map[string]any{"input_kind": "jsonl", "record_type": env.Type})
 			return nil
 		}
 		if data.DeletedAt != nil {
@@ -677,7 +689,7 @@ func enqueueContentProbeInput(
 		base, err := uri.ParseURI(data.BaseURI)
 		if err != nil {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "invalid base_uri", err, map[string]any{"base_uri": data.BaseURI})
+			_ = emitContentProbeInputError(context.Background(), w, "", "invalid base_uri", err, map[string]any{"base_uri": data.BaseURI})
 			return nil
 		}
 		key := strings.TrimPrefix(data.Key, "/")
@@ -686,7 +698,7 @@ func enqueueContentProbeInput(
 		}
 		if key == "" {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "missing key", fmt.Errorf("missing key in index record"), map[string]any{"base_uri": data.BaseURI})
+			_ = emitContentProbeInputError(context.Background(), w, "", "missing key", fmt.Errorf("missing key in index record"), map[string]any{"base_uri": data.BaseURI})
 			return nil
 		}
 		target := commandSourceTargetForRead(base)
@@ -705,7 +717,7 @@ func enqueueContentProbeInput(
 	parsed, err := uri.ParseURI(line)
 	if err != nil {
 		invalidCount.Add(1)
-		_ = emitContentProbeError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": line})
+		_ = emitContentProbeInputError(context.Background(), w, "", "invalid URI", err, map[string]any{"uri": line})
 		return nil
 	}
 	target := commandSourceTargetForRead(parsed)
@@ -731,7 +743,7 @@ func enqueueContentProbeInput(
 		m, err := match.New(match.Config{Includes: []string{parsed.Pattern}})
 		if err != nil {
 			invalidCount.Add(1)
-			_ = emitContentProbeError(context.Background(), w, "", "invalid pattern", err, map[string]any{"uri": line})
+			_ = emitContentProbeInputError(context.Background(), w, "", "invalid pattern", err, map[string]any{"uri": line})
 			return nil
 		}
 		matcher = m
@@ -768,6 +780,23 @@ func enqueueContentProbeInput(
 }
 
 func emitContentProbeError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
+	return emitContentProbeErrorWithCode(ctx, w, contentProbeErrCode(err), key, msg, err, details)
+}
+
+func emitContentProbeInputError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
+	return emitContentProbeErrorWithCode(ctx, w, output.ErrCodeInvalidInput, key, msg, err, details)
+}
+
+func emitContentProbeErrorWithCode(ctx context.Context, w output.Writer, code string, key, msg string, err error, details map[string]any) error {
+	safeDetails := sanitizeContentProbeDetails(details)
+	safeDetails["mode"] = "content_probe"
+	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: reflowpkg.FormatErrorMessage(msg, err), Key: key, Details: safeDetails}); werr != nil {
+		observability.CLILogger.Debug("Failed to emit content probe error record", zap.Error(werr))
+	}
+	return nil
+}
+
+func contentProbeErrCode(err error) string {
 	code := output.ErrCodeInternal
 	switch {
 	case provider.IsNotFound(err):
@@ -778,13 +807,73 @@ func emitContentProbeError(ctx context.Context, w output.Writer, key, msg string
 		code = output.ErrCodeThrottled
 	case provider.IsProviderUnavailable(err):
 		code = output.ErrCodeProviderUnavailable
+	case transfer.IsTransientNetworkError(err):
+		code = output.ErrCodeTransient
 	}
-	if details == nil {
-		details = map[string]any{}
+	return code
+}
+
+func emitContentProbeErrorPassthrough(ctx context.Context, w output.Writer, data json.RawMessage) error {
+	var rec output.ErrorRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return err
 	}
-	details["mode"] = "content_probe"
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: fmt.Sprintf("%s: %s", msg, err.Error()), Key: key, Details: details}); werr != nil {
+	if rec.Code == "" {
+		return fmt.Errorf("missing error code")
+	}
+	details := sanitizeContentProbeDetailsAny(rec.Details)
+	detailMap, ok := details.(map[string]any)
+	if !ok || detailMap == nil {
+		detailMap = map[string]any{}
+	}
+	detailMap["mode"] = "content_probe"
+	if werr := w.WriteError(ctx, &output.ErrorRecord{
+		Code:    rec.Code,
+		Message: reflowpkg.SanitizeOperationCauseMessage(errors.New(rec.Message)),
+		Key:     rec.Key,
+		Details: detailMap,
+	}); werr != nil {
 		observability.CLILogger.Debug("Failed to emit content probe error record", zap.Error(werr))
 	}
 	return nil
+}
+
+func sanitizeContentProbeDetails(details map[string]any) map[string]any {
+	if details == nil {
+		return map[string]any{}
+	}
+	safe := make(map[string]any, len(details))
+	for k, v := range details {
+		if k == "input" {
+			continue
+		}
+		safe[k] = sanitizeContentProbeDetailsAny(v)
+	}
+	return safe
+}
+
+func sanitizeContentProbeDetailsAny(v any) any {
+	switch typed := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return sanitizeContentProbeDetailString(typed)
+	case map[string]any:
+		return sanitizeContentProbeDetails(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = sanitizeContentProbeDetailsAny(item)
+		}
+		return out
+	default:
+		return typed
+	}
+}
+
+func sanitizeContentProbeDetailString(s string) string {
+	if s == "" {
+		return ""
+	}
+	return reflowpkg.SanitizeOperationCauseMessage(errors.New(s))
 }
