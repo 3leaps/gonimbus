@@ -3,7 +3,10 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -550,6 +553,153 @@ func TestContentProbeJSONLInputUsesSourceKeyForRewriteCapture(t *testing.T) {
 	require.Zero(t, errorCount.Load())
 }
 
+func TestEmitContentProbeErrorClassifiesTransientNetwork(t *testing.T) {
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+	err := &net.DNSError{Name: "source.internal.test", Err: "no such host", IsNotFound: true}
+
+	require.NoError(t, emitContentProbeError(context.Background(), w, "source.xml", "content probe read failed", err, nil))
+	require.NoError(t, w.Close())
+
+	rec := decodeContentProbeErrorRecord(t, buf.String())
+	require.Equal(t, output.ErrCodeTransient, rec.Code)
+	require.Equal(t, "source.xml", rec.Key)
+	require.Contains(t, rec.Message, "content probe read failed")
+}
+
+func TestEmitContentProbeErrorSanitizesProviderCause(t *testing.T) {
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+	err := errors.New("dial tcp: lookup private-source.internal.test on 10.0.0.1:53: no such host; GET https://storage.example.test/object?X-Amz-Signature=SECRET-AWS&X-Goog-Signature=SECRET-GOOG failed")
+
+	require.NoError(t, emitContentProbeError(context.Background(), w, "source.xml", "content probe read failed", err, map[string]any{
+		"uri":    "https://storage.example.test/object?X-Amz-Signature=SECRET-AWS",
+		"nested": map[string]any{"cause": "GET https://storage.example.test/object?X-Goog-Signature=SECRET-GOOG failed"},
+	}))
+	require.NoError(t, w.Close())
+
+	stdout := buf.String()
+	rec := decodeContentProbeErrorRecord(t, stdout)
+	require.Equal(t, output.ErrCodeTransient, rec.Code)
+	require.Contains(t, rec.Message, "content probe read failed")
+	for _, marker := range []string{"private-source.internal.test", "SECRET-AWS", "SECRET-GOOG", "X-Amz-Signature", "X-Goog-Signature"} {
+		require.NotContains(t, stdout, marker)
+	}
+}
+
+func TestContentProbeErrorRecordInputPassesThroughPreservingCode(t *testing.T) {
+	upstream := output.ErrorRecord{
+		Code:    output.ErrCodeTransient,
+		Message: "content probe read failed: dial tcp: lookup private-source.internal.test on 10.0.0.1:53: no such host; GET https://storage.example.test/object?X-Amz-Signature=SECRET-AWS failed",
+		Key:     "source.xml",
+		Details: map[string]any{
+			"input":      `{"type":"gonimbus.error.v1","data":{"message":"raw nested line"}}`,
+			"source_uri": "https://storage.example.test/object?X-Goog-Signature=SECRET-GOOG",
+		},
+	}
+	data, err := json.Marshal(upstream)
+	require.NoError(t, err)
+	line := `{"type":"` + output.TypeError + `","data":` + string(data) + `}`
+	tasks := make(chan probeTask, 1)
+	var invalidCount atomic.Int64
+	var errorCount atomic.Int64
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+
+	err = enqueueContentProbeInput(context.Background(), line, tasks, w, func(*uri.ObjectURI) (contentProbeProvider, error) {
+		t.Fatal("error record input should not connect to provider")
+		return nil, nil
+	}, &invalidCount, &errorCount)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	rec := decodeContentProbeErrorRecord(t, buf.String())
+	require.Equal(t, output.ErrCodeTransient, rec.Code)
+	require.Equal(t, "source.xml", rec.Key)
+	require.NotContains(t, rec.Message, "unsupported json record type")
+	require.Zero(t, invalidCount.Load())
+	require.Equal(t, int64(1), errorCount.Load())
+	require.Len(t, tasks, 0)
+	require.NotContains(t, buf.String(), "private-source.internal.test")
+	require.NotContains(t, buf.String(), "SECRET-AWS")
+	require.NotContains(t, buf.String(), "SECRET-GOOG")
+	require.NotContains(t, buf.String(), `"input"`)
+}
+
+func TestContentProbeUnsupportedJSONInputDoesNotCopyRawLine(t *testing.T) {
+	line := `{"type":"gonimbus.unknown.v1?X-Amz-Signature=SECRET-AWS","data":{"message":"dial tcp: lookup private-source.internal.test: no such host","source_uri":"https://storage.example.test/object?X-Goog-Signature=SECRET-GOOG"}}`
+	tasks := make(chan probeTask, 1)
+	var invalidCount atomic.Int64
+	var errorCount atomic.Int64
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+
+	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(*uri.ObjectURI) (contentProbeProvider, error) {
+		t.Fatal("unsupported json input should not connect to provider")
+		return nil, nil
+	}, &invalidCount, &errorCount)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	rec := decodeContentProbeErrorRecord(t, buf.String())
+	require.Equal(t, output.ErrCodeInvalidInput, rec.Code)
+	require.Contains(t, rec.Message, "unsupported json input")
+	require.Contains(t, rec.Message, "unsupported json record type")
+	require.Equal(t, int64(1), invalidCount.Load())
+	require.Zero(t, errorCount.Load())
+	require.NotContains(t, buf.String(), "private-source.internal.test")
+	require.NotContains(t, buf.String(), "SECRET-AWS")
+	require.NotContains(t, buf.String(), "SECRET-GOOG")
+	require.NotContains(t, buf.String(), `"input"`)
+}
+
+func TestContentProbeMalformedErrorRecordInputIsInvalidInput(t *testing.T) {
+	line := `{"type":"` + output.TypeError + `","data":{"message":"dial tcp: lookup private-source.internal.test: no such host","details":{"source_uri":"https://storage.example.test/object?X-Amz-Signature=SECRET-AWS"}}}`
+	tasks := make(chan probeTask, 1)
+	var invalidCount atomic.Int64
+	var errorCount atomic.Int64
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+
+	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(*uri.ObjectURI) (contentProbeProvider, error) {
+		t.Fatal("malformed error record input should not connect to provider")
+		return nil, nil
+	}, &invalidCount, &errorCount)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	rec := decodeContentProbeErrorRecord(t, buf.String())
+	require.Equal(t, output.ErrCodeInvalidInput, rec.Code)
+	require.Equal(t, int64(1), invalidCount.Load())
+	require.Zero(t, errorCount.Load())
+	require.NotContains(t, buf.String(), "private-source.internal.test")
+	require.NotContains(t, buf.String(), "SECRET-AWS")
+	require.NotContains(t, buf.String(), `"input"`)
+}
+
+func TestContentProbeInvalidJSONInputDoesNotCopyRawLine(t *testing.T) {
+	line := `{"type":"gonimbus.index.object.v1","data":{"source_uri":"https://storage.example.test/object?X-Amz-Signature=SECRET-AWS"}`
+	tasks := make(chan probeTask, 1)
+	var invalidCount atomic.Int64
+	var errorCount atomic.Int64
+	var buf bytes.Buffer
+	w := output.NewJSONLWriter(&buf, "test-job", string(provider.ProviderS3))
+
+	err := enqueueContentProbeInput(context.Background(), line, tasks, w, func(*uri.ObjectURI) (contentProbeProvider, error) {
+		t.Fatal("invalid json input should not connect to provider")
+		return nil, nil
+	}, &invalidCount, &errorCount)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	rec := decodeContentProbeErrorRecord(t, buf.String())
+	require.Equal(t, output.ErrCodeInvalidInput, rec.Code)
+	require.Equal(t, int64(1), invalidCount.Load())
+	require.Zero(t, errorCount.Load())
+	require.NotContains(t, buf.String(), "SECRET-AWS")
+	require.NotContains(t, buf.String(), `"input"`)
+}
+
 func TestContentProbeLookupNoMatchErrorOutputRedactsRawValue(t *testing.T) {
 	const marker = "SENSITIVE-MARKER-7f9a2c"
 	data := []byte(`file=` + marker)
@@ -622,4 +772,23 @@ func (p *rangeProbeProvider) GetRange(_ context.Context, _ string, start, endInc
 	}
 	b := p.data[start : endInclusive+1]
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
+
+func decodeContentProbeErrorRecord(t *testing.T, stdout string) output.ErrorRecord {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record output.Record
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		if record.Type != output.TypeError {
+			continue
+		}
+		var errRec output.ErrorRecord
+		require.NoError(t, json.Unmarshal(record.Data, &errRec))
+		return errRec
+	}
+	t.Fatalf("error record not found in stdout:\n%s", stdout)
+	return output.ErrorRecord{}
 }
