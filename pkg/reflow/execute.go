@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 )
@@ -301,7 +302,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 			if headErr != nil {
 				return 0, provider.PutResult{}, nil, "", "", headErr
 			}
-			return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionIfAbsentHead)
+			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
 		}
 	}
 
@@ -310,7 +311,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
 		switch {
 		case headErr == nil:
-			return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionHeadFallback)
+			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback)
 		case provider.IsNotFound(headErr):
 			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
 			return bytes, provider.PutResult{}, nil, "complete", "", err
@@ -330,11 +331,13 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	if headErr != nil {
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	return r.handleExistingDestination(ctx, src, layout, in, destKey, dstMeta, decisionIfAbsentHead)
+	return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
 }
 
-func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
-	duplicate, err := isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
+func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	duplicate, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (bool, error) {
+		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
+	})
 	if err != nil {
 		return 0, provider.PutResult{}, nil, "", "", err
 	}
@@ -385,14 +388,9 @@ func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in refl
 }
 
 func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Provider, key string) (*provider.ObjectMeta, error) {
-	release, err := limiter.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	meta, err := p.Head(ctx, key)
-	limiter.ObserveProviderResult(err)
-	return meta, err
+	return reflowprobe.Run(ctx, limiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
+		return p.Head(ctx, key)
+	})
 }
 
 func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions) (int64, error) {
