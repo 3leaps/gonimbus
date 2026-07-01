@@ -45,6 +45,9 @@ func isDuplicateCollision(sourceProvider, destProvider, sourceETag string, sourc
 	if !collisionETagsComparable(sourceProvider, destProvider) || destMeta == nil || sourceETag == "" || destMeta.ETag == "" || sourceETag != destMeta.ETag {
 		return false
 	}
+	if isMultipartETag(sourceETag) || isMultipartETag(destMeta.ETag) {
+		return false
+	}
 	return sourceSize <= 0 || destMeta.Size <= 0 || sourceSize == destMeta.Size
 }
 
@@ -54,6 +57,23 @@ func collisionETagsComparable(sourceProvider, destProvider string) bool {
 		sourceProvider = string(provider.ProviderS3)
 	}
 	return sourceProvider == destProvider && sourceProvider != string(provider.ProviderFile)
+}
+
+func isMultipartETag(etag string) bool {
+	etag = strings.Trim(strings.TrimSpace(etag), `"`)
+	if etag == "" {
+		return false
+	}
+	idx := strings.LastIndex(etag, "-")
+	if idx <= 0 || idx == len(etag)-1 {
+		return false
+	}
+	for _, r := range etag[idx+1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey, sourceProvider, destProvider, sourceETag string, sourceSize int64, destMeta *provider.ObjectMeta) (bool, error) {

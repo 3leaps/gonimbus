@@ -37,28 +37,17 @@ func CopyObjectWithOptions(ctx context.Context, src provider.Provider, dst provi
 		_ = body.Close()
 		return 0, &SizeMismatchError{Key: srcKey, Expected: expectedSize, Got: gotSize}
 	}
+	defer func() { _ = body.Close() }()
 
-	retryBody, err := newRetryableBody(ctx, body, gotSize, retryBufferMaxMemoryBytes)
+	result, err := UploadReaderWithSize(ctx, putter, dstKey, body, gotSize, UploadOptions{
+		RetryBufferBytes: retryBufferMaxMemoryBytes,
+		PutOptions:       opts,
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = retryBody.Close() }()
 
-	if opts.Empty() {
-		if err := putter.PutObject(ctx, dstKey, retryBody.Reader(), gotSize); err != nil {
-			return 0, err
-		}
-	} else {
-		optioned, ok := dst.(provider.MetadataAwarePutter)
-		if !ok {
-			return 0, errors.New("target provider does not support metadata-aware PutObject")
-		}
-		if err := optioned.PutObjectWithOptions(ctx, dstKey, retryBody.Reader(), gotSize, opts); err != nil {
-			return 0, err
-		}
-	}
-
-	return gotSize, nil
+	return result.Bytes, nil
 }
 
 // CopyObjectConditional streams a single object from srcKey to dstKey using an
@@ -75,9 +64,12 @@ func CopyObjectConditionalWithOptions(ctx context.Context, src provider.Provider
 	if !ok {
 		return 0, provider.PutResult{}, errors.New("source provider does not support GetObject")
 	}
-	putter, ok := dst.(provider.ConditionalPutter)
-	if !ok {
+	if _, ok := dst.(provider.ConditionalPutter); !ok {
 		return 0, provider.PutResult{}, errors.New("target provider does not support conditional PutObject")
+	}
+	objectPutter, ok := dst.(provider.ObjectPutter)
+	if !ok {
+		return 0, provider.PutResult{}, errors.New("target provider does not support PutObject")
 	}
 
 	body, gotSize, err := getter.GetObject(ctx, srcKey)
@@ -89,25 +81,16 @@ func CopyObjectConditionalWithOptions(ctx context.Context, src provider.Provider
 		_ = body.Close()
 		return 0, provider.PutResult{}, &SizeMismatchError{Key: srcKey, Expected: expectedSize, Got: gotSize}
 	}
+	defer func() { _ = body.Close() }()
 
-	retryBody, err := newRetryableBody(ctx, body, gotSize, retryBufferMaxMemoryBytes)
-	if err != nil {
-		return 0, provider.PutResult{}, err
-	}
-	defer func() { _ = retryBody.Close() }()
-
-	if opts.Empty() {
-		result, err = putter.PutObjectConditional(ctx, dstKey, retryBody.Reader(), gotSize, precond)
-	} else {
-		optioned, ok := dst.(provider.MetadataAwarePutter)
-		if !ok {
-			return 0, provider.PutResult{}, errors.New("target provider does not support metadata-aware conditional PutObject")
-		}
-		result, err = optioned.PutObjectConditionalWithOptions(ctx, dstKey, retryBody.Reader(), gotSize, precond, opts)
-	}
+	uploadResult, err := UploadReaderWithSize(ctx, objectPutter, dstKey, body, gotSize, UploadOptions{
+		RetryBufferBytes: retryBufferMaxMemoryBytes,
+		Precondition:     precond,
+		PutOptions:       opts,
+	})
 	if err != nil {
 		return 0, provider.PutResult{}, err
 	}
 
-	return gotSize, result, nil
+	return uploadResult.Bytes, provider.PutResult{ETag: uploadResult.ETag, Version: uploadResult.Version}, nil
 }

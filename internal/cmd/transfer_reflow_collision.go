@@ -60,6 +60,9 @@ func isDuplicateCollision(srcProvider string, destProvider string, srcETag strin
 	if !collisionETagsComparable(srcProvider, destProvider) || dstMeta == nil || srcETag == "" || dstMeta.ETag == "" || srcETag != dstMeta.ETag {
 		return false
 	}
+	if isMultipartCollisionETag(srcETag) || isMultipartCollisionETag(dstMeta.ETag) {
+		return false
+	}
 	return srcSize <= 0 || dstMeta.Size <= 0 || srcSize == dstMeta.Size
 }
 
@@ -69,6 +72,23 @@ func collisionETagsComparable(srcProvider string, destProvider string) bool {
 		srcProvider = string(provider.ProviderS3)
 	}
 	return srcProvider == destProvider && srcProvider != string(provider.ProviderFile)
+}
+
+func isMultipartCollisionETag(etag string) bool {
+	etag = strings.Trim(strings.TrimSpace(etag), `"`)
+	if etag == "" {
+		return false
+	}
+	idx := strings.LastIndex(etag, "-")
+	if idx <= 0 || idx == len(etag)-1 {
+		return false
+	}
+	for _, r := range etag[idx+1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func canCompareObjectBodies(src provider.Provider, dst provider.Provider) bool {

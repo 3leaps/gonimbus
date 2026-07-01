@@ -1,9 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/transfer"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseOutputDest(t *testing.T) {
@@ -97,26 +102,88 @@ func TestParseOutputDest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseOutputDest(tt.uri)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (result: %+v)", got)
-				}
+				require.Error(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Provider != tt.provider {
-				t.Errorf("provider = %q, want %q", got.Provider, tt.provider)
-			}
-			if got.Bucket != tt.bucket {
-				t.Errorf("bucket = %q, want %q", got.Bucket, tt.bucket)
-			}
-			if got.Key != tt.key {
-				t.Errorf("key = %q, want %q", got.Key, tt.key)
-			}
-			if got.BaseDir != tt.baseDir {
-				t.Errorf("baseDir = %q, want %q", got.BaseDir, tt.baseDir)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.provider, got.Provider)
+			require.Equal(t, tt.bucket, got.Bucket)
+			require.Equal(t, tt.key, got.Key)
+			require.Equal(t, tt.baseDir, got.BaseDir)
 		})
 	}
+}
+
+func TestUploadToOutputDestUsesMultipartAboveSharedThreshold(t *testing.T) {
+	path := sparseTempFile(t, transfer.DefaultMultipartThresholdBytes+1)
+	mock := &outputMultipartMock{}
+
+	err := uploadToOutputDest(context.Background(), mock, "index.db", path)
+
+	require.NoError(t, err)
+	require.False(t, mock.putCalled)
+	require.Greater(t, len(mock.partSizes), 1)
+}
+
+func TestUploadConditionallyToOutputDestUsesConditionalMultipartComplete(t *testing.T) {
+	path := sparseTempFile(t, transfer.DefaultMultipartThresholdBytes+1)
+	mock := &outputMultipartMock{}
+
+	err := uploadConditionallyToOutputDest(context.Background(), mock, "index.db", path, provider.PutPrecondition{IfAbsent: true})
+
+	require.NoError(t, err)
+	require.False(t, mock.putCalled)
+	require.True(t, mock.completeConditional)
+	require.Greater(t, len(mock.partSizes), 1)
+}
+
+func sparseTempFile(t *testing.T, size int64) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "gonimbus-output-upload-*")
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(size))
+	require.NoError(t, f.Close())
+	return f.Name()
+}
+
+type outputMultipartMock struct {
+	putCalled           bool
+	completeConditional bool
+	partSizes           []int64
+}
+
+func (m *outputMultipartMock) PutObject(context.Context, string, io.Reader, int64) error {
+	m.putCalled = true
+	return nil
+}
+
+func (m *outputMultipartMock) PutObjectConditional(context.Context, string, io.Reader, int64, provider.PutPrecondition) (provider.PutResult, error) {
+	m.putCalled = true
+	return provider.PutResult{}, nil
+}
+
+func (m *outputMultipartMock) CreateMultipartUpload(context.Context, string) (string, error) {
+	return "upload-1", nil
+}
+
+func (m *outputMultipartMock) UploadPart(_ context.Context, _ string, _ string, partNumber int32, body io.Reader, size int64) (provider.PartETag, error) {
+	_, err := io.Copy(io.Discard, body)
+	if err != nil {
+		return provider.PartETag{}, err
+	}
+	m.partSizes = append(m.partSizes, size)
+	return provider.PartETag{PartNumber: partNumber, ETag: "part-etag"}, nil
+}
+
+func (m *outputMultipartMock) CompleteMultipartUpload(context.Context, string, string, []provider.PartETag) (provider.PutResult, error) {
+	return provider.PutResult{ETag: "complete-etag"}, nil
+}
+
+func (m *outputMultipartMock) CompleteMultipartUploadConditional(context.Context, string, string, []provider.PartETag, provider.PutPrecondition) (provider.PutResult, error) {
+	m.completeConditional = true
+	return provider.PutResult{ETag: "complete-etag"}, nil
+}
+
+func (m *outputMultipartMock) AbortMultipartUpload(context.Context, string, string) error {
+	return nil
 }

@@ -3,9 +3,7 @@ package transfer
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
-	"os"
 )
 
 const (
@@ -29,6 +27,10 @@ func (b *retryableBody) Close() error {
 }
 
 func newRetryableBody(ctx context.Context, src io.ReadCloser, size int64, maxMemoryBytes int64) (*retryableBody, error) {
+	return newRetryableBodyWithTempDir(ctx, src, size, maxMemoryBytes, "")
+}
+
+func newRetryableBodyWithTempDir(ctx context.Context, src io.ReadCloser, size int64, maxMemoryBytes int64, tempDir string) (*retryableBody, error) {
 	_ = ctx
 	if maxMemoryBytes <= 0 {
 		maxMemoryBytes = DefaultRetryBufferMaxMemoryBytes
@@ -51,38 +53,25 @@ func newRetryableBody(ctx context.Context, src io.ReadCloser, size int64, maxMem
 		return &retryableBody{reader: bytes.NewReader(buf), cleanup: func() error { return nil }}, nil
 	}
 
-	f, err := os.CreateTemp("", "gonimbus-put-buffer-*")
+	f, cleanup, err := createSecureTempFile(tempDir, "gonimbus-put-buffer-*")
 	if err != nil {
 		return nil, err
 	}
 
 	_, copyErr := io.Copy(f, src)
 	if copyErr != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = cleanup()
 		return nil, copyErr
 	}
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = cleanup()
 		return nil, err
 	}
 
 	return &retryableBody{
-		reader: f,
-		cleanup: func() error {
-			name := f.Name()
-			closeErr := f.Close()
-			rmErr := os.Remove(name)
-			if closeErr != nil {
-				return fmt.Errorf("close temp file: %w", closeErr)
-			}
-			if rmErr != nil {
-				return fmt.Errorf("remove temp file: %w", rmErr)
-			}
-			return nil
-		},
+		reader:  f,
+		cleanup: cleanup,
 	}, nil
 }
 
