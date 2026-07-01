@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -278,7 +279,7 @@ func (t *Transfer) transferOne(ctx context.Context, obj provider.ObjectSummary) 
 			case "fail":
 				return fmt.Errorf("target exists: %s", dstKey)
 			case "skip":
-				if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "etag" && dstMeta.ETag == obj.ETag {
+				if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "etag" && strongETagEqual(obj.ETag, dstMeta.ETag) {
 					return t.writer.WriteSkip(ctx, &output.SkipRecord{SourceKey: srcKey, TargetKey: dstKey, Reason: "dedup.etag"})
 				}
 				if t.cfg.Dedup.Enabled && t.cfg.Dedup.Strategy == "key" {
@@ -313,16 +314,15 @@ func (t *Transfer) transferOne(ctx context.Context, obj provider.ObjectSummary) 
 		_ = body.Close()
 		return &SizeMismatchError{Key: srcKey, Expected: obj.Size, Got: gotSize}
 	}
+	defer func() { _ = body.Close() }()
 
-	retryBody, err := newRetryableBody(ctx, body, gotSize, t.cfg.RetryBufferMaxMemoryBytes)
+	result, err := UploadReaderWithSize(ctx, putter, dstKey, body, gotSize, UploadOptions{
+		RetryBufferBytes: t.cfg.RetryBufferMaxMemoryBytes,
+	})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = retryBody.Close() }()
-
-	if err := putter.PutObject(ctx, dstKey, retryBody.Reader(), gotSize); err != nil {
-		return err
-	}
+	_ = result
 
 	if err := t.writer.WriteTransfer(ctx, &output.TransferRecord{SourceKey: srcKey, TargetKey: dstKey, Bytes: gotSize}); err != nil {
 		return err
@@ -354,6 +354,27 @@ func (t *Transfer) summary(d time.Duration) *Summary {
 		Errors:             t.errors.Load(),
 		Duration:           d,
 	}
+}
+
+func strongETagEqual(sourceETag, destETag string) bool {
+	return sourceETag != "" && destETag != "" && sourceETag == destETag && !isMultipartETag(sourceETag) && !isMultipartETag(destETag)
+}
+
+func isMultipartETag(etag string) bool {
+	etag = strings.Trim(strings.TrimSpace(etag), `"`)
+	if etag == "" {
+		return false
+	}
+	idx := strings.LastIndex(etag, "-")
+	if idx <= 0 || idx == len(etag)-1 {
+		return false
+	}
+	for _, r := range etag[idx+1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // DrainReader ensures io.Reader is fully consumed when needed.

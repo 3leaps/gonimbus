@@ -2446,6 +2446,12 @@ func TestTransferReflowCommand_CollisionConflictComparesBodiesForS3DestWhenETags
 	require.Equal(t, collisionConflict, errRecord.Collision.Kind)
 }
 
+func TestTransferReflowCollisionDuplicateRejectsMultipartETagShortcut(t *testing.T) {
+	meta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{ETag: `"abc123-2"`, Size: 12}}
+
+	require.False(t, isDuplicateCollision("s3", "s3", `"abc123-2"`, 12, meta))
+}
+
 func TestTransferReflowCommand_ParallelConflictRaceSkipModeFailsWaiters(t *testing.T) {
 	src := newReflowMemoryProvider()
 	dst := newReflowMemoryProvider()

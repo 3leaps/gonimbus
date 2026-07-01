@@ -3,13 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
 // outputDestSpec describes an exact output object destination (s3://bucket/key.jsonl,
@@ -111,7 +111,7 @@ func parseOutputDest(uri string) (*outputDestSpec, error) {
 // newOutputProvider creates a provider capable of PutObject for the given destination spec.
 func newOutputProvider(ctx context.Context, spec *outputDestSpec) (provider.ObjectPutter, error) {
 	if spec.Provider == string(provider.ProviderFile) {
-		if err := os.MkdirAll(spec.BaseDir, 0o755); err != nil {
+		if err := os.MkdirAll(spec.BaseDir, 0o750); err != nil {
 			return nil, fmt.Errorf("create output directory: %w", err)
 		}
 	}
@@ -145,41 +145,14 @@ func newOutputProvider(ctx context.Context, spec *outputDestSpec) (provider.Obje
 
 // uploadToOutputDest opens a temp file and uploads it to the output destination.
 func uploadToOutputDest(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string) error {
-	f, err := os.Open(tempFilePath) // #nosec G304 -- tempFilePath is an internal spool path created by stream put.
-	if err != nil {
-		return fmt.Errorf("open temp file for upload: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("stat temp file for upload: %w", err)
-	}
-
-	if err := putter.PutObject(ctx, key, io.Reader(f), info.Size()); err != nil {
+	if _, err := transfer.UploadFile(ctx, putter, key, tempFilePath, transfer.UploadOptions{}); err != nil {
 		return fmt.Errorf("upload output: %w", err)
 	}
 	return nil
 }
 
 func uploadConditionallyToOutputDest(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string, precond provider.PutPrecondition) error {
-	conditionalPutter, ok := putter.(provider.ConditionalPutter)
-	if !ok {
-		return fmt.Errorf("destination provider does not support conditional writes")
-	}
-
-	f, err := os.Open(tempFilePath) // #nosec G304 -- tempFilePath is an internal spool path created by stream put.
-	if err != nil {
-		return fmt.Errorf("open temp file for upload: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("stat temp file for upload: %w", err)
-	}
-
-	if _, err := conditionalPutter.PutObjectConditional(ctx, key, io.Reader(f), info.Size(), precond); err != nil {
+	if _, err := transfer.UploadFile(ctx, putter, key, tempFilePath, transfer.UploadOptions{Precondition: precond}); err != nil {
 		return fmt.Errorf("conditional upload output: %w", err)
 	}
 	return nil

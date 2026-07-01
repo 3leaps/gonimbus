@@ -1,13 +1,11 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -20,6 +18,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/stream"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
 const (
@@ -29,7 +28,6 @@ const (
 	streamPutFramingJSON    = "jsonl"
 	streamPutDefaultPart    = int64(8 * 1024 * 1024)
 	streamPutDefaultTrigger = int64(64 * 1024 * 1024)
-	streamPutMultipartNever = int64(1<<63 - 1)
 )
 
 var streamPutCmd = newStreamPutCommand()
@@ -186,235 +184,34 @@ type streamPutUploadResult struct {
 }
 
 func uploadStreamPutReader(ctx context.Context, putter provider.ObjectPutter, destURI string, key string, r io.Reader, opts streamPutUploadOptions, w *output.JSONLWriter) (streamPutUploadResult, error) {
-	session, err := newStreamPutUploadSession(ctx, putter, destURI, key, opts, w)
+	result, err := transfer.UploadReader(ctx, putter, key, r, streamPutTransferOptions(destURI, opts, w))
 	if err != nil {
 		return streamPutUploadResult{}, err
 	}
-	if _, err := io.Copy(session, r); err != nil {
-		_ = session.Abort(ctx)
-		return streamPutUploadResult{}, err
-	}
-	result, err := session.Close(ctx)
-	if err != nil {
-		_ = session.Abort(ctx)
-		return streamPutUploadResult{}, err
-	}
-	return result, nil
+	return streamPutUploadResult{Bytes: result.Bytes, ETag: result.ETag, Mode: result.Mode}, nil
 }
 
-type streamPutUploadSession struct {
-	ctx     context.Context
-	putter  provider.ObjectPutter
-	destURI string
-	key     string
-	opts    streamPutUploadOptions
-	w       *output.JSONLWriter
-
-	spoolPath string
-	spool     *os.File
-
-	multipart bool
-	uploadID  string
-	parts     []provider.PartETag
-	partNum   int32
-	partBuf   bytes.Buffer
-	bytes     int64
-	closed    bool
-}
-
-func newStreamPutUploadSession(ctx context.Context, putter provider.ObjectPutter, destURI string, key string, opts streamPutUploadOptions, w *output.JSONLWriter) (*streamPutUploadSession, error) {
-	if opts.PartSize <= 0 {
-		opts.PartSize = streamPutDefaultPart
+func streamPutTransferOptions(destURI string, opts streamPutUploadOptions, w *output.JSONLWriter) transfer.UploadOptions {
+	uploadOpts := transfer.UploadOptions{
+		PartSizeBytes:         opts.PartSize,
+		MultipartThreshold:    opts.MultipartThreshold,
+		MultipartThresholdSet: true,
+		Progress: func(ctx context.Context, progress transfer.UploadProgress) error {
+			return w.WriteAny(ctx, streamPutProgressType, &streamPutProgressRecord{
+				DestURI:    destURI,
+				DestKey:    progress.Key,
+				UploadID:   progress.UploadID,
+				PartNumber: progress.PartNumber,
+				PartBytes:  progress.PartBytes,
+				Bytes:      progress.Bytes,
+				Status:     progress.Status,
+			})
+		},
 	}
-	if opts.MultipartThreshold < 0 {
-		opts.MultipartThreshold = streamPutDefaultTrigger
+	if !opts.Overwrite {
+		uploadOpts.Precondition = provider.PutPrecondition{IfAbsent: true}
 	}
-	if _, ok := putter.(provider.MultipartUploader); !ok {
-		opts.MultipartThreshold = streamPutMultipartNever
-	}
-	tmp, err := os.CreateTemp("", "gonimbus-stream-put-*")
-	if err != nil {
-		return nil, fmt.Errorf("create temp spool: %w", err)
-	}
-	return &streamPutUploadSession{ctx: ctx, putter: putter, destURI: destURI, key: key, opts: opts, w: w, spool: tmp, spoolPath: tmp.Name(), partNum: 1}, nil
-}
-
-func (s *streamPutUploadSession) Write(p []byte) (int, error) {
-	if s.closed {
-		return 0, output.ErrWriterClosed
-	}
-	written := 0
-	for len(p) > 0 {
-		if !s.multipart {
-			n, err := s.spool.Write(p)
-			if n > 0 {
-				s.bytes += int64(n)
-				written += n
-				p = p[n:]
-			}
-			if err != nil {
-				return written, err
-			}
-			if s.bytes > s.opts.MultipartThreshold {
-				if err := s.startMultipart(s.ctx); err != nil {
-					return written, err
-				}
-			}
-			continue
-		}
-		space := int(s.opts.PartSize) - s.partBuf.Len()
-		if space <= 0 {
-			if err := s.flushPart(s.ctx, false); err != nil {
-				return written, err
-			}
-			continue
-		}
-		if space > len(p) {
-			space = len(p)
-		}
-		n, err := s.partBuf.Write(p[:space])
-		s.bytes += int64(n)
-		written += n
-		p = p[n:]
-		if err != nil {
-			return written, err
-		}
-		if int64(s.partBuf.Len()) == s.opts.PartSize {
-			if err := s.flushPart(s.ctx, false); err != nil {
-				return written, err
-			}
-		}
-	}
-	return written, nil
-}
-
-func (s *streamPutUploadSession) Close(ctx context.Context) (streamPutUploadResult, error) {
-	if s.closed {
-		return streamPutUploadResult{}, output.ErrWriterClosed
-	}
-	s.closed = true
-	if !s.multipart {
-		if err := s.spool.Close(); err != nil {
-			_ = os.Remove(s.spoolPath)
-			return streamPutUploadResult{}, fmt.Errorf("close temp spool: %w", err)
-		}
-		defer func() { _ = os.Remove(s.spoolPath) }()
-		if err := uploadStreamPutOutput(ctx, s.putter, s.key, s.spoolPath, s.opts.Overwrite); err != nil {
-			return streamPutUploadResult{}, err
-		}
-		return streamPutUploadResult{Bytes: s.bytes, Mode: "single"}, nil
-	}
-	if s.partBuf.Len() > 0 || len(s.parts) == 0 {
-		if err := s.flushPart(ctx, true); err != nil {
-			return streamPutUploadResult{}, err
-		}
-	}
-	var (
-		result provider.PutResult
-		err    error
-	)
-	if s.opts.Overwrite {
-		result, err = s.multipartUploader().CompleteMultipartUpload(ctx, s.key, s.uploadID, s.parts)
-	} else {
-		conditional, ok := s.putter.(provider.ConditionalMultipartCompleter)
-		if !ok {
-			return streamPutUploadResult{}, fmt.Errorf("destination provider does not support conditional multipart completion")
-		}
-		result, err = conditional.CompleteMultipartUploadConditional(ctx, s.key, s.uploadID, s.parts, provider.PutPrecondition{IfAbsent: true})
-	}
-	if err != nil {
-		return streamPutUploadResult{}, fmt.Errorf("complete multipart upload: %w", err)
-	}
-	return streamPutUploadResult{Bytes: s.bytes, ETag: result.ETag, Mode: "multipart"}, nil
-}
-
-func (s *streamPutUploadSession) Abort(ctx context.Context) error {
-	_ = os.Remove(s.spoolPath)
-	if s.multipart && s.uploadID != "" {
-		return s.multipartUploader().AbortMultipartUpload(ctx, s.key, s.uploadID)
-	}
-	return nil
-}
-
-func (s *streamPutUploadSession) startMultipart(ctx context.Context) error {
-	mu, ok := s.putter.(provider.MultipartUploader)
-	if !ok {
-		return fmt.Errorf("destination provider does not support multipart uploads")
-	}
-	uploadID, err := mu.CreateMultipartUpload(ctx, s.key)
-	if err != nil {
-		return fmt.Errorf("create multipart upload: %w", err)
-	}
-	s.multipart = true
-	s.uploadID = uploadID
-
-	if _, err := s.spool.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek temp spool: %w", err)
-	}
-	buf := make([]byte, s.opts.PartSize)
-	for {
-		n, readErr := io.ReadFull(s.spool, buf)
-		if n > 0 {
-			if readErr == io.ErrUnexpectedEOF {
-				_, _ = s.partBuf.Write(buf[:n])
-			} else {
-				part, err := mu.UploadPart(ctx, s.key, s.uploadID, s.partNum, bytes.NewReader(buf[:n]), int64(n))
-				if err != nil {
-					return fmt.Errorf("upload multipart part %d: %w", s.partNum, err)
-				}
-				s.parts = append(s.parts, part)
-				if err := s.writeProgress(ctx, part.PartNumber, int64(n), "uploaded"); err != nil {
-					return err
-				}
-				s.partNum++
-			}
-		}
-		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("read temp spool: %w", readErr)
-		}
-	}
-	if err := s.spool.Close(); err != nil {
-		return fmt.Errorf("close temp spool: %w", err)
-	}
-	_ = os.Remove(s.spoolPath)
-	return nil
-}
-
-func (s *streamPutUploadSession) flushPart(ctx context.Context, final bool) error {
-	if s.partBuf.Len() == 0 && !final {
-		return nil
-	}
-	body := append([]byte(nil), s.partBuf.Bytes()...)
-	s.partBuf.Reset()
-	part, err := s.multipartUploader().UploadPart(ctx, s.key, s.uploadID, s.partNum, bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return fmt.Errorf("upload multipart part %d: %w", s.partNum, err)
-	}
-	s.parts = append(s.parts, part)
-	if err := s.writeProgress(ctx, part.PartNumber, int64(len(body)), "uploaded"); err != nil {
-		return err
-	}
-	s.partNum++
-	return nil
-}
-
-func (s *streamPutUploadSession) multipartUploader() provider.MultipartUploader {
-	return s.putter.(provider.MultipartUploader)
-}
-
-func (s *streamPutUploadSession) writeProgress(ctx context.Context, partNumber int32, partBytes int64, status string) error {
-	return s.w.WriteAny(ctx, streamPutProgressType, &streamPutProgressRecord{
-		DestURI:    s.destURI,
-		DestKey:    s.key,
-		UploadID:   s.uploadID,
-		PartNumber: partNumber,
-		PartBytes:  partBytes,
-		Bytes:      s.bytes,
-		Status:     status,
-	})
+	return uploadOpts
 }
 
 func streamPutUploadExit(ctx context.Context, w output.Writer, dest *outputDestSpec, err error) error {
@@ -539,7 +336,7 @@ func readStreamPutFramedObject(ctx context.Context, dec *stream.Decoder, root st
 	dest := root.objectSpec(destKey)
 	providerKey := dest.Key
 	destURI := outputDestURI(dest)
-	session, err := newStreamPutUploadSession(ctx, putter, destURI, providerKey, opts, w)
+	session, err := transfer.NewUploadSession(ctx, putter, providerKey, streamPutTransferOptions(destURI, opts, w))
 	if err != nil {
 		return nil, err
 	}
@@ -859,13 +656,6 @@ func parseStreamPutSize(raw string, fallback int64) (int64, error) {
 		return 0, err
 	}
 	return n * mult, nil
-}
-
-func uploadStreamPutOutput(ctx context.Context, putter provider.ObjectPutter, key string, tempFilePath string, overwrite bool) error {
-	if overwrite {
-		return uploadToOutputDest(ctx, putter, key, tempFilePath)
-	}
-	return uploadConditionallyToOutputDest(ctx, putter, key, tempFilePath, provider.PutPrecondition{IfAbsent: true})
 }
 
 func outputDestURI(dest *outputDestSpec) string {
