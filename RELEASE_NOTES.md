@@ -4,7 +4,7 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
-## v0.3.5 (2026-07-01)
+## v0.3.5 (2026-07-02)
 
 **Multipart Export/Reflow and the Migrated Reflow Engine**
 

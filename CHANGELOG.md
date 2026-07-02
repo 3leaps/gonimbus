@@ -15,7 +15,7 @@ changes.
 
 ## [Unreleased]
 
-## [0.3.5] - 2026-07-01
+## [0.3.5] - 2026-07-02
 
 **Multipart export and reflow for large objects, the migrated Experimental
 reflow engine, and hardened probe/error paths.**
