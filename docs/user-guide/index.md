@@ -844,4 +844,38 @@ newer run, or fails closed with manual reconciliation guidance. Use
 `--latest-write-mode unconditional` only for explicit recovery after you have
 verified hub state.
 
+### Large Hub Exports
+
+Large index runs can produce an `index.db` that is too large for a provider's
+single-object PUT limit. For S3-compatible hubs, `index export` automatically
+uses multipart upload through the shared transfer uploader when an artifact
+crosses the default multipart threshold (64 MiB). The default part size is 8 MiB;
+very large known-size artifacts increase part size automatically when needed to
+stay within provider part-count limits.
+
+The operator effect is that a large index hub export should complete as one
+published run instead of failing at the >5 GiB single-PUT boundary. The export
+still follows the same commit order: upload immutable artifacts, write
+`complete.json`, then advance `latest.json`.
+
+Plan local disk with two separate facts in mind:
+
+- The local `index.db` already exists before export and remains the source file
+  for the upload. `index export` does not need a second full-size copy of that
+  database just to use multipart upload.
+- Small commit-marker files may use temporary files, and provider/retry paths may
+  use system temp space. Keep the system temp directory outside the repository
+  working tree and leave headroom for normal OS and checkpoint activity.
+
+Provider cleanup still matters. Gonimbus aborts multipart uploads on failure
+paths it controls, but a killed process, host failure, or provider-side partial
+state can leave incomplete uploads behind. Configure the destination bucket's
+lifecycle cleanup for incomplete multipart uploads, such as an S3
+`AbortIncompleteMultipartUpload` lifecycle rule, before relying on repeated large
+exports.
+
+Multipart ETags are provider-specific and should not be treated as universal
+content hashes. Trust the hub's `complete.json` artifact sizes and SHA-256 values
+for export integrity.
+
 See [Workspace Pattern](workspace.md) for production workspace layout, shard strategies, and operational flows.

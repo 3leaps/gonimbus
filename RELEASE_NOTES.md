@@ -4,6 +4,72 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.5 (2026-07-02)
+
+**Multipart Export/Reflow and the Migrated Reflow Engine**
+
+v0.3.5 removes the practical single-PUT ceiling from the release's largest
+operator workflows. `index export` can publish a large `index.db` to an
+S3-compatible hub through multipart upload, and `transfer reflow` can copy large
+objects through the same shared upload primitive. The release also moves the
+migrated stdin reflow subset onto the Experimental `pkg/reflow` engine and
+tightens two error paths that matter during long runs: content-probe terminal
+errors keep their original code, and throttled reflow probes retry before falling
+back to per-object failure handling.
+
+### Multipart for large exports and reflow writes
+
+Large writes now use a shared multipart primitive in `pkg/transfer`. Once a
+known-size write crosses the default 64 MiB multipart threshold, Gonimbus uploads
+bounded parts, completes conditionally when the destination supports IfAbsent,
+and aborts the multipart upload on every failure path it controls.
+
+The immediate operator effect is simple: a large hub export or reflow write no
+longer fails only because the destination enforces a >5 GiB single-PUT limit.
+Multipart-form ETags are still treated carefully; Gonimbus does not use them as
+blind byte-equality proof for collision decisions.
+
+### Reflow engine migration (Experimental)
+
+The stdin `transfer reflow` subset now routes through the Experimental
+`pkg/reflow` engine for metadata planning, dry-run planning, record-stream copy
+execution, collision decisions, adaptive concurrency, and typed run / summary
+records. CLI behavior is intended to remain compatible; unsupported forms keep
+using the legacy path until later migration work.
+
+`pkg/reflow` remains **Experimental**. There are no Stable library API breaks in
+this release.
+
+### Error-path hardening
+
+- `content probe` now recognizes `gonimbus.error.v1` input records as terminal
+  records, preserves their original error code, and avoids wrapping retryable
+  records as `INTERNAL`.
+- Content-probe error output now uses the same provider-error sanitizer as
+  reflow and no longer carries raw input JSONL lines forward in parser
+  diagnostics.
+- Reflow HEAD/body-compare probe operations now retry throttled provider
+  attempts through the adaptive limiter. If throttling never clears, the
+  existing per-object failure behavior remains in place; the checkpoint/resume
+  classifier boundary is unchanged.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.5
+```
+
+Existing CLI workflows remain compatible with v0.3.4. Operators planning large
+multipart writes should verify local disk headroom for the index database,
+checkpoint files, and any retry/temp spooling, and configure provider lifecycle
+cleanup for incomplete multipart uploads, such as S3
+`AbortIncompleteMultipartUpload` lifecycle rules.
+
+See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the complete release
+notes.
+
+---
+
 ## v0.3.4 (2026-06-27)
 
 **Google Cloud Storage Provider and Library-Exposure Foundation**
@@ -147,57 +213,6 @@ notes.
 
 ---
 
-## v0.3.2 (2026-06-15)
-
-**Package-Manager Distribution Plumbing**
-
-v0.3.2 is a small release focused on package-manager distribution. It prepares
-the release pipeline for Homebrew and Scoop publishing and updates the release
-build matrix to match those distribution targets.
-
-### Package-Manager Distribution
-
-The release upload ceremony now prints the GitHub download URL and SHA256 for
-the assets consumed by downstream package managers:
-
-- Homebrew: macOS ARM64, Linux AMD64, and Linux ARM64.
-- Scoop: Windows AMD64 and Windows ARM64.
-
-Those values come from the uploaded GitHub release assets and the signed
-`SHA256SUMS` manifest, so the Homebrew tap and Scoop bucket can be updated from
-the same release evidence used in the signing ceremony.
-
-### Build Matrix
-
-The release matrix remains five artifacts:
-
-- `gonimbus-linux-amd64`
-- `gonimbus-linux-arm64`
-- `gonimbus-darwin-arm64`
-- `gonimbus-windows-amd64.exe`
-- `gonimbus-windows-arm64.exe`
-
-The native Intel Mac artifact, `gonimbus-darwin-amd64`, is no longer published.
-Apple-silicon macOS remains the Homebrew macOS baseline, and Linux AMD64 plus
-Linux ARM64 remain available through Homebrew.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.2
-```
-
-After the package-manager manifests are published, supported users can also
-install with Homebrew or Scoop:
-
-```bash
-brew install 3leaps/tap/gonimbus
-scoop install gonimbus
-```
-
-See [docs/releases/v0.3.2.md](docs/releases/v0.3.2.md) for the complete
-release notes.
-
 For v0.3.0 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
@@ -206,3 +221,4 @@ the [CHANGELOG](CHANGELOG.md).
 <!-- v0.2.2 entry removed when v0.3.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.2.md -->
 <!-- v0.2.1 entry removed when v0.3.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.1.md -->
 <!-- v0.3.1 entry removed when v0.3.4 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.1.md -->
+<!-- v0.3.2 entry removed when v0.3.5 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.2.md -->

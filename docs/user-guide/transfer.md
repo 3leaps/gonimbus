@@ -98,7 +98,11 @@ The `path_template` field transforms source keys to target keys during transfer.
 | ------------ | ----------------------- | --------------------------- | -------------- |
 | `{filename}` | Final path segment      | `a/b/c.txt`                 | `c.txt`        |
 | `{dir[n]}`   | Nth directory (0-based) | `a/b/c.txt` with `{dir[0]}` | `a`            |
-| `{key}`      | Full source key         | `a/b/c.txt`                 | `a/b/c.txt`    |
+
+Manifest `path_template` also supports a full-source-key placeholder for simple
+prefixing use cases. Prefer named directory placeholders in examples so the
+mapping is explicit and does not get copied into `transfer reflow`
+`--rewrite-from` templates, which use a different matcher.
 
 ### Examples
 
@@ -126,7 +130,7 @@ transfer:
 # Source: data/file.json
 # Target: archive/2024/data/file.json
 transfer:
-  path_template: "archive/2024/{key}"
+  path_template: "archive/2024/{dir[0]}/{filename}"
 ```
 
 **Remove middle layers:**
@@ -329,6 +333,30 @@ For S3 destinations, `transfer reflow --dry-run` performs one explicit
 conditional zero-byte write probe under `<dest>/.gonimbus-preflight/`, then
 deletes the probe object. Set `--readonly` or `GONIMBUS_READONLY=1` to suppress
 that provider-side mutation.
+
+### Large Reflow Writes
+
+For S3-compatible destinations, reflow automatically switches large destination
+writes to multipart upload through the shared transfer uploader. The default
+threshold is 64 MiB and the default part size is 8 MiB; very large known-size
+objects increase part size automatically when needed to stay within provider
+part-count limits. Normal reflow use does not require a separate multipart flag.
+
+Multipart writes keep the same operator contract as smaller writes: collision
+policy still gates the destination, IfAbsent-capable destinations complete
+conditionally for no-overwrite modes, metadata/provenance options still apply,
+and terminal reflow records still describe the per-object outcome. Multipart
+ETags remain provider-specific, so use `inspect-pair` and size-authoritative
+records for verification instead of treating multipart ETags as portable content
+hashes.
+
+Before sustained large reflows, verify host headroom for active part buffers,
+checkpoint files, retry/temp spooling, and normal system temp usage. Keep temp
+locations outside the repository working tree. Also configure destination
+lifecycle cleanup for incomplete multipart uploads, such as an S3
+`AbortIncompleteMultipartUpload` rule; Gonimbus aborts uploads on controlled
+failure paths, but lifecycle cleanup is the backstop for killed processes or
+provider-side partial state.
 
 ### Template Variables
 

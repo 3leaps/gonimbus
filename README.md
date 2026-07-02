@@ -15,7 +15,10 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 - **CLI**: Run validated crawl/inspect jobs from manifests; stream JSONL to stdout/files or index sinks
 - **Server**: Long-running runner with streaming results; intended to live near the data and accept remote job submissions
-- **Library**: Embeddable components (matcher, crawler, outputs, provider backends) for Go apps. See [docs/library-consumers.md](docs/library-consumers.md) for the supported import surface (`pkg/uri`, `pkg/match`, `pkg/provider`, `pkg/provider/s3`, `pkg/provider/file`) and the embedding contract
+- **Library**: Embeddable components (matcher, crawler, outputs, provider
+  backends, and the Experimental reflow engine) for Go apps. See
+  [docs/library-consumers.md](docs/library-consumers.md) for the supported
+  import surface and embedding contract
 
 ## Quick Start
 
@@ -128,10 +131,15 @@ an interrupted run can be safely continued with `--resume-run <run_id>`.
 `stream put` can upload raw stdin or framed `stream get` batches, reflow can
 use `overwrite-if-source-newer` for freshness-based collision handling, and
 `inspect-pair` can verify terminal reflow write claims against destination HEAD
-results. Adaptive `transfer reflow --parallel` behavior and throughput tuning
-are documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
+results. Large `index export` artifacts and reflow writes use multipart upload
+for S3-compatible destinations when they cross the default threshold; see
+[Local Index](docs/user-guide/index.md#large-hub-exports) and
+[Reflow](docs/user-guide/reflow.md#large-object-writes-and-multipart-upload)
+for local-resource and lifecycle guidance.
+Adaptive `transfer reflow --parallel` behavior and throughput tuning are
+documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the current
+See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the current
 operator notes.
 
 ### Outputs
