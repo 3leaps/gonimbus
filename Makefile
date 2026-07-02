@@ -365,6 +365,10 @@ test-cloud-real: sync-embedded-identity ## Run opt-in real-cloud tests; skips wh
 	@echo "Running opt-in real-cloud integration tests..."
 	$(GOTEST) ./... -v -tags=cloudintegration -run 'RealCloud|RealGCS|RealS3'
 
+test-cloud-real-s3-release-stress: sync-embedded-identity ## Run opt-in real S3 >5GiB release stress validation
+	@echo "Running opt-in real S3 release stress validation..."
+	$(GOTEST) ./internal/cmd -v -tags=cloudintegration -run '^TestReleaseStressS3LargeMultipart_CloudIntegration$$' -timeout 6h
+
 moto-start:  ## Start moto server for cloud integration tests
 	@if curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
 		echo "✅ Moto server already running at $(MOTO_ENDPOINT)"; \

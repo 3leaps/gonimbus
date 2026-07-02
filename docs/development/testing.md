@@ -83,10 +83,43 @@ bucket.
 export GONIMBUS_S3_TEST_BUCKET=<your-bucket>
 export GONIMBUS_S3_TEST_ENDPOINT=<your-endpoint>   # omit for AWS
 export GONIMBUS_S3_TEST_REGION=<your-region>
-export AWS_PROFILE=<your-profile>                  # or any standard AWS credential source
+export GONIMBUS_S3_TEST_PROFILE=<your-profile>      # optional; or use AWS_PROFILE/default chain
+export GONIMBUS_S3_TEST_PREFIX=<scratch-prefix>     # optional; default is generated
 
 make test-cloud-real         # real-bucket lane; skips when the vars are unset
 ```
+
+Real S3-compatible tests create objects only under a generated test prefix
+inside your bucket and clean up that prefix at test end. They do not create or
+delete the bucket.
+
+#### S3-compatible release stress validation
+
+The release stress lane is separate from `make test-cloud-real` because it
+uploads and reflows a sparse local `index.db` larger than 5 GiB. It is intended
+for pre-tag validation against a bucket you control.
+
+```bash
+export GONIMBUS_S3_TEST_BUCKET=<your-bucket>
+export GONIMBUS_S3_TEST_ENDPOINT=<your-endpoint>   # omit for AWS
+export GONIMBUS_S3_TEST_REGION=<your-region>
+export GONIMBUS_S3_TEST_PROFILE=<your-profile>     # optional
+export GONIMBUS_S3_TEST_PREFIX=<scratch-prefix>    # optional
+
+# Optional tuning:
+export GONIMBUS_S3_RELEASE_STRESS_SIZE_BYTES=5435817984
+export GONIMBUS_S3_RELEASE_STRESS_PARALLEL=128
+export GONIMBUS_S3_RELEASE_STRESS_MIN_BACKOFFS=0
+export GONIMBUS_S3_RELEASE_STRESS_TIMEOUT=4h
+
+make test-cloud-real-s3-release-stress
+```
+
+The stress lane builds a small valid local index database outside the repository
+working tree, sparsely extends it past the S3 single-PUT wall, exports it to an
+S3-compatible hub through `index export`, then reflows the exported run artifacts
+with high `--parallel`. It asserts the exported and reflowed `index.db` object
+sizes and removes all objects under the generated scratch prefix on exit.
 
 #### GCS
 
