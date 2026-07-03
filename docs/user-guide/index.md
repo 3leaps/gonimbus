@@ -140,6 +140,40 @@ Notes:
 - Scoped builds skip soft-delete by default because the prefix plan is not full coverage.
 - `gonimbus index build --dry-run` prints the scope plan so you can audit prefix counts.
 
+### Incremental builds with `--since`
+
+Use `index build --since <timestamp>` for recurring top-ups that should ingest
+objects modified at or after a lower bound:
+
+```bash
+gonimbus index build --job index-manifest.yaml --since 2026-07-02T00:00:00Z
+```
+
+Use `--since auto` to read the latest successful run for the same IndexSet and
+use that run's start time as the watermark:
+
+```bash
+gonimbus index build --job index-manifest.yaml --since auto
+```
+
+Bare `--since` is accepted as shorthand for `--since auto`.
+
+When the manifest uses `build.scope.type: date_partitions`, `--since` narrows
+the date partition range before LIST, reducing enumeration for date-partitioned
+layouts. Mixed `union` scopes can report `enumeration_reduction: partial` when
+only the date-partitioned branches can be narrowed; non-date branches still use
+full enumeration with a last-modified ingest filter. If the layout is not
+date-partitioned, Gonimbus reports that enumeration reduction was not applied
+and falls back to full enumeration with that same filter.
+
+Since builds are not full-coverage audits. They skip soft-delete and can leave
+deletion state stale until a full-coverage build runs. Each since run prints a
+per-prefix delta report with `added`, `changed`, and `unchanged` counts.
+
+Dry-run plans do not open the local index database. `--dry-run --since auto`
+therefore previews the fail-closed path rather than resolving a prior run; use
+`--dry-run --since <timestamp>` to inspect concrete date-partition narrowing.
+
 ## Commands
 
 ### `doctor`
@@ -402,7 +436,7 @@ gonimbus serve
 # Submit an index build job
 curl -X POST http://localhost:8080/api/v1/jobs \
   -H 'Content-Type: application/json' \
-  -d '{"type":"index.build","manifest_path":"/absolute/path/index-manifest.yaml","name":"nightly-sweep"}'
+  -d '{"type":"index.build","manifest_path":"/absolute/path/index-manifest.yaml","name":"nightly-sweep","since":"auto"}'
 
 # List jobs
 curl 'http://localhost:8080/api/v1/jobs?status=running&type=index.build'

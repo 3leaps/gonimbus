@@ -82,6 +82,7 @@ var (
 	indexBuildName            string
 	indexBuildSummary         bool
 	indexBuildResumeRun       string
+	indexBuildSince           string
 )
 
 func init() {
@@ -100,6 +101,10 @@ func init() {
 	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
+	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
+	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
+		flag.NoOptDefVal = "auto"
+	}
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
 
@@ -142,7 +147,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		exec := jobregistry.NewExecutor(execRoot)
-		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName), jobregistry.BackgroundOptions{Dedupe: indexBuildDedupe})
+		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName), jobregistry.BackgroundOptions{Dedupe: indexBuildDedupe, Since: strings.TrimSpace(indexBuildSince)})
 		if err != nil {
 			return err
 		}
@@ -254,17 +259,22 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 	checkpointCfg := indexBuildCheckpointConfigFromManifest(m, identity, buildFilters.FiltersHash, scopeHash)
 
-	// Show plan in dry-run mode
-	if indexBuildDryRun {
-		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters)
-	}
-
 	// Build IndexSetParams
 	params := buildIndexSetParams(m, identity, buildFilters.FiltersHash, scopeHash)
 
 	identityResult, err := indexstore.ComputeIndexSetID(params)
 	if err != nil {
 		return fmt.Errorf("compute index identity: %w", err)
+	}
+
+	// Show plan in dry-run mode. This intentionally does not create/open the
+	// index database, so --since auto fails closed in the displayed plan.
+	if indexBuildDryRun {
+		sincePlan, err := planIndexBuildSince(ctx, m, strings.TrimSpace(indexBuildSince), nil, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan)
 	}
 
 	// Open index database
@@ -326,6 +336,14 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 	checkpointCfg.IndexSetID = indexSet.IndexSetID
 
+	sincePlan, err := resolveIndexBuildSince(ctx, db, indexSet.IndexSetID, m, strings.TrimSpace(indexBuildSince), time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	bindIndexBuildSince(&checkpointCfg, sincePlan)
+	crawlManifest := manifestForSincePlan(m, sincePlan)
+	runtimeFilter := combineIndexBuildFilters(buildFilters.Filter, sincePlan.Filter)
+
 	// Create IndexRun
 	sourceType := m.Build.Source
 	if sourceType == "" {
@@ -364,7 +382,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  source_type: %s\n", sourceType)
 
 	// Run crawl and ingest records (streaming - memory-bounded)
-	result, crawlErr := runCrawlForIndex(ctx, m, db, indexSet.IndexSetID, run, buildFilters.Filter, nil)
+	writeIndexBuildSinceStart(os.Stderr, sincePlan)
+	result, crawlErr := runCrawlForIndex(ctx, crawlManifest, db, indexSet.IndexSetID, run, runtimeFilter, nil, sincePlan.Enabled)
 	if crawlErr != nil {
 		classification := classifyIndexBuildRunError(crawlErr, m)
 		if classification.Resumable && indexBuildCheckpointEligible(checkpointCfg) {
@@ -420,8 +439,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// Finalize run status based on collected errors (soft-delete only on success)
-	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
-	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete, nil); err != nil {
+	allowSoftDelete := !sincePlan.Enabled && (m.Build == nil || m.Build.Scope == nil)
+	if err := finalizeIndexRun(ctx, db, indexSet.IndexSetID, run, result, allowSoftDelete, indexBuildSinceEvents(run.RunID, sincePlan, time.Now().UTC())); err != nil {
 		if store != nil && job != nil {
 			job.State = jobregistry.JobStateFailed
 			ended := time.Now().UTC()
@@ -457,8 +476,13 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_soft_deleted: %d\n", result.ObjectsDeleted)
 	}
 	if result.FinalStatus == indexstore.RunStatusSuccess && !allowSoftDelete {
-		_, _ = fmt.Fprintf(os.Stderr, "  note: soft-delete skipped for scoped build (not full coverage by default)\n")
+		if sincePlan.Enabled {
+			_, _ = fmt.Fprintf(os.Stderr, "  note: soft-delete skipped for --since build (not full coverage)\n")
+		} else {
+			_, _ = fmt.Fprintf(os.Stderr, "  note: soft-delete skipped for scoped build (not full coverage by default)\n")
+		}
 	}
+	writeIndexBuildDeltaReport(os.Stderr, result, sincePlan)
 	if result.FinalStatus == indexstore.RunStatusPartial {
 		_, _ = fmt.Fprintf(os.Stderr, "  note: partial run (some errors encountered)\n")
 	}
@@ -486,6 +510,9 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	}
 	if indexBuildSummary {
 		return fmt.Errorf("--summary is not compatible with --resume-run")
+	}
+	if strings.TrimSpace(indexBuildSince) != "" {
+		return fmt.Errorf("--since is not accepted with --resume-run; resume uses checkpointed build config")
 	}
 
 	opStore, err := openDefaultOperationCheckpointStore(ctx)
@@ -565,6 +592,12 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	if err != nil {
 		return err
 	}
+	sincePlan, err := indexBuildSincePlanFromCheckpoint(&payload.Config)
+	if err != nil {
+		return err
+	}
+	runtimeFilter := combineIndexBuildFilters(buildFilters.Filter, sincePlan.Filter)
+	crawlManifest := manifestForSincePlan(m, sincePlan)
 
 	if err := indexstore.MarkIndexRunResumingWithEvents(context.Background(), db, runID, []indexstore.RunEvent{
 		indexRunLifecycleEvent(runID, "resume_started", string(opcheckpoint.ErrorClassInterrupted), time.Now().UTC()),
@@ -573,7 +606,7 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	}
 	cmd.SilenceUsage = true
 
-	result, crawlErr := runCrawlForIndex(ctx, m, db, run.IndexSetID, run, buildFilters.Filter, payload.CrawlPrefixes)
+	result, crawlErr := runCrawlForIndex(ctx, crawlManifest, db, run.IndexSetID, run, runtimeFilter, payload.CrawlPrefixes, sincePlan.Enabled)
 	if crawlErr != nil {
 		classification := classifyIndexBuildRunError(crawlErr, m)
 		if classification.Resumable {
@@ -613,7 +646,7 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 		return err
 	}
 	promoteCtx := context.Background()
-	allowSoftDelete := m.Build == nil || m.Build.Scope == nil
+	allowSoftDelete := !sincePlan.Enabled && (m.Build == nil || m.Build.Scope == nil)
 	if err := finalizeIndexRun(promoteCtx, db, indexSet.IndexSetID, run, result, allowSoftDelete, []indexstore.RunEvent{
 		indexRunLifecycleEvent(runID, "resume_completed", "", time.Now().UTC()),
 	}); err != nil {
@@ -649,16 +682,21 @@ type indexBuildCheckpointPayload struct {
 }
 
 type indexBuildCheckpointConfig struct {
-	IndexSetID         string                  `json:"index_set_id,omitempty"`
-	SourceType         string                  `json:"source_type"`
-	Manifest           manifest.IndexManifest  `json:"manifest"`
-	Identity           indexBuildIdentityState `json:"identity"`
-	FiltersHash        string                  `json:"filters_hash,omitempty"`
-	ScopeHash          string                  `json:"scope_hash,omitempty"`
-	CrawlPrefixesHash  string                  `json:"crawl_prefixes_hash,omitempty"`
-	ScopeWarnPrefixes  int                     `json:"scope_warn_prefixes"`
-	ScopeMaxPrefixes   int                     `json:"scope_max_prefixes"`
-	UsesDefaultIndexDB bool                    `json:"uses_default_index_db"`
+	IndexSetID                       string                     `json:"index_set_id,omitempty"`
+	SourceType                       string                     `json:"source_type"`
+	Manifest                         manifest.IndexManifest     `json:"manifest"`
+	Identity                         indexBuildIdentityState    `json:"identity"`
+	FiltersHash                      string                     `json:"filters_hash,omitempty"`
+	ScopeHash                        string                     `json:"scope_hash,omitempty"`
+	CrawlPrefixesHash                string                     `json:"crawl_prefixes_hash,omitempty"`
+	SinceMode                        string                     `json:"since_mode,omitempty"`
+	SinceWatermark                   string                     `json:"since_watermark,omitempty"`
+	SinceAutoFallback                bool                       `json:"since_auto_fallback,omitempty"`
+	SinceRuntimeScope                *manifest.IndexScopeConfig `json:"since_runtime_scope,omitempty"`
+	SinceEnumerationReductionPartial bool                       `json:"since_enumeration_reduction_partial,omitempty"`
+	ScopeWarnPrefixes                int                        `json:"scope_warn_prefixes"`
+	ScopeMaxPrefixes                 int                        `json:"scope_max_prefixes"`
+	UsesDefaultIndexDB               bool                       `json:"uses_default_index_db"`
 }
 
 type indexBuildIdentityState struct {
@@ -1262,7 +1300,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 }
 
 // showIndexBuildPlan displays the build plan without executing.
-func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters) error {
+func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters, sincePlan *indexBuildSincePlan) error {
 	_, _ = fmt.Fprintln(os.Stdout, "Index Build Plan (dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "==========================")
 	_, _ = fmt.Fprintln(os.Stdout)
@@ -1307,7 +1345,8 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 	if m.Build != nil && m.Build.Scope != nil {
 		_, _ = fmt.Fprintln(os.Stdout)
 		_, _ = fmt.Fprintln(os.Stdout, "Scope Plan (build.scope):")
-		plan, err := compileScopePlan(ctx, m)
+		scopeManifest := manifestForSincePlan(m, sincePlan)
+		plan, err := compileScopePlan(ctx, scopeManifest)
 		if err != nil {
 			writeScopePlanError(os.Stdout, err, m.Connection.Profile)
 		} else if plan == nil || len(plan.Prefixes) == 0 {
@@ -1332,6 +1371,23 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 			}
 		}
 		_, _ = fmt.Fprintln(os.Stdout, "  note: scope plan overrides derived match prefixes")
+	}
+
+	if sincePlan != nil && sincePlan.Enabled {
+		_, _ = fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintln(os.Stdout, "Since Plan:")
+		_, _ = fmt.Fprintf(os.Stdout, "  mode: %s\n", sincePlan.Mode)
+		if !sincePlan.Watermark.IsZero() {
+			_, _ = fmt.Fprintf(os.Stdout, "  watermark: %s\n", sincePlan.Watermark.Format(time.RFC3339Nano))
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "  enumeration_reduction: %s\n", enumerationReductionStatus(sincePlan))
+		if sincePlan.Reason != "" {
+			_, _ = fmt.Fprintf(os.Stdout, "  reason: %s\n", sincePlan.Reason)
+		}
+		for _, warning := range sincePlan.Warnings {
+			_, _ = fmt.Fprintf(os.Stdout, "  warning: %s\n", warning)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "  note: --since builds skip soft-delete because they are not full-coverage audits")
 	}
 
 	// Derived crawl prefixes (used when build.scope is absent).
@@ -1475,6 +1531,13 @@ type indexBuildResult struct {
 	PrefixesIngested int64
 	ObjectsDeleted   int64
 	CrawlPrefixes    []string
+	DeltaByPrefix    map[string]indexBuildDeltaCounts
+}
+
+type indexBuildDeltaCounts struct {
+	Added     int64
+	Changed   int64
+	Unchanged int64
 }
 
 // runCrawlForIndex executes the crawl with streaming ingestion.
@@ -1489,6 +1552,7 @@ func runCrawlForIndex(
 	run *indexstore.IndexRun,
 	filter *match.CompositeFilter,
 	crawlPrefixesOverride []string,
+	deltaReport bool,
 ) (*indexBuildResult, error) {
 	// Create provider.
 	prov, err := providerdispatch.NewSource(ctx, &uri.ObjectURI{
@@ -1570,6 +1634,7 @@ func runCrawlForIndex(
 	writer := newIndexIngestWriter(db, indexSetID, run, m.Connection.BaseURI, basePrefix, indexIngestWriterConfig{
 		ObjectBatchSize: DefaultObjectBatchSize,
 		PrefixBatchSize: DefaultPrefixBatchSize,
+		DeltaReport:     deltaReport,
 	})
 
 	// Create crawler config with nil-guard
@@ -1610,6 +1675,7 @@ func runCrawlForIndex(
 			}
 		}
 	}
+	writer.setDeltaPrefixes(crawlPrefixes)
 	_, crawlErr := c.Run(ctx)
 
 	// Always close writer to flush remaining batches, even on error.
