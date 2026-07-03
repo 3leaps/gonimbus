@@ -15,6 +15,73 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-03
+
+**Incremental index top-ups and query-time forward deltas.**
+
+v0.3.6 focuses on steady-state indexing for large object stores. `index build
+--since <timestamp>|auto` lets recurring builds narrow provider enumeration
+when the manifest has a date-partitioned scope, and `index query --since-run
+<run_id>` lets downstream consumers read the current objects first seen or
+changed after a completed run. The release also hardens index timestamp storage
+and schema-v8 migration behavior so the new delta surface fails closed instead
+of guessing across older run history. See
+[`docs/releases/v0.3.6.md`](docs/releases/v0.3.6.md) for the narrative walkthrough.
+
+### Added
+
+- **Incremental index builds:** `index build --since <timestamp>|auto` narrows
+  date-partition scope before provider LIST when possible, then applies a
+  last-modified ingest filter. `--since auto` derives its watermark from the
+  latest successful run in the same IndexSet and falls back to full enumeration
+  with a warning when the watermark cannot be resolved safely.
+- **Since-plan telemetry:** since builds emit structured planning output that
+  tells operators whether enumeration reduction was applied, partially applied,
+  or unavailable, plus per-prefix `added` / `changed` / `unchanged` counts.
+- **Query-time forward deltas:** `index query --since-run <run_id>` emits the
+  current active rows first seen or meaningfully changed after a successful run
+  in the same IndexSet. The output keeps the existing
+  `gonimbus.index.object.v1` record shape and adds optional delta fields such
+  as `change_kind`, `first_seen_run_id`, and `last_changed_run_id`.
+- **Index schema v8:** object rows now persist `first_seen_run_id` and
+  `last_changed_run_id` alongside the existing run and timestamp metadata.
+
+### Changed
+
+- **Scoped since builds remain not-full-coverage:** since builds skip
+  soft-delete because they do not prove absence outside the narrowed listing
+  plan. Periodic full-coverage audit builds remain the deletion-detection path.
+- **Timestamp storage compatibility:** index database timestamp storage is now
+  normalized to a fixed-width UTC text form that is preserved by both the
+  default SQLite driver and the optional `gonimbus_libsql` build. CLI and JSON
+  output timestamps remain unchanged, but users who query `index.db` directly
+  may see internal timestamp fields stored with a `+0000 UTC` suffix instead of
+  `Z`. Existing RFC3339/RFC3339Nano stored values remain readable and are
+  migrated automatically.
+
+### Fixed
+
+- **Since-run guardrails:** `--since-run` validates that the boundary run is
+  known, successful, in the same IndexSet, and comparable by stored run
+  ordering rather than by lexicographic run ID sorting.
+- **Migration honesty:** indexes migrated from earlier schemas reject
+  pre-baseline `--since-run` boundaries instead of returning a confident delta
+  that cannot distinguish added from changed rows.
+- **Change-predicate parity:** SQL persistence of `last_changed_*` is guarded
+  against drift from the Go object-row change predicate, including timestamp
+  equivalence cases.
+- **libsql parity:** optional `gonimbus_libsql` builds preserve the same
+  timestamp storage and migration behavior as the default pure-Go SQLite path.
+
+### Documentation
+
+- Added this v0.3.6 release page and refreshed rolling release notes.
+- Updated steady-state index guidance for `--since`, `--since auto`,
+  enumeration-reduction signals, scoped-build deletion limits, steady-state
+  cadence, `--since-run` downstream delta flows, and the deliberate absence of
+  `--at-run` point-in-time queries.
+- Updated the current-release README pointer for incremental index operations.
+
 ## [0.3.5] - 2026-07-02
 
 **Multipart export and reflow for large objects, the migrated Experimental
@@ -1148,7 +1215,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/3leaps/gonimbus/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/3leaps/gonimbus/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/3leaps/gonimbus/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/3leaps/gonimbus/compare/v0.3.2...v0.3.3

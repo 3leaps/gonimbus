@@ -136,10 +136,14 @@ for S3-compatible destinations when they cross the default threshold; see
 [Local Index](docs/user-guide/index.md#large-hub-exports) and
 [Reflow](docs/user-guide/reflow.md#large-object-writes-and-multipart-upload)
 for local-resource and lifecycle guidance.
+Recurring index jobs can use `index build --since <timestamp>|auto` to narrow
+date-partitioned listing plans, then use `index query --since-run <run_id>` to
+feed downstream consumers with current objects added or changed after a known
+run; see [Steady-State Index Operations](docs/user-guide/steady-state-index-operations.md).
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the current
+See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the current
 operator notes.
 
 ### Outputs

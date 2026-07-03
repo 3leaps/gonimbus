@@ -169,6 +169,10 @@ and falls back to full enumeration with that same filter.
 Since builds are not full-coverage audits. They skip soft-delete and can leave
 deletion state stale until a full-coverage build runs. Each since run prints a
 per-prefix delta report with `added`, `changed`, and `unchanged` counts.
+Also check the since-plan reduction signal: `applied` means the listing plan was
+narrowed before provider LIST, `partial` means only part of a mixed scope was
+narrowed, and `none` means the run used full enumeration with the
+last-modified ingest filter.
 
 Dry-run plans do not open the local index database. `--dry-run --since auto`
 therefore previews the fail-closed path rather than resolving a prior run; use
