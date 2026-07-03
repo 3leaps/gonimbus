@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // Migrate creates (or upgrades) the index schema in-place.
 //
@@ -83,6 +84,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			restore_expiry TEXT,
 			content_type TEXT,
 			head_enriched_at TEXT,
+			first_seen_run_id TEXT,
+			first_seen_at TEXT,
+			last_changed_run_id TEXT,
+			last_changed_at TEXT,
 			last_seen_run_id TEXT NOT NULL,
 			last_seen_at TEXT NOT NULL,
 			deleted_at TEXT,
@@ -92,6 +97,15 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_current_last_modified ON objects_current(index_set_id, last_modified);`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_current_deleted_at ON objects_current(index_set_id, deleted_at);`,
+
+		`CREATE TABLE IF NOT EXISTS object_delta_baselines (
+			index_set_id TEXT PRIMARY KEY,
+			baseline_run_id TEXT NOT NULL,
+			baseline_started_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id),
+			FOREIGN KEY(baseline_run_id) REFERENCES index_runs(run_id)
+		);`,
 
 		`CREATE TABLE IF NOT EXISTS prefix_stats (
 			index_set_id TEXT NOT NULL,
@@ -172,6 +186,14 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	normalizedCoreTimestampsBeforeObjectAlters := false
+	if current < 6 && current < 7 {
+		if err := normalizeCoreTimestampTextColumns(ctx, tx); err != nil {
+			return err
+		}
+		normalizedCoreTimestampsBeforeObjectAlters = true
+	}
+
 	// v5: add LIST-derived storage class to current object rows.
 	if current < 5 {
 		if err := addObjectsCurrentStorageClass(ctx, tx); err != nil {
@@ -193,9 +215,33 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	// v7: normalize timestamp TEXT values to fixed-width UTC so SQLite
 	// lexicographic comparisons preserve chronological order.
 	if current < 7 {
-		if err := normalizeTimestampTextColumns(ctx, tx); err != nil {
+		if normalizedCoreTimestampsBeforeObjectAlters {
+			if err := normalizeHeadEnrichmentTimestampTextColumns(ctx, tx); err != nil {
+				return err
+			}
+		} else {
+			if err := normalizeTimestampTextColumns(ctx, tx); err != nil {
+				return err
+			}
+		}
+	}
+	// v8: add first-seen and last-changed metadata for forward-delta
+	// queries. Existing rows are backfilled from last_seen_* and each legacy
+	// index set records a baseline run so query output cannot claim recovered
+	// pre-migration object history.
+	if current < 8 {
+		if err := addObjectsCurrentDeltaColumns(ctx, tx); err != nil {
 			return err
 		}
+		if err := backfillObjectDeltaTracking(ctx, tx); err != nil {
+			return err
+		}
+		if err := normalizeObjectDeltaTimestampColumns(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := ensureObjectsCurrentDeltaIndexes(ctx, tx); err != nil {
+		return err
 	}
 
 	if current != SchemaVersion {
@@ -264,11 +310,107 @@ func ensureObjectsCurrentHeadEnrichmentIndex(ctx context.Context, tx *sql.Tx) er
 	return nil
 }
 
+func addObjectsCurrentDeltaColumns(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE objects_current ADD COLUMN first_seen_run_id TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN first_seen_at TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN last_changed_run_id TEXT;`,
+		`ALTER TABLE objects_current ADD COLUMN last_changed_at TEXT;`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if !strings.Contains(msg, "duplicate column name") && !strings.Contains(msg, "already exists") {
+				return fmt.Errorf("exec migration statement: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func backfillObjectDeltaTracking(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE objects_current
+		SET first_seen_run_id = COALESCE(first_seen_run_id, last_seen_run_id),
+		    first_seen_at = COALESCE(first_seen_at, last_seen_at),
+		    last_changed_run_id = COALESCE(last_changed_run_id, last_seen_run_id),
+		    last_changed_at = COALESCE(last_changed_at, last_seen_at)
+	`); err != nil {
+		return fmt.Errorf("backfill object delta columns: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_delta_baselines (index_set_id, baseline_run_id, baseline_started_at, created_at)
+		SELECT index_set_id, run_id, started_at, ?
+		FROM (
+			SELECT r.index_set_id, r.run_id, r.started_at,
+			       ROW_NUMBER() OVER (PARTITION BY r.index_set_id ORDER BY r.started_at DESC, r.run_id DESC) AS rn
+			FROM index_runs r
+			WHERE EXISTS (
+				SELECT 1 FROM objects_current o WHERE o.index_set_id = r.index_set_id
+			)
+		)
+		WHERE rn = 1
+		ON CONFLICT(index_set_id) DO NOTHING
+	`, timeString(time.Now().UTC())); err != nil {
+		return fmt.Errorf("record object delta baseline: %w", err)
+	}
+	return nil
+}
+
+func normalizeObjectDeltaTimestampColumns(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	normalizations := []struct {
+		table     string
+		column    string
+		pkColumns []string
+	}{
+		{table: "objects_current", column: "first_seen_at", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "last_changed_at", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "object_delta_baselines", column: "baseline_started_at", pkColumns: []string{"index_set_id"}},
+		{table: "object_delta_baselines", column: "created_at", pkColumns: []string{"index_set_id"}},
+	}
+	for _, normalization := range normalizations {
+		if err := normalizeTimestampTextColumn(ctx, tx, normalization.table, normalization.column, normalization.pkColumns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureObjectsCurrentDeltaIndexes(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_objects_current_first_seen_run_id ON objects_current(index_set_id, first_seen_run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_objects_current_last_changed_run_id ON objects_current(index_set_id, last_changed_run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_object_delta_baselines_started_at ON object_delta_baselines(index_set_id, baseline_started_at);`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("exec migration statement: %w", err)
+		}
+	}
+	return nil
+}
+
 func normalizeTimestampTextColumns(ctx context.Context, tx *sql.Tx) error {
 	if tx == nil {
 		return fmt.Errorf("tx is nil")
 	}
+	if err := normalizeCoreTimestampTextColumns(ctx, tx); err != nil {
+		return err
+	}
+	return normalizeHeadEnrichmentTimestampTextColumns(ctx, tx)
+}
 
+func normalizeCoreTimestampTextColumns(ctx context.Context, tx *sql.Tx) error {
 	normalizations := []struct {
 		table     string
 		column    string
@@ -280,13 +422,28 @@ func normalizeTimestampTextColumns(ctx context.Context, tx *sql.Tx) error {
 		{table: "index_runs", column: "acquired_at", pkColumns: []string{"run_id"}},
 		{table: "index_runs", column: "source_snapshot_at", pkColumns: []string{"run_id"}},
 		{table: "objects_current", column: "last_modified", pkColumns: []string{"index_set_id", "rel_key"}},
-		{table: "objects_current", column: "restore_expiry", pkColumns: []string{"index_set_id", "rel_key"}},
-		{table: "objects_current", column: "head_enriched_at", pkColumns: []string{"index_set_id", "rel_key"}},
 		{table: "objects_current", column: "last_seen_at", pkColumns: []string{"index_set_id", "rel_key"}},
 		{table: "objects_current", column: "deleted_at", pkColumns: []string{"index_set_id", "rel_key"}},
 		{table: "index_run_events", column: "occurred_at", pkColumns: []string{"event_id"}},
 	}
 
+	for _, normalization := range normalizations {
+		if err := normalizeTimestampTextColumn(ctx, tx, normalization.table, normalization.column, normalization.pkColumns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeHeadEnrichmentTimestampTextColumns(ctx context.Context, tx *sql.Tx) error {
+	normalizations := []struct {
+		table     string
+		column    string
+		pkColumns []string
+	}{
+		{table: "objects_current", column: "restore_expiry", pkColumns: []string{"index_set_id", "rel_key"}},
+		{table: "objects_current", column: "head_enriched_at", pkColumns: []string{"index_set_id", "rel_key"}},
+	}
 	for _, normalization := range normalizations {
 		if err := normalizeTimestampTextColumn(ctx, tx, normalization.table, normalization.column, normalization.pkColumns); err != nil {
 			return err
@@ -304,8 +461,12 @@ func normalizeTimestampTextColumn(ctx context.Context, tx *sql.Tx, table, column
 	if err != nil {
 		return fmt.Errorf("query timestamp column %s.%s: %w", table, column, err)
 	}
-	defer func() { _ = rows.Close() }()
 
+	type pendingUpdate struct {
+		normalized string
+		pkValues   []string
+	}
+	var updates []pendingUpdate
 	for rows.Next() {
 		values := make([]sql.NullString, len(selectColumns))
 		dest := make([]any, len(values))
@@ -329,25 +490,41 @@ func normalizeTimestampTextColumn(ctx context.Context, tx *sql.Tx, table, column
 			continue
 		}
 
-		whereParts := make([]string, len(pkColumns))
-		args := make([]any, 0, len(pkColumns)+1)
-		args = append(args, normalized)
+		pkValues := make([]string, len(pkColumns))
 		for i, pkColumn := range pkColumns {
 			if !values[i].Valid {
 				return fmt.Errorf("timestamp normalization %s.%s has null primary key column %s", table, column, pkColumn)
 			}
-			whereParts[i] = fmt.Sprintf("%s = ?", pkColumn)
-			args = append(args, values[i].String)
+			pkValues[i] = values[i].String
 		}
+		updates = append(updates, pendingUpdate{
+			normalized: normalized,
+			pkValues:   pkValues,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate timestamp column %s.%s: %w", table, column, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close timestamp column %s.%s rows: %w", table, column, err)
+	}
 
-		// #nosec G201 -- identifiers come from normalizeTimestampTextColumns' fixed table/column allowlist.
-		update := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE %s`, table, column, strings.Join(whereParts, " AND "))
+	whereParts := make([]string, len(pkColumns))
+	for i, pkColumn := range pkColumns {
+		whereParts[i] = fmt.Sprintf("%s = ?", pkColumn)
+	}
+	// #nosec G201 -- identifiers come from normalizeTimestampTextColumns' fixed table/column allowlist.
+	update := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE %s`, table, column, strings.Join(whereParts, " AND "))
+	for _, pending := range updates {
+		args := make([]any, 0, len(pending.pkValues)+1)
+		args = append(args, pending.normalized)
+		for _, pkValue := range pending.pkValues {
+			args = append(args, pkValue)
+		}
 		if _, err := tx.ExecContext(ctx, update, args...); err != nil {
 			return fmt.Errorf("normalize timestamp %s.%s: %w", table, column, err)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate timestamp column %s.%s: %w", table, column, err)
 	}
 
 	return nil

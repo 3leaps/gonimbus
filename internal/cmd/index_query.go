@@ -66,6 +66,9 @@ Examples:
   # Emit one canonical object per non-empty ETag group
   gonimbus index query s3://bucket/prefix/ --canonical-by-etag
 
+  # Emit current objects first seen or changed after a completed run
+  gonimbus index query --index-set idx_da038d8171b4a9ba --since-run run_1783087200000000000
+
   ETag caveat: ETag is a provider version/fingerprint hint, not a universal
   content hash. See docs/user-guide/index-build-mental-model.md.`,
 	Args: cobra.MaximumNArgs(1),
@@ -96,6 +99,7 @@ func init() {
 	indexQueryCmd.Flags().Bool("canonical-by-etag", false, "Emit one canonical record per non-empty ETag group; empty ETags pass through as standard records")
 	indexQueryCmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule for --canonical-by-etag: min-key, min-modified, max-modified")
 	indexQueryCmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
+	indexQueryCmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run")
 
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
@@ -115,19 +119,24 @@ type indexQueryRecord struct {
 }
 
 type indexQueryRecordData struct {
-	BaseURI        string  `json:"base_uri"`
-	RelKey         string  `json:"rel_key"`
-	Key            string  `json:"key"`
-	SizeBytes      int64   `json:"size_bytes"`
-	LastModified   *string `json:"last_modified,omitempty"`
-	ETag           string  `json:"etag,omitempty"`
-	StorageClass   *string `json:"storage_class,omitempty"`
-	ArchiveStatus  *string `json:"archive_status,omitempty"`
-	RestoreState   *string `json:"restore_state,omitempty"`
-	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
-	ContentType    *string `json:"content_type,omitempty"`
-	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
+	BaseURI          string  `json:"base_uri"`
+	RelKey           string  `json:"rel_key"`
+	Key              string  `json:"key"`
+	SizeBytes        int64   `json:"size_bytes"`
+	LastModified     *string `json:"last_modified,omitempty"`
+	ETag             string  `json:"etag,omitempty"`
+	StorageClass     *string `json:"storage_class,omitempty"`
+	ArchiveStatus    *string `json:"archive_status,omitempty"`
+	RestoreState     *string `json:"restore_state,omitempty"`
+	RestoreExpiry    *string `json:"restore_expiry,omitempty"`
+	ContentType      *string `json:"content_type,omitempty"`
+	HeadEnrichedAt   *string `json:"head_enriched_at,omitempty"`
+	FirstSeenRunID   string  `json:"first_seen_run_id,omitempty"`
+	FirstSeenAt      *string `json:"first_seen_at,omitempty"`
+	LastChangedRunID string  `json:"last_changed_run_id,omitempty"`
+	LastChangedAt    *string `json:"last_changed_at,omitempty"`
+	ChangeKind       string  `json:"change_kind,omitempty"`
+	DeletedAt        *string `json:"deleted_at,omitempty"`
 }
 
 type indexCanonicalQueryRecord struct {
@@ -146,30 +155,40 @@ type indexCanonicalQueryRecordData struct {
 }
 
 type indexCanonicalObjectData struct {
-	RelKey         string  `json:"rel_key"`
-	Key            string  `json:"key"`
-	SizeBytes      int64   `json:"size_bytes"`
-	LastModified   *string `json:"last_modified,omitempty"`
-	StorageClass   *string `json:"storage_class,omitempty"`
-	ArchiveStatus  *string `json:"archive_status,omitempty"`
-	RestoreState   *string `json:"restore_state,omitempty"`
-	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
-	ContentType    *string `json:"content_type,omitempty"`
-	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
-	DeletedAt      *string `json:"deleted_at"`
+	RelKey           string  `json:"rel_key"`
+	Key              string  `json:"key"`
+	SizeBytes        int64   `json:"size_bytes"`
+	LastModified     *string `json:"last_modified,omitempty"`
+	StorageClass     *string `json:"storage_class,omitempty"`
+	ArchiveStatus    *string `json:"archive_status,omitempty"`
+	RestoreState     *string `json:"restore_state,omitempty"`
+	RestoreExpiry    *string `json:"restore_expiry,omitempty"`
+	ContentType      *string `json:"content_type,omitempty"`
+	HeadEnrichedAt   *string `json:"head_enriched_at,omitempty"`
+	FirstSeenRunID   string  `json:"first_seen_run_id,omitempty"`
+	FirstSeenAt      *string `json:"first_seen_at,omitempty"`
+	LastChangedRunID string  `json:"last_changed_run_id,omitempty"`
+	LastChangedAt    *string `json:"last_changed_at,omitempty"`
+	ChangeKind       string  `json:"change_kind,omitempty"`
+	DeletedAt        *string `json:"deleted_at"`
 }
 
 type indexCanonicalAlternateData struct {
-	RelKey         string  `json:"rel_key"`
-	SizeBytes      int64   `json:"size_bytes"`
-	LastModified   *string `json:"last_modified,omitempty"`
-	StorageClass   *string `json:"storage_class,omitempty"`
-	ArchiveStatus  *string `json:"archive_status,omitempty"`
-	RestoreState   *string `json:"restore_state,omitempty"`
-	RestoreExpiry  *string `json:"restore_expiry,omitempty"`
-	ContentType    *string `json:"content_type,omitempty"`
-	HeadEnrichedAt *string `json:"head_enriched_at,omitempty"`
-	DeletedAt      *string `json:"deleted_at"`
+	RelKey           string  `json:"rel_key"`
+	SizeBytes        int64   `json:"size_bytes"`
+	LastModified     *string `json:"last_modified,omitempty"`
+	StorageClass     *string `json:"storage_class,omitempty"`
+	ArchiveStatus    *string `json:"archive_status,omitempty"`
+	RestoreState     *string `json:"restore_state,omitempty"`
+	RestoreExpiry    *string `json:"restore_expiry,omitempty"`
+	ContentType      *string `json:"content_type,omitempty"`
+	HeadEnrichedAt   *string `json:"head_enriched_at,omitempty"`
+	FirstSeenRunID   string  `json:"first_seen_run_id,omitempty"`
+	FirstSeenAt      *string `json:"first_seen_at,omitempty"`
+	LastChangedRunID string  `json:"last_changed_run_id,omitempty"`
+	LastChangedAt    *string `json:"last_changed_at,omitempty"`
+	ChangeKind       string  `json:"change_kind,omitempty"`
+	DeletedAt        *string `json:"deleted_at"`
 }
 
 func runIndexQuery(cmd *cobra.Command, args []string) error {
@@ -199,6 +218,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	canonicalByETag, _ := cmd.Flags().GetBool("canonical-by-etag")
 	canonicalTieBreakRaw, _ := cmd.Flags().GetString("canonical-tie-break")
 	includeAlternates, _ := cmd.Flags().GetBool("include-alternates")
+	sinceRun, _ := cmd.Flags().GetString("since-run")
 	outputURI, _ := cmd.Flags().GetString("output")
 	outputProfile, _ := cmd.Flags().GetString("output-profile")
 	outputRegion, _ := cmd.Flags().GetString("output-region")
@@ -246,6 +266,19 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	params.StorageClasses = storageClasses
+	if strings.TrimSpace(sinceRun) != "" {
+		if includeDeleted {
+			return fmt.Errorf("--include-deleted is not supported with --since-run; deletion deltas are not tracked in this index format")
+		}
+		if err := validateRunID(sinceRun); err != nil {
+			return err
+		}
+		filter, err := indexstore.ResolveSinceRunFilter(ctx, db, indexSet.IndexSetID, sinceRun)
+		if err != nil {
+			return fmt.Errorf("invalid --since-run: %w", err)
+		}
+		params.SinceRun = filter
+	}
 
 	// Parse size filters using match package
 	if minSizeStr != "" {
@@ -480,7 +513,25 @@ func newIndexQueryRecord(baseURI string, ts string, r indexstore.QueryResult) in
 		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
 		record.Data.HeadEnrichedAt = &headEnrichedAt
 	}
+	populateIndexQueryDeltaData(&record.Data, r)
 	return record
+}
+
+func populateIndexQueryDeltaData(data *indexQueryRecordData, r indexstore.QueryResult) {
+	if data == nil || r.ChangeKind == "" {
+		return
+	}
+	data.FirstSeenRunID = r.FirstSeenRunID
+	data.LastChangedRunID = r.LastChangedRunID
+	data.ChangeKind = r.ChangeKind
+	if r.FirstSeenAt != nil {
+		firstSeenAt := r.FirstSeenAt.Format(time.RFC3339)
+		data.FirstSeenAt = &firstSeenAt
+	}
+	if r.LastChangedAt != nil {
+		lastChangedAt := r.LastChangedAt.Format(time.RFC3339)
+		data.LastChangedAt = &lastChangedAt
+	}
 }
 
 func newIndexCanonicalQueryRecord(baseURI string, ts string, group indexstore.CanonicalObjectGroup, rule indexstore.CanonicalTieBreak, includeAlternates bool) indexCanonicalQueryRecord {
@@ -530,7 +581,25 @@ func newIndexCanonicalObjectData(baseURI string, r indexstore.QueryResult) index
 		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
 		record.HeadEnrichedAt = &headEnrichedAt
 	}
+	populateIndexCanonicalDeltaData(&record, r)
 	return record
+}
+
+func populateIndexCanonicalDeltaData(data *indexCanonicalObjectData, r indexstore.QueryResult) {
+	if data == nil || r.ChangeKind == "" {
+		return
+	}
+	data.FirstSeenRunID = r.FirstSeenRunID
+	data.LastChangedRunID = r.LastChangedRunID
+	data.ChangeKind = r.ChangeKind
+	if r.FirstSeenAt != nil {
+		firstSeenAt := r.FirstSeenAt.Format(time.RFC3339)
+		data.FirstSeenAt = &firstSeenAt
+	}
+	if r.LastChangedAt != nil {
+		lastChangedAt := r.LastChangedAt.Format(time.RFC3339)
+		data.LastChangedAt = &lastChangedAt
+	}
 }
 
 func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlternateData {
@@ -558,7 +627,25 @@ func newIndexCanonicalAlternateData(r indexstore.QueryResult) indexCanonicalAlte
 		headEnrichedAt := r.HeadEnrichedAt.Format(time.RFC3339)
 		record.HeadEnrichedAt = &headEnrichedAt
 	}
+	populateIndexCanonicalAlternateDeltaData(&record, r)
 	return record
+}
+
+func populateIndexCanonicalAlternateDeltaData(data *indexCanonicalAlternateData, r indexstore.QueryResult) {
+	if data == nil || r.ChangeKind == "" {
+		return
+	}
+	data.FirstSeenRunID = r.FirstSeenRunID
+	data.LastChangedRunID = r.LastChangedRunID
+	data.ChangeKind = r.ChangeKind
+	if r.FirstSeenAt != nil {
+		firstSeenAt := r.FirstSeenAt.Format(time.RFC3339)
+		data.FirstSeenAt = &firstSeenAt
+	}
+	if r.LastChangedAt != nil {
+		lastChangedAt := r.LastChangedAt.Format(time.RFC3339)
+		data.LastChangedAt = &lastChangedAt
+	}
 }
 
 type indexDBEntry struct {

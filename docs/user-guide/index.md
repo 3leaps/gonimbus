@@ -301,6 +301,10 @@ gonimbus index query 's3://bucket/prefix/' \
 # Count only (no output records)
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
 
+# Emit current objects first seen or changed after a completed run
+gonimbus index query 's3://bucket/prefix/' \
+  --since-run run_1783087200000000000
+
 # Emit one canonical object per non-empty ETag group
 gonimbus index query 's3://bucket/prefix/' --canonical-by-etag
 
@@ -329,6 +333,27 @@ If the latest run for the selected index is `failed-resumable`, `index query`
 still allows inspection of the local partial index but prints a stderr warning
 with the resumable run ID. Treat those query results as checkpoint-state
 inspection, not as a validated completed snapshot.
+
+`--since-run <run_id>` emits the current active rows first seen or meaningfully
+changed after a successful run in the same IndexSet. It is a forward delta over
+latest index state, intended for "only process new or changed objects" flows.
+It is not point-in-time history: the current SQLite index does not retain
+object snapshots for older runs, so it cannot reconstruct "state as of run X".
+
+Delta tracking uses Gonimbus-written run metadata and compares run boundaries by
+stored run timestamps, not by run ID string sorting. Unknown, non-successful, or
+cross-IndexSet run IDs fail closed. For indexes migrated from older schemas,
+precise `added` / `changed` classification begins at the migration baseline run;
+older boundary runs are rejected rather than returning a confident but
+under-specified delta.
+
+`--since-run` output keeps the existing `gonimbus.index.object.v1` record type
+and adds optional fields such as `change_kind`, `first_seen_run_id`, and
+`last_changed_run_id`. `change_kind` is `added` when the object first appeared
+after the boundary, and `changed` when an existing or reappeared object changed
+after the boundary. Deletion history is not tracked in this index format, so
+`--include-deleted --since-run` is rejected instead of implying a deletion
+delta.
 
 `--canonical-by-etag` groups query results by non-empty ETag and emits one
 `gonimbus.index.object.canonical.v1` record per group. Rows with empty or
@@ -531,6 +556,7 @@ Index queries support pattern, metadata, storage-class, and output filters:
 | Before date    | `--before`         | `2026-01-01`                       |
 | Storage class  | `--storage-class`  | `STANDARD`, `GLACIER,DEEP_ARCHIVE` |
 | Enriched after | `--enriched-after` | `2026-05-25T00:00:00Z`             |
+| Since run      | `--since-run`      | `run_1783087200000000000`          |
 | Count only     | `--count`          | Returns count instead of records   |
 
 `--storage-class` matches the raw provider value captured from LIST responses.

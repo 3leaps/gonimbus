@@ -363,22 +363,32 @@ func TestOpenIndexDBByIDInRoot_MigratesLegacyV4ForQuery(t *testing.T) {
 func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) {
 	lastModified := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	deletedAt := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	firstSeenAt := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	lastChangedAt := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	group := indexstore.CanonicalObjectGroup{
 		ETag: "etag-shared",
 		Canonical: indexstore.QueryResult{
-			RelKey:       "canonical.xml",
-			SizeBytes:    123,
-			LastModified: &lastModified,
-			ETag:         "etag-shared",
-			StorageClass: stringPtr("GLACIER"),
+			RelKey:           "canonical.xml",
+			SizeBytes:        123,
+			LastModified:     &lastModified,
+			ETag:             "etag-shared",
+			StorageClass:     stringPtr("GLACIER"),
+			FirstSeenRunID:   "run_first",
+			FirstSeenAt:      &firstSeenAt,
+			LastChangedRunID: "run_changed",
+			LastChangedAt:    &lastChangedAt,
+			ChangeKind:       indexstore.QueryChangeKindChanged,
 		},
 		Alternates: []indexstore.QueryResult{{
-			RelKey:       "alternate.xml",
-			SizeBytes:    456,
-			LastModified: &lastModified,
-			ETag:         "etag-shared",
-			DeletedAt:    &deletedAt,
-			StorageClass: stringPtr("STANDARD"),
+			RelKey:           "alternate.xml",
+			SizeBytes:        456,
+			LastModified:     &lastModified,
+			ETag:             "etag-shared",
+			DeletedAt:        &deletedAt,
+			StorageClass:     stringPtr("STANDARD"),
+			LastChangedRunID: "run_changed",
+			LastChangedAt:    &lastChangedAt,
+			ChangeKind:       indexstore.QueryChangeKindChanged,
 		}},
 	}
 
@@ -389,6 +399,9 @@ func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) 
 	require.Contains(t, string(b), `"type":"gonimbus.index.object.canonical.v1"`)
 	require.Contains(t, string(b), `"key":"prefix/canonical.xml"`)
 	require.Contains(t, string(b), `"storage_class":"GLACIER"`)
+	require.Contains(t, string(b), `"first_seen_run_id":"run_first"`)
+	require.Contains(t, string(b), `"last_changed_run_id":"run_changed"`)
+	require.Contains(t, string(b), `"change_kind":"changed"`)
 	require.Contains(t, string(b), `"alternates_count":1`)
 	require.Contains(t, string(b), `"size_bytes":456`)
 	require.Contains(t, string(b), `"storage_class":"STANDARD"`)
@@ -405,6 +418,7 @@ func TestIndexQueryHelpDocumentsCanonicalETagCaveat(t *testing.T) {
 	help := strings.Join(strings.Fields(indexQueryCmd.Long), " ")
 
 	require.Contains(t, help, "--canonical-by-etag")
+	require.Contains(t, help, "--since-run")
 	require.Contains(t, help, "ETag is a provider version/fingerprint hint")
 	require.Contains(t, help, "not a universal content hash")
 	require.Contains(t, help, "docs/user-guide/index-build-mental-model.md")
@@ -439,6 +453,27 @@ func TestIndexQueryRecordIncludesStorageClass(t *testing.T) {
 	b, err := json.Marshal(record)
 	require.NoError(t, err)
 	require.Contains(t, string(b), `"storage_class":"DEEP_ARCHIVE"`)
+}
+
+func TestIndexQueryRecordIncludesSinceRunDeltaFields(t *testing.T) {
+	firstSeenAt := time.Date(2026, 7, 3, 14, 0, 0, 0, time.UTC)
+	lastChangedAt := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	record := newIndexQueryRecord("s3://bucket/prefix/", "2026-07-03T16:00:00Z", indexstore.QueryResult{
+		RelKey:           "delta.json",
+		SizeBytes:        1,
+		FirstSeenRunID:   "run_first",
+		FirstSeenAt:      &firstSeenAt,
+		LastChangedRunID: "run_changed",
+		LastChangedAt:    &lastChangedAt,
+		ChangeKind:       indexstore.QueryChangeKindAdded,
+	})
+	b, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"first_seen_run_id":"run_first"`)
+	require.Contains(t, string(b), `"first_seen_at":"2026-07-03T14:00:00Z"`)
+	require.Contains(t, string(b), `"last_changed_run_id":"run_changed"`)
+	require.Contains(t, string(b), `"last_changed_at":"2026-07-03T15:00:00Z"`)
+	require.Contains(t, string(b), `"change_kind":"added"`)
 }
 
 func TestWarnIfLatestIndexRunFailedResumable(t *testing.T) {

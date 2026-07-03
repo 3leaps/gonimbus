@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -16,6 +17,17 @@ import (
 )
 
 const indexBuildSinceFutureSkew = 5 * time.Minute
+
+var errNoIndexRuns = errors.New("no index runs found")
+
+type latestIndexRunNotSuccessError struct {
+	runID  string
+	status indexstore.RunStatus
+}
+
+func (e latestIndexRunNotSuccessError) Error() string {
+	return fmt.Sprintf("latest index run %s is %s, not success", e.runID, e.status)
+}
 
 type indexBuildSincePlan struct {
 	Enabled                     bool
@@ -41,7 +53,12 @@ func resolveIndexBuildSince(ctx context.Context, db *sql.DB, indexSetID string, 
 
 	run, err := latestSuccessfulIndexRun(ctx, db, indexSetID)
 	if err != nil {
-		return planIndexBuildSince(ctx, m, raw, nil, now)
+		plan, planErr := planIndexBuildSince(ctx, m, raw, nil, now)
+		if planErr != nil {
+			return nil, planErr
+		}
+		applyIndexBuildSinceAutoFallbackWarning(plan, err)
+		return plan, nil
 	}
 	watermark := run.StartedAt
 	return planIndexBuildSince(ctx, m, raw, &watermark, now)
@@ -50,15 +67,35 @@ func resolveIndexBuildSince(ctx context.Context, db *sql.DB, indexSetID string, 
 func latestSuccessfulIndexRun(ctx context.Context, db *sql.DB, indexSetID string) (*indexstore.IndexRun, error) {
 	runs, err := indexstore.ListIndexRuns(ctx, db, indexSetID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list index runs: %w", err)
 	}
 	if len(runs) == 0 {
-		return nil, fmt.Errorf("no index runs found for index set %s", indexSetID)
+		return nil, fmt.Errorf("%w for index set %s", errNoIndexRuns, indexSetID)
 	}
 	if runs[0].Status != indexstore.RunStatusSuccess {
-		return nil, fmt.Errorf("latest index run %s is %s, not success", runs[0].RunID, runs[0].Status)
+		return nil, latestIndexRunNotSuccessError{runID: runs[0].RunID, status: runs[0].Status}
 	}
 	return &runs[0], nil
+}
+
+func applyIndexBuildSinceAutoFallbackWarning(plan *indexBuildSincePlan, err error) {
+	if plan == nil || !plan.AutoFallback {
+		return
+	}
+	switch {
+	case errors.Is(err, errNoIndexRuns):
+		plan.Reason = "no prior successful run"
+		plan.Warnings = []string{"--since auto could not find a prior successful run for this IndexSet; using full enumeration"}
+	default:
+		var notSuccess latestIndexRunNotSuccessError
+		if errors.As(err, &notSuccess) {
+			plan.Reason = "latest index run is not successful"
+			plan.Warnings = []string{fmt.Sprintf("--since auto found latest run %s with status %s; using full enumeration", notSuccess.runID, notSuccess.status)}
+			return
+		}
+		plan.Reason = "auto watermark metadata unreadable"
+		plan.Warnings = []string{"--since auto could not read prior run metadata for this IndexSet; using full enumeration"}
+	}
 }
 
 func planIndexBuildSince(ctx context.Context, m *manifest.IndexManifest, raw string, autoWatermark *time.Time, now time.Time) (*indexBuildSincePlan, error) {

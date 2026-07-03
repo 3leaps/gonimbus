@@ -88,6 +88,32 @@ explicit `null`.
 non-null values. The filter is pushed into SQL using bound parameters, including
 canonical-by-ETag mode where filtering happens before ETag grouping.
 
+### Current-state forward deltas
+
+`index query --since-run` is a current-state forward-delta query. It returns
+rows whose `first_seen_run_id` or `last_changed_run_id` resolves to an
+`index_runs.started_at` after the supplied successful boundary run in the same
+IndexSet. Run ordering is resolved through `index_runs`; run ID lexical order is
+not a contract.
+
+The current SQLite schema stores latest object state in `objects_current`, not
+per-run object snapshots. Therefore `--since-run` can answer "what current rows
+were added or meaningfully changed after run X", but it cannot reconstruct
+"what rows existed at run X". Full point-in-time history belongs to a future
+segment or snapshot-backed index format.
+
+`last_changed_*` advances on the same LIST-derived change predicate used by the
+incremental build delta report: size, ETag, storage class, or `last_modified`
+changes, plus reappearance from soft-delete. `last_seen_*` alone does not
+advance `last_changed_*`.
+
+Indexes migrated from schemas that predate delta tracking record an
+`object_delta_baselines` row per legacy IndexSet. Query boundaries before that
+baseline are rejected because the migration backfills current rows from
+`last_seen_*` and cannot recover earlier first-seen or changed history. Deletion
+history is not tracked, so `--since-run` is incompatible with
+`--include-deleted`.
+
 ### HEAD-derived enrichment
 
 `archive_status`, `restore_state`, `restore_expiry`, `content_type`, and
