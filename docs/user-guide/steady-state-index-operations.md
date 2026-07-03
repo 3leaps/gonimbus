@@ -198,8 +198,15 @@ Gonimbus does not yet provide:
 
 - query-time historical object views over prior runs
 - `index query --at-run` for historical run snapshots
-- `index query --since-run` for query-time deltas
 
-For now, treat each successful build as the latest state of the same index set.
-Use a full-coverage audit build when you need deletion detection, and use
+For query-time deltas, `index query --since-run <run_id>` emits the current
+active rows first seen or meaningfully changed after a successful run in the
+same IndexSet. It is a forward delta over latest state, not point-in-time
+history. For indexes migrated from older schemas, precise `added` / `changed`
+classification begins at the migration baseline, and boundary runs before that
+baseline are rejected.
+
+Use a full-coverage audit build when you need deletion detection.
+`--since-run` does not track deletion history, so it rejects
+`--include-deleted --since-run` rather than implying a deletion delta. Use
 stable manifest identities when you need comparable run history.

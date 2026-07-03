@@ -59,14 +59,13 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	_, err = db.ExecContext(ctx, `
-		CREATE TABLE schema_meta (
+	legacyStatements := []string{
+		`CREATE TABLE schema_meta (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			schema_version INTEGER NOT NULL
-		);
-		INSERT INTO schema_meta (id, schema_version) VALUES (1, 4);
-
-		CREATE TABLE index_sets (
+		)`,
+		`INSERT INTO schema_meta (id, schema_version) VALUES (1, 4)`,
+		`CREATE TABLE index_sets (
 			index_set_id TEXT PRIMARY KEY,
 			base_uri TEXT NOT NULL,
 			provider TEXT NOT NULL,
@@ -78,9 +77,8 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 			endpoint_host TEXT,
 			index_build_hash TEXT NOT NULL,
 			created_at TEXT NOT NULL
-		);
-
-		CREATE TABLE index_runs (
+		)`,
+		`CREATE TABLE index_runs (
 			run_id TEXT PRIMARY KEY,
 			index_set_id TEXT NOT NULL,
 			started_at TEXT NOT NULL,
@@ -90,9 +88,8 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 			source_snapshot_at TEXT,
 			status TEXT NOT NULL,
 			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id)
-		);
-
-		CREATE TABLE objects_current (
+		)`,
+		`CREATE TABLE objects_current (
 			index_set_id TEXT NOT NULL,
 			rel_key TEXT NOT NULL,
 			size_bytes INTEGER NOT NULL,
@@ -104,9 +101,8 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 			PRIMARY KEY(index_set_id, rel_key),
 			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id),
 			FOREIGN KEY(last_seen_run_id) REFERENCES index_runs(run_id)
-		);
-
-		CREATE TABLE prefix_stats (
+		)`,
+		`CREATE TABLE prefix_stats (
 			index_set_id TEXT NOT NULL,
 			run_id TEXT NOT NULL,
 			prefix TEXT NOT NULL,
@@ -119,9 +115,8 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 			PRIMARY KEY(index_set_id, run_id, prefix),
 			FOREIGN KEY(index_set_id) REFERENCES index_sets(index_set_id),
 			FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
-		);
-
-		CREATE TABLE index_run_events (
+		)`,
+		`CREATE TABLE index_run_events (
 			event_id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
 			occurred_at TEXT NOT NULL,
@@ -132,10 +127,29 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 			prefix TEXT,
 			error_code TEXT,
 			FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
-		);
-	`)
+		)`,
+	}
+	for _, stmt := range legacyStatements {
+		_, err = db.ExecContext(ctx, stmt)
+		require.NoError(t, err)
+	}
+	legacyStartedAt := "2026-01-01T00:00:00Z"
+	_, err = db.ExecContext(ctx, `INSERT INTO index_sets
+		(index_set_id, base_uri, provider, storage_provider, cloud_provider, region_kind, region, endpoint, endpoint_host, index_build_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"idx_v4", "s3://example-bucket/data/", "s3", "", "", "", "", "", "",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", legacyStartedAt)
 	require.NoError(t, err)
-
+	_, err = db.ExecContext(ctx, `INSERT INTO index_runs
+		(run_id, index_set_id, started_at, ended_at, acquired_at, source_type, source_snapshot_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"run_v4", "idx_v4", legacyStartedAt, legacyStartedAt, legacyStartedAt, "crawl", nil, RunStatusSuccess)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO objects_current
+		(index_set_id, rel_key, size_bytes, last_modified, etag, last_seen_run_id, last_seen_at, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+		"idx_v4", "legacy.json", 100, legacyStartedAt, "etag-v4", "run_v4", legacyStartedAt)
+	require.NoError(t, err)
 	require.NoError(t, Migrate(ctx, db))
 
 	var columnCount int
@@ -147,11 +161,38 @@ func TestMigrateUpgradesVersion4DBWithoutStorageClass(t *testing.T) {
 	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_objects_current_storage_class'`).Scan(&indexCount)
 	require.NoError(t, err)
 	require.Equal(t, 1, indexCount)
+	for _, column := range []string{"first_seen_run_id", "first_seen_at", "last_changed_run_id", "last_changed_at"} {
+		err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('objects_current') WHERE name = ?`, column).Scan(&columnCount)
+		require.NoError(t, err)
+		require.Equal(t, 1, columnCount, column)
+	}
+	var firstSeenRunID, firstSeenAt, lastChangedRunID, lastChangedAt, lastSeenAt, lastModified string
+	err = db.QueryRowContext(ctx, `
+		SELECT first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at, last_seen_at, last_modified
+		FROM objects_current
+		WHERE index_set_id = 'idx_v4' AND rel_key = 'legacy.json'
+	`).Scan(&firstSeenRunID, &firstSeenAt, &lastChangedRunID, &lastChangedAt, &lastSeenAt, &lastModified)
+	require.NoError(t, err)
+	require.Equal(t, "run_v4", firstSeenRunID)
+	require.Equal(t, "run_v4", lastChangedRunID)
+	require.Equal(t, "'2026-01-01T00:00:00.000000000+0000'", quoted(firstSeenAt))
+	require.Equal(t, "'2026-01-01T00:00:00.000000000+0000'", quoted(lastChangedAt))
+	require.Equal(t, "'2026-01-01T00:00:00.000000000+0000'", quoted(lastSeenAt))
+	require.Equal(t, "'2026-01-01T00:00:00.000000000+0000'", quoted(lastModified))
+
+	baseline, err := GetObjectDeltaBaseline(ctx, db, "idx_v4")
+	require.NoError(t, err)
+	require.NotNil(t, baseline)
+	require.Equal(t, "run_v4", baseline.BaselineRunID)
 
 	var version int
 	err = db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version)
 	require.NoError(t, err)
 	require.Equal(t, SchemaVersion, version)
+}
+
+func quoted(value string) string {
+	return "'" + value + "'"
 }
 
 func TestMigrateNormalizesVersion6TimestampText(t *testing.T) {
@@ -193,13 +234,13 @@ func TestMigrateNormalizesVersion6TimestampText(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version))
 	require.Equal(t, SchemaVersion, version)
 
-	assertQuotedTimestamp(t, db, `SELECT quote(created_at) FROM index_sets WHERE index_set_id = 'idx_legacy'`, "'2026-01-01T01:00:00.000000000Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(started_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.000000000Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(acquired_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.500000000Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(source_snapshot_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.000000001Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(last_modified) FROM objects_current WHERE index_set_id = 'idx_legacy' AND rel_key = 'alpha/a.json'`, "'2026-01-01T01:00:00.000000000Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(head_enriched_at) FROM objects_current WHERE index_set_id = 'idx_legacy' AND rel_key = 'alpha/a.json'`, "'2026-01-01T01:00:00.500000000Z'")
-	assertQuotedTimestamp(t, db, `SELECT quote(occurred_at) FROM index_run_events WHERE event_id = 'evt_legacy'`, "'2026-01-01T01:00:00.000000000Z'")
+	assertQuotedTimestamp(t, db, `SELECT quote(created_at) FROM index_sets WHERE index_set_id = 'idx_legacy'`, "'2026-01-01T01:00:00.000000000+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(started_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.000000000+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(acquired_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.500000000+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(source_snapshot_at) FROM index_runs WHERE run_id = 'run_legacy'`, "'2026-01-01T01:00:00.000000001+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(last_modified) FROM objects_current WHERE index_set_id = 'idx_legacy' AND rel_key = 'alpha/a.json'`, "'2026-01-01T01:00:00.000000000+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(head_enriched_at) FROM objects_current WHERE index_set_id = 'idx_legacy' AND rel_key = 'alpha/a.json'`, "'2026-01-01T01:00:00.500000000+0000'")
+	assertQuotedTimestamp(t, db, `SELECT quote(occurred_at) FROM index_run_events WHERE event_id = 'evt_legacy'`, "'2026-01-01T01:00:00.000000000+0000'")
 }
 
 func TestMigrateRejectsNewerSchemaVersion(t *testing.T) {

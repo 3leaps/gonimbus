@@ -398,7 +398,7 @@ func (w *indexIngestWriter) classifyObjectDeltaLocked(ctx context.Context) error
 		switch {
 		case existing == nil || existing.DeletedAt != nil:
 			counts.Added++
-		case objectRowChanged(existing, row):
+		case indexstore.ObjectRowChanged(existing, row):
 			counts.Changed++
 		default:
 			counts.Unchanged++
@@ -429,37 +429,6 @@ func (w *indexIngestWriter) setDeltaPrefixes(prefixes []string) {
 	sort.SliceStable(w.deltaPrefixes, func(i, j int) bool {
 		return len(w.deltaPrefixes[i]) > len(w.deltaPrefixes[j])
 	})
-}
-
-func objectRowChanged(existing *indexstore.ObjectRow, candidate indexstore.ObjectRow) bool {
-	if existing == nil {
-		return true
-	}
-	if existing.SizeBytes != candidate.SizeBytes || existing.ETag != candidate.ETag {
-		return true
-	}
-	if !stringPtrEqual(existing.StorageClass, candidate.StorageClass) {
-		return true
-	}
-	switch {
-	case existing.LastModified == nil && candidate.LastModified == nil:
-		return false
-	case existing.LastModified == nil || candidate.LastModified == nil:
-		return true
-	default:
-		return !existing.LastModified.Equal(*candidate.LastModified)
-	}
-}
-
-func stringPtrEqual(a, b *string) bool {
-	switch {
-	case a == nil && b == nil:
-		return true
-	case a == nil || b == nil:
-		return false
-	default:
-		return *a == *b
-	}
 }
 
 func copyIndexBuildDeltaCounts(in map[string]indexBuildDeltaCounts) map[string]indexBuildDeltaCounts {

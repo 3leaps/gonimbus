@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTimestampWritesUseFixedWidthRFC3339Text(t *testing.T) {
+func TestTimestampWritesUseFixedWidthDBText(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Path: ":memory:"})
 	require.NoError(t, err)
@@ -58,11 +58,11 @@ func TestTimestampWritesUseFixedWidthRFC3339Text(t *testing.T) {
 		FROM objects_current
 		WHERE index_set_id = 'idx_timestamp' AND rel_key = 'alpha/a.json'
 	`).Scan(&lastModifiedRaw, &lastSeenRaw, &deletedAtRaw, &restoreExpiryRaw, &headEnrichedAtRaw))
-	require.Equal(t, "'2026-01-01T01:00:00.000000000Z'", lastModifiedRaw)
-	require.Equal(t, "'2026-01-01T02:00:00.000000000Z'", lastSeenRaw)
-	require.Equal(t, "'2026-01-02T00:00:00.000000000Z'", deletedAtRaw)
-	require.Equal(t, "'2026-01-04T00:00:00.123456789Z'", restoreExpiryRaw)
-	require.Equal(t, "'2026-01-03T00:00:00.987654321Z'", headEnrichedAtRaw)
+	require.Equal(t, "'2026-01-01T01:00:00.000000000+0000'", lastModifiedRaw)
+	require.Equal(t, "'2026-01-01T02:00:00.000000000+0000'", lastSeenRaw)
+	require.Equal(t, "'2026-01-02T00:00:00.000000000+0000'", deletedAtRaw)
+	require.Equal(t, "'2026-01-04T00:00:00.123456789+0000'", restoreExpiryRaw)
+	require.Equal(t, "'2026-01-03T00:00:00.987654321+0000'", headEnrichedAtRaw)
 
 	events, err := ListRunEvents(ctx, db, "run_001", nil)
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestTimestampWritesUseFixedWidthRFC3339Text(t *testing.T) {
 		FROM index_run_events
 		WHERE event_id = 'evt_timestamp'
 	`).Scan(&occurredAtRaw))
-	require.Equal(t, "'2026-01-01T03:00:00.000000000Z'", occurredAtRaw)
+	require.Equal(t, "'2026-01-01T03:00:00.000000000+0000'", occurredAtRaw)
 }
 
 func TestTimestampFiltersUseExactSecondBoundaries(t *testing.T) {

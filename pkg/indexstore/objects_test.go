@@ -124,6 +124,252 @@ func TestBatchUpsertObjects(t *testing.T) {
 	assert.Equal(t, int64(3), count)
 }
 
+func TestBatchUpsertObjectsTracksFirstSeenAndLastChanged(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Path: ":memory:"})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.NoError(t, Migrate(ctx, db))
+	indexSet, _, err := FindOrCreateIndexSet(ctx, db, IndexSetParams{
+		BaseURI:  "s3://test-bucket/data/",
+		Provider: "s3",
+		BuildParams: BuildParams{
+			SourceType:    "crawl",
+			SchemaVersion: SchemaVersion,
+		},
+	})
+	require.NoError(t, err)
+
+	lastModified := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	run1, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{{
+		IndexSetID:    indexSet.IndexSetID,
+		RelKey:        "file.json",
+		SizeBytes:     100,
+		LastModified:  &lastModified,
+		ETag:          "etag-1",
+		LastSeenRunID: run1.RunID,
+		LastSeenAt:    run1.StartedAt,
+	}}))
+	obj, err := GetObject(ctx, db, indexSet.IndexSetID, "file.json")
+	require.NoError(t, err)
+	require.Equal(t, run1.RunID, obj.FirstSeenRunID)
+	require.Equal(t, run1.RunID, obj.LastChangedRunID)
+
+	run2, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{{
+		IndexSetID:    indexSet.IndexSetID,
+		RelKey:        "file.json",
+		SizeBytes:     100,
+		LastModified:  &lastModified,
+		ETag:          "etag-1",
+		LastSeenRunID: run2.RunID,
+		LastSeenAt:    run2.StartedAt,
+	}}))
+	obj, err = GetObject(ctx, db, indexSet.IndexSetID, "file.json")
+	require.NoError(t, err)
+	require.Equal(t, run1.RunID, obj.FirstSeenRunID)
+	require.Equal(t, run1.RunID, obj.LastChangedRunID)
+	require.Equal(t, run2.RunID, obj.LastSeenRunID)
+
+	run3, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{{
+		IndexSetID:    indexSet.IndexSetID,
+		RelKey:        "file.json",
+		SizeBytes:     101,
+		LastModified:  &lastModified,
+		ETag:          "etag-2",
+		LastSeenRunID: run3.RunID,
+		LastSeenAt:    run3.StartedAt,
+	}}))
+	obj, err = GetObject(ctx, db, indexSet.IndexSetID, "file.json")
+	require.NoError(t, err)
+	require.Equal(t, run1.RunID, obj.FirstSeenRunID)
+	require.Equal(t, run3.RunID, obj.LastChangedRunID)
+
+	_, err = db.ExecContext(ctx, `UPDATE objects_current SET deleted_at = ? WHERE index_set_id = ? AND rel_key = ?`,
+		timeString(run3.StartedAt), indexSet.IndexSetID, "file.json")
+	require.NoError(t, err)
+	run4, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{{
+		IndexSetID:    indexSet.IndexSetID,
+		RelKey:        "file.json",
+		SizeBytes:     101,
+		LastModified:  &lastModified,
+		ETag:          "etag-2",
+		LastSeenRunID: run4.RunID,
+		LastSeenAt:    run4.StartedAt,
+	}}))
+	obj, err = GetObject(ctx, db, indexSet.IndexSetID, "file.json")
+	require.NoError(t, err)
+	require.Equal(t, run1.RunID, obj.FirstSeenRunID)
+	require.Equal(t, run4.RunID, obj.LastChangedRunID)
+	require.Nil(t, obj.DeletedAt)
+}
+
+func TestBatchUpsertObjectsLastChangedMatchesObjectRowChangedPredicate(t *testing.T) {
+	ctx := context.Background()
+	stringPtr := func(value string) *string { return &value }
+
+	baseModified := time.Date(2026, 7, 1, 12, 13, 14, 123456789, time.UTC)
+	equalInstantDifferentLocation := time.Date(2026, 7, 1, 7, 13, 14, 123456789, time.FixedZone("offset", -5*60*60))
+	changedModified := baseModified.Add(time.Nanosecond)
+	baseStorage := "STANDARD"
+
+	base := ObjectRow{
+		RelKey:       "file.json",
+		SizeBytes:    100,
+		LastModified: &baseModified,
+		ETag:         "etag-1",
+		StorageClass: &baseStorage,
+	}
+
+	tests := []struct {
+		name      string
+		candidate ObjectRow
+	}{
+		{
+			name:      "unchanged",
+			candidate: base,
+		},
+		{
+			name: "size changed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.SizeBytes = 101
+				return obj
+			}(),
+		},
+		{
+			name: "etag changed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.ETag = "etag-2"
+				return obj
+			}(),
+		},
+		{
+			name: "storage class changed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.StorageClass = stringPtr("GLACIER")
+				return obj
+			}(),
+		},
+		{
+			name: "storage class removed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.StorageClass = nil
+				return obj
+			}(),
+		},
+		{
+			name: "storage class added",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.StorageClass = stringPtr("STANDARD")
+				return obj
+			}(),
+		},
+		{
+			name: "last modified changed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.LastModified = &changedModified
+				return obj
+			}(),
+		},
+		{
+			name: "last modified removed",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.LastModified = nil
+				return obj
+			}(),
+		},
+		{
+			name: "last modified added",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.LastModified = &baseModified
+				return obj
+			}(),
+		},
+		{
+			name: "last modified equal instant different location",
+			candidate: func() ObjectRow {
+				obj := base
+				obj.LastModified = &equalInstantDifferentLocation
+				return obj
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := Open(ctx, Config{Path: ":memory:"})
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			require.NoError(t, Migrate(ctx, db))
+
+			indexSet, _, err := FindOrCreateIndexSet(ctx, db, IndexSetParams{
+				BaseURI:  "s3://test-bucket/data/",
+				Provider: "s3",
+				BuildParams: BuildParams{
+					SourceType:    "crawl",
+					SchemaVersion: SchemaVersion,
+				},
+			})
+			require.NoError(t, err)
+
+			initialRun, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+			require.NoError(t, err)
+			candidateRun, err := CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+			require.NoError(t, err)
+
+			existing := base
+			existing.IndexSetID = indexSet.IndexSetID
+			existing.LastSeenRunID = initialRun.RunID
+			existing.LastSeenAt = initialRun.StartedAt
+
+			if tt.name == "storage class added" {
+				existing.StorageClass = nil
+			}
+			if tt.name == "last modified added" {
+				existing.LastModified = nil
+			}
+
+			require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{existing}))
+
+			candidate := tt.candidate
+			candidate.IndexSetID = indexSet.IndexSetID
+			candidate.RelKey = existing.RelKey
+			candidate.LastSeenRunID = candidateRun.RunID
+			candidate.LastSeenAt = candidateRun.StartedAt
+
+			expectedChanged := ObjectRowChanged(&existing, candidate)
+			require.NoError(t, BatchUpsertObjects(ctx, db, []ObjectRow{candidate}))
+
+			got, err := GetObject(ctx, db, indexSet.IndexSetID, existing.RelKey)
+			require.NoError(t, err)
+			if expectedChanged {
+				require.Equal(t, candidate.LastSeenRunID, got.LastChangedRunID)
+			} else {
+				require.Equal(t, existing.LastSeenRunID, got.LastChangedRunID)
+			}
+		})
+	}
+
+	// Reappearance from soft-delete is intentionally tracked as a last_changed
+	// update by SQL even when the LIST fields themselves are unchanged.
+}
+
 func TestBatchUpdateHeadEnrichmentPreservesListFields(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Path: ":memory:"})

@@ -257,6 +257,89 @@ func TestQueryObjects_Validation(t *testing.T) {
 	}
 }
 
+func TestQueryObjectsSinceRunForwardDelta(t *testing.T) {
+	ctx, db, indexSetID, _ := setupQueryTestDB(t, "since-run")
+	boundary := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	later := boundary.Add(24 * time.Hour)
+	old := boundary.Add(-24 * time.Hour)
+
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_z_boundary", boundary, RunStatusSuccess)
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_a_later", later, RunStatusSuccess)
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_old", old, RunStatusSuccess)
+
+	insertQueryDeltaObject(t, ctx, db, indexSetID, "old/unchanged.json", "run_old", old, "run_z_boundary", boundary, "run_a_later", later, "")
+	insertQueryDeltaObject(t, ctx, db, indexSetID, "delta/added.json", "run_a_later", later, "run_a_later", later, "run_a_later", later, "etag-added")
+	insertQueryDeltaObject(t, ctx, db, indexSetID, "delta/changed.json", "run_old", old, "run_a_later", later, "run_a_later", later, "etag-changed")
+	insertQueryDeltaObject(t, ctx, db, indexSetID, "delta/reseen.json", "run_old", old, "run_z_boundary", boundary, "run_a_later", later, "etag-reseen")
+	insertQueryDeltaObject(t, ctx, db, indexSetID, "delta/deleted.json", "run_a_later", later, "run_a_later", later, "run_a_later", later, "etag-deleted")
+	_, err := db.ExecContext(ctx, `UPDATE objects_current SET deleted_at = ? WHERE index_set_id = ? AND rel_key = ?`, timeString(later), indexSetID, "delta/deleted.json")
+	require.NoError(t, err)
+
+	filter, err := ResolveSinceRunFilter(ctx, db, indexSetID, "run_z_boundary")
+	require.NoError(t, err)
+
+	results, _, err := QueryObjects(ctx, db, QueryParams{IndexSetID: indexSetID, SinceRun: filter})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.Equal(t, "delta/added.json", results[0].RelKey)
+	require.Equal(t, QueryChangeKindAdded, results[0].ChangeKind)
+	require.Equal(t, "run_a_later", results[0].FirstSeenRunID)
+	require.Equal(t, "delta/changed.json", results[1].RelKey)
+	require.Equal(t, QueryChangeKindChanged, results[1].ChangeKind)
+	require.Equal(t, "run_a_later", results[1].LastChangedRunID)
+
+	count, err := QueryObjectCount(ctx, db, QueryParams{IndexSetID: indexSetID, SinceRun: filter})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count)
+
+	streamingCount, err := QueryObjectCount(ctx, db, QueryParams{IndexSetID: indexSetID, Pattern: "delta/*.json", SinceRun: filter})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), streamingCount)
+
+	canonical, stats, err := QueryCanonicalObjects(ctx, db, QueryParams{IndexSetID: indexSetID, SinceRun: filter})
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.TotalRecords)
+	require.Len(t, canonical, 2)
+}
+
+func TestResolveSinceRunFilterValidation(t *testing.T) {
+	ctx, db, indexSetID, _ := setupQueryTestDB(t, "since-run-validation")
+	otherIndexSetID := "idx_other_since_run_validation"
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO index_sets (index_set_id, base_uri, provider, index_build_hash, created_at)
+		VALUES (?, 's3://other-bucket/', 's3', 'hash-other', ?)`,
+		otherIndexSetID, timeString(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)))
+	require.NoError(t, err)
+
+	baseline := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	old := baseline.Add(-24 * time.Hour)
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_old", old, RunStatusSuccess)
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_baseline", baseline, RunStatusSuccess)
+	insertQueryTestRun(t, ctx, db, indexSetID, "run_failed", baseline.Add(time.Hour), RunStatusFailed)
+	insertQueryTestRun(t, ctx, db, otherIndexSetID, "run_other", baseline, RunStatusSuccess)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO object_delta_baselines (index_set_id, baseline_run_id, baseline_started_at, created_at)
+		VALUES (?, ?, ?, ?)`,
+		indexSetID, "run_baseline", timeString(baseline), timeString(baseline))
+	require.NoError(t, err)
+
+	_, err = ResolveSinceRunFilter(ctx, db, indexSetID, "run_old")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "predates object delta tracking baseline")
+
+	_, err = ResolveSinceRunFilter(ctx, db, indexSetID, "run_failed")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires a successful boundary run")
+
+	_, err = ResolveSinceRunFilter(ctx, db, indexSetID, "run_other")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "belongs to index set")
+
+	filter, err := ResolveSinceRunFilter(ctx, db, indexSetID, "run_baseline")
+	require.NoError(t, err)
+	require.Equal(t, "run_baseline", filter.RunID)
+}
+
 func TestGetIndexSetByBaseURI(t *testing.T) {
 	ctx := context.Background()
 
@@ -1096,6 +1179,29 @@ func insertQueryTestObjectWithStorageClass(t *testing.T, ctx context.Context, db
 	if err != nil {
 		t.Fatalf("insert object %s: %v", relKey, err)
 	}
+}
+
+func insertQueryTestRun(t *testing.T, ctx context.Context, db *sql.DB, indexSetID, runID string, startedAt time.Time, status RunStatus) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO index_runs (run_id, index_set_id, started_at, ended_at, acquired_at, source_type, status)
+		VALUES (?, ?, ?, ?, ?, 'crawl', ?)`,
+		runID, indexSetID, timeString(startedAt), timeString(startedAt.Add(time.Minute)), timeString(startedAt), status)
+	require.NoError(t, err)
+}
+
+func insertQueryDeltaObject(t *testing.T, ctx context.Context, db *sql.DB, indexSetID, relKey string, firstRunID string, firstAt time.Time, changedRunID string, changedAt time.Time, seenRunID string, seenAt time.Time, etag string) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO objects_current (
+			index_set_id, rel_key, size_bytes, last_modified, etag,
+			first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at,
+			last_seen_run_id, last_seen_at
+		)
+		VALUES (?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		indexSetID, relKey, timeString(changedAt), etag,
+		firstRunID, timeString(firstAt), changedRunID, timeString(changedAt), seenRunID, timeString(seenAt))
+	require.NoError(t, err)
 }
 
 func TestParseTimestamp(t *testing.T) {

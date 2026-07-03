@@ -8,24 +8,28 @@ import (
 	"time"
 )
 
-const dbTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+const dbTimeLayout = "2006-01-02T15:04:05.000000000-0700"
 
 // ObjectRow represents a row in the objects_current table.
 type ObjectRow struct {
-	IndexSetID     string
-	RelKey         string
-	SizeBytes      int64
-	LastModified   *time.Time
-	ETag           string
-	StorageClass   *string
-	ArchiveStatus  *string
-	RestoreState   *string
-	RestoreExpiry  *time.Time
-	ContentType    *string
-	HeadEnrichedAt *time.Time
-	LastSeenRunID  string
-	LastSeenAt     time.Time
-	DeletedAt      *time.Time
+	IndexSetID       string
+	RelKey           string
+	SizeBytes        int64
+	LastModified     *time.Time
+	ETag             string
+	StorageClass     *string
+	ArchiveStatus    *string
+	RestoreState     *string
+	RestoreExpiry    *time.Time
+	ContentType      *string
+	HeadEnrichedAt   *time.Time
+	FirstSeenRunID   string
+	FirstSeenAt      time.Time
+	LastChangedRunID string
+	LastChangedAt    time.Time
+	LastSeenRunID    string
+	LastSeenAt       time.Time
+	DeletedAt        *time.Time
 }
 
 // HeadEnrichmentUpdate contains HEAD-derived fields that may be written by
@@ -53,18 +57,42 @@ func UpsertObject(ctx context.Context, db *sql.DB, obj ObjectRow) error {
 	_, err := db.ExecContext(ctx,
 		`INSERT INTO objects_current
 		 (index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
+		  first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at,
 		  last_seen_run_id, last_seen_at, deleted_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		 ON CONFLICT(index_set_id, rel_key) DO UPDATE SET
+		   last_changed_run_id = CASE
+		     WHEN objects_current.deleted_at IS NOT NULL
+		       OR objects_current.size_bytes IS NOT excluded.size_bytes
+		       OR objects_current.last_modified IS NOT excluded.last_modified
+		       OR objects_current.etag IS NOT excluded.etag
+		       OR objects_current.storage_class IS NOT excluded.storage_class
+		     THEN excluded.last_changed_run_id
+		     ELSE COALESCE(objects_current.last_changed_run_id, objects_current.last_seen_run_id, excluded.last_changed_run_id)
+		   END,
+		   last_changed_at = CASE
+		     WHEN objects_current.deleted_at IS NOT NULL
+		       OR objects_current.size_bytes IS NOT excluded.size_bytes
+		       OR objects_current.last_modified IS NOT excluded.last_modified
+		       OR objects_current.etag IS NOT excluded.etag
+		       OR objects_current.storage_class IS NOT excluded.storage_class
+		     THEN excluded.last_changed_at
+		     ELSE COALESCE(objects_current.last_changed_at, objects_current.last_seen_at, excluded.last_changed_at)
+		   END,
 		   size_bytes = excluded.size_bytes,
 		   last_modified = excluded.last_modified,
 		   etag = excluded.etag,
 		   storage_class = excluded.storage_class,
+		   first_seen_run_id = COALESCE(objects_current.first_seen_run_id, objects_current.last_seen_run_id, excluded.first_seen_run_id),
+		   first_seen_at = COALESCE(objects_current.first_seen_at, objects_current.last_seen_at, excluded.first_seen_at),
 		   last_seen_run_id = excluded.last_seen_run_id,
 		   last_seen_at = excluded.last_seen_at,
 		   deleted_at = NULL`,
 		obj.IndexSetID, obj.RelKey, obj.SizeBytes, optionalTimeString(obj.LastModified),
-		obj.ETag, obj.StorageClass, obj.LastSeenRunID, timeString(obj.LastSeenAt))
+		obj.ETag, obj.StorageClass,
+		firstSeenRunID(obj), timeString(firstSeenAt(obj)),
+		lastChangedRunID(obj), timeString(lastChangedAt(obj)),
+		obj.LastSeenRunID, timeString(obj.LastSeenAt))
 
 	if err != nil {
 		return fmt.Errorf("upsert object: %w", err)
@@ -93,13 +121,34 @@ func BatchUpsertObjects(ctx context.Context, db *sql.DB, objects []ObjectRow) er
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO objects_current
 		 (index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
+		  first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at,
 		  last_seen_run_id, last_seen_at, deleted_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		 ON CONFLICT(index_set_id, rel_key) DO UPDATE SET
+		   last_changed_run_id = CASE
+		     WHEN objects_current.deleted_at IS NOT NULL
+		       OR objects_current.size_bytes IS NOT excluded.size_bytes
+		       OR objects_current.last_modified IS NOT excluded.last_modified
+		       OR objects_current.etag IS NOT excluded.etag
+		       OR objects_current.storage_class IS NOT excluded.storage_class
+		     THEN excluded.last_changed_run_id
+		     ELSE COALESCE(objects_current.last_changed_run_id, objects_current.last_seen_run_id, excluded.last_changed_run_id)
+		   END,
+		   last_changed_at = CASE
+		     WHEN objects_current.deleted_at IS NOT NULL
+		       OR objects_current.size_bytes IS NOT excluded.size_bytes
+		       OR objects_current.last_modified IS NOT excluded.last_modified
+		       OR objects_current.etag IS NOT excluded.etag
+		       OR objects_current.storage_class IS NOT excluded.storage_class
+		     THEN excluded.last_changed_at
+		     ELSE COALESCE(objects_current.last_changed_at, objects_current.last_seen_at, excluded.last_changed_at)
+		   END,
 		   size_bytes = excluded.size_bytes,
 		   last_modified = excluded.last_modified,
 		   etag = excluded.etag,
 		   storage_class = excluded.storage_class,
+		   first_seen_run_id = COALESCE(objects_current.first_seen_run_id, objects_current.last_seen_run_id, excluded.first_seen_run_id),
+		   first_seen_at = COALESCE(objects_current.first_seen_at, objects_current.last_seen_at, excluded.first_seen_at),
 		   last_seen_run_id = excluded.last_seen_run_id,
 		   last_seen_at = excluded.last_seen_at,
 		   deleted_at = NULL`)
@@ -111,7 +160,10 @@ func BatchUpsertObjects(ctx context.Context, db *sql.DB, objects []ObjectRow) er
 	for _, obj := range objects {
 		_, err := stmt.ExecContext(ctx,
 			obj.IndexSetID, obj.RelKey, obj.SizeBytes, optionalTimeString(obj.LastModified),
-			obj.ETag, obj.StorageClass, obj.LastSeenRunID, timeString(obj.LastSeenAt))
+			obj.ETag, obj.StorageClass,
+			firstSeenRunID(obj), timeString(firstSeenAt(obj)),
+			lastChangedRunID(obj), timeString(lastChangedAt(obj)),
+			obj.LastSeenRunID, timeString(obj.LastSeenAt))
 		if err != nil {
 			return fmt.Errorf("exec upsert for %s: %w", obj.RelKey, err)
 		}
@@ -138,19 +190,23 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 	var restoreExpiryRaw any
 	var contentType sql.NullString
 	var headEnrichedAtRaw any
+	var firstSeenAtRaw any
+	var lastChangedAtRaw any
 	var lastSeenAtRaw any
 	var deletedAtRaw any
 
 	err := db.QueryRowContext(ctx,
 		`SELECT index_set_id, rel_key, size_bytes, last_modified, etag, storage_class,
 		        archive_status, restore_state, restore_expiry, content_type, head_enriched_at,
+		        first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at,
 		        last_seen_run_id, last_seen_at, deleted_at
 		 FROM objects_current
 		 WHERE index_set_id = ? AND rel_key = ?`,
 		indexSetID, relKey).Scan(
 		&obj.IndexSetID, &obj.RelKey, &obj.SizeBytes, &lastModifiedRaw,
 		&obj.ETag, &storageClass, &archiveStatus, &restoreState, &restoreExpiryRaw,
-		&contentType, &headEnrichedAtRaw, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
+		&contentType, &headEnrichedAtRaw, &obj.FirstSeenRunID, &firstSeenAtRaw,
+		&obj.LastChangedRunID, &lastChangedAtRaw, &obj.LastSeenRunID, &lastSeenAtRaw, &deletedAtRaw)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -178,6 +234,21 @@ func GetObject(ctx context.Context, db *sql.DB, indexSetID, relKey string) (*Obj
 		return nil, fmt.Errorf("parse head_enriched_at: %w", err)
 	}
 	obj.HeadEnrichedAt = headEnrichedAt
+
+	firstSeenAt, err := parseOptionalDBTime(firstSeenAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse first_seen_at: %w", err)
+	}
+	if firstSeenAt != nil {
+		obj.FirstSeenAt = *firstSeenAt
+	}
+	lastChangedAt, err := parseOptionalDBTime(lastChangedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse last_changed_at: %w", err)
+	}
+	if lastChangedAt != nil {
+		obj.LastChangedAt = *lastChangedAt
+	}
 
 	lastSeenAt, err := parseDBTimeValue(lastSeenAtRaw)
 	if err != nil {
@@ -336,6 +407,34 @@ func optionalTimeString(value *time.Time) *string {
 	}
 	out := timeString(*value)
 	return &out
+}
+
+func firstSeenRunID(obj ObjectRow) string {
+	if obj.FirstSeenRunID != "" {
+		return obj.FirstSeenRunID
+	}
+	return obj.LastSeenRunID
+}
+
+func firstSeenAt(obj ObjectRow) time.Time {
+	if !obj.FirstSeenAt.IsZero() {
+		return obj.FirstSeenAt
+	}
+	return obj.LastSeenAt
+}
+
+func lastChangedRunID(obj ObjectRow) string {
+	if obj.LastChangedRunID != "" {
+		return obj.LastChangedRunID
+	}
+	return obj.LastSeenRunID
+}
+
+func lastChangedAt(obj ObjectRow) time.Time {
+	if !obj.LastChangedAt.IsZero() {
+		return obj.LastChangedAt
+	}
+	return obj.LastSeenAt
 }
 
 func timeString(value time.Time) string {

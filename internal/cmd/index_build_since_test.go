@@ -162,6 +162,26 @@ func TestResolveIndexBuildSinceAuto_LatestNonSuccessFailsClosed(t *testing.T) {
 	require.True(t, plan.AutoFallback)
 	require.True(t, plan.Watermark.IsZero())
 	require.Nil(t, plan.Filter)
+	require.Equal(t, "latest index run is not successful", plan.Reason)
+	require.Contains(t, plan.Warnings[0], "status partial")
+	require.Contains(t, plan.Warnings[0], "using full enumeration")
+}
+
+func TestResolveIndexBuildSinceAuto_DBReadErrorFailsClosedWithSpecificWarning(t *testing.T) {
+	ctx := context.Background()
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: ":memory:"})
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(ctx, db))
+	require.NoError(t, db.Close())
+
+	plan, err := resolveIndexBuildSince(ctx, db, "idx_unreadable", testSinceManifestWithScope(nil), "auto", time.Now().UTC())
+	require.NoError(t, err)
+	require.True(t, plan.Enabled)
+	require.True(t, plan.AutoFallback)
+	require.True(t, plan.Watermark.IsZero())
+	require.Nil(t, plan.Filter)
+	require.Equal(t, "auto watermark metadata unreadable", plan.Reason)
+	require.Contains(t, plan.Warnings[0], "could not read prior run metadata")
 	require.Contains(t, plan.Warnings[0], "using full enumeration")
 }
 

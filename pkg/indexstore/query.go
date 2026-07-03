@@ -57,6 +57,11 @@ type QueryParams struct {
 	// Default: false (only non-deleted objects).
 	IncludeDeleted bool
 
+	// SinceRun filters to current rows first seen or meaningfully changed after
+	// a validated run boundary. This is a forward delta over latest state, not
+	// historical reconstruction.
+	SinceRun *SinceRunFilter
+
 	// Limit caps the number of results returned.
 	// Optional. Zero means no limit.
 	Limit int
@@ -77,18 +82,42 @@ const (
 
 // QueryResult holds a single object from the query.
 type QueryResult struct {
-	RelKey         string
-	SizeBytes      int64
-	LastModified   *time.Time
-	ETag           string
-	StorageClass   *string
-	ArchiveStatus  *string
-	RestoreState   *string
-	RestoreExpiry  *time.Time
-	ContentType    *string
-	HeadEnrichedAt *time.Time
-	DeletedAt      *time.Time
+	RelKey           string
+	SizeBytes        int64
+	LastModified     *time.Time
+	ETag             string
+	StorageClass     *string
+	ArchiveStatus    *string
+	RestoreState     *string
+	RestoreExpiry    *time.Time
+	ContentType      *string
+	HeadEnrichedAt   *time.Time
+	FirstSeenRunID   string
+	FirstSeenAt      *time.Time
+	LastChangedRunID string
+	LastChangedAt    *time.Time
+	ChangeKind       string
+	DeletedAt        *time.Time
 }
+
+// SinceRunFilter is a resolved query boundary for --since-run.
+type SinceRunFilter struct {
+	RunID     string
+	StartedAt time.Time
+}
+
+// ObjectDeltaBaseline records the legacy migration boundary for an index set.
+type ObjectDeltaBaseline struct {
+	IndexSetID        string
+	BaselineRunID     string
+	BaselineStartedAt time.Time
+	CreatedAt         time.Time
+}
+
+const (
+	QueryChangeKindAdded   = "added"
+	QueryChangeKindChanged = "changed"
+)
 
 // CanonicalObjectGroup holds one ETag group after canonical selection.
 type CanonicalObjectGroup struct {
@@ -144,6 +173,9 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	if params.IndexSetID == "" {
 		return nil, stats, fmt.Errorf("index_set_id is required")
 	}
+	if params.SinceRun != nil && params.IncludeDeleted {
+		return nil, stats, fmt.Errorf("--include-deleted is not supported with --since-run; deletion deltas are not tracked in this index format")
+	}
 
 	// Compile regex if provided
 	var keyRe *regexp.Regexp
@@ -166,6 +198,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	// Build SQL query with filters that can be pushed to DB
 	query := `SELECT rel_key, size_bytes, last_modified, etag, storage_class,
 		       archive_status, restore_state, restore_expiry, content_type, head_enriched_at,
+		       first_seen_run_id, first_seen_at, last_changed_run_id, last_changed_at,
 		       deleted_at
 		FROM objects_current
 		WHERE index_set_id = ?`
@@ -212,6 +245,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		query += ` AND head_enriched_at >= ?`
 		args = append(args, timeString(params.EnrichedAfter))
 	}
+	query = appendSinceRunFilterSQL(query, &args, params.SinceRun)
 
 	query += ` ORDER BY rel_key`
 
@@ -230,21 +264,26 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 	var results []QueryResult
 	for rows.Next() {
 		var (
-			relKey         string
-			sizeBytes      int64
-			lastModified   sql.NullString
-			etag           sql.NullString
-			storageClass   sql.NullString
-			archiveStatus  sql.NullString
-			restoreState   sql.NullString
-			restoreExpiry  sql.NullString
-			contentType    sql.NullString
-			headEnrichedAt sql.NullString
-			deletedAt      sql.NullString
+			relKey           string
+			sizeBytes        int64
+			lastModified     sql.NullString
+			etag             sql.NullString
+			storageClass     sql.NullString
+			archiveStatus    sql.NullString
+			restoreState     sql.NullString
+			restoreExpiry    sql.NullString
+			contentType      sql.NullString
+			headEnrichedAt   sql.NullString
+			firstSeenRunID   sql.NullString
+			firstSeenAt      sql.NullString
+			lastChangedRunID sql.NullString
+			lastChangedAt    sql.NullString
+			deletedAt        sql.NullString
 		)
 
 		if err := rows.Scan(&relKey, &sizeBytes, &lastModified, &etag, &storageClass,
-			&archiveStatus, &restoreState, &restoreExpiry, &contentType, &headEnrichedAt, &deletedAt); err != nil {
+			&archiveStatus, &restoreState, &restoreExpiry, &contentType, &headEnrichedAt,
+			&firstSeenRunID, &firstSeenAt, &lastChangedRunID, &lastChangedAt, &deletedAt); err != nil {
 			return nil, stats, fmt.Errorf("scan row: %w", err)
 		}
 
@@ -300,6 +339,27 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 				stats.TimestampParseErrors++
 			}
 		}
+		if firstSeenRunID.Valid {
+			result.FirstSeenRunID = firstSeenRunID.String
+		}
+		if firstSeenAt.Valid {
+			if t, err := parseTimestamp(firstSeenAt.String); err == nil {
+				result.FirstSeenAt = &t
+			} else {
+				stats.TimestampParseErrors++
+			}
+		}
+		if lastChangedRunID.Valid {
+			result.LastChangedRunID = lastChangedRunID.String
+		}
+		if lastChangedAt.Valid {
+			if t, err := parseTimestamp(lastChangedAt.String); err == nil {
+				result.LastChangedAt = &t
+			} else {
+				stats.TimestampParseErrors++
+			}
+		}
+		result.ChangeKind = queryChangeKind(result, params.SinceRun)
 
 		if deletedAt.Valid {
 			if t, err := parseTimestamp(deletedAt.String); err == nil {
@@ -331,6 +391,9 @@ func QueryHeadEnrichmentCandidates(ctx context.Context, db *sql.DB, params Query
 	var stats QueryStats
 	if params.IndexSetID == "" {
 		return nil, stats, fmt.Errorf("index_set_id is required")
+	}
+	if params.SinceRun != nil && params.IncludeDeleted {
+		return nil, stats, fmt.Errorf("--include-deleted is not supported with --since-run; deletion deltas are not tracked in this index format")
 	}
 
 	var keyRe *regexp.Regexp
@@ -369,6 +432,7 @@ func QueryHeadEnrichmentCandidates(ctx context.Context, db *sql.DB, params Query
 		args = append(args, params.MaxSize)
 	}
 	query = appendStorageClassFilterSQL(query, &args, params.StorageClasses)
+	query = appendSinceRunFilterSQL(query, &args, params.SinceRun)
 	query += ` ORDER BY rel_key`
 
 	rows, err := db.QueryContext(ctx, query, args...)
@@ -640,6 +704,9 @@ func QueryObjectCount(ctx context.Context, db *sql.DB, params QueryParams) (int6
 	if params.IndexSetID == "" {
 		return 0, fmt.Errorf("index_set_id is required")
 	}
+	if params.SinceRun != nil && params.IncludeDeleted {
+		return 0, fmt.Errorf("--include-deleted is not supported with --since-run; deletion deltas are not tracked in this index format")
+	}
 
 	// Compile regex if provided
 	var keyRe *regexp.Regexp
@@ -695,6 +762,7 @@ func queryCountFast(ctx context.Context, db *sql.DB, params QueryParams) (int64,
 		query += ` AND head_enriched_at >= ?`
 		args = append(args, timeString(params.EnrichedAfter))
 	}
+	query = appendSinceRunFilterSQL(query, &args, params.SinceRun)
 
 	var count int64
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
@@ -745,6 +813,7 @@ func queryCountStreaming(ctx context.Context, db *sql.DB, params QueryParams, ke
 		query += ` AND head_enriched_at >= ?`
 		args = append(args, timeString(params.EnrichedAfter))
 	}
+	query = appendSinceRunFilterSQL(query, &args, params.SinceRun)
 
 	// No ORDER BY for counting - unnecessary overhead at scale
 
@@ -817,6 +886,111 @@ func appendStorageClassFilterSQL(query string, args *[]interface{}, values []str
 		*args = append(*args, value)
 	}
 	return query
+}
+
+func appendSinceRunFilterSQL(query string, args *[]interface{}, filter *SinceRunFilter) string {
+	if filter == nil {
+		return query
+	}
+	boundary := timeString(filter.StartedAt)
+	query += ` AND (
+		EXISTS (
+			SELECT 1 FROM index_runs first_seen_run
+			WHERE first_seen_run.run_id = objects_current.first_seen_run_id
+			  AND first_seen_run.index_set_id = objects_current.index_set_id
+			  AND first_seen_run.started_at > ?
+		)
+		OR EXISTS (
+			SELECT 1 FROM index_runs last_changed_run
+			WHERE last_changed_run.run_id = objects_current.last_changed_run_id
+			  AND last_changed_run.index_set_id = objects_current.index_set_id
+			  AND last_changed_run.started_at > ?
+		)
+	)`
+	*args = append(*args, boundary, boundary)
+	return query
+}
+
+func queryChangeKind(result QueryResult, filter *SinceRunFilter) string {
+	if filter == nil {
+		return ""
+	}
+	if result.FirstSeenAt != nil && result.FirstSeenAt.After(filter.StartedAt) {
+		return QueryChangeKindAdded
+	}
+	if result.LastChangedAt != nil && result.LastChangedAt.After(filter.StartedAt) {
+		return QueryChangeKindChanged
+	}
+	return ""
+}
+
+// ResolveSinceRunFilter validates a --since-run boundary for an index set and
+// returns the timestamp-resolved filter used by all query paths.
+func ResolveSinceRunFilter(ctx context.Context, db *sql.DB, indexSetID, runID string) (*SinceRunFilter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	indexSetID = strings.TrimSpace(indexSetID)
+	runID = strings.TrimSpace(runID)
+	if indexSetID == "" {
+		return nil, fmt.Errorf("index_set_id is required")
+	}
+	if runID == "" {
+		return nil, fmt.Errorf("run_id is required")
+	}
+
+	run, err := GetIndexRun(ctx, db, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run.IndexSetID != indexSetID {
+		return nil, fmt.Errorf("run %s belongs to index set %s, not %s", runID, run.IndexSetID, indexSetID)
+	}
+	if run.Status != RunStatusSuccess {
+		return nil, fmt.Errorf("run %s has status %s; --since-run requires a successful boundary run", runID, run.Status)
+	}
+	baseline, err := GetObjectDeltaBaseline(ctx, db, indexSetID)
+	if err != nil {
+		return nil, err
+	}
+	if baseline != nil && run.StartedAt.Before(baseline.BaselineStartedAt) {
+		return nil, fmt.Errorf("run %s predates object delta tracking baseline %s; added/changed classification is precise only for runs at or after the baseline", runID, baseline.BaselineRunID)
+	}
+	return &SinceRunFilter{RunID: run.RunID, StartedAt: run.StartedAt}, nil
+}
+
+// GetObjectDeltaBaseline returns the legacy migration baseline for an index set.
+// A nil baseline means the index set was created with delta tracking available.
+func GetObjectDeltaBaseline(ctx context.Context, db *sql.DB, indexSetID string) (*ObjectDeltaBaseline, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var baseline ObjectDeltaBaseline
+	var baselineStartedAtRaw any
+	var createdAtRaw any
+	err := db.QueryRowContext(ctx, `
+		SELECT index_set_id, baseline_run_id, baseline_started_at, created_at
+		FROM object_delta_baselines
+		WHERE index_set_id = ?`, indexSetID).Scan(
+		&baseline.IndexSetID, &baseline.BaselineRunID, &baselineStartedAtRaw, &createdAtRaw,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get object delta baseline: %w", err)
+	}
+	baselineStartedAt, err := parseDBTimeValue(baselineStartedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse baseline_started_at: %w", err)
+	}
+	createdAt, err := parseDBTimeValue(createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse baseline created_at: %w", err)
+	}
+	baseline.BaselineStartedAt = baselineStartedAt
+	baseline.CreatedAt = createdAt
+	return &baseline, nil
 }
 
 // parseTimestamp parses a timestamp string with RFC3339Nano fallback.
