@@ -6,10 +6,8 @@ index set.
 
 This page is for operators running recurring `index build` jobs against large
 or growing buckets, where each build should add to an index set's run history
-rather than create a new index set. It describes today's operating pattern for
-recurring builds. It does not describe automatic incremental listing:
-`index build` does not currently have a `--since` mode, a built-in delta
-report, or historical query flags.
+rather than create a new index set. It describes the repeat-build pattern and
+the `index build --since` mode for incremental top-ups.
 
 ## Mental Model
 
@@ -76,6 +74,52 @@ latest prefix plan until a full-coverage audit build is run. That tradeoff is
 intentional for recurring operational builds: Gonimbus avoids interpreting
 "not listed in this scope" as "deleted from the source."
 
+`index build --since` follows the same rule. A since build is not a
+full-coverage audit, even when it exits successfully, so it skips soft-delete.
+Objects deleted outside the since listing plan can remain visible until a
+full-coverage audit build runs.
+
+## Incremental Top-Ups with `--since`
+
+Use `--since <timestamp>` when a recurring build should ingest objects modified
+at or after a known lower bound:
+
+```bash
+gonimbus index build --job manifests/current.yaml --since 2026-07-02T00:00:00Z
+```
+
+Use `--since auto` to let Gonimbus read the latest successful run for the same
+IndexSet and use that run's start time as the lower bound:
+
+```bash
+gonimbus index build --job manifests/current.yaml --since auto
+```
+
+Bare `--since` is accepted as shorthand for `--since auto`.
+
+The watermark comes only from Gonimbus-written run metadata for the same
+IndexSet. If the prior successful run is missing, unreadable, ambiguous, or in
+the future, Gonimbus fails closed to full enumeration and prints a warning. It
+does not fabricate `now`, use source-object metadata as authority, or produce
+an empty listing scope.
+
+Dry-run plans do not open the local index database. `--dry-run --since auto`
+therefore shows the fail-closed full-enumeration preview; use an explicit
+timestamp with dry-run to inspect the narrowed date-partition prefix plan.
+
+For manifests with `build.scope.type: date_partitions`, `--since` narrows the
+date range before provider LIST calls. This is the mode that reduces
+enumeration cost for date-partitioned layouts. Mixed `union` scopes can report
+`enumeration_reduction: partial` when only some child scopes can be narrowed;
+the remaining child scopes still use full enumeration with a last-modified
+ingest filter. For non-date-ordered layouts, Gonimbus cannot infer a cheaper
+listing plan from a timestamp; it falls back to full enumeration with that same
+filter and reports that enumeration reduction was not applied.
+
+Each since run prints a small delta report by effective crawl prefix:
+`added`, `changed`, and `unchanged`. The report is emitted on the same
+operator-controlled output surfaces as the normal run summary.
+
 ## Recommended Pattern
 
 1. Create one manifest per operational shard, such as a prefix, collection, or
@@ -83,11 +127,13 @@ intentional for recurring operational builds: Gonimbus avoids interpreting
 2. Keep the manifest identity stable for repeat builds of the same shard.
 3. Run frequent scoped builds for current or otherwise active shards.
 4. Continue rebuilding recent shards through the close window.
-5. Freeze closed shards unless an audit or incident response requires a rebuild.
-6. Schedule periodic full-coverage audit builds when deletion detection matters.
-7. Compare run counts and stats after each scheduled build before treating the
+5. Use `--since auto` for steady-state top-ups when the manifest identity stays
+   stable.
+6. Freeze closed shards unless an audit or incident response requires a rebuild.
+7. Schedule periodic full-coverage audit builds when deletion detection matters.
+8. Compare run counts and stats after each scheduled build before treating the
    run as ready for downstream queries.
-8. Export validated runs to an index hub so other operators can hydrate the
+9. Export validated runs to an index hub so other operators can hydrate the
    current run without rebuilding.
 
 ## Useful Commands
@@ -144,12 +190,13 @@ gonimbus index hydrate \
 
 ## Current Limits
 
-Today, recurring builds are repeat listings over the manifest's effective
-scope. They are the supported pattern for steady-state operations, but they are
-not automatic delta builds. Gonimbus does not yet provide:
+`--since` reduces enumeration only when the manifest can map the watermark to a
+narrower listing plan, such as `date_partitions`. It is not a general
+provider-side modified-time query for arbitrary key layouts.
 
-- `index build --since` for provider-side delta listing
-- A native "new since last run" report
+Gonimbus does not yet provide:
+
+- query-time historical object views over prior runs
 - `index query --at-run` for historical run snapshots
 - `index query --since-run` for query-time deltas
 

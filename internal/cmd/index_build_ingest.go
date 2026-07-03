@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,9 @@ type indexIngestWriter struct {
 	objectsIngested  int64
 	prefixesIngested int64
 	errorCount       int64
+	deltaReport      bool
+	deltaByPrefix    map[string]indexBuildDeltaCounts
+	deltaPrefixes    []string
 
 	// Error tracking flags for partial run detection
 	sawThrottle     bool
@@ -75,6 +79,8 @@ type indexIngestWriter struct {
 type indexIngestWriterConfig struct {
 	ObjectBatchSize int
 	PrefixBatchSize int
+	DeltaReport     bool
+	DeltaPrefixes   []string
 }
 
 // newIndexIngestWriter creates a streaming ingest writer.
@@ -94,6 +100,10 @@ func newIndexIngestWriter(
 	if prefixBatchSize <= 0 {
 		prefixBatchSize = DefaultPrefixBatchSize
 	}
+	deltaPrefixes := append([]string(nil), cfg.DeltaPrefixes...)
+	sort.SliceStable(deltaPrefixes, func(i, j int) bool {
+		return len(deltaPrefixes[i]) > len(deltaPrefixes[j])
+	})
 
 	// Ensure basePrefix ends with '/' when set.
 	if basePrefix != "" && !strings.HasSuffix(basePrefix, "/") {
@@ -110,6 +120,9 @@ func newIndexIngestWriter(
 		prefixBatchSize: prefixBatchSize,
 		objectBatch:     make([]indexstore.ObjectRow, 0, objectBatchSize),
 		prefixBatch:     make([]indexstore.PrefixStatRow, 0, prefixBatchSize),
+		deltaReport:     cfg.DeltaReport,
+		deltaByPrefix:   make(map[string]indexBuildDeltaCounts),
+		deltaPrefixes:   deltaPrefixes,
 	}
 }
 
@@ -325,6 +338,7 @@ func (w *indexIngestWriter) Result() *indexBuildResult {
 		FinalStatus:      indexstore.RunStatusSuccess,
 		ObjectsIngested:  w.objectsIngested,
 		PrefixesIngested: w.prefixesIngested,
+		DeltaByPrefix:    copyIndexBuildDeltaCounts(w.deltaByPrefix),
 	}
 
 	// If any errors were seen, mark as partial
@@ -340,6 +354,12 @@ func (w *indexIngestWriter) Result() *indexBuildResult {
 func (w *indexIngestWriter) flushObjectsLocked(ctx context.Context) error {
 	if len(w.objectBatch) == 0 {
 		return nil
+	}
+
+	if w.deltaReport {
+		if err := w.classifyObjectDeltaLocked(ctx); err != nil {
+			return err
+		}
 	}
 
 	if err := indexstore.BatchUpsertObjects(ctx, w.db, w.objectBatch); err != nil {
@@ -365,6 +385,92 @@ func (w *indexIngestWriter) flushPrefixesLocked(ctx context.Context) error {
 	w.prefixesIngested += int64(len(w.prefixBatch))
 	w.prefixBatch = w.prefixBatch[:0] // Clear batch, keep capacity
 	return nil
+}
+
+func (w *indexIngestWriter) classifyObjectDeltaLocked(ctx context.Context) error {
+	for _, row := range w.objectBatch {
+		existing, err := indexstore.GetObject(ctx, w.db, row.IndexSetID, row.RelKey)
+		if err != nil {
+			return err
+		}
+		prefix := w.deltaPrefixForRelKey(row.RelKey)
+		counts := w.deltaByPrefix[prefix]
+		switch {
+		case existing == nil || existing.DeletedAt != nil:
+			counts.Added++
+		case objectRowChanged(existing, row):
+			counts.Changed++
+		default:
+			counts.Unchanged++
+		}
+		w.deltaByPrefix[prefix] = counts
+	}
+	return nil
+}
+
+func (w *indexIngestWriter) deltaPrefixForRelKey(relKey string) string {
+	fullKey := relKey
+	if w.basePrefix != "" {
+		fullKey = w.basePrefix + relKey
+	}
+	for _, prefix := range w.deltaPrefixes {
+		if strings.HasPrefix(fullKey, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+func (w *indexIngestWriter) setDeltaPrefixes(prefixes []string) {
+	if !w.deltaReport {
+		return
+	}
+	w.deltaPrefixes = append([]string(nil), prefixes...)
+	sort.SliceStable(w.deltaPrefixes, func(i, j int) bool {
+		return len(w.deltaPrefixes[i]) > len(w.deltaPrefixes[j])
+	})
+}
+
+func objectRowChanged(existing *indexstore.ObjectRow, candidate indexstore.ObjectRow) bool {
+	if existing == nil {
+		return true
+	}
+	if existing.SizeBytes != candidate.SizeBytes || existing.ETag != candidate.ETag {
+		return true
+	}
+	if !stringPtrEqual(existing.StorageClass, candidate.StorageClass) {
+		return true
+	}
+	switch {
+	case existing.LastModified == nil && candidate.LastModified == nil:
+		return false
+	case existing.LastModified == nil || candidate.LastModified == nil:
+		return true
+	default:
+		return !existing.LastModified.Equal(*candidate.LastModified)
+	}
+}
+
+func stringPtrEqual(a, b *string) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
+}
+
+func copyIndexBuildDeltaCounts(in map[string]indexBuildDeltaCounts) map[string]indexBuildDeltaCounts {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]indexBuildDeltaCounts, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 // Compile-time check that indexIngestWriter implements output.Writer.

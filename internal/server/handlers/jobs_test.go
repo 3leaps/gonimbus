@@ -31,12 +31,13 @@ func TestJobsHandlerSubmitStartsIndexBuild(t *testing.T) {
 	}}
 	h := newJobsHandlerForTest(store, starter, &fakeJobStopper{})
 
-	reqBody := fmt.Sprintf(`{"type":"index.build","manifest_path":%q,"name":"nightly","metadata":{"site":"s1"}}`, manifestPath)
+	reqBody := fmt.Sprintf(`{"type":"index.build","manifest_path":%q,"name":"nightly","since":"auto","metadata":{"site":"s1"}}`, manifestPath)
 	rec := serveJobsRequest(h, http.MethodPost, "/api/v1/jobs", reqBody)
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Equal(t, manifestPath, starter.manifestPath)
 	require.Equal(t, "nightly", starter.name)
+	require.Equal(t, "auto", starter.opts.Since)
 	require.Equal(t, "s1", starter.opts.Metadata["site"])
 	require.Equal(t, jobregistry.JobTypeIndexBuild, starter.opts.JobType)
 

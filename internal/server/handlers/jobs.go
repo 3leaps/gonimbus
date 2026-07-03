@@ -59,6 +59,7 @@ type submitJobRequest struct {
 	ManifestPath string            `json:"manifest_path,omitempty"`
 	ManifestURI  string            `json:"manifest_uri,omitempty"`
 	Name         string            `json:"name,omitempty"`
+	Since        string            `json:"since,omitempty"`
 	Dedupe       bool              `json:"dedupe,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
@@ -94,6 +95,7 @@ func (h *JobsHandler) Submit(w http.ResponseWriter, r *http.Request) {
 
 	job, err := h.starter.StartIndexBuildBackground(manifestPath, strings.TrimSpace(req.Name), jobregistry.BackgroundOptions{
 		Dedupe:   req.Dedupe,
+		Since:    strings.TrimSpace(req.Since),
 		JobType:  jobregistry.JobTypeIndexBuild,
 		Metadata: metadata,
 	})

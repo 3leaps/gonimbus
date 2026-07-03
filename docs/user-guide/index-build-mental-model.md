@@ -39,6 +39,12 @@ objects, a filtered build still receives those 100M object summaries from the
 provider. The value of filtering is that Gonimbus does not store or follow up on
 objects that fail the ingest predicates.
 
+`index build --since` uses both levers. On a date-partitioned
+`build.scope`, it narrows the date prefix plan before LIST and then applies a
+last-modified ingest filter. On non-date layouts, it cannot reduce enumeration;
+the run reports that boundary and falls back to full enumeration plus the
+last-modified ingest filter.
+
 Use `gonimbus index build --job <manifest> --dry-run` before large builds. The
 dry run prints the derived prefixes or scope plan, which is the best early signal
 for whether the job will enumerate a bounded partition or a very broad prefix.
@@ -103,6 +109,12 @@ Scoped builds are not full-coverage audits. They intentionally skip
 soft-delete by default because objects outside the scope were not checked. Use a
 full-coverage audit build when deletion detection across the whole index set is
 required.
+
+Since builds are also not full-coverage audits. `--since auto` reads the latest
+successful Gonimbus run for the same IndexSet and uses that run's start time as
+the lower bound. If the watermark cannot be resolved safely, Gonimbus falls back
+to full enumeration and warns instead of fabricating a timestamp or using an
+empty scope.
 
 ## Practical Guidance For Orchestrators
 

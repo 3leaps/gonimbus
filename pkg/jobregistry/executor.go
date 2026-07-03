@@ -37,6 +37,7 @@ func (e *Executor) StderrPath(jobID string) string {
 
 type BackgroundOptions struct {
 	Dedupe   bool
+	Since    string
 	JobType  string
 	Metadata map[string]string
 }
@@ -103,7 +104,11 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 		}
 	}
 
-	cmd := exec.Command(exe, "index", "build", "--job", absManifest, "--_managed-job-id", jobID)
+	args := []string{"index", "build", "--job", absManifest, "--_managed-job-id", jobID}
+	if since := strings.TrimSpace(opts.Since); since != "" {
+		args = append(args, "--since", since)
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = stdoutFile
 	cmd.Stderr = stderrFile
 	cmd.Env = os.Environ()
@@ -127,7 +132,7 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 		LastHeartbeat: func() *time.Time { t := now; return &t }(),
 		StdoutPath:    e.StdoutPath(jobID),
 		StderrPath:    e.StderrPath(jobID),
-		Metadata:      cloneMetadata(opts.Metadata),
+		Metadata:      indexBuildBackgroundMetadata(opts),
 	}
 	if err := e.store.Write(rec); err != nil {
 		return nil, err
@@ -154,6 +159,17 @@ func cloneMetadata(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
+	}
+	return out
+}
+
+func indexBuildBackgroundMetadata(opts BackgroundOptions) map[string]string {
+	out := cloneMetadata(opts.Metadata)
+	if since := strings.TrimSpace(opts.Since); since != "" {
+		if out == nil {
+			out = map[string]string{}
+		}
+		out["since"] = since
 	}
 	return out
 }
