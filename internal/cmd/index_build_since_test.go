@@ -260,13 +260,15 @@ func TestIndexBuildSinceSuccessfulRunDoesNotSoftDeleteOutOfScopeRows(t *testing.
 	t.Cleanup(restore)
 
 	oldTime := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	previousRun, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
 	require.NoError(t, indexstore.BatchUpsertObjects(ctx, db, []indexstore.ObjectRow{{
 		IndexSetID:    indexSet.IndexSetID,
 		RelKey:        "site-a/2026-07-01/old.json",
 		SizeBytes:     100,
 		LastModified:  &oldTime,
 		ETag:          "old",
-		LastSeenRunID: "run_previous",
+		LastSeenRunID: previousRun.RunID,
 		LastSeenAt:    oldTime,
 	}}))
 
