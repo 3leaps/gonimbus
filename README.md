@@ -9,7 +9,7 @@
 
 Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and crawl of cloud object storage. It produces machine-friendly outputs (JSONL baseline) and favors **prefix-first listing** with doublestar matching to stay fast and predictable.
 
-**Scale**: Tested with 32M+ object buckets. Path-scoped index builds reduce listing costs by 99%+ on date-partitioned data.
+**Scale**: Tested with 32M+ object buckets. Path-scoped index builds reduce listing costs by 99%+ on date-partitioned data, and recurring `--since` top-ups narrow re-listing to recent partitions instead of re-enumerating the whole scope every run.
 
 ## Modes
 
@@ -136,10 +136,17 @@ for S3-compatible destinations when they cross the default threshold; see
 [Local Index](docs/user-guide/index.md#large-hub-exports) and
 [Reflow](docs/user-guide/reflow.md#large-object-writes-and-multipart-upload)
 for local-resource and lifecycle guidance.
+Recurring index jobs no longer have to re-enumerate their whole listing scope to
+catch the day's arrivals: `index build --since <timestamp>|auto` narrows the listing
+plan on date-partitioned layouts and reports whether that reduction actually
+applied, so a top-up never silently pays full enumeration cost. Downstream
+consumers can then use `index query --since-run <run_id>` to process only the
+current objects added or changed after a known run; see
+[Steady-State Index Operations](docs/user-guide/steady-state-index-operations.md).
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the current
+See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the current
 operator notes.
 
 ### Outputs
@@ -155,7 +162,8 @@ Two output modes for content access:
 - **Content inspection** (JSONL-only): `content head` reads first N bytes with base64 encoding. See [docs/releases/v0.1.6.md](docs/releases/v0.1.6.md).
 - **Content streaming** (mixed framing): `stream get` delivers full content with JSONL headers + raw bytes. See [docs/releases/v0.1.5.md](docs/releases/v0.1.5.md).
 
-Optional DuckDB sink for local indexing.
+Optional local index sink backed by an embedded SQLite database for fast
+repeated queries on large buckets — see [Local Index](docs/user-guide/index.md).
 
 ## Examples
 
@@ -175,8 +183,10 @@ gonimbus atlas build --from-index <id> --output <dir> # Build content-addressed 
 # Index workflow (for large buckets)
 gonimbus index init            # Initialize local index database
 gonimbus index build --job <path>  # Build index from crawl
+gonimbus index build --since auto --job <path>  # Incremental top-up (narrows date-partitioned re-listing)
 gonimbus index build --background --job <path>  # Background build with job tracking
 gonimbus index query <uri>     # Query indexed objects by pattern/storage class
+gonimbus index query <uri> --since-run <run_id>  # Emit current objects added/changed since a run
 gonimbus index enrich-with-head <index-set-id>  # Cache HEAD-derived archive/restore metadata
 gonimbus index list            # List local indexes
 gonimbus index stats           # Show index statistics and resumable run state

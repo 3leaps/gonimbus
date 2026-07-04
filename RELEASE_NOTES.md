@@ -4,6 +4,74 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.6 (2026-07-04)
+
+**Incremental Index Top-Ups and Query-Time Deltas**
+
+v0.3.6 makes recurring index operations cheaper and easier to feed into
+downstream workflows. `index build --since <timestamp>|auto` can narrow
+date-partitioned listing plans before provider LIST calls, and it reports
+whether that reduction actually applied. `index query --since-run <run_id>`
+then emits the current objects first seen or meaningfully changed after a
+successful run, giving consumers a forward delta without rebuilding or
+relisting the source.
+
+### Incremental top-ups with `--since`
+
+Use `--since <timestamp>` when a recurring build has a known lower bound, or
+`--since auto` to derive the watermark from the latest successful run in the
+same IndexSet.
+
+On date-partitioned scopes, Gonimbus narrows the listing plan before provider
+enumeration. On layouts that cannot be narrowed safely, the run falls back to
+full enumeration with a last-modified ingest filter and reports that reduction
+was not applied. That signal is intentional: operators should verify the
+since-plan output instead of assuming every since run was cheaper.
+
+Since builds are not full-coverage audits. They skip soft-delete and can leave
+deleted objects visible until a periodic full audit build runs.
+
+### Forward deltas with `--since-run`
+
+`index query --since-run <run_id>` emits current active rows first seen or
+changed after a successful run in the same IndexSet. Output keeps the existing
+`gonimbus.index.object.v1` record type and adds optional delta fields such as
+`change_kind`, `first_seen_run_id`, and `last_changed_run_id`.
+
+This is latest-state delta query, not point-in-time history. The current index
+does not ship `--at-run`, and `--include-deleted --since-run` is rejected
+instead of implying deletion history.
+
+### Compatibility
+
+Index schema v8 adds first-seen and last-changed run metadata. Older indexes
+migrate forward automatically, but `--since-run` rejects boundary runs before
+the migration baseline because precise added/changed classification starts at
+that point.
+
+Index database timestamp storage is now normalized to a fixed-width UTC text
+form preserved by both the default SQLite driver and optional
+`gonimbus_libsql` builds. CLI and JSON output timestamps remain unchanged, but
+direct `index.db` queriers may see internal timestamp fields stored with a
+`+0000 UTC` suffix instead of `Z`. Existing RFC3339/RFC3339Nano stored values
+remain readable and migrate automatically.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.6
+```
+
+Existing full-build and normal query workflows remain compatible with v0.3.5.
+Add `--since auto` only after confirming the manifest identity is stable for
+the shard you intend to top up, and keep periodic full-coverage audits when
+deletion detection matters.
+
+See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the complete release
+notes.
+
+---
+
 ## v0.3.5 (2026-07-02)
 
 **Multipart Export/Reflow and the Migrated Reflow Engine**
@@ -131,89 +199,7 @@ surfaces (`pkg/reflow` and direct `pkg/provider/gcs` imports).
 See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the complete release
 notes.
 
----
-
-## v0.3.3 (2026-06-17)
-
-**Adaptive Reflow Concurrency and Reflow Surface Hardening**
-
-v0.3.3 makes large `transfer reflow` runs faster to right-size and safer to
-trust. `--parallel` becomes a requested ceiling that the engine adapts within —
-discovering an endpoint's sustainable rate on its own — while a resource-derived
-cap keeps even an extreme value from harming the host. The release also hardens
-the reflow surface: capability-aware collision fallback, fail-closed priority
-probe extraction, and classified, credential-redacted error output.
-
-### Adaptive Reflow Concurrency
-
-`transfer reflow --parallel` is now a **requested ceiling**, not a fixed worker
-count. A run resolves an effective ceiling — `min(--parallel, resource cap)`,
-where the cap is derived from available memory and the file-descriptor limit —
-then, in adaptive mode (the default), varies active concurrency within it using
-throttle-aware AIMD control. `--no-adaptive` runs fixed at the effective ceiling.
-
-```bash
-# Ask for up to 256 workers; the engine settles where the endpoint + host allow.
-gonimbus transfer reflow --stdin \
-  --dest 's3://dest-bucket/reflowed/' \
-  --parallel 256 < reflow-input.jsonl
-```
-
-The clamp is never silent (`concurrency_ceiling_reason` plus a stderr notice),
-connection-error bursts freeze the ramp rather than cutting it, and additive
-`concurrency_*` run/summary fields record the rate a run converged to. On
-S3-compatible destinations, reflow opts into HTTP transport sizing derived from
-the effective ceiling so high concurrency reuses connections. See
-[Concurrency and Throughput](docs/user-guide/concurrency-and-throughput.md) for
-the provider-generalized model.
-
-### Capability-Aware Collision Fallback
-
-On S3-compatible stores that do not honor `If-None-Match: *`, no-overwrite
-collision modes previously risked a silent degrade to overwrite. Reflow now runs
-a semantic IfAbsent probe (`honored` / `not_honored` / `inconclusive`) and fails
-closed to a HEAD/compare fallback, emitting a structured warning and
-`gonimbus.reflow.summary.v1` audit fields for the probe status, fallback
-activation, and degraded-path object count.
-
-### Probe Priority Fallbacks
-
-`content probe` `xml_xpath` extractors accept `xpath_priority` for ordered
-fallback tags, with `resolved_priority`, `resolved_xpath`, `truncated_fallback`,
-and `truncated_fallback_count` audit fields. Lower-priority values observed at a
-truncated read boundary fail closed to quarantine rather than being accepted as
-final matches.
-
-### Reflow Error Classification and Redaction
-
-Resumable reflow aborts emit a compact classified cause for automation, and
-published reflow error/warning messages redact credential material from provider
-URLs — every URL query value is redacted by default — so credential-bearing
-provider errors do not leak into JSONL, logs, or CI artifacts.
-
-### Library API
-
-This release has additive Stable API changes and no Stable breaks:
-`pkg/provider/s3.Config` adds optional `MaxIdleConnsPerHost` and
-`MaxConnsPerHost` transport sizing fields. Zero values preserve the AWS SDK
-defaults.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.3
-```
-
-Existing `transfer reflow --parallel` invocations keep working; the value is now
-a requested ceiling, adaptive control is on by default, and `--no-adaptive`
-restores fixed-concurrency behavior at the resource-capped effective ceiling.
-
-See [docs/releases/v0.3.3.md](docs/releases/v0.3.3.md) for the complete release
-notes.
-
----
-
-For v0.3.0 and earlier release notes, see [docs/releases/](docs/releases/) or
+For v0.3.3 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
 <!-- v0.3.0 entry removed when v0.3.3 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.0.md -->
@@ -222,3 +208,4 @@ the [CHANGELOG](CHANGELOG.md).
 <!-- v0.2.1 entry removed when v0.3.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.1.md -->
 <!-- v0.3.1 entry removed when v0.3.4 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.1.md -->
 <!-- v0.3.2 entry removed when v0.3.5 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.2.md -->
+<!-- v0.3.3 entry removed when v0.3.6 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.3.md -->

@@ -120,6 +120,55 @@ Each since run prints a small delta report by effective crawl prefix:
 `added`, `changed`, and `unchanged`. The report is emitted on the same
 operator-controlled output surfaces as the normal run summary.
 
+### Confirming the reduction signal
+
+Treat the since-plan signal as required run evidence. A successful `--since`
+build means the index was updated; it does not automatically mean provider
+enumeration was reduced.
+
+Check the run output before treating a top-up as the cheaper path:
+
+- `enumeration_reduction: yes` means the listing plan was narrowed before
+  provider LIST.
+- `enumeration_reduction: partial` means only part of a mixed scope could be
+  narrowed; the remaining scope still used full enumeration with the
+  last-modified ingest filter.
+- `enumeration_reduction: no` means Gonimbus could not derive a cheaper
+  prefix plan and used full enumeration with the ingest filter.
+
+The stored `since_plan` event also includes
+`enumeration_reduction_applied` and `enumeration_reduction_partial` booleans
+for scripts that should not parse display text.
+
+The fallback is deliberately visible. If you expected reduction and the run
+reported `no`, check whether the manifest has a `date_partitions` scope, the
+manifest identity still matches the prior IndexSet, and the resolved watermark
+is plausible for the operational shard.
+
+### Downstream deltas with `--since-run`
+
+After a successful top-up, downstream consumers can read current objects added
+or changed after a completed boundary run:
+
+```bash
+gonimbus index query \
+  --index-set idx_da038d8171b4a9ba \
+  --since-run run_1783087200000000000
+```
+
+This is useful for "process only new or changed objects" flows. For example, a
+consumer can feed the JSONL output into a reorganization or validation stage
+without relisting the source.
+
+The boundary run must be known, successful, and in the same IndexSet. Gonimbus
+compares stored run ordering metadata rather than sorting run ID strings. For
+indexes migrated from older schemas, precise added/changed classification
+starts at the migration baseline; older boundary runs are rejected.
+
+`--since-run` is latest-state delta query. It does not reconstruct historical
+snapshots and does not report deletion deltas. `--include-deleted --since-run`
+is rejected rather than implying deletion history.
+
 ## Recommended Pattern
 
 1. Create one manifest per operational shard, such as a prefix, collection, or
@@ -129,12 +178,14 @@ operator-controlled output surfaces as the normal run summary.
 4. Continue rebuilding recent shards through the close window.
 5. Use `--since auto` for steady-state top-ups when the manifest identity stays
    stable.
-6. Freeze closed shards unless an audit or incident response requires a rebuild.
-7. Schedule periodic full-coverage audit builds when deletion detection matters.
-8. Compare run counts and stats after each scheduled build before treating the
-   run as ready for downstream queries.
-9. Export validated runs to an index hub so other operators can hydrate the
-   current run without rebuilding.
+6. Confirm the since-plan signal reports the expected enumeration reduction.
+7. Use `index query --since-run <run_id>` for downstream current-state deltas.
+8. Freeze closed shards unless an audit or incident response requires a rebuild.
+9. Schedule periodic full-coverage audit builds when deletion detection matters.
+10. Compare run counts and stats after each scheduled build before treating the
+    run as ready for downstream queries.
+11. Export validated runs to an index hub so other operators can hydrate the
+    current run without rebuilding.
 
 ## Useful Commands
 

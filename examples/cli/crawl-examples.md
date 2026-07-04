@@ -66,9 +66,6 @@ gonimbus crawl --job manifest.yaml --quiet | \
 ## Pipeline Examples
 
 ```bash
-# Index to DuckDB (future feature)
-gonimbus crawl --job manifest.yaml | gonimbus index --db inventory.duckdb
-
 # Stream to S3 (using aws cli)
 gonimbus crawl --job manifest.yaml | \
     aws s3 cp - s3://results-bucket/crawl-$(date +%Y%m%d).jsonl
