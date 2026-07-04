@@ -128,16 +128,20 @@ enumeration was reduced.
 
 Check the run output before treating a top-up as the cheaper path:
 
-- `enumeration_reduction: applied` means the listing plan was narrowed before
+- `enumeration_reduction: yes` means the listing plan was narrowed before
   provider LIST.
 - `enumeration_reduction: partial` means only part of a mixed scope could be
   narrowed; the remaining scope still used full enumeration with the
   last-modified ingest filter.
-- `enumeration_reduction: none` means Gonimbus could not derive a cheaper
+- `enumeration_reduction: no` means Gonimbus could not derive a cheaper
   prefix plan and used full enumeration with the ingest filter.
 
+The stored `since_plan` event also includes
+`enumeration_reduction_applied` and `enumeration_reduction_partial` booleans
+for scripts that should not parse display text.
+
 The fallback is deliberately visible. If you expected reduction and the run
-reported `none`, check whether the manifest has a `date_partitions` scope, the
+reported `no`, check whether the manifest has a `date_partitions` scope, the
 manifest identity still matches the prior IndexSet, and the resolved watermark
 is plausible for the operational shard.
 
