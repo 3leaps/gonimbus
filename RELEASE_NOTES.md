@@ -4,7 +4,7 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
-## v0.3.6 (2026-07-03)
+## v0.3.6 (2026-07-04)
 
 **Incremental Index Top-Ups and Query-Time Deltas**
 

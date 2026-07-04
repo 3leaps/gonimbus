@@ -12,11 +12,11 @@ Gonimbus is a Go-first **library + CLI + optional server** for large-scale inspe
 
 ## Core Capabilities
 
-- **Providers**: S3/S3-compatible first; GCS fast-follow.
+- **Providers**: S3/S3-compatible and GCS as first-class providers.
 - **Auth**: provider-default chains as first-class citizens (profiles/roles/SSO for AWS; ADC/device flow for GCP). Raw keys remain an explicit fallback.
 - **Matching**: doublestar semantics over normalized keys; derive the strongest list prefix per pattern and enforce sharding when patterns have no prefix.
 - **Crawl Engine**: bounded pipelines (lister → matcher → optional enricher → writer) with backpressure, rate limiting, and cancellation.
-- **Outputs**: JSONL envelopes (object/error/progress). Includes a DuckDB sink for local indexing; JSONL remains the contract.
+- **Outputs**: JSONL envelopes (object/error/progress). Local index store backed by an embedded SQLite database; JSONL remains the contract.
 - **Doctoring**: environment/auth checks plus `whoami`-style visibility for active identities.
 
 ## Non-Goals
@@ -27,6 +27,6 @@ Gonimbus is a Go-first **library + CLI + optional server** for large-scale inspe
 ## Near-Term Roadmap (v0.1.x)
 
 - S3-compatible support with access key/secret; AWS profiles/assume-role; GCP ADC/device flow.
-- Prefix-first crawler with doublestar matcher and JSONL writer; DuckDB sink.
+- Prefix-first crawler with doublestar matcher and JSONL writer; local index store.
 - Server skeleton with streaming responses and local endpoints exercised via forge-workhorse-groningen.
 - Schema-validated job manifests and outputs (Crucible-aligned).

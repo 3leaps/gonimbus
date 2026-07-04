@@ -15,7 +15,7 @@ changes.
 
 ## [Unreleased]
 
-## [0.3.6] - 2026-07-03
+## [0.3.6] - 2026-07-04
 
 **Incremental index top-ups and query-time forward deltas.**
 
