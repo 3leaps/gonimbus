@@ -89,6 +89,14 @@
       "type": "integer",
       "minimum": 1
     },
+    "data_root": {
+      "type": "string",
+      "description": "Optional app-wide operational data root for indexes, job records, and operation checkpoints. Empty uses the platform app-data default."
+    },
+    "data_dir": {
+      "type": "string",
+      "description": "Compatibility alias for data_root."
+    },
     "on_collision": {
       "type": "string",
       "description": "Default collision behavior for transfer reflow. log is a deprecated alias for skip-if-duplicate.",

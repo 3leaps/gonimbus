@@ -42,7 +42,7 @@ type resolvedIndexRun struct {
 type resumeLeaseHeartbeatContextKey struct{}
 
 func openDefaultOperationCheckpointStore(ctx context.Context) (*opcheckpoint.Store, error) {
-	dataDir, err := indexDataDir()
+	rootDir, err := appDataPath(appDataClassOperationCheckpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func openDefaultOperationCheckpointStore(ctx context.Context) (*opcheckpoint.Sto
 		forbidden = appendForbiddenRoot(forbidden, wd)
 	}
 	return opcheckpoint.Open(ctx, opcheckpoint.Config{
-		AppDataDir:     dataDir,
+		RootDir:        rootDir,
 		ForbiddenRoots: forbidden,
 	})
 }

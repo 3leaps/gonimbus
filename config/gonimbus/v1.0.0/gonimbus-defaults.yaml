@@ -67,3 +67,8 @@ debug:
 
 # Number of background workers (if applicable)
 workers: 4
+# Optional operational data root relocation.
+#
+# Empty uses the platform app-data default. Set data_root in user config for a
+# persistent relocation, or set GONIMBUS_DATA_DIR for a one-process override.
+data_root: ""

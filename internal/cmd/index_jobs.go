@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -83,11 +82,7 @@ func init() {
 }
 
 func indexJobsRootDir() (string, error) {
-	dataDir, err := indexDataDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dataDir, "jobs", "index-build"), nil
+	return appDataPath(appDataClassIndexBuildJobs)
 }
 
 func runIndexJobsList(cmd *cobra.Command, _ []string) error {

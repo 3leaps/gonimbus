@@ -129,9 +129,11 @@ func ensureStoreDir(path string) error {
 		return nil
 	}
 
-	// #nosec G301 -- data directories use 0755 for multi-user access compatibility
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create store directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("chmod store directory: %w", err)
 	}
 	return nil
 }

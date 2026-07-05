@@ -242,6 +242,8 @@ GONIMBUS_HOST=localhost         # Server host
 GONIMBUS_LOG_LEVEL=info         # Log level (trace/debug/info/warn/error)
 GONIMBUS_METRICS_PORT=9090      # Metrics port
 GONIMBUS_READONLY=1             # Disable provider-side mutations
+GONIMBUS_DATA_DIR=/mnt/gonimbus-data  # One-process operational data root override
+# GONIMBUS_DATA_ROOT is accepted as an alias for GONIMBUS_DATA_DIR.
 ```
 
 Copy `.env.example` to `.env` for local development.

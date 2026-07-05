@@ -54,15 +54,15 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 
 	jobID := uuid.New().String()
 	jobDir := e.store.JobDir(jobID)
-	if err := os.MkdirAll(jobDir, 0755); err != nil {
+	if err := mkdirSecure(jobDir); err != nil {
 		return nil, fmt.Errorf("create job dir: %w", err)
 	}
 
-	stdoutFile, err := os.Create(e.StdoutPath(jobID))
+	stdoutFile, err := os.OpenFile(e.StdoutPath(jobID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create stdout log: %w", err)
 	}
-	stderrFile, err := os.Create(e.StderrPath(jobID))
+	stderrFile, err := os.OpenFile(e.StderrPath(jobID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		_ = stdoutFile.Close()
 		return nil, fmt.Errorf("create stderr log: %w", err)

@@ -218,6 +218,8 @@ func setDefaults() {
 
 	// Safety defaults
 	viper.SetDefault("readonly", false)
+	viper.SetDefault("data_root", "")
+	viper.SetDefault("data_dir", "")
 
 	// Reflow provenance defaults
 	viper.SetDefault("provenance.mode", "none")

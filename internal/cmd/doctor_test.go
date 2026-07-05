@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -128,6 +130,48 @@ func TestDoctorFlagsRegistered(t *testing.T) {
 	require.NotNil(t, doctorCmd.Flags().Lookup("endpoint"))
 	require.NotNil(t, doctorCmd.Flags().Lookup("region"))
 	require.NotNil(t, doctorCmd.Flags().Lookup("probe-uri"))
+}
+
+func TestRunAppDataRootCheckReportsResolvedRoot(t *testing.T) {
+	resetAppDataRootTestState(t)
+
+	root := filepath.Join(t.TempDir(), "data")
+	t.Setenv("GONIMBUS_DATA_DIR", root)
+
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{Use: "doctor"}
+	cmd.SetOut(&stdout)
+	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
+	require.NoError(t, err)
+
+	require.True(t, runAppDataRootCheck(out, 1, 1))
+
+	got := stdout.String()
+	require.Contains(t, got, "Checking data root")
+	require.Contains(t, got, normalizedPathForTest(t, root))
+	require.Contains(t, got, "source=GONIMBUS_DATA_DIR")
+	require.Contains(t, got, "status=creatable")
+}
+
+func TestRunAppDataRootCheckReportsLooseExistingMode(t *testing.T) {
+	resetAppDataRootTestState(t)
+
+	root := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.Chmod(root, 0o755))
+	t.Setenv("GONIMBUS_DATA_DIR", root)
+
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{Use: "doctor"}
+	cmd.SetOut(&stdout)
+	out, err := newDiagnosticPrinter(cmd, diagnosticLogFormatPlain)
+	require.NoError(t, err)
+
+	require.False(t, runAppDataRootCheck(out, 1, 1))
+
+	got := stdout.String()
+	require.Contains(t, got, "mode=0755")
+	require.Contains(t, got, "recommended: 0700")
 }
 
 func TestDoctorS3OptionsRequireProviderS3(t *testing.T) {

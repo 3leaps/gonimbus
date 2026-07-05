@@ -113,10 +113,12 @@ func TestLoad(t *testing.T) {
 		require.NoError(t, os.Setenv("GONIMBUS_PORT", "3000"))
 		require.NoError(t, os.Setenv("GONIMBUS_LOG_LEVEL", "warn"))
 		require.NoError(t, os.Setenv("GONIMBUS_METRICS_ENABLED", "false"))
+		require.NoError(t, os.Setenv("GONIMBUS_DATA_DIR", "/tmp/gonimbus-data"))
 		defer func() {
 			_ = os.Unsetenv("GONIMBUS_PORT")
 			_ = os.Unsetenv("GONIMBUS_LOG_LEVEL")
 			_ = os.Unsetenv("GONIMBUS_METRICS_ENABLED")
+			_ = os.Unsetenv("GONIMBUS_DATA_DIR")
 		}()
 
 		cfg, err := Load(ctx)
@@ -127,6 +129,7 @@ func TestLoad(t *testing.T) {
 		assert.Equal(t, 3000, cfg.Server.Port)
 		assert.Equal(t, "warn", cfg.Logging.Level)
 		assert.False(t, cfg.Metrics.Enabled)
+		assert.Equal(t, "/tmp/gonimbus-data", cfg.DataDir)
 	})
 
 	// Test config precedence: runtime > env > defaults
@@ -190,6 +193,8 @@ func TestEnvSpecs(t *testing.T) {
 	assert.True(t, envVarNames["GONIMBUS_PORT"], "PORT env var must be mapped")
 	assert.True(t, envVarNames["GONIMBUS_HOST"], "HOST env var must be mapped")
 	assert.True(t, envVarNames["GONIMBUS_METRICS_PORT"], "METRICS_PORT env var must be mapped")
+	assert.True(t, envVarNames["GONIMBUS_DATA_ROOT"], "DATA_ROOT env var must be mapped")
+	assert.True(t, envVarNames["GONIMBUS_DATA_DIR"], "DATA_DIR env var must be mapped")
 }
 
 func TestDurationParsing(t *testing.T) {
