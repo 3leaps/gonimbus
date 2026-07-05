@@ -44,7 +44,7 @@ func (s *Store) ensureRoot() error {
 	if strings.TrimSpace(s.root) == "" {
 		return fmt.Errorf("job registry root dir is empty")
 	}
-	return os.MkdirAll(s.root, 0755)
+	return mkdirSecure(s.root)
 }
 
 func (s *Store) Write(record *JobRecord) error {
@@ -60,7 +60,7 @@ func (s *Store) Write(record *JobRecord) error {
 	}
 
 	jobDir := s.JobDir(jobID)
-	if err := os.MkdirAll(jobDir, 0755); err != nil {
+	if err := mkdirSecure(jobDir); err != nil {
 		return fmt.Errorf("create job dir: %w", err)
 	}
 
@@ -76,6 +76,10 @@ func (s *Store) Write(record *JobRecord) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp job file: %w", err)
+	}
 
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
@@ -89,7 +93,14 @@ func (s *Store) Write(record *JobRecord) error {
 	if err := os.Rename(tmpName, finalPath); err != nil {
 		return fmt.Errorf("rename job file: %w", err)
 	}
-	return nil
+	return os.Chmod(finalPath, 0o600)
+}
+
+func mkdirSecure(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
 }
 
 func (s *Store) Get(jobID string) (*JobRecord, error) {

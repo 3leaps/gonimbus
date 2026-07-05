@@ -259,5 +259,7 @@ func getEnvSpecs() []EnvVarSpec {
 
 		// Workers
 		{Name: prefix + "WORKERS", Path: []string{"workers"}, Type: EnvInt},
+		{Name: prefix + "DATA_ROOT", Path: []string{"data_root"}, Type: EnvString},
+		{Name: prefix + "DATA_DIR", Path: []string{"data_dir"}, Type: EnvString},
 	}
 }

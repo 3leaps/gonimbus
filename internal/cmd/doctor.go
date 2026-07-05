@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -100,11 +101,11 @@ func runDoctor(cmd *cobra.Command, args []string) {
 
 	allChecks := true
 	checkNum := 1
-	totalChecks := 5
+	totalChecks := 6
 
 	// Add S3 checks if provider specified
 	if doctorProvider == "s3" {
-		totalChecks = 9 // credentials, source, endpoint/region, expiry
+		totalChecks = 10 // credentials, source, endpoint/region, expiry
 		if s3Opts.Probe != nil {
 			totalChecks++
 		}
@@ -161,7 +162,13 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	}
 	checkNum++
 
-	// Check 5: Environment
+	// Check 5: App data root
+	if !runAppDataRootCheck(out, checkNum, totalChecks) {
+		allChecks = false
+	}
+	checkNum++
+
+	// Check 6: Environment
 	out.Info(fmt.Sprintf("[%d/%d] Checking environment... ✅ %s/%s", checkNum, totalChecks, runtime.GOOS, runtime.GOARCH),
 		zap.String("os", runtime.GOOS),
 		zap.String("arch", runtime.GOARCH))
@@ -184,6 +191,113 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	}
 	out.Info("")
 	out.Info("=== End Diagnostics ===")
+}
+
+func runAppDataRootCheck(out *diagnosticPrinter, checkNum, totalChecks int) bool {
+	resolved, err := resolveAppDataRoot()
+	if err != nil {
+		out.Error(fmt.Sprintf("[%d/%d] Checking data root... ❌ %v", checkNum, totalChecks, err),
+			zap.Error(err))
+		return false
+	}
+
+	status, err := appDataRootAccessStatus(resolved.Dir)
+	if err != nil {
+		out.Error(fmt.Sprintf("[%d/%d] Checking data root... ❌ path=%s source=%s status=%s error=%v", checkNum, totalChecks, resolved.Dir, resolved.Source, status, err),
+			zap.String("data_root", resolved.Dir),
+			zap.String("source", resolved.Source),
+			zap.String("status", status),
+			zap.Error(err))
+		return false
+	}
+
+	if loose, mode := appDataRootLooseMode(resolved.Dir); loose {
+		out.Warn(fmt.Sprintf("[%d/%d] Checking data root... ⚠️  path=%s source=%s status=%s mode=%04o (recommended: 0700)", checkNum, totalChecks, resolved.Dir, resolved.Source, status, mode),
+			zap.String("data_root", resolved.Dir),
+			zap.String("source", resolved.Source),
+			zap.String("status", status),
+			zap.String("mode", fmt.Sprintf("%04o", mode)))
+		return false
+	}
+
+	out.Info(fmt.Sprintf("[%d/%d] Checking data root... ✅ path=%s source=%s status=%s", checkNum, totalChecks, resolved.Dir, resolved.Source, status),
+		zap.String("data_root", resolved.Dir),
+		zap.String("source", resolved.Source),
+		zap.String("status", status))
+	return true
+}
+
+func appDataRootAccessStatus(root string) (string, error) {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" {
+		return "", fmt.Errorf("data root is empty")
+	}
+
+	info, err := os.Stat(root)
+	if err == nil {
+		if !info.IsDir() {
+			return "not-directory", fmt.Errorf("data root is not a directory")
+		}
+		if err := probeWritableDir(root); err != nil {
+			return "not-writable", err
+		}
+		return "writable", nil
+	}
+	if !os.IsNotExist(err) {
+		return "not-readable", err
+	}
+
+	parent := nearestExistingParent(root)
+	if parent == "" {
+		return "not-creatable", fmt.Errorf("no existing parent for data root")
+	}
+	if err := probeWritableDir(parent); err != nil {
+		return "not-creatable", err
+	}
+	return "creatable", nil
+}
+
+func appDataRootLooseMode(root string) (bool, os.FileMode) {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return false, 0
+	}
+	mode := info.Mode().Perm()
+	return mode&0o077 != 0, mode
+}
+
+func nearestExistingParent(path string) string {
+	dir := filepath.Clean(path)
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		info, err := os.Stat(parent)
+		if err == nil && info.IsDir() {
+			return parent
+		}
+		dir = parent
+	}
+}
+
+func probeWritableDir(dir string) error {
+	f, err := os.CreateTemp(dir, ".gonimbus-doctor-write-test-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return err
+	}
+	closeErr := f.Close()
+	removeErr := os.Remove(name)
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
 }
 
 type doctorS3Options struct {

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	gfconfig "github.com/fulmenhq/gofulmen/config"
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -678,19 +677,15 @@ func openMigratedIndexDB(ctx context.Context, path string) (*sql.DB, error) {
 }
 
 func indexDataDir() (string, error) {
-	identity := GetAppIdentity()
-	if identity == nil || strings.TrimSpace(identity.ConfigName) == "" {
-		return "", fmt.Errorf("app identity is not available")
-	}
-	return gfconfig.GetAppDataDir(identity.ConfigName), nil
-}
-
-func indexRootDir() (string, error) {
-	dataDir, err := indexDataDir()
+	resolved, err := resolveAppDataRoot()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dataDir, "indexes"), nil
+	return resolved.Dir, nil
+}
+
+func indexRootDir() (string, error) {
+	return appDataPath(appDataClassIndexes)
 }
 
 func listIndexDBPaths() ([]string, error) {

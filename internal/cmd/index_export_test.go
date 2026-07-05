@@ -150,6 +150,26 @@ func TestBuildCompleteJSON_Basic(t *testing.T) {
 	assert.NotEmpty(t, source["run_ended_at"])
 }
 
+func TestBuildCompleteJSONDoesNotLeakLocalDataRoot(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	indexSet := &indexstore.IndexSet{
+		IndexSetID: "idx_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		BaseURI:    "s3://bucket/prefix/",
+		Provider:   "s3",
+	}
+	run := &indexstore.IndexRun{
+		RunID:      "run_1709654400000000000",
+		IndexSetID: indexSet.IndexSetID,
+		StartedAt:  time.Now().UTC(),
+		Status:     indexstore.RunStatusSuccess,
+	}
+
+	data, err := buildCompleteJSON(indexSet, run, nil, "deadbeef"+"deadbeef"+"deadbeef"+"deadbeef"+"deadbeef"+"deadbeef"+"deadbeef"+"deadbeef", 4096, "", 0)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), localRoot)
+	require.NotContains(t, string(data), filepath.Base(localRoot))
+}
+
 func TestBuildCompleteJSON_WithIdentity(t *testing.T) {
 	indexSet := &indexstore.IndexSet{
 		IndexSetID: "idx_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",

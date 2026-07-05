@@ -14,6 +14,10 @@ type Config struct {
 	Health  HealthConfig  `mapstructure:"health"`
 	Debug   DebugConfig   `mapstructure:"debug"`
 	Workers int           `mapstructure:"workers"`
+	// DataRoot optionally relocates gonimbus operational state. DataDir is
+	// accepted as a compatibility alias; DataRoot wins when both are set.
+	DataRoot string `mapstructure:"data_root"`
+	DataDir  string `mapstructure:"data_dir"`
 }
 
 // ServerConfig contains HTTP server configuration

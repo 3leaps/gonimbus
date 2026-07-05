@@ -61,6 +61,12 @@ Scoped builds reduce provider listing work by limiting the prefix plan. They are
 appropriate for date-partitioned or shard-oriented operations, but they are not
 full-coverage audits. This distinction matters most for deletion detection.
 
+For recurring date-partitioned operations, make the manifest scoped first, then
+layer `--since` on top. A `date_partitions` scope can reduce the recurring
+baseline before any incremental watermark is applied because Gonimbus lists only
+the partition prefixes described by the manifest instead of the whole source.
+`--since` then narrows within that scoped plan for steady-state top-ups.
+
 Soft-delete behavior depends on run coverage:
 
 - A successful full-coverage build can mark previously seen objects as deleted

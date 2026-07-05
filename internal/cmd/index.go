@@ -46,7 +46,7 @@ func runIndexInit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(indexDir, 0755); err != nil {
+		if err := mkdirAppDataDir(indexDir); err != nil {
 			return fmt.Errorf("create index directory: %w", err)
 		}
 		_, _ = fmt.Fprintln(os.Stdout, "Index directory initialized")

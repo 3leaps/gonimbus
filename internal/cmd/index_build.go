@@ -19,7 +19,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	gfconfig "github.com/fulmenhq/gofulmen/config"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
@@ -191,11 +190,11 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		// In foreground mode, we don't capture logs yet, but we still expose
 		// the expected paths for consistency.
 		if strings.TrimSpace(indexBuildManagedJobID) == "" {
-			_ = os.MkdirAll(store.JobDir(jobID), 0755)
-			if f, err := os.OpenFile(job.StdoutPath, os.O_CREATE, 0644); err == nil {
+			_ = mkdirAppDataDir(store.JobDir(jobID))
+			if f, err := os.OpenFile(job.StdoutPath, os.O_CREATE, 0o600); err == nil {
 				_ = f.Close()
 			}
-			if f, err := os.OpenFile(job.StderrPath, os.O_CREATE, 0644); err == nil {
+			if f, err := os.OpenFile(job.StderrPath, os.O_CREATE, 0o600); err == nil {
 				_ = f.Close()
 			}
 		}
@@ -1451,7 +1450,10 @@ func resolveIndexDBPath(explicit string, identityResult *indexstore.IndexSetIden
 		return resolvedIndexDB{}, fmt.Errorf("index identity is required to derive default index path")
 	}
 
-	dataDir := gfconfig.GetAppDataDir(identity.ConfigName)
+	dataDir, err := indexDataDir()
+	if err != nil {
+		return resolvedIndexDB{}, err
+	}
 	indexDir := filepath.Join(dataDir, "indexes", identityResult.DirName)
 	return resolvedIndexDB{
 		Path:          filepath.Join(indexDir, "index.db"),
@@ -1465,12 +1467,12 @@ func writeIndexIdentityFile(indexDir string, identityResult *indexstore.IndexSet
 		return nil
 	}
 
-	if err := os.MkdirAll(indexDir, 0755); err != nil {
+	if err := mkdirAppDataDir(indexDir); err != nil {
 		return fmt.Errorf("create index directory: %w", err)
 	}
 
 	identityPath := filepath.Join(indexDir, "identity.json")
-	if err := os.WriteFile(identityPath, []byte(identityResult.CanonicalJSON+"\n"), 0644); err != nil {
+	if err := os.WriteFile(identityPath, []byte(identityResult.CanonicalJSON+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write identity.json: %w", err)
 	}
 	return nil
@@ -1481,7 +1483,7 @@ func writeIndexManifestFile(indexDir string, m *manifest.IndexManifest) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(indexDir, 0755); err != nil {
+	if err := mkdirAppDataDir(indexDir); err != nil {
 		return fmt.Errorf("create index directory: %w", err)
 	}
 
@@ -1491,7 +1493,7 @@ func writeIndexManifestFile(indexDir string, m *manifest.IndexManifest) error {
 	}
 
 	manifestPath := filepath.Join(indexDir, "manifest.json")
-	if err := os.WriteFile(manifestPath, append(b, '\n'), 0644); err != nil {
+	if err := os.WriteFile(manifestPath, append(b, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil

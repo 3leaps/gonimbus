@@ -236,6 +236,47 @@ The probe is read-only and never uses `HeadBucket`, `PutObject`, or
 `DeleteObject`. `HeadObject` and `ListObjectsV2(MaxKeys=1)` are low-cost
 interactive checks, but do not run `doctor` inside high-volume loops.
 
+#### Operational Data Root
+
+Gonimbus stores local indexes, index-build job records, and resumable operation
+checkpoints under one app-wide data root. By default, the root follows the
+platform app-data location; if `XDG_DATA_HOME` is set, the default is derived
+from that location.
+
+Use `GONIMBUS_DATA_DIR` for a one-process override:
+
+```bash
+GONIMBUS_DATA_DIR=/mnt/gonimbus-data gonimbus index build --job index-manifest.yaml
+```
+
+Use `data_root` in the user config for a persistent override:
+
+```yaml
+data_root: /mnt/gonimbus-data
+```
+
+Precedence is:
+
+1. `GONIMBUS_DATA_DIR` (`GONIMBUS_DATA_ROOT` is accepted as an environment alias)
+2. `data_root` in config (`data_dir` is accepted as an alias)
+3. `XDG_DATA_HOME`
+4. Platform default
+
+The override is an app-wide root, not an index-only setting. Keep indexes,
+index-build job records, reflow state, and operation checkpoints under the
+same root so resume and diagnostics stay coherent.
+
+Gonimbus does not auto-migrate existing local data when the root changes. To
+relocate, stop active jobs, copy the existing data-root contents to the new
+directory, set the override, then run `gonimbus doctor` and an index command
+such as `gonimbus index doctor` before resuming scheduled work.
+
+Do not place the data root inside a git working tree. Gonimbus rejects any
+resolved data root that lands there, including roots derived from `XDG_DATA_HOME`
+or through symlinked components. Prefer a host-local directory with owner-only
+permissions; avoid cloud-synced, backed-up, or network-shared folders unless
+your local data-at-rest controls explicitly cover that location.
+
 ### `index init`
 
 Initialize the local index database. Run once before building indexes.
