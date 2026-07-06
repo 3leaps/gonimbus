@@ -146,7 +146,7 @@ current objects added or changed after a known run; see
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the current
+See [docs/releases/v0.3.7.md](docs/releases/v0.3.7.md) for the current
 operator notes.
 
 ### Outputs
