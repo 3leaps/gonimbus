@@ -87,6 +87,12 @@ type JournalSummary struct {
 	Records uint64
 }
 
+type Journal struct {
+	Header  JournalHeader
+	Records []ObjectRecord
+	Footer  JournalFooter
+}
+
 type JournalWriter struct {
 	mu       sync.Mutex
 	path     string
@@ -240,7 +246,34 @@ func ValidateJournal(path string) (JournalSummary, error) {
 		return JournalSummary{}, fmt.Errorf("open journal: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	return validateJournalReader(file)
+	journal, records, err := readJournalReader(file, false)
+	if err != nil {
+		return JournalSummary{}, err
+	}
+	return JournalSummary{
+		Header:  journal.Header,
+		Footer:  journal.Footer,
+		Records: records,
+	}, nil
+}
+
+func ReadJournal(path string) (Journal, error) {
+	dir, name, err := splitJournalPath(path)
+	if err != nil {
+		return Journal{}, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return Journal{}, fmt.Errorf("open journal directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	file, err := root.Open(name)
+	if err != nil {
+		return Journal{}, fmt.Errorf("open journal: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	journal, _, err := readJournalReader(file, true)
+	return journal, err
 }
 
 func TruncateToLastFullLine(path string) (int64, error) {
@@ -313,9 +346,10 @@ func splitJournalPath(path string) (string, string, error) {
 	return dir, name, nil
 }
 
-func validateJournalReader(r io.Reader) (JournalSummary, error) {
+func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error) {
 	reader := bufio.NewReader(r)
-	var summary JournalSummary
+	var journal Journal
+	var records uint64
 	var sawHeader bool
 	var sawFooter bool
 	lineNo := 0
@@ -324,91 +358,95 @@ func validateJournalReader(r io.Reader) (JournalSummary, error) {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if line != "" {
-					return JournalSummary{}, fmt.Errorf("%w: partial trailing line", ErrIncompleteJournal)
+					return Journal{}, 0, fmt.Errorf("%w: partial trailing line", ErrIncompleteJournal)
 				}
 				break
 			}
-			return JournalSummary{}, fmt.Errorf("read journal line: %w", err)
+			return Journal{}, 0, fmt.Errorf("read journal line: %w", err)
 		}
 		lineNo++
 		line = strings.TrimSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\r")
 		if strings.TrimSpace(line) == "" {
-			return JournalSummary{}, fmt.Errorf("%w: empty line %d", ErrInvalidJournal, lineNo)
+			return Journal{}, 0, fmt.Errorf("%w: empty line %d", ErrInvalidJournal, lineNo)
 		}
 		var env struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal([]byte(line), &env); err != nil {
-			return JournalSummary{}, fmt.Errorf("%w: decode line %d: %v", ErrInvalidJournal, lineNo, err)
+			return Journal{}, 0, fmt.Errorf("%w: decode line %d: %v", ErrInvalidJournal, lineNo, err)
 		}
 		switch env.Type {
 		case JournalHeaderType:
 			if sawHeader {
-				return JournalSummary{}, fmt.Errorf("%w: duplicate header", ErrInvalidJournal)
+				return Journal{}, 0, fmt.Errorf("%w: duplicate header", ErrInvalidJournal)
 			}
-			if summary.Records != 0 || sawFooter {
-				return JournalSummary{}, fmt.Errorf("%w: header after records", ErrInvalidJournal)
+			if records != 0 || sawFooter {
+				return Journal{}, 0, fmt.Errorf("%w: header after records", ErrInvalidJournal)
 			}
 			var header JournalHeader
 			if err := json.Unmarshal([]byte(line), &header); err != nil {
-				return JournalSummary{}, fmt.Errorf("%w: decode header: %v", ErrInvalidJournal, err)
+				return Journal{}, 0, fmt.Errorf("%w: decode header: %v", ErrInvalidJournal, err)
 			}
 			header = normalizeHeader(header)
 			if err := validateHeader(header); err != nil {
-				return JournalSummary{}, err
+				return Journal{}, 0, err
 			}
-			summary.Header = header
+			journal.Header = header
 			sawHeader = true
 		case ObjectRecordType:
 			if !sawHeader {
-				return JournalSummary{}, fmt.Errorf("%w: record before header", ErrInvalidJournal)
+				return Journal{}, 0, fmt.Errorf("%w: record before header", ErrInvalidJournal)
 			}
 			if sawFooter {
-				return JournalSummary{}, fmt.Errorf("%w: record after footer", ErrInvalidJournal)
+				return Journal{}, 0, fmt.Errorf("%w: record after footer", ErrInvalidJournal)
 			}
 			var rec ObjectRecord
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
-				return JournalSummary{}, fmt.Errorf("%w: decode record: %v", ErrInvalidJournal, err)
+				return Journal{}, 0, fmt.Errorf("%w: decode record: %v", ErrInvalidJournal, err)
 			}
 			if err := validateObjectRecord(rec); err != nil {
-				return JournalSummary{}, err
+				return Journal{}, 0, err
 			}
-			if rec.JournalID != summary.Header.JournalID {
-				return JournalSummary{}, fmt.Errorf("%w: record journal_id mismatch", ErrInvalidJournal)
+			if rec.JournalID != journal.Header.JournalID {
+				return Journal{}, 0, fmt.Errorf("%w: record journal_id mismatch", ErrInvalidJournal)
 			}
-			if rec.Sequence != summary.Records+1 {
-				return JournalSummary{}, fmt.Errorf("%w: non-monotonic record sequence %d, expected %d", ErrInvalidJournal, rec.Sequence, summary.Records+1)
+			expected := records + 1
+			if rec.Sequence != expected {
+				return Journal{}, 0, fmt.Errorf("%w: non-monotonic record sequence %d, expected %d", ErrInvalidJournal, rec.Sequence, expected)
 			}
-			summary.Records++
+			records++
+			if collectRecords {
+				journal.Records = append(journal.Records, normalizeObjectRecord(rec, rec.JournalID, rec.Sequence))
+			}
 		case JournalFooterType:
 			if !sawHeader {
-				return JournalSummary{}, fmt.Errorf("%w: footer before header", ErrInvalidJournal)
+				return Journal{}, 0, fmt.Errorf("%w: footer before header", ErrInvalidJournal)
 			}
 			if sawFooter {
-				return JournalSummary{}, fmt.Errorf("%w: duplicate footer", ErrInvalidJournal)
+				return Journal{}, 0, fmt.Errorf("%w: duplicate footer", ErrInvalidJournal)
 			}
 			var footer JournalFooter
 			if err := json.Unmarshal([]byte(line), &footer); err != nil {
-				return JournalSummary{}, fmt.Errorf("%w: decode footer: %v", ErrInvalidJournal, err)
+				return Journal{}, 0, fmt.Errorf("%w: decode footer: %v", ErrInvalidJournal, err)
 			}
 			footer = normalizeFooter(footer)
-			if err := validateFooter(summary.Header, footer, summary.Records); err != nil {
-				return JournalSummary{}, err
+			if err := validateFooter(journal.Header, footer, records); err != nil {
+				return Journal{}, 0, err
 			}
-			summary.Footer = footer
+			journal.Footer = footer
 			sawFooter = true
 		default:
-			return JournalSummary{}, fmt.Errorf("%w: unknown record type %q", ErrInvalidJournal, env.Type)
+			return Journal{}, 0, fmt.Errorf("%w: unknown record type %q", ErrInvalidJournal, env.Type)
 		}
 	}
 	if !sawHeader {
-		return JournalSummary{}, fmt.Errorf("%w: missing header", ErrIncompleteJournal)
+		return Journal{}, 0, fmt.Errorf("%w: missing header", ErrIncompleteJournal)
 	}
 	if !sawFooter {
-		return JournalSummary{}, fmt.Errorf("%w: missing footer", ErrIncompleteJournal)
+		return Journal{}, 0, fmt.Errorf("%w: missing footer", ErrIncompleteJournal)
 	}
-	return summary, nil
+	return journal, records, nil
 }
 
 func writeJSONLine(w io.Writer, v any) error {
