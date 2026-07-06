@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,11 +26,12 @@ const (
 )
 
 type SegmentWriterConfig struct {
-	Dir                  string
-	IndexSetID           string
-	RunID                string
-	CreatedAt            time.Time
-	TargetRowsPerSegment int
+	Dir                    string
+	IndexSetID             string
+	RunID                  string
+	CreatedAt              time.Time
+	TargetRowsPerSegment   int
+	AllowExistingIdentical bool
 }
 
 type InternalManifest struct {
@@ -138,6 +140,10 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 }
 
 func WriteInternalManifestFile(path string, manifest InternalManifest) error {
+	return writeInternalManifestFile(path, manifest, false)
+}
+
+func writeInternalManifestFile(path string, manifest InternalManifest, allowExistingIdentical bool) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("manifest path is required")
@@ -148,6 +154,10 @@ func WriteInternalManifestFile(path string, manifest InternalManifest) error {
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create manifest directory: %w", err)
+	}
+	data, err := marshalIndentedJSON(manifest)
+	if err != nil {
+		return fmt.Errorf("write manifest: %w", err)
 	}
 	temp, err := os.CreateTemp(dir, ".manifest-*.json.tmp")
 	if err != nil {
@@ -161,9 +171,7 @@ func WriteInternalManifestFile(path string, manifest InternalManifest) error {
 		}
 	}()
 
-	enc := json.NewEncoder(temp)
-	enc.SetIndent("", "  ")
-	encodeErr := enc.Encode(manifest)
+	_, encodeErr := temp.Write(data)
 	closeErr := temp.Close()
 	if encodeErr != nil {
 		return fmt.Errorf("write manifest: %w", encodeErr)
@@ -172,11 +180,36 @@ func WriteInternalManifestFile(path string, manifest InternalManifest) error {
 		return fmt.Errorf("close manifest: %w", closeErr)
 	}
 	if err := linkImmutableManifest(tempPath, filepath.Join(dir, name)); err != nil {
+		if allowExistingIdentical && errors.Is(err, os.ErrExist) {
+			existing, readErr := os.ReadFile(filepath.Join(dir, name))
+			if readErr != nil {
+				return fmt.Errorf("read existing manifest: %w", readErr)
+			}
+			if string(existing) == string(data) {
+				return nil
+			}
+		}
 		return err
 	}
 	cleanupTemp = false
 	_ = os.Remove(tempPath)
 	return nil
+}
+
+func ReadInternalManifestFile(path string) (InternalManifest, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return InternalManifest{}, fmt.Errorf("manifest path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return InternalManifest{}, fmt.Errorf("read manifest: %w", err)
+	}
+	var manifest InternalManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return InternalManifest{}, fmt.Errorf("parse manifest: %w", err)
+	}
+	return manifest, nil
 }
 
 func ReadSegmentFile(path string) ([]CurrentObjectRow, error) {
@@ -217,6 +250,39 @@ func ReadSegmentFile(path string) ([]CurrentObjectRow, error) {
 	return out, nil
 }
 
+func ReadSegmentFileVerified(dir string, descriptor SegmentDescriptor) ([]CurrentObjectRow, error) {
+	path, err := safeSegmentPath(dir, descriptor.Path)
+	if err != nil {
+		return nil, err
+	}
+	if descriptor.Digest.Algorithm != "sha256" {
+		return nil, fmt.Errorf("unsupported segment digest algorithm %q", descriptor.Digest.Algorithm)
+	}
+	if strings.TrimSpace(descriptor.Digest.Hex) == "" {
+		return nil, fmt.Errorf("segment digest is required")
+	}
+	got, err := sha256HexFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if got != descriptor.Digest.Hex {
+		return nil, fmt.Errorf("segment digest mismatch for %s", descriptor.Path)
+	}
+	return ReadSegmentFile(path)
+}
+
+func ReadManifestRows(segmentDir string, manifest InternalManifest) ([]CurrentObjectRow, error) {
+	rows := make([]CurrentObjectRow, 0, manifest.Counts.Rows)
+	for _, segment := range manifest.Segments {
+		segmentRows, err := ReadSegmentFileVerified(segmentDir, segment)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, segmentRows...)
+	}
+	return rows, nil
+}
+
 func writeSegmentFile(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, error) {
 	temp, err := os.CreateTemp(config.Dir, ".segment-*.parquet.tmp")
 	if err != nil {
@@ -243,6 +309,20 @@ func writeSegmentFile(config SegmentWriterConfig, ordinal int, rows []CurrentObj
 	descriptor := segmentDescriptor(config, ordinal, rows, digestHex)
 	finalPath := filepath.Join(config.Dir, descriptor.Path)
 	if err := linkImmutable(tempPath, finalPath); err != nil {
+		if config.AllowExistingIdentical && errors.Is(err, os.ErrExist) {
+			existingDigest, digestErr := sha256HexFile(finalPath)
+			if digestErr != nil {
+				return SegmentDescriptor{}, fmt.Errorf("hash existing segment: %w", digestErr)
+			}
+			if existingDigest == digestHex {
+				info, statErr := os.Stat(finalPath)
+				if statErr != nil {
+					return SegmentDescriptor{}, fmt.Errorf("stat existing segment: %w", statErr)
+				}
+				descriptor.SizeBytes = info.Size()
+				return descriptor, nil
+			}
+		}
 		return SegmentDescriptor{}, err
 	}
 	cleanupTemp = false
@@ -313,6 +393,39 @@ func linkImmutableManifest(tempPath, finalPath string) error {
 		return fmt.Errorf("create immutable manifest: %w", err)
 	}
 	return nil
+}
+
+func marshalIndentedJSON(value any) ([]byte, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func sha256HexFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func safeSegmentPath(dir string, name string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	name = filepath.Clean(strings.TrimSpace(name))
+	if dir == "" {
+		return "", fmt.Errorf("segment directory is required")
+	}
+	if name == "" || name == "." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
+		return "", fmt.Errorf("invalid segment path")
+	}
+	return filepath.Join(dir, name), nil
 }
 
 func normalizeSegmentWriterConfig(config SegmentWriterConfig) SegmentWriterConfig {

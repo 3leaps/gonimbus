@@ -1,13 +1,11 @@
 package indexsubstrate
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,7 +70,7 @@ func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
 		require.Equal(t, segment.Digest.Hex, digest)
 		require.Greater(t, segment.SizeBytes, int64(0))
 
-		segmentRows, err := ReadSegmentFile(path)
+		segmentRows, err := ReadSegmentFileVerified(dir, segment)
 		require.NoError(t, err)
 		reconstructed = append(reconstructed, segmentRows...)
 	}
@@ -177,6 +175,26 @@ func TestWriteSegmentSetRejectsInvalidRows(t *testing.T) {
 	}
 }
 
+func TestReadSegmentFileVerifiedRejectsDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	manifest, err := WriteSegmentSet(SegmentWriterConfig{
+		Dir:        dir,
+		IndexSetID: "idx_test",
+		RunID:      "run_test",
+		CreatedAt:  base,
+	}, []CurrentObjectRow{
+		segmentTestRow("idx_test", "data/a.xml", 10, `"etag-a"`, base, nil, nil, nil, nil),
+	})
+	require.NoError(t, err)
+	require.Len(t, manifest.Segments, 1)
+	manifest.Segments[0].Digest.Hex = strings.Repeat("0", 64)
+
+	_, err = ReadSegmentFileVerified(dir, manifest.Segments[0])
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "digest mismatch")
+}
+
 func segmentTestRow(indexSetID, relKey string, size int64, etag string, seenAt time.Time, storageClass, contentType, restoreState *string, restoreExpiry *time.Time) CurrentObjectRow {
 	lastModified := seenAt.Add(-time.Hour)
 	headEnrichedAt := seenAt.Add(time.Minute)
@@ -198,17 +216,4 @@ func segmentTestRow(indexSetID, relKey string, size int64, etag string, seenAt t
 		LastSeenRunID:    "run_test",
 		LastSeenAt:       seenAt,
 	}
-}
-
-func sha256HexFile(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = file.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
