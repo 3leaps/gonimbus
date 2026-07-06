@@ -4,6 +4,61 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.3.7 (2026-07-05)
+
+**Operational Data Root Overrides**
+
+v0.3.7 gives deployments a single supported data-root control for local
+operational state. `GONIMBUS_DATA_DIR` sets a one-process root, `data_root` sets
+the same root in config, and Gonimbus now routes index databases, index-build job
+records, server job defaults, and operation checkpoints through the shared
+resolver.
+
+`GONIMBUS_DATA_ROOT` and `data_dir` remain supported aliases, but new automation
+should prefer `GONIMBUS_DATA_DIR` and `data_root`.
+
+### Relocating operational state
+
+Use an environment override for a single process:
+
+```bash
+GONIMBUS_DATA_DIR=/mnt/gonimbus-data gonimbus index build --job index.yaml
+```
+
+Use config for a persistent relocation:
+
+```yaml
+data_root: /mnt/gonimbus-data
+```
+
+`gonimbus doctor` now reports the resolved data root, the source that selected
+it, and whether Gonimbus can write or create it.
+
+### Guardrails
+
+Resolved data roots inside a git working tree are rejected before state is
+created, regardless of source, including symlink-resolved paths. App-data
+directories and runtime state files are created with owner-only permissions
+where Gonimbus controls them.
+
+Changing the root does not migrate existing state. Move existing indexes, job
+records, and checkpoints deliberately, then verify the new root with
+`gonimbus doctor` before resuming production jobs.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.7
+```
+
+Existing command flags, manifest formats, and default platform app-data behavior
+remain compatible with v0.3.6.
+
+See [docs/releases/v0.3.7.md](docs/releases/v0.3.7.md) for the complete release
+notes.
+
+---
+
 ## v0.3.6 (2026-07-04)
 
 **Incremental Index Top-Ups and Query-Time Deltas**
@@ -138,68 +193,7 @@ notes.
 
 ---
 
-## v0.3.4 (2026-06-27)
-
-**Google Cloud Storage Provider and Library-Exposure Foundation**
-
-v0.3.4 widens the provider matrix beyond S3 and `file://` for the first time:
-Google Cloud Storage (`gs://`) becomes a first-class crawl/inspect source and
-`transfer reflow` destination, reusing the same adaptive-concurrency and
-IfAbsent-capability model already documented for S3. The release also lands the
-Experimental `pkg/reflow` library-exposure foundation, with CLI behavior
-unchanged.
-
-### Google Cloud Storage provider
-
-A bucket living in GCS no longer needs separate tooling to inspect, index, or
-reflow: the same records, index hub, and content-aware reflow semantics now apply
-to `gs://`, and cross-provider reflow (S3 → GCS, `file://` → GCS, GCS → S3) works
-through the one dispatch seam. GCS extends the provider matrix without forking the
-operating model.
-
-`gs://` works as a source and reflow destination across
-inspect/index/tree/stream/content/doctor and `transfer reflow`. GCS reports the
-same IfAbsent honored/probe-status summary fields as S3, maps `429` and
-`403`+`RESOURCE_EXHAUSTED` to `provider.ErrThrottled` (and `5xx`, including
-`503`, to `provider.ErrProviderUnavailable`), and plugs into the
-adaptive `--parallel` model. Authentication uses Application Default Credentials
-or service-account keys under the credential-source discipline (no URI- or
-manifest-sourced credential filepaths); `STORAGE_EMULATOR_HOST` is test-only.
-
-ETag-based `If-Match` conditional writes are unsupported (GCS uses generation
-preconditions), so `--on-collision overwrite-if-source-newer` is unavailable on
-GCS destinations and fails closed; IfAbsent `skip-if-duplicate` is supported.
-
-### Library-exposure foundation (Experimental)
-
-`pkg/reflow` exposes typed records, the adaptive-concurrency substrate, and
-provider-error redaction helpers as an Experimental surface; the CLI still drives
-the internal path. The migration completes in a later release.
-
-### Fixes and housekeeping
-
-- `--resume-run` restored across the v0.3.2 → v0.3.3 upgrade boundary
-  (op-checkpoint `no_adaptive` now omitted when unset; cross-version compat test).
-- Reflow probe operations now bounded by adaptive concurrency (probes back off
-  with copies under throttling; deadlock-free at the floor).
-- `golang.org/x/net` upgraded to v0.56.0.
-- Corrected broken `transfer reflow` rewrite examples in the shipped v0.2.1 /
-  v0.2.3 release notes.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.4
-```
-
-CLI workflows remain compatible with v0.3.3. GCS is a first-class CLI and server
-capability; the **Experimental** label applies only to the new Go package import
-surfaces (`pkg/reflow` and direct `pkg/provider/gcs` imports).
-
-See [docs/releases/v0.3.4.md](docs/releases/v0.3.4.md) for the complete release
-notes.
-
-For v0.3.3 and earlier release notes, see [docs/releases/](docs/releases/) or
+For v0.3.4 and earlier release notes, see [docs/releases/](docs/releases/) or
 the [CHANGELOG](CHANGELOG.md).
 
 <!-- v0.3.0 entry removed when v0.3.3 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.0.md -->
@@ -209,3 +203,4 @@ the [CHANGELOG](CHANGELOG.md).
 <!-- v0.3.1 entry removed when v0.3.4 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.1.md -->
 <!-- v0.3.2 entry removed when v0.3.5 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.2.md -->
 <!-- v0.3.3 entry removed when v0.3.6 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.3.md -->
+<!-- v0.3.4 entry removed when v0.3.7 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.4.md -->

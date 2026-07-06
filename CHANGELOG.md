@@ -15,6 +15,55 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-05
+
+**Operational data root overrides and repository-local state guardrails.**
+
+v0.3.7 gives operators a single supported way to relocate Gonimbus operational
+state away from the platform default app-data directory. `GONIMBUS_DATA_DIR`
+sets a one-process data root, `data_root` sets the same root in config, and the
+existing operational-state surfaces now resolve through that shared root instead
+of each choosing their own local path. The release also fails closed when a
+resolved data root would live inside a git working tree, regardless of source.
+See [`docs/releases/v0.3.7.md`](docs/releases/v0.3.7.md) for the narrative
+walkthrough.
+
+### Added
+
+- **App-wide data root override:** `GONIMBUS_DATA_DIR` controls the operational
+  data root for index databases, index-build job records, server job defaults,
+  and operation checkpoints. `GONIMBUS_DATA_ROOT` remains accepted as an
+  environment alias.
+- **Persistent config key:** `data_root` can be set in Gonimbus config for a
+  durable relocation. `data_dir` remains accepted as a compatibility alias.
+- **Doctor visibility:** `gonimbus doctor` reports the resolved data root,
+  source, and writability/creatability status so operators can verify a runtime
+  environment before a crawl, index build, or transfer.
+
+### Changed
+
+- **Single resolver for operational state:** indexes, index-build jobs, server
+  job defaults, and operation checkpoints now use the same data-root resolver.
+- **Platform defaults remain automatic:** when no override is set, Gonimbus uses
+  the platform app-data location, honoring `XDG_DATA_HOME` where the platform
+  config layer does.
+- **Local-state permissions tightened:** app-data directories and runtime state
+  files are created with owner-only permissions where Gonimbus controls the
+  path.
+
+### Fixed
+
+- **Repository-local state rejection:** resolved data roots inside a git working
+  tree are rejected before state is created, regardless of source, including
+  paths that enter the repository through symlinks.
+
+### Documentation
+
+- Added this v0.3.7 release page and refreshed rolling release notes.
+- Documented data-root precedence, no-auto-migration behavior, off-host storage
+  caution, and repository-local path rejection in the index user guide.
+- Updated README environment-variable examples and the current-release pointer.
+
 ## [0.3.6] - 2026-07-04
 
 **Incremental index top-ups and query-time forward deltas.**
@@ -1215,7 +1264,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/3leaps/gonimbus/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/3leaps/gonimbus/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/3leaps/gonimbus/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/3leaps/gonimbus/compare/v0.3.3...v0.3.4
