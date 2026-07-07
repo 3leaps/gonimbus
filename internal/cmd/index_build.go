@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/indexcompare"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -82,6 +83,7 @@ var (
 	indexBuildSummary            bool
 	indexBuildResumeRun          string
 	indexBuildSince              string
+	indexBuildFormat             string
 	indexBuildExperimentalEngine bool
 )
 
@@ -102,6 +104,7 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
+	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "sqlite", "Index artifact format to build (sqlite, both)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(experimental) build durable v2 snapshot through pkg/indexbuild")
 	_ = indexBuildCmd.Flags().MarkHidden("experimental-engine")
 	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
@@ -129,6 +132,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		if err := validateIndexBuildExperimentalEngineGlobalFlags(resumeRun); err != nil {
 			return err
 		}
+	}
+	if err := validateIndexBuildFormatFlags(resumeRun); err != nil {
+		return err
 	}
 	if resumeRun != "" {
 		return runIndexBuildResume(ctx, cmd, resumeRun)
@@ -235,6 +241,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		if err := validateEndpointURL(m.Connection.Endpoint); err != nil {
 			return fmt.Errorf("connection.endpoint: %w", err)
 		}
+	}
+	if err := validateIndexBuildFormatManifest(m); err != nil {
+		return err
 	}
 
 	// Build effective identity (manifest + CLI overrides)
@@ -423,7 +432,23 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	// Run crawl and ingest records (streaming - memory-bounded)
 	writeIndexBuildSinceStart(os.Stderr, sincePlan)
-	result, crawlErr := runCrawlForIndex(ctx, crawlManifest, db, indexSet.IndexSetID, run, runtimeFilter, nil, sincePlan.Enabled)
+	var result *indexBuildResult
+	var crawlErr error
+	var compareReport *indexcompare.Report
+	if selectedIndexBuildFormat() == "both" {
+		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters)
+		result = bothResult.Result
+		crawlErr = err
+		if bothResult.Report != nil {
+			compareReport = bothResult.Report
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			if emitErr := enc.Encode(compareReport); emitErr != nil && crawlErr == nil {
+				crawlErr = fmt.Errorf("emit compare result: %w", emitErr)
+			}
+		}
+	} else {
+		result, crawlErr = runCrawlForIndex(ctx, crawlManifest, db, indexSet.IndexSetID, run, runtimeFilter, nil, sincePlan.Enabled)
+	}
 	if crawlErr != nil {
 		classification := classifyIndexBuildRunError(crawlErr, m)
 		if classification.Resumable && indexBuildCheckpointEligible(checkpointCfg) {
@@ -530,6 +555,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		if err := printIndexBuildSummary(ctx, db, indexSet.IndexSetID, run.RunID, os.Stderr); err != nil {
 			return err
 		}
+	}
+	if compareReport != nil && !compareReport.ParityPassed {
+		return fmt.Errorf("index format parity failed")
 	}
 
 	return nil

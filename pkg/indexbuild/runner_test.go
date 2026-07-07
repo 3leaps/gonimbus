@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -87,6 +88,34 @@ func TestRunnerNormalizesProviderCoverageToRelKeyTombstones(t *testing.T) {
 	}
 	require.NotNil(t, byKey["missing.xml"].DeletedAt)
 	require.Equal(t, cfg.RunStartedAt, *byKey["missing.xml"].DeletedAt)
+}
+
+func TestRunnerFansOutOneObservedStreamToExtraSink(t *testing.T) {
+	cfg := testConfig(t, "fanout")
+	cfg.CrawlPrefixes = []string{"data/"}
+	sink := &captureObservationSink{}
+	cfg.ObservationSinks = []output.Writer{sink}
+
+	summary, err := NewRunner(cfg).Build(context.Background())
+	require.NoError(t, err)
+	require.True(t, sink.closed)
+	require.Equal(t, int64(2), summary.ObjectsObserved)
+	require.Equal(t, []string{"data/a.xml", "data/b.xml"}, sink.keys)
+
+	_, rows, err := ReadLatest(cfg.Paths.LatestPath)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, sink.keys[0], "data/"+rows[0].RelKey)
+	require.Equal(t, sink.keys[1], "data/"+rows[1].RelKey)
+}
+
+func TestRunnerDoesNotPublishWhenObservationSinkFails(t *testing.T) {
+	cfg := testConfig(t, "fanout-fail")
+	cfg.ObservationSinks = []output.Writer{failingObservationSink{}}
+
+	_, err := NewRunner(cfg).Build(context.Background())
+	require.ErrorContains(t, err, "observation sink 0 object")
+	require.NoFileExists(t, cfg.Paths.LatestPath)
 }
 
 func TestPartialCrawlJournalIsNotPublishableByRetry(t *testing.T) {
@@ -341,6 +370,57 @@ func (s *captureSink) OnEvent(_ context.Context, event Event) error {
 	s.events = append(s.events, event)
 	return nil
 }
+
+type captureObservationSink struct {
+	keys   []string
+	closed bool
+}
+
+func (s *captureObservationSink) WriteObject(_ context.Context, obj *output.ObjectRecord) error {
+	s.keys = append(s.keys, obj.Key)
+	return nil
+}
+
+func (s *captureObservationSink) WriteError(context.Context, *output.ErrorRecord) error { return nil }
+func (s *captureObservationSink) WriteProgress(context.Context, *output.ProgressRecord) error {
+	return nil
+}
+func (s *captureObservationSink) WriteSummary(context.Context, *output.SummaryRecord) error {
+	return nil
+}
+func (s *captureObservationSink) WritePrefix(context.Context, *output.PrefixRecord) error { return nil }
+func (s *captureObservationSink) WritePreflight(context.Context, *output.PreflightRecord) error {
+	return nil
+}
+func (s *captureObservationSink) WriteTransfer(context.Context, *output.TransferRecord) error {
+	return nil
+}
+func (s *captureObservationSink) WriteSkip(context.Context, *output.SkipRecord) error { return nil }
+func (s *captureObservationSink) Close() error {
+	s.closed = true
+	return nil
+}
+
+type failingObservationSink struct{}
+
+func (failingObservationSink) WriteObject(context.Context, *output.ObjectRecord) error {
+	return fmt.Errorf("forced failure")
+}
+
+func (failingObservationSink) WriteError(context.Context, *output.ErrorRecord) error { return nil }
+func (failingObservationSink) WriteProgress(context.Context, *output.ProgressRecord) error {
+	return nil
+}
+func (failingObservationSink) WriteSummary(context.Context, *output.SummaryRecord) error { return nil }
+func (failingObservationSink) WritePrefix(context.Context, *output.PrefixRecord) error   { return nil }
+func (failingObservationSink) WritePreflight(context.Context, *output.PreflightRecord) error {
+	return nil
+}
+func (failingObservationSink) WriteTransfer(context.Context, *output.TransferRecord) error {
+	return nil
+}
+func (failingObservationSink) WriteSkip(context.Context, *output.SkipRecord) error { return nil }
+func (failingObservationSink) Close() error                                        { return nil }
 
 func exportedPackageNames(t *testing.T) []string {
 	t.Helper()

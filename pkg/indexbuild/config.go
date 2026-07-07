@@ -8,6 +8,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -129,9 +130,17 @@ type Config struct {
 	Match      MatchConfig
 	Filter     *match.CompositeFilter
 	Crawl      crawler.Config
-	Paths      PathConfig
-	Coverage   []CoverageAttestation
-	PriorRows  []ObjectState
+	// CrawlPrefixes, when supplied, is the exact provider-prefix observation
+	// plan. It lets CLI adapters pass a manifest scope plan into the engine
+	// without making the engine import manifest or command packages.
+	CrawlPrefixes []string
+	// ObservationSinks receive the same observed crawl stream as the durable
+	// journal materializer. This is the library-owned fanout boundary used by
+	// CLI adapters to materialize compatibility formats from one observation.
+	ObservationSinks []output.Writer
+	Paths            PathConfig
+	Coverage         []CoverageAttestation
+	PriorRows        []ObjectState
 
 	RunStartedAt         time.Time
 	CreatedAt            time.Time
@@ -143,9 +152,9 @@ type Config struct {
 // String returns a redacted config summary. Provider handles, callbacks, and
 // local paths are rendered by presence only.
 func (c Config) String() string {
-	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, Paths:%s, Coverage:%d, PriorRows:%d, Events:%s}",
+	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, CrawlPrefixes:%d, ObservationSinks:%d, Paths:%s, Coverage:%d, PriorRows:%d, Events:%s}",
 		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Source, c.Match, ifacePresence(c.Filter == nil), c.Crawl,
-		c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil))
+		len(c.CrawlPrefixes), len(c.ObservationSinks), c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil))
 }
 
 // GoString implements fmt %#v with the same redaction as String.

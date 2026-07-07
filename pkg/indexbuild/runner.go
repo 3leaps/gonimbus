@@ -66,6 +66,7 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
+	observed := newObservationFanoutWriter(writer, cfg.ObservationSinks)
 
 	crawlCfg := cfg.Crawl
 	if crawlCfg.Concurrency <= 0 {
@@ -77,18 +78,22 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	if crawlCfg.ProgressEvery <= 0 {
 		crawlCfg.ProgressEvery = crawler.DefaultConfig().ProgressEvery
 	}
-	c := crawler.New(cfg.Source.Provider, matcher, writer, cfg.RunID, crawlCfg)
+	c := crawler.New(cfg.Source.Provider, matcher, observed, cfg.RunID, crawlCfg)
 	if cfg.Filter != nil {
 		c = c.WithFilter(cfg.Filter)
 	}
-	prefixes := matcher.Prefixes()
+	prefixes := append([]string(nil), cfg.CrawlPrefixes...)
+	if len(prefixes) == 0 {
+		prefixes = matcher.Prefixes()
+	}
 	if len(prefixes) == 0 {
 		prefixes = []string{""}
 	}
+	c = c.WithPrefixes(prefixes)
 
 	crawlSummary, crawlErr := c.Run(ctx)
 	if crawlErr != nil {
-		closeErr := writer.Close()
+		closeErr := observed.Close()
 		_ = emitEvent(context.Background(), cfg.Events, Event{
 			Type:    EventTypeCrawlError,
 			RunID:   cfg.RunID,
@@ -100,16 +105,16 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		return Summary{}, fmt.Errorf("crawl failed: %w", crawlErr)
 	}
 	if writer.ErrorCount() > 0 {
-		if closeErr := writer.Close(); closeErr != nil {
+		if closeErr := observed.Close(); closeErr != nil {
 			return Summary{}, closeErr
 		}
 		return Summary{}, fmt.Errorf("crawl completed with %d errors; snapshot not published", writer.ErrorCount())
 	}
 	if err := writer.Seal(); err != nil {
-		_ = writer.Close()
+		_ = observed.Close()
 		return Summary{}, err
 	}
-	if err := writer.Close(); err != nil {
+	if err := observed.Close(); err != nil {
 		return Summary{}, err
 	}
 	if crawlSummary != nil && len(crawlSummary.Prefixes) > 0 {
