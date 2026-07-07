@@ -40,6 +40,8 @@ func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
 	require.Equal(t, ManifestType, manifest.Type)
 	require.Equal(t, ManifestRenderType, manifest.Render)
 	require.Equal(t, IndexSchemaVersion, manifest.IndexSchemaVersion)
+	require.Empty(t, manifest.ParentManifests)
+	require.Equal(t, DefaultManifestReachability(), manifest.Reachability)
 	require.Equal(t, SegmentSizing{TargetRowsPerSegment: 2, Rationale: SegmentSizingRationale}, manifest.SegmentSizing)
 	require.Equal(t, ManifestCounts{Rows: 4, ActiveRows: 3, Tombstones: 1, DistinctETags: 3}, manifest.Counts)
 	require.Len(t, manifest.Segments, 2)
@@ -112,6 +114,8 @@ func TestWriteInternalManifestFileIsImmutableJSON(t *testing.T) {
 		RunID:              "run_test",
 		IndexSchemaVersion: IndexSchemaVersion,
 		CreatedAt:          time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		ParentManifests:    []ManifestReference{},
+		Reachability:       DefaultManifestReachability(),
 		SegmentSizing:      SegmentSizing{TargetRowsPerSegment: DefaultTargetRowsPerSegment, Rationale: SegmentSizingRationale},
 	}
 
@@ -138,6 +142,56 @@ func TestWriteSegmentSetUsesConservativeDefaultSizing(t *testing.T) {
 	require.Equal(t, SegmentSizingRationale, manifest.SegmentSizing.Rationale)
 	require.Empty(t, manifest.Segments)
 	require.Equal(t, ManifestCounts{}, manifest.Counts)
+}
+
+func TestWriteSegmentSetCarriesParentReachabilityMetadata(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	manifest, err := WriteSegmentSet(SegmentWriterConfig{
+		Dir:        dir,
+		IndexSetID: "idx_test",
+		RunID:      "run_child",
+		CreatedAt:  base,
+		ParentManifests: []ManifestReference{{
+			IndexSetID:     "idx_test",
+			RunID:          "run_parent",
+			ManifestSHA256: strings.Repeat("a", 64),
+		}},
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []ManifestReference{{
+		IndexSetID:     "idx_test",
+		RunID:          "run_parent",
+		ManifestSHA256: strings.Repeat("a", 64),
+	}}, manifest.ParentManifests)
+	require.Equal(t, ManifestReachability{
+		Model:            ManifestReachabilityModel,
+		SegmentNamespace: SegmentNamespaceShared,
+		RefcountMode:     RefcountModeDerivedAudit,
+		CompactOwner:     CompactOwnerIndexCompact,
+	}, manifest.Reachability)
+
+	path := filepath.Join(dir, "manifest.json")
+	require.NoError(t, WriteInternalManifestFile(path, manifest))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"parent_manifests"`)
+	require.Contains(t, string(data), `"retained_manifests_parent_chain_latest_pointers"`)
+}
+
+func TestWriteSegmentSetRejectsInvalidParentManifestBeforeCreatingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "segments")
+	_, err := WriteSegmentSet(SegmentWriterConfig{
+		Dir:        dir,
+		IndexSetID: "idx_test",
+		RunID:      "run_child",
+		ParentManifests: []ManifestReference{{
+			RunID: "run_parent",
+		}},
+	}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "parent manifest")
+	require.NoDirExists(t, dir)
 }
 
 func TestWriteSegmentSetRejectsInvalidRows(t *testing.T) {
