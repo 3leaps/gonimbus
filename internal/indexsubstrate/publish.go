@@ -287,7 +287,7 @@ func validatePublicationCoverage(coverage []CoverageAttestation) error {
 			return fmt.Errorf("%w: coverage gaps are not publishable in this slice", ErrInvalidCoverage)
 		}
 		if !publishableCoverageScope(entry.Scope) {
-			return fmt.Errorf("%w: coverage scope must be explicit non-root prefix coverage", ErrInvalidCoverage)
+			return fmt.Errorf("%w: coverage scope must be explicit prefix coverage", ErrInvalidCoverage)
 		}
 	}
 	return nil
@@ -297,7 +297,7 @@ func publishableCoverageScope(scope *Scope) bool {
 	if scope == nil || scope.Window != nil {
 		return false
 	}
-	prefix := strings.TrimPrefix(strings.TrimSpace(scope.Prefix), "/")
+	prefix := cleanCoveragePrefix(scope.Prefix)
 	return prefix != ""
 }
 

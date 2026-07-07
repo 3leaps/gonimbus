@@ -182,6 +182,36 @@ func TestCompactDoesNotTombstoneWithoutExactConfirmedCoverage(t *testing.T) {
 	}
 }
 
+func TestCompactRelativeRootCoverageTombstonesAllRelKeys(t *testing.T) {
+	runStartedAt := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	prior := []CurrentObjectRow{{
+		IndexSetID:       "idx_test",
+		RelKey:           "missing.xml",
+		SizeBytes:        10,
+		FirstSeenRunID:   "run_old",
+		FirstSeenAt:      runStartedAt.Add(-24 * time.Hour),
+		LastChangedRunID: "run_old",
+		LastChangedAt:    runStartedAt.Add(-24 * time.Hour),
+		LastSeenRunID:    "run_old",
+		LastSeenAt:       runStartedAt.Add(-24 * time.Hour),
+	}}
+
+	result, err := Compact(CompactionInput{
+		IndexSetID:   "idx_test",
+		RunID:        "run_current",
+		RunStartedAt: runStartedAt,
+		PriorRows:    prior,
+		Coverage: []CoverageAttestation{{
+			Scope:    &Scope{Prefix: RelativeRootScopePrefix},
+			Basis:    CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Tombstones, 1)
+	require.NotNil(t, rowsByRelKey(result.Rows)["missing.xml"].DeletedAt)
+}
+
 func TestCompactJournalFilesRejectsUnsealedJournals(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unsealed.jsonl")
 	writer, err := CreateJournal(path, testHeader())

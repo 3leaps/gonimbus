@@ -65,23 +65,24 @@ Example:
 
 // Index build flags.
 var (
-	indexBuildJobPath         string
-	indexBuildDBPath          string
-	indexBuildDryRun          bool
-	indexBuildBackground      bool
-	indexBuildDedupe          bool
-	indexBuildManagedJobID    string
-	indexBuildStorageProv     string
-	indexBuildCloudProv       string
-	indexBuildRegionKind      string
-	indexBuildRegion          string
-	indexBuildEndpointHost    string
-	indexBuildScopeWarnPrefix int
-	indexBuildScopeMaxPrefix  int
-	indexBuildName            string
-	indexBuildSummary         bool
-	indexBuildResumeRun       string
-	indexBuildSince           string
+	indexBuildJobPath            string
+	indexBuildDBPath             string
+	indexBuildDryRun             bool
+	indexBuildBackground         bool
+	indexBuildDedupe             bool
+	indexBuildManagedJobID       string
+	indexBuildStorageProv        string
+	indexBuildCloudProv          string
+	indexBuildRegionKind         string
+	indexBuildRegion             string
+	indexBuildEndpointHost       string
+	indexBuildScopeWarnPrefix    int
+	indexBuildScopeMaxPrefix     int
+	indexBuildName               string
+	indexBuildSummary            bool
+	indexBuildResumeRun          string
+	indexBuildSince              string
+	indexBuildExperimentalEngine bool
 )
 
 func init() {
@@ -101,6 +102,8 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
+	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(experimental) build durable v2 snapshot through pkg/indexbuild")
+	_ = indexBuildCmd.Flags().MarkHidden("experimental-engine")
 	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
 		flag.NoOptDefVal = "auto"
 	}
@@ -122,6 +125,11 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	resumeRun := strings.TrimSpace(indexBuildResumeRun)
+	if indexBuildExperimentalEngine {
+		if err := validateIndexBuildExperimentalEngineGlobalFlags(resumeRun); err != nil {
+			return err
+		}
+	}
 	if resumeRun != "" {
 		return runIndexBuildResume(ctx, cmd, resumeRun)
 	}
@@ -274,6 +282,39 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan)
+	}
+
+	if indexBuildExperimentalEngine {
+		if err := validateIndexBuildExperimentalEngineManifest(m); err != nil {
+			return err
+		}
+		cmd.SilenceUsage = true
+		summary, identityDir, err := runIndexBuildExperimentalEngine(ctx, m, identityResult, buildFilters)
+		if err != nil {
+			if store != nil && job != nil {
+				job.State = jobregistry.JobStateFailed
+				ended := time.Now().UTC()
+				job.EndedAt = &ended
+				_ = store.Write(job)
+			}
+			return err
+		}
+		if store != nil && job != nil {
+			job.IndexDir = identityDir
+			job.IndexSetID = summary.IndexSetID
+			job.RunID = summary.RunID
+			job.PID = os.Getpid()
+			job.State = jobregistry.JobStateSuccess
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "\nIndex build completed (experimental engine)\n")
+		_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", summary.RunID)
+		_, _ = fmt.Fprintf(os.Stderr, "  index_set_id: %s\n", summary.IndexSetID)
+		_, _ = fmt.Fprintf(os.Stderr, "  objects_observed: %d\n", summary.ObjectsObserved)
+		_, _ = fmt.Fprintf(os.Stderr, "  segments: %d\n", len(summary.Manifest.Segments))
+		return nil
 	}
 
 	// Open index database
