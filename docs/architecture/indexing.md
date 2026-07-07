@@ -102,6 +102,31 @@ were added or meaningfully changed after run X", but it cannot reconstruct
 "what rows existed at run X". Full point-in-time history belongs to a future
 segment or snapshot-backed index format.
 
+### Durable Snapshot Manifests
+
+The experimental durable index path writes immutable segment snapshots behind an
+internal manifest. Internal manifests may expose exact segment shape metadata
+needed for engine validation, including segment key ranges, tombstone counts,
+and artifact-level ETag counts.
+
+Boundary manifests are a separate future render mode for publication across a
+data boundary. Phase 1 does not publish boundary manifests: invoking boundary
+rendering fails with a hard not-implemented error before any artifact is
+created. This prevents partial or half-hardened boundary output from being
+mistaken for a safe publication format.
+
+When boundary rendering is implemented, it must use tokens minted in a separate
+namespace rather than segment identifiers or hashes of restricted values. It
+must coarsen or omit restricted-axis shape metadata such as exact per-segment
+row counts, tombstone counts, byte sizes, and segment counts by restricted
+axis. It must omit boundary `distinct_etags` and suppress restricted-column
+min/max statistics, bloom filters, and dictionary surfaces in boundary segment
+variants.
+
+Boundary mode is not a row-key de-identification layer. A recipient that is not
+authorized to see row-level keys needs a different representation, not a
+boundary manifest over the same keys.
+
 `last_changed_*` advances on the same LIST-derived change predicate used by the
 incremental build delta report: size, ETag, storage class, or `last_modified`
 changes, plus reappearance from soft-delete. `last_seen_*` alone does not
