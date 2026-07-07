@@ -109,6 +109,14 @@ internal manifest. Internal manifests may expose exact segment shape metadata
 needed for engine validation, including segment key ranges, tombstone counts,
 and artifact-level ETag counts.
 
+Durable snapshots store segment files in a shared immutable segment namespace.
+Phase 1 manifests carry parent manifest references and an explicit reachability
+policy: retained manifests, their parent chains, and latest pointers are the
+roots of segment reachability. Mutable refcount files are not required for
+correctness. A future `index compact` command may derive refcounts as an audit
+and delete plan before applying retention policy, but those derived counts are
+not primary truth.
+
 Boundary manifests are a separate future render mode for publication across a
 data boundary. Phase 1 does not publish boundary manifests: invoking boundary
 rendering fails with a hard not-implemented error before any artifact is

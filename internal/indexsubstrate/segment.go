@@ -23,6 +23,11 @@ const (
 
 	DefaultTargetRowsPerSegment = 100_000
 	SegmentSizingRationale      = "temporary conservative default pending real-corpus sizing evidence"
+
+	ManifestReachabilityModel = "retained_manifests_parent_chain_latest_pointers"
+	SegmentNamespaceShared    = "shared_immutable_segments"
+	RefcountModeDerivedAudit  = "derived_audit_plan_only"
+	CompactOwnerIndexCompact  = "index compact"
 )
 
 type SegmentWriterConfig struct {
@@ -32,18 +37,34 @@ type SegmentWriterConfig struct {
 	CreatedAt              time.Time
 	TargetRowsPerSegment   int
 	AllowExistingIdentical bool
+	ParentManifests        []ManifestReference
 }
 
 type InternalManifest struct {
-	Type               string              `json:"type"`
-	Render             string              `json:"render"`
-	IndexSetID         string              `json:"index_set_id"`
-	RunID              string              `json:"run_id"`
-	IndexSchemaVersion int                 `json:"index_schema_version"`
-	CreatedAt          time.Time           `json:"created_at"`
-	SegmentSizing      SegmentSizing       `json:"segment_sizing"`
-	Counts             ManifestCounts      `json:"counts"`
-	Segments           []SegmentDescriptor `json:"segments"`
+	Type               string               `json:"type"`
+	Render             string               `json:"render"`
+	IndexSetID         string               `json:"index_set_id"`
+	RunID              string               `json:"run_id"`
+	IndexSchemaVersion int                  `json:"index_schema_version"`
+	CreatedAt          time.Time            `json:"created_at"`
+	ParentManifests    []ManifestReference  `json:"parent_manifests"`
+	Reachability       ManifestReachability `json:"reachability"`
+	SegmentSizing      SegmentSizing        `json:"segment_sizing"`
+	Counts             ManifestCounts       `json:"counts"`
+	Segments           []SegmentDescriptor  `json:"segments"`
+}
+
+type ManifestReference struct {
+	IndexSetID     string `json:"index_set_id"`
+	RunID          string `json:"run_id"`
+	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
+}
+
+type ManifestReachability struct {
+	Model            string `json:"model"`
+	SegmentNamespace string `json:"segment_namespace"`
+	RefcountMode     string `json:"refcount_mode"`
+	CompactOwner     string `json:"compact_owner"`
 }
 
 type SegmentSizing struct {
@@ -103,6 +124,9 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 	if err := validateSegmentWriterConfig(config); err != nil {
 		return InternalManifest{}, err
 	}
+	if err := validateManifestReferences(config.ParentManifests); err != nil {
+		return InternalManifest{}, err
+	}
 	if err := os.MkdirAll(config.Dir, 0o700); err != nil {
 		return InternalManifest{}, fmt.Errorf("create segment directory: %w", err)
 	}
@@ -118,6 +142,8 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		RunID:              config.RunID,
 		IndexSchemaVersion: IndexSchemaVersion,
 		CreatedAt:          config.CreatedAt,
+		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
+		Reachability:       DefaultManifestReachability(),
 		SegmentSizing: SegmentSizing{
 			TargetRowsPerSegment: config.TargetRowsPerSegment,
 			Rationale:            SegmentSizingRationale,
@@ -456,6 +482,15 @@ func validateSegmentWriterConfig(config SegmentWriterConfig) error {
 	default:
 		return nil
 	}
+}
+
+func validateManifestReferences(refs []ManifestReference) error {
+	for _, ref := range normalizeManifestReferences(refs) {
+		if ref.IndexSetID == "" || ref.RunID == "" {
+			return fmt.Errorf("parent manifest index_set_id and run_id are required")
+		}
+	}
+	return nil
 }
 
 func normalizeAndSortSegmentRows(rows []CurrentObjectRow, indexSetID string) ([]CurrentObjectRow, error) {

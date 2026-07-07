@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,25 @@ func TestPublishSnapshotRetriesFromSealedJournals(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, result.Manifest, manifest)
 	require.Equal(t, expectedRows, rows)
+}
+
+func TestPublishSnapshotPersistsParentReachabilityMetadata(t *testing.T) {
+	config, _ := publishTestConfig(t)
+	config.ParentManifests = []ManifestReference{{
+		IndexSetID:     "idx_test",
+		RunID:          "run_parent",
+		ManifestSHA256: strings.Repeat("e", 64),
+	}}
+
+	result, err := PublishSnapshot(config)
+	require.NoError(t, err)
+	require.Equal(t, config.ParentManifests, result.Manifest.ParentManifests)
+	require.Equal(t, DefaultManifestReachability(), result.Manifest.Reachability)
+
+	manifest, _, err := ReadLatestPublishedRows(config.LatestPath)
+	require.NoError(t, err)
+	require.Equal(t, config.ParentManifests, manifest.ParentManifests)
+	require.Equal(t, DefaultManifestReachability(), manifest.Reachability)
 }
 
 func TestPublishSnapshotFailureAfterCompleteCanAdvanceLatestOnRetry(t *testing.T) {

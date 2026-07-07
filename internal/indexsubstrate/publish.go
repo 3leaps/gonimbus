@@ -32,6 +32,7 @@ type PublishConfig struct {
 	RunID                string
 	RunStartedAt         time.Time
 	CreatedAt            time.Time
+	ParentManifests      []ManifestReference
 	PriorRows            []CurrentObjectRow
 	JournalPaths         []string
 	Coverage             []CoverageAttestation
@@ -112,6 +113,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		CreatedAt:              config.CreatedAt,
 		TargetRowsPerSegment:   config.TargetRowsPerSegment,
 		AllowExistingIdentical: true,
+		ParentManifests:        config.ParentManifests,
 	}, compaction.Rows)
 	if err != nil {
 		return result, err
