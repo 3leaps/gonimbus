@@ -25,6 +25,7 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/content`       | Experimental | Content metadata helpers.                                                                                   |
 | `github.com/3leaps/gonimbus/pkg/crawler`       | Experimental | Crawl engine internals for CLI workflows.                                                                   |
 | `github.com/3leaps/gonimbus/pkg/indexstore`    | Experimental | Index storage substrate.                                                                                    |
+| `github.com/3leaps/gonimbus/pkg/indexbuild`    | Experimental | Durable index build workflow engine over injected providers and internal journal/segment publication.       |
 | `github.com/3leaps/gonimbus/pkg/jobregistry`   | Experimental | Local job-control substrate.                                                                                |
 | `github.com/3leaps/gonimbus/pkg/manifest`      | Experimental | Manifest parsing and validation substrate.                                                                  |
 | `github.com/3leaps/gonimbus/pkg/match`         | Stable       | Object-key pattern matching used by embedded consumers.                                                     |

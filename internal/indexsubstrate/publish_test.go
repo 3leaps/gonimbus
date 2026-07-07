@@ -159,6 +159,19 @@ func TestPublishSnapshotRejectsUnconfirmedCoverage(t *testing.T) {
 	require.NoFileExists(t, config.LatestPath)
 }
 
+func TestPublishSnapshotAcceptsExplicitRelativeRootCoverage(t *testing.T) {
+	config, _ := publishTestConfig(t)
+	config.Coverage = []CoverageAttestation{{
+		Scope:    &Scope{Prefix: RelativeRootScopePrefix},
+		Basis:    CoverageBasisConfirmed,
+		Complete: true,
+	}}
+
+	_, err := PublishSnapshot(config)
+	require.NoError(t, err)
+	require.FileExists(t, config.LatestPath)
+}
+
 func publishTestConfig(t *testing.T) (PublishConfig, []CurrentObjectRow) {
 	t.Helper()
 	root := t.TempDir()

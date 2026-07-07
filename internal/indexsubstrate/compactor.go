@@ -14,6 +14,11 @@ const (
 	CoverageBasisInferred  CoverageBasis = "inferred"
 )
 
+// RelativeRootScopePrefix is an explicit rel_key-space sentinel for complete
+// coverage of the whole index-relative root. It is distinct from blank or "/",
+// which remain invalid publish scopes.
+const RelativeRootScopePrefix = "."
+
 type CoverageAttestation struct {
 	Scope    *Scope        `json:"scope,omitempty"`
 	Basis    CoverageBasis `json:"basis"`
@@ -268,9 +273,12 @@ func tombstoneCoverageScopeContainsRelKey(scope *Scope, relKey string) bool {
 	if scope == nil {
 		return false
 	}
-	prefix := strings.TrimPrefix(scope.Prefix, "/")
+	prefix := cleanCoveragePrefix(scope.Prefix)
 	if prefix == "" || scope.Window != nil {
 		return false
+	}
+	if prefix == RelativeRootScopePrefix {
+		return true
 	}
 	return prefixContainsRelKey(prefix, relKey)
 }
@@ -279,11 +287,18 @@ func gapScopeContainsRelKey(scope *Scope, relKey string) bool {
 	if scope == nil {
 		return true
 	}
-	prefix := strings.TrimPrefix(scope.Prefix, "/")
+	prefix := cleanCoveragePrefix(scope.Prefix)
 	if prefix == "" {
 		return true
 	}
+	if prefix == RelativeRootScopePrefix {
+		return true
+	}
 	return prefixContainsRelKey(prefix, relKey)
+}
+
+func cleanCoveragePrefix(prefix string) string {
+	return strings.TrimPrefix(strings.TrimSpace(prefix), "/")
 }
 
 func prefixContainsRelKey(prefix string, relKey string) bool {
