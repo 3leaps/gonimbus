@@ -167,7 +167,7 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	runPrefix := hubArtifactKey(hub, "index-sets", indexSetFlag, "runs", runID)
 	completeKey := runPrefix + "/complete.json"
 
-	completeData, err := downloadBytesBounded(ctx, getter, completeKey, maxHubMarkerBytes, "complete.json")
+	completeData, err := downloadBytesBounded(ctx, getter, completeKey, maxHubCompleteMarkerBytes, "complete.json")
 	if err != nil {
 		if provider.IsNotFound(err) {
 			return fmt.Errorf("run %s is not committed (complete.json not found); cannot hydrate", runID)

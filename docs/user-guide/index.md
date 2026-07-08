@@ -965,6 +965,13 @@ writing them under the destination directory. A durable hydrate does not create
 an `index.db`; downstream commands must explicitly support durable manifests
 before using that hydrated output.
 
+`index hub ls` and `index hub show` display hub run formats so mixed
+`sqlite-v1` / `durable-v2` hubs are legible. JSON output includes format counts
+at the index-set level and per-run artifact summaries. `index hub gc --dry-run
+--json` includes the same per-run format and artifact summary for removal
+candidates, so operators can see when retention would remove a durable manifest
+and its segment set rather than a single SQLite database artifact.
+
 ### Large Hub Exports
 
 Large index runs can produce an `index.db` that is too large for a provider's
