@@ -239,74 +239,103 @@ func ReadInternalManifestFile(path string) (InternalManifest, error) {
 }
 
 func ReadSegmentFile(path string) ([]CurrentObjectRow, error) {
+	out := []CurrentObjectRow{}
+	if err := WalkSegmentFile(path, func(row CurrentObjectRow) error {
+		out = append(out, row)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func WalkSegmentFile(path string, visit func(CurrentObjectRow) error) error {
 	dir, name, err := splitJournalPath(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, fmt.Errorf("open segment directory: %w", err)
+		return fmt.Errorf("open segment directory: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	file, err := root.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open segment: %w", err)
+		return fmt.Errorf("open segment: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 	reader := parquet.NewGenericReader[segmentParquetRow](file)
 	defer func() { _ = reader.Close() }()
 	rows := make([]segmentParquetRow, 64)
-	out := make([]CurrentObjectRow, 0, reader.NumRows())
 	for {
 		n, err := reader.Read(rows)
 		for _, row := range rows[:n] {
 			current, convErr := currentRowFromSegmentParquet(row)
 			if convErr != nil {
-				return nil, convErr
+				return convErr
 			}
-			out = append(out, current)
+			if err := visit(current); err != nil {
+				return err
+			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read segment: %w", err)
+			return fmt.Errorf("read segment: %w", err)
 		}
+	}
+	return nil
+}
+
+func ReadSegmentFileVerified(dir string, descriptor SegmentDescriptor) ([]CurrentObjectRow, error) {
+	out := []CurrentObjectRow{}
+	if err := WalkSegmentFileVerified(dir, descriptor, func(row CurrentObjectRow) error {
+		out = append(out, row)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-func ReadSegmentFileVerified(dir string, descriptor SegmentDescriptor) ([]CurrentObjectRow, error) {
+func WalkSegmentFileVerified(dir string, descriptor SegmentDescriptor, visit func(CurrentObjectRow) error) error {
 	path, err := safeSegmentPath(dir, descriptor.Path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if descriptor.Digest.Algorithm != "sha256" {
-		return nil, fmt.Errorf("unsupported segment digest algorithm %q", descriptor.Digest.Algorithm)
+		return fmt.Errorf("unsupported segment digest algorithm %q", descriptor.Digest.Algorithm)
 	}
 	if strings.TrimSpace(descriptor.Digest.Hex) == "" {
-		return nil, fmt.Errorf("segment digest is required")
+		return fmt.Errorf("segment digest is required")
 	}
 	got, err := sha256HexFile(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if got != descriptor.Digest.Hex {
-		return nil, fmt.Errorf("segment digest mismatch for %s", descriptor.Path)
+		return fmt.Errorf("segment digest mismatch for %s", descriptor.Path)
 	}
-	return ReadSegmentFile(path)
+	return WalkSegmentFile(path, visit)
 }
 
 func ReadManifestRows(segmentDir string, manifest InternalManifest) ([]CurrentObjectRow, error) {
 	rows := make([]CurrentObjectRow, 0, manifest.Counts.Rows)
+	err := WalkManifestRows(segmentDir, manifest, func(row CurrentObjectRow) error {
+		rows = append(rows, row)
+		return nil
+	})
+	return rows, err
+}
+
+func WalkManifestRows(segmentDir string, manifest InternalManifest, visit func(CurrentObjectRow) error) error {
 	for _, segment := range manifest.Segments {
-		segmentRows, err := ReadSegmentFileVerified(segmentDir, segment)
-		if err != nil {
-			return nil, err
+		if err := WalkSegmentFileVerified(segmentDir, segment, visit); err != nil {
+			return err
 		}
-		rows = append(rows, segmentRows...)
 	}
-	return rows, nil
+	return nil
 }
 
 func writeSegmentFile(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, error) {

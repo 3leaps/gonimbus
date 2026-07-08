@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,331 @@ build:
 	require.NoFileExists(t, filepath.Join(dataRoot, "indexes", "index.db"))
 }
 
+func TestIndexBuildFormatBothUsesSingleObservedProviderStream(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{objects: indexBuildEngineTestObjects(base)}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	var stdout strings.Builder
+	cmd.SetOut(&stdout)
+	require.NoError(t, runIndexBuild(cmd, nil))
+	require.Equal(t, 1, prov.listCalls)
+
+	var report map[string]any
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
+	require.Equal(t, "gonimbus.index.compare_result.v1", report["type"])
+	require.Equal(t, true, report["sqlite_materialized"])
+	require.Equal(t, true, report["durable_published"])
+	require.Equal(t, true, report["comparison_ran"])
+	require.Equal(t, true, report["parity_passed"])
+
+	latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, latestFiles, 1)
+}
+
+func TestIndexBuildFormatBothRejectsBuildScopeBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: prefix_list
+    prefixes: ["hot/"]
+  match:
+    includes: ["**"]
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, "--format both does not support build.scope in this slice")
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildFormatBothRejectsNarrowMatchIncludesBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["hot/**"]
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, `--format both supports only default build.match.includes "**" in this slice`)
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildFormatBothRejectsWhitespacePaddedDefaultIncludeBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: [" ** "]
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, `--format both supports only default build.match.includes "**" in this slice`)
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildFormatBothRejectsMatchExcludesBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+    excludes: ["tmp/**"]
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, "--format both does not support build.match.excludes in this slice")
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildFormatBothRejectsMatchFiltersBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+    filters:
+      size:
+        min: "1B"
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, "--format both does not support build.match.filters in this slice")
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildExperimentalEngineRejectsNarrowMatchBeforeDurablePublish(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+    excludes: ["tmp/**"]
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildExperimentalEngine = true
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	err := runIndexBuild(cmd, nil)
+	require.ErrorContains(t, err, "--experimental-engine does not support build.match.excludes in this slice")
+	require.Zero(t, prov.listCalls)
+
+	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, globErr)
+	require.Empty(t, latestFiles)
+}
+
+func TestIndexBuildFormatBothRejectsExperimentalEngineFlag(t *testing.T) {
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildFormat = "both"
+	indexBuildExperimentalEngine = true
+
+	err := validateIndexBuildFormatFlags("")
+	require.ErrorContains(t, err, "--format both is not compatible with --experimental-engine")
+}
+
 func indexBuildEngineAdapterTestConfig(t *testing.T, name string) indexbuild.Config {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)
@@ -153,6 +479,28 @@ func (indexBuildEngineFakeProvider) Head(context.Context, string) (*provider.Obj
 
 func (indexBuildEngineFakeProvider) Close() error { return nil }
 
+type countingIndexBuildProvider struct {
+	objects   []provider.ObjectSummary
+	listCalls int
+}
+
+func (p *countingIndexBuildProvider) List(_ context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	p.listCalls++
+	var out []provider.ObjectSummary
+	for _, obj := range p.objects {
+		if strings.HasPrefix(obj.Key, opts.Prefix) {
+			out = append(out, obj)
+		}
+	}
+	return &provider.ListResult{Objects: out}, nil
+}
+
+func (*countingIndexBuildProvider) Head(context.Context, string) (*provider.ObjectMeta, error) {
+	return nil, provider.ErrNotFound
+}
+
+func (*countingIndexBuildProvider) Close() error { return nil }
+
 func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 	t.Helper()
 	oldJobPath := indexBuildJobPath
@@ -172,6 +520,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 	oldSummary := indexBuildSummary
 	oldResumeRun := indexBuildResumeRun
 	oldSince := indexBuildSince
+	oldFormat := indexBuildFormat
 	oldExperimentalEngine := indexBuildExperimentalEngine
 	t.Cleanup(func() {
 		indexBuildJobPath = oldJobPath
@@ -191,6 +540,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildSummary = oldSummary
 		indexBuildResumeRun = oldResumeRun
 		indexBuildSince = oldSince
+		indexBuildFormat = oldFormat
 		indexBuildExperimentalEngine = oldExperimentalEngine
 	})
 	return func() {
@@ -211,6 +561,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildSummary = false
 		indexBuildResumeRun = ""
 		indexBuildSince = ""
+		indexBuildFormat = "sqlite"
 		indexBuildExperimentalEngine = false
 	}
 }

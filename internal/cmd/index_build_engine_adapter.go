@@ -2,19 +2,25 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/3leaps/gonimbus/internal/indexcompare"
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/scope"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -24,6 +30,128 @@ var newIndexBuildEngineSource = func(ctx context.Context, src *uri.ObjectURI, op
 
 func runIndexBuildEngine(ctx context.Context, cfg indexbuild.Config) (indexbuild.Summary, error) {
 	return indexbuild.NewRunner(cfg).Build(ctx)
+}
+
+type indexBuildBothFormatsResult struct {
+	Result  *indexBuildResult
+	Summary indexbuild.Summary
+	Report  *indexcompare.Report
+}
+
+func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db *sql.DB, indexSet *indexstore.IndexSet, run *indexstore.IndexRun, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexBuildBothFormatsResult, error) {
+	out := indexBuildBothFormatsResult{Result: &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}}
+	if m == nil {
+		return out, fmt.Errorf("index manifest is required")
+	}
+	if indexSet == nil {
+		return out, fmt.Errorf("index set is required")
+	}
+	if run == nil {
+		return out, fmt.Errorf("index run is required")
+	}
+	if identityResult == nil {
+		return out, fmt.Errorf("index identity is required")
+	}
+	baseBucket, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
+	if err != nil {
+		return out, fmt.Errorf("parse base_uri: %w", err)
+	}
+	if baseBucket != "" && baseBucket != m.Connection.Bucket {
+		return out, fmt.Errorf("base_uri bucket %q does not match connection.bucket %q", baseBucket, m.Connection.Bucket)
+	}
+	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
+		Provider: m.Connection.Provider,
+		Bucket:   m.Connection.Bucket,
+	}, providerdispatch.SourceOptions{
+		Command: operationIndexBuild,
+		S3: providerdispatch.S3Options{
+			Region:         m.Connection.Region,
+			Endpoint:       m.Connection.Endpoint,
+			Profile:        m.Connection.Profile,
+			ForcePathStyle: m.Connection.Endpoint != "",
+		},
+		GCS: providerdispatch.GCSOptions{
+			Project: m.Connection.Project,
+		},
+	})
+	if err != nil {
+		return out, fmt.Errorf("create provider: %w", err)
+	}
+	defer func() { _ = prov.Close() }()
+
+	crawlPrefixes, err := indexBuildEngineCrawlPrefixes(ctx, m, basePrefix, prov)
+	if err != nil {
+		return out, err
+	}
+	journalDir, err := indexSubstrateJournalRunDir(indexSet.IndexSetID, run.RunID)
+	if err != nil {
+		return out, err
+	}
+	segmentRoot, err := indexSubstrateSegmentCacheDir(indexSet.IndexSetID)
+	if err != nil {
+		return out, err
+	}
+	runSegmentDir := filepath.Join(segmentRoot, "runs", run.RunID)
+	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
+	if err != nil {
+		return out, err
+	}
+	paths := indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, run.RunID, resolvedDB.IdentityDir)
+	sqliteWriter := newIndexIngestWriter(db, indexSet.IndexSetID, run, m.Connection.BaseURI, basePrefix, indexIngestWriterConfig{
+		ObjectBatchSize: DefaultObjectBatchSize,
+		PrefixBatchSize: DefaultPrefixBatchSize,
+	})
+	sqliteWriter.setDeltaPrefixes(crawlPrefixes)
+	cfg := indexbuild.Config{
+		IndexSetID:           indexSet.IndexSetID,
+		RunID:                run.RunID,
+		BaseURI:              m.Connection.BaseURI,
+		Source:               indexbuild.Source{Provider: prov, ProviderName: m.Connection.Provider},
+		Match:                indexBuildEngineMatchConfig(m),
+		Filter:               nil,
+		Crawl:                indexBuildEngineCrawlConfig(m),
+		CrawlPrefixes:        crawlPrefixes,
+		ObservationSinks:     []output.Writer{sqliteWriter},
+		Paths:                paths,
+		Coverage:             indexBuildEngineCoverage(basePrefix),
+		RunStartedAt:         run.StartedAt,
+		CreatedAt:            time.Now().UTC(),
+		TargetRowsPerSegment: 0,
+	}
+	if buildFilters != nil {
+		cfg.Filter = buildFilters.Filter
+	}
+	summary, err := runIndexBuildEngine(ctx, cfg)
+	out.Summary = summary
+	out.Result = sqliteWriter.Result()
+	out.Result.CrawlPrefixes = append([]string(nil), crawlPrefixes...)
+	if err != nil {
+		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, resolvedDB, paths, false, false)
+		return out, err
+	}
+	manifestDoc, err := indexsubstrate.ReadInternalManifestFile(paths.ManifestPath)
+	if err != nil {
+		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, resolvedDB, paths, true, false)
+		return out, fmt.Errorf("read durable manifest: %w", err)
+	}
+	report, err := indexcompare.Compare(ctx, indexcompare.Input{
+		SQLiteDB:             db,
+		SQLiteIndexSetID:     indexSet.IndexSetID,
+		SQLiteArtifact:       indexcompare.Artifact{ID: indexSet.IndexSetID, Path: resolvedDB.Path},
+		DurableManifest:      manifestDoc,
+		DurableSegmentDir:    paths.SegmentDir,
+		DurableArtifact:      indexcompare.Artifact{ID: run.RunID, Path: paths.ManifestPath},
+		ObservationRunID:     run.RunID,
+		ObservationStartedAt: run.StartedAt,
+	})
+	out.Report = &report
+	if err != nil {
+		return out, fmt.Errorf("compare index formats: %w", err)
+	}
+	if !report.ParityPassed {
+		return out, fmt.Errorf("index format parity failed: projection_mismatches=%d content_identity_mismatches=%d", report.ProjectionMismatches, report.ContentIdentityCheck.Mismatches)
+	}
+	return out, nil
 }
 
 func runIndexBuildExperimentalEngine(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexbuild.Summary, string, error) {
@@ -137,6 +265,9 @@ func validateIndexBuildExperimentalEngineManifest(m *manifest.IndexManifest) err
 		if m.Build.Scope != nil {
 			return fmt.Errorf("--experimental-engine does not support build.scope in this slice")
 		}
+		if err := validateIndexBuildDurableFullBaseMatch(m, "--experimental-engine"); err != nil {
+			return err
+		}
 		switch strings.TrimSpace(m.Build.Source) {
 		case "", manifest.DefaultIndexSource:
 			return nil
@@ -145,6 +276,79 @@ func validateIndexBuildExperimentalEngineManifest(m *manifest.IndexManifest) err
 		}
 	}
 	return nil
+}
+
+func validateIndexBuildFormatFlags(resumeRun string) error {
+	switch selectedIndexBuildFormat() {
+	case "sqlite":
+		return nil
+	case "both":
+		switch {
+		case strings.TrimSpace(resumeRun) != "":
+			return fmt.Errorf("--format both is not compatible with --resume-run in this slice")
+		case indexBuildDryRun:
+			return fmt.Errorf("--format both is not compatible with --dry-run in this slice")
+		case indexBuildBackground:
+			return fmt.Errorf("--format both is not compatible with --background in this slice")
+		case indexBuildDedupe:
+			return fmt.Errorf("--format both is not compatible with --dedupe in this slice")
+		case indexBuildExperimentalEngine:
+			return fmt.Errorf("--format both is not compatible with --experimental-engine")
+		case strings.TrimSpace(indexBuildDBPath) != "":
+			return fmt.Errorf("--format both is not compatible with --db in this slice")
+		case strings.TrimSpace(indexBuildSince) != "":
+			return fmt.Errorf("--format both is not compatible with --since in this slice")
+		default:
+			return nil
+		}
+	default:
+		return fmt.Errorf("--format must be one of: sqlite, both")
+	}
+}
+
+func validateIndexBuildFormatManifest(m *manifest.IndexManifest) error {
+	if selectedIndexBuildFormat() != "both" {
+		return nil
+	}
+	if m != nil && m.Build != nil && m.Build.Scope != nil {
+		return fmt.Errorf("--format both does not support build.scope in this slice")
+	}
+	return validateIndexBuildDurableFullBaseMatch(m, "--format both")
+}
+
+func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName string) error {
+	if m == nil || m.Build == nil || m.Build.Match == nil {
+		return nil
+	}
+	matchCfg := m.Build.Match
+	if len(matchCfg.Excludes) > 0 {
+		return fmt.Errorf("%s does not support build.match.excludes in this slice", flagName)
+	}
+	if matchCfg.Filters != nil {
+		return fmt.Errorf("%s does not support build.match.filters in this slice", flagName)
+	}
+	if !isDefaultIndexBuildIncludes(matchCfg.Includes) {
+		return fmt.Errorf("%s supports only default build.match.includes %q in this slice", flagName, manifest.DefaultIndexIncludes)
+	}
+	return nil
+}
+
+func isDefaultIndexBuildIncludes(includes []string) bool {
+	if len(includes) == 0 {
+		return true
+	}
+	if len(includes) != 1 {
+		return false
+	}
+	return includes[0] == manifest.DefaultIndexIncludes
+}
+
+func selectedIndexBuildFormat() string {
+	format := strings.TrimSpace(strings.ToLower(indexBuildFormat))
+	if format == "" {
+		return "sqlite"
+	}
+	return format
 }
 
 func indexBuildEngineMatchConfig(m *manifest.IndexManifest) indexbuild.MatchConfig {
@@ -175,6 +379,34 @@ func indexBuildEngineCrawlConfig(m *manifest.IndexManifest) crawler.Config {
 	return cfg
 }
 
+func indexBuildEngineCrawlPrefixes(ctx context.Context, m *manifest.IndexManifest, basePrefix string, prov provider.Provider) ([]string, error) {
+	if m != nil && m.Build != nil && m.Build.Scope != nil {
+		var lister provider.PrefixLister
+		var err error
+		if scope.RequiresPrefixLister(m.Build.Scope) {
+			lister, err = providerdispatch.RequireCapability[provider.PrefixLister](prov, operationIndexBuild, m.Connection.Provider, "PrefixLister")
+			if err != nil {
+				return nil, err
+			}
+		}
+		plan, err := scope.Compile(ctx, m.Build.Scope, basePrefix, lister)
+		if err != nil {
+			return nil, fmt.Errorf("build.scope: %w", err)
+		}
+		if plan == nil || len(plan.Prefixes) == 0 {
+			return nil, fmt.Errorf("build.scope produced no crawl prefixes")
+		}
+		if err := validateScopePlan(plan.Prefixes, indexBuildScopeMaxPrefix); err != nil {
+			return nil, err
+		}
+		if warning := scopePlanWarning(plan.Prefixes, indexBuildScopeWarnPrefix); warning != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+		}
+		return append([]string(nil), plan.Prefixes...), nil
+	}
+	return nil, nil
+}
+
 func indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, indexDBDir string) indexbuild.PathConfig {
 	return indexbuild.PathConfig{
 		JournalDir:   journalDir,
@@ -195,4 +427,28 @@ func indexBuildEngineCoverage(basePrefix string) []indexbuild.CoverageAttestatio
 		Basis:    indexbuild.CoverageBasisConfirmed,
 		Complete: true,
 	}}
+}
+
+func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, resolvedDB resolvedIndexDB, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {
+	report := &indexcompare.Report{
+		Type:                 "gonimbus.index.compare_result.v1",
+		ProjectionVersion:    indexcompare.ProjectionVersion,
+		ComparatorVersion:    indexcompare.ComparatorVersion,
+		SQLiteMaterialized:   true,
+		DurablePublished:     durablePublished,
+		ComparisonRan:        comparisonRan,
+		ParityPassed:         false,
+		ContentIdentityCheck: indexcompare.ContentIdentityCheck{Semantics: "provider_etag_equivalence"},
+		SQLiteArtifact:       indexcompare.Artifact{Path: resolvedDB.Path},
+		DurableArtifact:      indexcompare.Artifact{Path: paths.ManifestPath},
+	}
+	if indexSet != nil {
+		report.SQLiteArtifact.ID = indexSet.IndexSetID
+	}
+	if run != nil {
+		report.ObservationRunID = run.RunID
+		report.ObservationStartedAt = run.StartedAt.UTC().Format(time.RFC3339Nano)
+		report.DurableArtifact.ID = run.RunID
+	}
+	return report
 }
