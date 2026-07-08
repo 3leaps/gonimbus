@@ -31,6 +31,7 @@ func TestPublishSnapshotAdvancesLatestAfterCompletePipeline(t *testing.T) {
 		PublishStepLatestAdvanced,
 	}, steps)
 	require.Equal(t, ManifestType, result.Manifest.Type)
+	require.Equal(t, config.Coverage, result.Manifest.Coverage)
 	require.FileExists(t, config.ManifestPath)
 	require.FileExists(t, config.CompletePath)
 	require.FileExists(t, config.LatestPath)

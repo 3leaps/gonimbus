@@ -114,6 +114,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		TargetRowsPerSegment:   config.TargetRowsPerSegment,
 		AllowExistingIdentical: true,
 		ParentManifests:        config.ParentManifests,
+		Coverage:               config.Coverage,
 	}, compaction.Rows)
 	if err != nil {
 		return result, err

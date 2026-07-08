@@ -126,6 +126,53 @@ func projectionFromDurable(row indexsubstrate.CurrentObjectRow) (projectionRow, 
 	}, nil
 }
 
+type durableDeltaIterator struct {
+	rows <-chan durableDeltaRowResult
+}
+
+type durableDeltaRowResult struct {
+	row durableDeltaRow
+	err error
+}
+
+func newDurableDeltaIterator(ctx context.Context, segmentDir string, manifest indexsubstrate.InternalManifest) *durableDeltaIterator {
+	out := make(chan durableDeltaRowResult, 1)
+	go func() {
+		defer close(out)
+		err := indexsubstrate.WalkManifestRows(segmentDir, manifest, func(current indexsubstrate.CurrentObjectRow) error {
+			projected, err := projectionFromDurable(current)
+			if err != nil {
+				return err
+			}
+			row := durableDeltaRow{projectionRow: projected, DeletedAt: current.DeletedAt}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case out <- durableDeltaRowResult{row: row}:
+				return nil
+			}
+		})
+		if err != nil {
+			select {
+			case <-ctx.Done():
+			case out <- durableDeltaRowResult{err: err}:
+			}
+		}
+	}()
+	return &durableDeltaIterator{rows: out}
+}
+
+func (i *durableDeltaIterator) Next() (durableDeltaRow, bool, error) {
+	result, ok := <-i.rows
+	if !ok {
+		return durableDeltaRow{}, false, nil
+	}
+	if result.err != nil {
+		return durableDeltaRow{}, false, result.err
+	}
+	return result.row, true, nil
+}
+
 func normalizeTimeString(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

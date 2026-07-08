@@ -44,6 +44,7 @@ func TestRunnerBuildPublishesDeterministicSnapshotAndRetryParity(t *testing.T) {
 	retrySummary, err := Retry(ctx, RetryConfig{
 		IndexSetID:           cfg.IndexSetID,
 		RunID:                cfg.RunID,
+		BaseURI:              cfg.BaseURI,
 		Paths:                cfg.Paths,
 		JournalPaths:         summary.JournalPaths,
 		Coverage:             cfg.Coverage,
