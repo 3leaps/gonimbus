@@ -242,7 +242,7 @@ func readLatestPointerVersioned(ctx context.Context, getter provider.VersionedGe
 		return latestPointerDoc{}, "", err
 	}
 	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(body)
+	data, err := readAllBounded(body, meta.Size, maxHubMarkerBytes, "latest.json")
 	if err != nil {
 		return latestPointerDoc{}, "", err
 	}
@@ -261,7 +261,7 @@ func readLatestPointerVersioned(ctx context.Context, getter provider.VersionedGe
 
 func readCompleteDoc(ctx context.Context, getter provider.ObjectGetter, hub *hubDestSpec, indexSetID, runID string) (hubCompleteDoc, error) {
 	key := hubArtifactKey(hub, "index-sets", indexSetID, "runs", runID, "complete.json")
-	data, err := downloadBytes(ctx, getter, key)
+	data, err := downloadBytesBounded(ctx, getter, key, maxHubMarkerBytes, "complete.json")
 	if err != nil {
 		return hubCompleteDoc{}, err
 	}

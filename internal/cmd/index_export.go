@@ -57,6 +57,7 @@ func init() {
 	indexExportCmd.Flags().String("index-set", "", "Index set ID to export (required)")
 	indexExportCmd.Flags().String("run-id", "", "Specific run ID to export (default: latest successful)")
 	indexExportCmd.Flags().String("db", "", "Explicit local DB path (overrides index-set lookup)")
+	indexExportCmd.Flags().String("format", indexHubFormatSQLiteV1, "Index format to export (sqlite, sqlite-v1, durable, durable-v2)")
 
 	// Hub provider auth
 	indexExportCmd.Flags().String("hub-profile", "", "AWS profile for hub destination")
@@ -165,6 +166,7 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
 	dbFlag, _ := cmd.Flags().GetString("db")
+	formatFlag, _ := cmd.Flags().GetString("format")
 	hubProfile, _ := cmd.Flags().GetString("hub-profile")
 	hubRegion, _ := cmd.Flags().GetString("hub-region")
 	hubEndpoint, _ := cmd.Flags().GetString("hub-endpoint")
@@ -223,6 +225,10 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	format, err := normalizeIndexHubFormat(formatFlag)
+	if err != nil {
+		return err
+	}
 
 	_, _ = fmt.Fprintf(os.Stderr, "Exporting index_set=%s run=%s to %s\n", indexSet.IndexSetID, run.RunID, hubURI)
 
@@ -271,6 +277,9 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	if closer, ok := getter.(io.Closer); ok {
 		defer func() { _ = closer.Close() }()
 	}
+	if format == indexHubFormatDurableV2 {
+		return runIndexExportDurable(ctx, cmd, hub, getter, putter, indexSet, run)
+	}
 
 	// Publish sequence (brief contract): index.db + identity.json first, complete.json last, then latest.json
 	runPrefix := []string{"index-sets", indexSet.IndexSetID, "runs", run.RunID}
@@ -315,6 +324,56 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	printLatestPointerOutcome(os.Stderr, outcome, indexSet.IndexSetID, run.RunID)
 
 	_, _ = fmt.Fprintf(os.Stderr, "Export complete: %s/runs/%s/\n", indexSet.IndexSetID, run.RunID)
+	return nil
+}
+
+func runIndexExportDurable(ctx context.Context, cmd *cobra.Command, hub *hubDestSpec, getter provider.ObjectGetter, putter provider.ObjectPutter, indexSet *indexstore.IndexSet, run *indexstore.IndexRun) error {
+	local, err := loadLocalDurableSnapshotForExport(indexSet.IndexSetID, run.RunID)
+	if err != nil {
+		return err
+	}
+
+	runPrefix := []string{"index-sets", indexSet.IndexSetID, "runs", run.RunID}
+	for _, segment := range local.Manifest.Segments {
+		localPath, err := safeLocalArtifactPath(local.SegmentDir, segment.Path)
+		if err != nil {
+			return fmt.Errorf("segment %s: %w", segment.SegmentID, err)
+		}
+		key := hubArtifactKey(hub, append(runPrefix, "segments", segment.Path)...)
+		_, _ = fmt.Fprintf(os.Stderr, "  uploading segment %s (%d bytes)...\n", segment.Path, segment.SizeBytes)
+		if err := uploadToOutputDest(ctx, putter, key, localPath); err != nil {
+			return fmt.Errorf("upload segment %s: %w", segment.Path, err)
+		}
+	}
+
+	manifestKey := hubArtifactKey(hub, append(runPrefix, "manifest.json")...)
+	_, _ = fmt.Fprintf(os.Stderr, "  uploading manifest.json (%d bytes)...\n", local.ManifestSize)
+	if err := uploadToOutputDest(ctx, putter, manifestKey, local.ManifestPath); err != nil {
+		return fmt.Errorf("upload durable manifest: %w", err)
+	}
+
+	completeJSON, err := buildDurableCompleteJSON(indexSet, run, local)
+	if err != nil {
+		return fmt.Errorf("build durable complete.json: %w", err)
+	}
+	completeKey := hubArtifactKey(hub, append(runPrefix, "complete.json")...)
+	_, _ = fmt.Fprintln(os.Stderr, "  writing complete.json (commit marker)...")
+	if err := uploadBytes(ctx, putter, completeKey, completeJSON); err != nil {
+		return fmt.Errorf("upload complete.json: %w", err)
+	}
+
+	_, _ = fmt.Fprintln(os.Stderr, "  updating latest.json...")
+	latestOpts, err := latestPointerOptionsFromCommand(cmd)
+	if err != nil {
+		return err
+	}
+	outcome, err := advanceLatestPointer(ctx, hub, getter, putter, indexSet.IndexSetID, run.RunID, latestOpts)
+	if err != nil {
+		return fmt.Errorf("update latest.json: %w", err)
+	}
+	printLatestPointerOutcome(os.Stderr, outcome, indexSet.IndexSetID, run.RunID)
+
+	_, _ = fmt.Fprintf(os.Stderr, "Export complete: %s/runs/%s/ (%s)\n", indexSet.IndexSetID, run.RunID, indexHubFormatDurableV2)
 	return nil
 }
 
@@ -488,13 +547,16 @@ func buildCompleteJSON(
 	}
 
 	type completeDoc struct {
-		Version     string     `json:"version"`
-		IndexSetID  string     `json:"index_set_id"`
-		RunID       string     `json:"run_id"`
-		CompletedAt string     `json:"completed_at"`
-		ExportedBy  string     `json:"exported_by"`
-		Artifacts   artifacts  `json:"artifacts"`
-		Source      sourceInfo `json:"source"`
+		Version             string     `json:"version"`
+		MarkerSchemaVersion string     `json:"marker_schema_version"`
+		Format              string     `json:"format"`
+		FormatVersion       string     `json:"format_version"`
+		IndexSetID          string     `json:"index_set_id"`
+		RunID               string     `json:"run_id"`
+		CompletedAt         string     `json:"completed_at"`
+		ExportedBy          string     `json:"exported_by"`
+		Artifacts           artifacts  `json:"artifacts"`
+		Source              sourceInfo `json:"source"`
 	}
 
 	runStatus, err := exportableRunStatus(run.Status)
@@ -503,11 +565,14 @@ func buildCompleteJSON(
 	}
 
 	doc := completeDoc{
-		Version:     "1.0",
-		IndexSetID:  indexSet.IndexSetID,
-		RunID:       run.RunID,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339),
-		ExportedBy:  exportedByString(),
+		Version:             "1.0",
+		MarkerSchemaVersion: indexHubMarkerSchemaV1,
+		Format:              indexHubFormatSQLiteV1,
+		FormatVersion:       "1",
+		IndexSetID:          indexSet.IndexSetID,
+		RunID:               run.RunID,
+		CompletedAt:         time.Now().UTC().Format(time.RFC3339),
+		ExportedBy:          exportedByString(),
 		Artifacts: artifacts{
 			IndexDB: artifactEntry{SizeBytes: dbSize, SHA256: dbSHA256},
 		},

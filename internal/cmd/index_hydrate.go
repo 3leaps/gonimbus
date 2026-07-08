@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/spf13/cobra"
@@ -166,7 +167,7 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	runPrefix := hubArtifactKey(hub, "index-sets", indexSetFlag, "runs", runID)
 	completeKey := runPrefix + "/complete.json"
 
-	completeData, err := downloadBytes(ctx, getter, completeKey)
+	completeData, err := downloadBytesBounded(ctx, getter, completeKey, maxHubMarkerBytes, "complete.json")
 	if err != nil {
 		if provider.IsNotFound(err) {
 			return fmt.Errorf("run %s is not committed (complete.json not found); cannot hydrate", runID)
@@ -178,12 +179,28 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	if err := json.Unmarshal(completeData, &complete); err != nil {
 		return fmt.Errorf("parse complete.json: %w", err)
 	}
+	format := completeMarkerFormat(complete)
 
 	// Prepare destination
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("create destination directory: %w", err)
 	}
+	switch format {
+	case indexHubFormatSQLiteV1:
+		return hydrateSQLiteRun(ctx, getter, runPrefix, complete, completeData, destDir)
+	case indexHubFormatDurableV2:
+		return hydrateDurableRun(ctx, getter, runPrefix, indexSetFlag, runID, complete, completeData, destDir)
+	case "":
+		return fmt.Errorf("complete.json has no format and no sqlite index_db artifact")
+	default:
+		return fmt.Errorf("unsupported index hub format %q", format)
+	}
+}
 
+func hydrateSQLiteRun(ctx context.Context, getter provider.ObjectGetter, runPrefix string, complete completeMarker, completeData []byte, destDir string) error {
+	if complete.Artifacts.IndexDB == nil {
+		return fmt.Errorf("sqlite hub run is missing index_db artifact")
+	}
 	// Download index.db
 	indexDBKey := runPrefix + "/index.db"
 	indexDBDest := filepath.Join(destDir, "index.db")
@@ -241,6 +258,117 @@ func runIndexHydrate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+func hydrateDurableRun(ctx context.Context, getter provider.ObjectGetter, runPrefix, indexSetID, runID string, complete completeMarker, completeData []byte, destDir string) error {
+	if err := validateDurableCompleteMarker(indexSetID, runID, complete); err != nil {
+		return err
+	}
+	manifestRef := *complete.Artifacts.Manifest
+	if manifestRef.Path != "manifest.json" || manifestRef.Role != "manifest" || !manifestRef.Required {
+		return fmt.Errorf("durable manifest artifact must be required manifest role at manifest.json")
+	}
+	if manifestRef.SizeBytes > maxDurableManifestBytes {
+		return fmt.Errorf("durable manifest size %d exceeds limit %d", manifestRef.SizeBytes, maxDurableManifestBytes)
+	}
+	manifestKey := runPrefix + "/manifest.json"
+	_, _ = fmt.Fprintf(os.Stderr, "  downloading manifest.json (%d bytes)...\n", manifestRef.SizeBytes)
+	manifestData, err := downloadBytesBounded(ctx, getter, manifestKey, maxDurableManifestBytes, "manifest.json")
+	if err != nil {
+		return fmt.Errorf("download durable manifest: %w", err)
+	}
+	if int64(len(manifestData)) != manifestRef.SizeBytes {
+		return fmt.Errorf("durable manifest size mismatch: expected %d, got %d", manifestRef.SizeBytes, len(manifestData))
+	}
+	if sha256HexBytes(manifestData) != manifestRef.SHA256 {
+		return fmt.Errorf("durable manifest integrity check failed: expected sha256=%s", manifestRef.SHA256)
+	}
+	var manifest indexsubstrate.InternalManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("parse durable manifest: %w", err)
+	}
+	if err := validateDurableHubManifest(indexSetID, runID, manifest); err != nil {
+		return err
+	}
+	if err := validateDurableHubManifestBounds(manifest); err != nil {
+		return err
+	}
+	segmentRefs, err := durableSegmentArtifactMap(complete, manifest)
+	if err != nil {
+		return err
+	}
+
+	for _, segment := range manifest.Segments {
+		ref := segmentRefs["segments/"+segment.Path]
+		destPath, err := safeLocalArtifactPath(destDir, ref.Path)
+		if err != nil {
+			return fmt.Errorf("segment %s: %w", segment.SegmentID, err)
+		}
+		key := runPrefix + "/" + ref.Path
+		_, _ = fmt.Fprintf(os.Stderr, "  downloading segment %s (%d bytes)...\n", segment.Path, ref.SizeBytes)
+		if err := downloadFile(ctx, getter, key, destPath); err != nil {
+			return fmt.Errorf("download segment %s: %w", segment.Path, err)
+		}
+		gotSHA, gotSize, err := hashFile(destPath)
+		if err != nil {
+			return fmt.Errorf("verify segment %s: %w", segment.Path, err)
+		}
+		if gotSHA != ref.SHA256 {
+			return fmt.Errorf("segment %s integrity check failed: expected sha256=%s, got %s", segment.Path, ref.SHA256, gotSHA)
+		}
+		if gotSize != ref.SizeBytes {
+			return fmt.Errorf("segment %s size mismatch: expected %d, got %d", segment.Path, ref.SizeBytes, gotSize)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "manifest.json"), manifestData, 0o644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "complete.json"), completeData, 0o644); err != nil {
+		return fmt.Errorf("write complete.json: %w", err)
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "Hydrate complete: %s\n", destDir)
+	return nil
+}
+
+func durableSegmentArtifactMap(complete completeMarker, manifest indexsubstrate.InternalManifest) (map[string]artifactRef, error) {
+	if len(complete.Artifacts.Segments) != len(manifest.Segments) {
+		return nil, fmt.Errorf("durable segment artifact count mismatch")
+	}
+	var totalBytes int64
+	refs := make(map[string]artifactRef, len(complete.Artifacts.Segments))
+	for _, ref := range complete.Artifacts.Segments {
+		if ref.Path == "" || ref.Role != "segment" || !ref.Required {
+			return nil, fmt.Errorf("durable segment artifact entries must be required segment roles")
+		}
+		if filepath.Clean(ref.Path) != ref.Path || !strings.HasPrefix(ref.Path, "segments/") {
+			return nil, fmt.Errorf("durable segment artifact path must be canonical segments/<name>")
+		}
+		if _, err := safeLocalArtifactPath(".", ref.Path); err != nil {
+			return nil, fmt.Errorf("durable segment artifact %q: %w", ref.Path, err)
+		}
+		if ref.SizeBytes < 0 {
+			return nil, fmt.Errorf("durable segment artifact size must be non-negative")
+		}
+		if totalBytes > maxDurableDeclaredArtifactSum-ref.SizeBytes {
+			return nil, fmt.Errorf("durable declared artifact bytes exceed limit")
+		}
+		totalBytes += ref.SizeBytes
+		if _, exists := refs[ref.Path]; exists {
+			return nil, fmt.Errorf("duplicate durable segment artifact %s", ref.Path)
+		}
+		refs[ref.Path] = ref
+	}
+	for _, segment := range manifest.Segments {
+		path := "segments/" + segment.Path
+		ref, ok := refs[path]
+		if !ok {
+			return nil, fmt.Errorf("durable complete marker missing segment artifact %s", path)
+		}
+		if ref.SHA256 != segment.Digest.Hex || ref.SizeBytes != segment.SizeBytes {
+			return nil, fmt.Errorf("durable segment artifact mismatch for %s", path)
+		}
+	}
+	return refs, nil
+}
+
 // validFullIndexSetPattern matches idx_<exactly 64 hex chars>.
 var validFullIndexSetPattern = regexp.MustCompile(`^idx_[0-9a-f]{64}$`)
 
@@ -271,7 +399,7 @@ func validateRunID(id string) error {
 // resolveLatestRunID reads latest.json from the hub to determine the run ID.
 func resolveLatestRunID(ctx context.Context, getter provider.ObjectGetter, hub *hubDestSpec, indexSetID string) (string, error) {
 	latestKey := hubArtifactKey(hub, "index-sets", indexSetID, "latest.json")
-	data, err := downloadBytes(ctx, getter, latestKey)
+	data, err := downloadBytesBounded(ctx, getter, latestKey, maxHubMarkerBytes, "latest.json")
 	if err != nil {
 		if provider.IsNotFound(err) {
 			return "", fmt.Errorf("no latest.json found for index set %s; use --run-id to specify explicitly", indexSetID)
@@ -298,13 +426,24 @@ func resolveLatestRunID(ctx context.Context, getter provider.ObjectGetter, hub *
 
 // completeMarker is the subset of complete.json needed for hydration verification.
 type completeMarker struct {
-	Artifacts struct {
-		IndexDB      artifactRef  `json:"index_db"`
-		IdentityJSON *artifactRef `json:"identity_json,omitempty"`
+	MarkerSchemaVersion string `json:"marker_schema_version,omitempty"`
+	Format              string `json:"format,omitempty"`
+	FormatVersion       string `json:"format_version,omitempty"`
+	IndexSetID          string `json:"index_set_id,omitempty"`
+	RunID               string `json:"run_id,omitempty"`
+	ExportedBy          string `json:"exported_by,omitempty"`
+	Artifacts           struct {
+		IndexDB      *artifactRef  `json:"index_db,omitempty"`
+		IdentityJSON *artifactRef  `json:"identity_json,omitempty"`
+		Manifest     *artifactRef  `json:"manifest,omitempty"`
+		Segments     []artifactRef `json:"segments,omitempty"`
 	} `json:"artifacts"`
 }
 
 type artifactRef struct {
+	Path      string `json:"path,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Required  bool   `json:"required,omitempty"`
 	SizeBytes int64  `json:"size_bytes"`
 	SHA256    string `json:"sha256"`
 }
@@ -319,6 +458,33 @@ func downloadBytes(ctx context.Context, getter provider.ObjectGetter, key string
 	return io.ReadAll(body)
 }
 
+func downloadBytesBounded(ctx context.Context, getter provider.ObjectGetter, key string, maxBytes int64, label string) ([]byte, error) {
+	body, declaredSize, err := getter.GetObject(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = body.Close() }()
+	return readAllBounded(body, declaredSize, maxBytes, label)
+}
+
+func readAllBounded(r io.Reader, declaredSize, maxBytes int64, label string) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("%s size limit must be positive", label)
+	}
+	if declaredSize > maxBytes {
+		return nil, fmt.Errorf("%s size %d exceeds limit %d", label, declaredSize, maxBytes)
+	}
+	limited := io.LimitReader(r, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s size exceeds limit %d", label, maxBytes)
+	}
+	return data, nil
+}
+
 // downloadFile streams an object from the hub to a local file.
 func downloadFile(ctx context.Context, getter provider.ObjectGetter, key, destPath string) error {
 	body, _, err := getter.GetObject(ctx, key)
@@ -327,6 +493,9 @@ func downloadFile(ctx context.Context, getter provider.ObjectGetter, key, destPa
 	}
 	defer func() { _ = body.Close() }()
 
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create destination directory: %w", err)
+	}
 	f, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Base(destPath), err)

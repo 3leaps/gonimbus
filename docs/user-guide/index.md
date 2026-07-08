@@ -930,6 +930,10 @@ For team and production use, indexes can be published to a shared hub (S3 or loc
 # Export to hub
 gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_da038d...
 
+# Export an opt-in durable snapshot
+gonimbus index export --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d... --format durable
+
 # Hydrate from hub
 gonimbus index hydrate --hub s3://bucket/index-hub/ \
   --index-set idx_da038d8171b4a9ba... --dest /tmp/hydrated/
@@ -950,6 +954,16 @@ first, gonimbus re-reads the current pointer and either retries, yields to the
 newer run, or fails closed with manual reconciliation guidance. Use
 `--latest-write-mode unconditional` only for explicit recovery after you have
 verified hub state.
+
+Hub runs carry an explicit format marker. Existing exports and the default
+`index export` path use `sqlite-v1`, which hydrates `index.db` and optional
+`identity.json` exactly as before. `index export --format durable` publishes the
+opt-in `durable-v2` format: `manifest.json` plus immutable `segments/*.parquet`
+artifacts. `index hydrate` reads the marker, rejects unknown formats, and for
+durable runs verifies the manifest and every referenced segment by digest before
+writing them under the destination directory. A durable hydrate does not create
+an `index.db`; downstream commands must explicitly support durable manifests
+before using that hydrated output.
 
 ### Large Hub Exports
 
