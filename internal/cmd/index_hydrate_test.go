@@ -585,9 +585,13 @@ func TestRunIndexHydrate_RejectsOversizedCompleteMarker(t *testing.T) {
 	runID := "run_1709654400000000000"
 	runDir := filepath.Join(hubDir, "index-sets", indexSetID, "runs", runID)
 	require.NoError(t, os.MkdirAll(runDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), bytesOfSize(maxHubMarkerBytes+1), 0644))
+	completePath := filepath.Join(runDir, "complete.json")
+	completeFile, err := os.Create(completePath)
+	require.NoError(t, err)
+	require.NoError(t, completeFile.Truncate(maxHubCompleteMarkerBytes+1))
+	require.NoError(t, completeFile.Close())
 
-	err := runHydrateFileHubForTest(ctx, hubDir, indexSetID, runID, t.TempDir())
+	err = runHydrateFileHubForTest(ctx, hubDir, indexSetID, runID, t.TempDir())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "complete.json size")
 	require.Contains(t, err.Error(), "exceeds limit")
@@ -906,12 +910,4 @@ func writeDurableHubRunForHydrateTest(t *testing.T, mutateComplete func(map[stri
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), append(completeBytes, '\n'), 0o600))
 	return hubDir, indexSetID, runID
-}
-
-func bytesOfSize(size int64) []byte {
-	out := make([]byte, int(size))
-	for i := range out {
-		out[i] = 'x'
-	}
-	return out
 }

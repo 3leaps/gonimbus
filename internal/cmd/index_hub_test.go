@@ -172,6 +172,31 @@ func TestRunIndexHubLs_WithIndexSets(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 }
 
+func TestRunIndexHubLs_JSONSurfacesMixedFormats(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubLsCmd(t, hubDir, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result []struct {
+		IndexSetID   string         `json:"index_set_id"`
+		LatestRun    string         `json:"latest_run"`
+		LatestFormat string         `json:"latest_format"`
+		RunCount     int            `json:"run_count"`
+		FormatCounts map[string]int `json:"format_counts"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Len(t, result, 1)
+	require.Equal(t, testFullIndexSetID, result[0].IndexSetID)
+	require.Equal(t, "run_3000000000000000000", result[0].LatestRun)
+	require.Equal(t, indexHubFormatDurableV2, result[0].LatestFormat)
+	require.Equal(t, 3, result[0].RunCount)
+	require.Equal(t, 2, result[0].FormatCounts[indexHubFormatSQLiteV1])
+	require.Equal(t, 1, result[0].FormatCounts[indexHubFormatDurableV2])
+}
+
 func TestRunIndexHubLs_PositionalHubURI(t *testing.T) {
 	hubDir := setupHubWithRuns(t)
 
@@ -254,6 +279,53 @@ func TestRunIndexHubShow(t *testing.T) {
 
 	cmd := newHubShowCmd(t, hubDir, testFullIndexSetID, true)
 	require.NoError(t, cmd.Execute())
+}
+
+func TestRunIndexHubShow_JSONSurfacesRunFormatAndArtifacts(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubShowCmd(t, hubDir, testFullIndexSetID, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result struct {
+		LatestRun string `json:"latest_run"`
+		Runs      []struct {
+			RunID     string `json:"run_id"`
+			Format    string `json:"format"`
+			Artifacts struct {
+				Count      int   `json:"count"`
+				TotalBytes int64 `json:"total_size_bytes"`
+				Manifest   bool  `json:"manifest"`
+				Segments   int   `json:"segments"`
+			} `json:"artifacts"`
+		} `json:"runs"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Equal(t, "run_3000000000000000000", result.LatestRun)
+	var durableRun *struct {
+		RunID     string `json:"run_id"`
+		Format    string `json:"format"`
+		Artifacts struct {
+			Count      int   `json:"count"`
+			TotalBytes int64 `json:"total_size_bytes"`
+			Manifest   bool  `json:"manifest"`
+			Segments   int   `json:"segments"`
+		} `json:"artifacts"`
+	}
+	for i := range result.Runs {
+		if result.Runs[i].Format == indexHubFormatDurableV2 {
+			durableRun = &result.Runs[i]
+			break
+		}
+	}
+	require.NotNil(t, durableRun)
+	require.Equal(t, "run_3000000000000000000", durableRun.RunID)
+	require.Equal(t, 3, durableRun.Artifacts.Count)
+	require.Equal(t, int64(42+100+200), durableRun.Artifacts.TotalBytes)
+	require.True(t, durableRun.Artifacts.Manifest)
+	require.Equal(t, 2, durableRun.Artifacts.Segments)
 }
 
 // --- hub set-latest ---
@@ -350,6 +422,50 @@ func TestRunIndexHubGC_Before(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 }
 
+func TestRunIndexHubGCDryRunJSONSurfacesFormatAndArtifactSet(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_1000000000000000000")
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubGCCmd(t, hubDir, "", 0, "2030-01-01", true, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result struct {
+		DryRun  bool `json:"dry_run"`
+		Removed []struct {
+			RunID       string `json:"run_id"`
+			Format      string `json:"format"`
+			ArtifactSet struct {
+				Count      int   `json:"count"`
+				TotalBytes int64 `json:"total_size_bytes"`
+				Segments   int   `json:"segments"`
+			} `json:"artifact_set"`
+		} `json:"removed"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.True(t, result.DryRun)
+	var durableCandidate *struct {
+		RunID       string `json:"run_id"`
+		Format      string `json:"format"`
+		ArtifactSet struct {
+			Count      int   `json:"count"`
+			TotalBytes int64 `json:"total_size_bytes"`
+			Segments   int   `json:"segments"`
+		} `json:"artifact_set"`
+	}
+	for i := range result.Removed {
+		if result.Removed[i].Format == indexHubFormatDurableV2 {
+			durableCandidate = &result.Removed[i]
+			break
+		}
+	}
+	require.NotNil(t, durableCandidate)
+	require.Equal(t, "run_3000000000000000000", durableCandidate.RunID)
+	require.Equal(t, 3, durableCandidate.ArtifactSet.Count)
+	require.Equal(t, int64(42+100+200), durableCandidate.ArtifactSet.TotalBytes)
+	require.Equal(t, 2, durableCandidate.ArtifactSet.Segments)
+}
+
 func TestRunIndexHubGC_KeepRetentionSemantics(t *testing.T) {
 	// 3 committed runs: run_3 (newest/latest), run_2, run_1 (oldest).
 	// --keep 2 should keep 2 total (run_3 + run_2), remove run_1.
@@ -389,6 +505,35 @@ func TestRunIndexHubGC_KeepOneKeepsOnlyLatest(t *testing.T) {
 	// run_3 (latest) should be kept
 	run3Dir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_3000000000000000000")
 	assert.FileExists(t, filepath.Join(run3Dir, "index.db"), "run_3 should be kept (latest)")
+}
+
+func TestRunIndexHubGC_RetainsPresentUnreadableCompleteMarker(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+
+	unreadableRunID := "run_2000000000000000000"
+	unreadableRunDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", unreadableRunID)
+	require.NoError(t, os.WriteFile(filepath.Join(unreadableRunDir, "complete.json"), []byte(`{"completed_at":`), 0644))
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	execErr := newHubGCCmd(t, hubDir, "", 1, "", false, false).Execute()
+
+	require.NoError(t, w.Close())
+	os.Stderr = origStderr
+	captured, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+
+	require.NoError(t, execErr)
+	assert.Contains(t, string(captured), "retaining run "+testFullIndexSetID+"/"+unreadableRunID)
+
+	assert.FileExists(t, filepath.Join(unreadableRunDir, "index.db"), "run with present unreadable complete marker should be retained")
+
+	oldestRunDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000")
+	_, err = os.Stat(filepath.Join(oldestRunDir, "index.db"))
+	assert.True(t, os.IsNotExist(err), "oldest valid non-latest run should still be deleted")
 }
 
 func TestRunIndexHubGC_KeepWithStaleLatest(t *testing.T) {
@@ -585,6 +730,73 @@ func setupHubWithRuns(t *testing.T) string {
 	return hubDir
 }
 
+func setupHubWithMixedFormats(t *testing.T, latestRunID string) string {
+	t.Helper()
+	hubDir := setupHubWithRuns(t)
+	runID := "run_3000000000000000000"
+	runDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID)
+	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "segments"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "manifest.json"), []byte(`{"type":"manifest"}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "segments", "seg-000001.parquet"), []byte("segment-1"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "segments", "seg-000002.parquet"), []byte("segment-2"), 0644))
+
+	complete := map[string]interface{}{
+		"version":               "1.0",
+		"marker_schema_version": indexHubMarkerSchemaV1,
+		"format":                indexHubFormatDurableV2,
+		"format_version":        "2",
+		"index_set_id":          testFullIndexSetID,
+		"run_id":                runID,
+		"completed_at":          "2026-02-01T00:00:00Z",
+		"exported_by":           "gonimbus-test",
+		"artifacts": map[string]interface{}{
+			"manifest": map[string]interface{}{
+				"path":       "manifest.json",
+				"role":       "manifest",
+				"required":   true,
+				"size_bytes": 42,
+				"sha256":     "manifest-sha",
+			},
+			"segments": []map[string]interface{}{
+				{
+					"path":       "segments/seg-000001.parquet",
+					"role":       "segment",
+					"required":   true,
+					"size_bytes": 100,
+					"sha256":     "seg-1-sha",
+				},
+				{
+					"path":       "segments/seg-000002.parquet",
+					"role":       "segment",
+					"required":   true,
+					"size_bytes": 200,
+					"sha256":     "seg-2-sha",
+				},
+			},
+		},
+		"durable": map[string]interface{}{
+			"segments": 2,
+			"rows":     900122,
+		},
+	}
+	data, err := json.MarshalIndent(complete, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), data, 0644))
+
+	latestPath := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "latest.json")
+	latest := map[string]interface{}{
+		"version":      "1.0",
+		"index_set_id": testFullIndexSetID,
+		"run_id":       latestRunID,
+		"updated_at":   "2026-03-06T00:00:00Z",
+	}
+	latestData, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(latestPath, latestData, 0644))
+
+	return hubDir
+}
+
 // setupHubWith3Runs creates a file-based hub with 3 committed runs.
 // Run 3 (run_3000000000000000000) is newest and set as latest.
 // Run 2 (run_2000000000000000000) is middle.
@@ -638,6 +850,20 @@ func setupHubWith3Runs(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(latestDir, "latest.json"), data, 0644))
 
 	return hubDir
+}
+
+func captureHubStdout(t *testing.T, run func() error) ([]byte, error) {
+	t.Helper()
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	execErr := run()
+	require.NoError(t, w.Close())
+	os.Stdout = origStdout
+	captured, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	return captured, execErr
 }
 
 func newHubInitCmd(t *testing.T, hubDir, description string) *cobra.Command {

@@ -290,9 +290,33 @@ func runIndexHubInit(cmd *cobra.Command, args []string) error {
 
 // hubIndexSetInfo holds summary info about an index set in the hub.
 type hubIndexSetInfo struct {
-	IndexSetID string `json:"index_set_id"`
-	LatestRun  string `json:"latest_run,omitempty"`
-	RunCount   int    `json:"run_count"`
+	IndexSetID   string         `json:"index_set_id"`
+	LatestRun    string         `json:"latest_run,omitempty"`
+	LatestFormat string         `json:"latest_format,omitempty"`
+	RunCount     int            `json:"run_count"`
+	FormatCounts map[string]int `json:"format_counts,omitempty"`
+}
+
+type hubArtifactSummary struct {
+	Count         int   `json:"count"`
+	TotalBytes    int64 `json:"total_size_bytes,omitempty"`
+	IndexDB       bool  `json:"index_db,omitempty"`
+	IdentityJSON  bool  `json:"identity_json,omitempty"`
+	Manifest      bool  `json:"manifest,omitempty"`
+	Segments      int   `json:"segments,omitempty"`
+	RequiredCount int   `json:"required_count,omitempty"`
+}
+
+type hubRunMarkerSummary struct {
+	Format        string             `json:"format"`
+	FormatVersion string             `json:"format_version,omitempty"`
+	CompletedAt   string             `json:"completed_at,omitempty"`
+	Artifacts     hubArtifactSummary `json:"artifacts"`
+}
+
+type hubCompleteEnvelope struct {
+	CompletedAt string `json:"completed_at"`
+	completeMarker
 }
 
 func runIndexHubLs(cmd *cobra.Command, args []string) error {
@@ -329,10 +353,10 @@ func runIndexHubLs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Enrich with latest.json and run count
+	// Enrich with latest.json, run count, and run formats.
 	infos := make([]hubIndexSetInfo, 0, len(indexSetIDs))
 	for _, setID := range indexSetIDs {
-		info := hubIndexSetInfo{IndexSetID: setID}
+		info := hubIndexSetInfo{IndexSetID: setID, FormatCounts: make(map[string]int)}
 
 		// Try to read latest.json
 		latestKey := hubArtifactKey(hub, "index-sets", setID, "latest.json")
@@ -349,6 +373,20 @@ func runIndexHubLs(cmd *cobra.Command, args []string) error {
 		runsPrefix := hubArtifactKey(hub, "index-sets", setID, "runs/")
 		runs, _ := discoverRuns(ctx, lister, runsPrefix)
 		info.RunCount = len(runs)
+		for _, runID := range runs {
+			completeKey := hubArtifactKey(hub, "index-sets", setID, "runs", runID, "complete.json")
+			summary, ok := readHubRunMarkerSummary(ctx, getter, completeKey)
+			if !ok {
+				continue
+			}
+			info.FormatCounts[summary.Format]++
+			if runID == info.LatestRun {
+				info.LatestFormat = summary.Format
+			}
+		}
+		if len(info.FormatCounts) == 0 {
+			info.FormatCounts = nil
+		}
 
 		infos = append(infos, info)
 	}
@@ -360,15 +398,97 @@ func runIndexHubLs(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "INDEX SET\tLATEST RUN\tRUNS")
+	_, _ = fmt.Fprintln(w, "INDEX SET\tLATEST RUN\tLATEST FORMAT\tRUNS\tFORMATS")
 	for _, info := range infos {
 		latest := info.LatestRun
 		if latest == "" {
 			latest = "-"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\n", info.IndexSetID, latest, info.RunCount)
+		latestFormat := info.LatestFormat
+		if latestFormat == "" {
+			latestFormat = "-"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", info.IndexSetID, latest, latestFormat, info.RunCount, formatCountsString(info.FormatCounts))
 	}
 	return w.Flush()
+}
+
+func readHubRunMarkerSummary(ctx context.Context, getter provider.ObjectGetter, key string) (hubRunMarkerSummary, bool) {
+	data, err := downloadBytesBounded(ctx, getter, key, maxHubCompleteMarkerBytes, "complete.json")
+	if err != nil {
+		return hubRunMarkerSummary{}, false
+	}
+	summary, err := summarizeHubRunMarker(data)
+	if err != nil {
+		return hubRunMarkerSummary{}, false
+	}
+	return summary, true
+}
+
+func summarizeHubRunMarker(data []byte) (hubRunMarkerSummary, error) {
+	var complete hubCompleteEnvelope
+	if err := json.Unmarshal(data, &complete); err != nil {
+		return hubRunMarkerSummary{}, err
+	}
+	format := completeMarkerFormat(complete.completeMarker)
+	if strings.TrimSpace(format) == "" {
+		format = "unknown"
+	}
+	return hubRunMarkerSummary{
+		Format:        format,
+		FormatVersion: strings.TrimSpace(complete.FormatVersion),
+		CompletedAt:   strings.TrimSpace(complete.CompletedAt),
+		Artifacts:     summarizeHubArtifacts(complete.completeMarker),
+	}, nil
+}
+
+func summarizeHubArtifacts(complete completeMarker) hubArtifactSummary {
+	var summary hubArtifactSummary
+	add := func(ref *artifactRef) {
+		if ref == nil {
+			return
+		}
+		summary.Count++
+		if ref.SizeBytes > 0 {
+			summary.TotalBytes += ref.SizeBytes
+		}
+		if ref.Required {
+			summary.RequiredCount++
+		}
+	}
+	if complete.Artifacts.IndexDB != nil {
+		summary.IndexDB = true
+		add(complete.Artifacts.IndexDB)
+	}
+	if complete.Artifacts.IdentityJSON != nil {
+		summary.IdentityJSON = true
+		add(complete.Artifacts.IdentityJSON)
+	}
+	if complete.Artifacts.Manifest != nil {
+		summary.Manifest = true
+		add(complete.Artifacts.Manifest)
+	}
+	for i := range complete.Artifacts.Segments {
+		summary.Segments++
+		add(&complete.Artifacts.Segments[i])
+	}
+	return summary
+}
+
+func formatCountsString(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "-"
+	}
+	formats := make([]string, 0, len(counts))
+	for format := range counts {
+		formats = append(formats, format)
+	}
+	sort.Strings(formats)
+	parts := make([]string, 0, len(formats))
+	for _, format := range formats {
+		parts = append(parts, fmt.Sprintf("%s:%d", format, counts[format]))
+	}
+	return strings.Join(parts, ",")
 }
 
 // discoverIndexSets lists unique index set IDs under the index-sets/ prefix.
@@ -452,10 +572,14 @@ func discoverRuns(ctx context.Context, lister provider.Provider, runsPrefix stri
 
 // hubRunInfo holds details about a specific run in the hub.
 type hubRunInfo struct {
-	RunID       string          `json:"run_id"`
-	IsLatest    bool            `json:"is_latest"`
-	IsCommitted bool            `json:"is_committed"`
-	Complete    json.RawMessage `json:"complete,omitempty"`
+	RunID         string              `json:"run_id"`
+	IsLatest      bool                `json:"is_latest"`
+	IsCommitted   bool                `json:"is_committed"`
+	Format        string              `json:"format,omitempty"`
+	FormatVersion string              `json:"format_version,omitempty"`
+	CompletedAt   string              `json:"completed_at,omitempty"`
+	Artifacts     *hubArtifactSummary `json:"artifacts,omitempty"`
+	Complete      json.RawMessage     `json:"complete,omitempty"`
 }
 
 func runIndexHubShow(cmd *cobra.Command, args []string) error {
@@ -518,9 +642,15 @@ func runIndexHubShow(cmd *cobra.Command, args []string) error {
 		}
 
 		completeKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "runs", runID, "complete.json")
-		if data, getErr := downloadBytes(ctx, getter, completeKey); getErr == nil {
+		if data, getErr := downloadBytesBounded(ctx, getter, completeKey, maxHubCompleteMarkerBytes, "complete.json"); getErr == nil {
 			info.IsCommitted = true
 			info.Complete = data
+			if summary, summaryErr := summarizeHubRunMarker(data); summaryErr == nil {
+				info.Format = summary.Format
+				info.FormatVersion = summary.FormatVersion
+				info.CompletedAt = summary.CompletedAt
+				info.Artifacts = &summary.Artifacts
+			}
 		}
 
 		runs = append(runs, info)
@@ -550,7 +680,7 @@ func runIndexHubShow(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "Runs:      %d\n\n", len(runs))
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "RUN ID\tCOMMITTED\tLATEST")
+	_, _ = fmt.Fprintln(w, "RUN ID\tCOMMITTED\tLATEST\tFORMAT\tARTIFACTS\tBYTES")
 	for _, r := range runs {
 		committed := "no"
 		if r.IsCommitted {
@@ -560,7 +690,19 @@ func runIndexHubShow(cmd *cobra.Command, args []string) error {
 		if r.IsLatest {
 			latest = "<--"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", r.RunID, committed, latest)
+		format := r.Format
+		if format == "" {
+			format = "-"
+		}
+		artifactCount := "-"
+		totalBytes := "-"
+		if r.Artifacts != nil {
+			artifactCount = fmt.Sprintf("%d", r.Artifacts.Count)
+			if r.Artifacts.TotalBytes > 0 {
+				totalBytes = fmt.Sprintf("%d", r.Artifacts.TotalBytes)
+			}
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.RunID, committed, latest, format, artifactCount, totalBytes)
 	}
 	return w.Flush()
 }
@@ -594,7 +736,7 @@ func runIndexHubSetLatest(cmd *cobra.Command, args []string) error {
 	}
 
 	completeKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "runs", runIDFlag, "complete.json")
-	if _, getErr := downloadBytes(ctx, getter, completeKey); getErr != nil {
+	if _, getErr := downloadBytesBounded(ctx, getter, completeKey, maxHubCompleteMarkerBytes, "complete.json"); getErr != nil {
 		if provider.IsNotFound(getErr) {
 			return fmt.Errorf("run %s is not committed (complete.json not found); cannot set as latest", runIDFlag)
 		}
@@ -735,16 +877,18 @@ func listAllKeys(ctx context.Context, lister provider.Provider, prefix string) (
 // --- gc implementation ---
 
 // gcRunCandidate represents a run being evaluated for garbage collection.
-// In dry-run output, only the IndexSetID/RunID/IsLatest/CompletedAt fields are
-// populated. In real-run output, Artifacts and Error are also populated to
-// reflect the per-run deletion outcome.
+// In dry-run output, Format/ArtifactSet describe the committed hub marker before
+// deletion. In real-run output, Artifacts and Error also reflect the deletion
+// outcome.
 type gcRunCandidate struct {
-	IndexSetID  string `json:"index_set_id"`
-	RunID       string `json:"run_id"`
-	IsLatest    bool   `json:"is_latest"`
-	CompletedAt string `json:"completed_at,omitempty"`
-	Artifacts   int    `json:"artifacts,omitempty"` // count of objects deleted (real-run)
-	Error       string `json:"error,omitempty"`     // populated if list/delete failed (real-run)
+	IndexSetID  string              `json:"index_set_id"`
+	RunID       string              `json:"run_id"`
+	IsLatest    bool                `json:"is_latest"`
+	Format      string              `json:"format,omitempty"`
+	CompletedAt string              `json:"completed_at,omitempty"`
+	ArtifactSet *hubArtifactSummary `json:"artifact_set,omitempty"`
+	Artifacts   int                 `json:"artifacts,omitempty"` // count of objects deleted (real-run)
+	Error       string              `json:"error,omitempty"`     // populated if list/delete failed (real-run)
 }
 
 // gcResult is the JSON envelope emitted by `gonimbus index hub gc --json`.
@@ -756,6 +900,10 @@ type gcResult struct {
 	DryRun  bool             `json:"dry_run"`
 	Removed []gcRunCandidate `json:"removed"`
 	Errors  int              `json:"errors,omitempty"`
+}
+
+func warnRetainingUnreadableComplete(indexSetID, runID, reason string) {
+	_, _ = fmt.Fprintf(os.Stderr, "warning: retaining run %s/%s: complete.json is present but unreadable: %s\n", indexSetID, runID, reason)
 }
 
 func runIndexHubGC(cmd *cobra.Command, args []string) error {
@@ -845,22 +993,36 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 
 		// Build candidates with completion times
 		type runWithTime struct {
-			runID       string
-			isLatest    bool
-			completedAt time.Time
-			hasComplete bool
+			runID        string
+			isLatest     bool
+			format       string
+			artifacts    hubArtifactSummary
+			completedAt  time.Time
+			hasComplete  bool
+			retainReason string
 		}
 		candidates := make([]runWithTime, 0, len(runIDs))
 		for _, runID := range runIDs {
 			r := runWithTime{runID: runID, isLatest: runID == latestRunID}
 			completeKey := hubArtifactKey(hub, "index-sets", setID, "runs", runID, "complete.json")
-			if data, getErr := downloadBytes(ctx, getter, completeKey); getErr == nil {
-				r.hasComplete = true
-				var complete struct {
-					CompletedAt string `json:"completed_at"`
+			if data, getErr := downloadBytesBounded(ctx, getter, completeKey, maxHubCompleteMarkerBytes, "complete.json"); getErr != nil {
+				if !provider.IsNotFound(getErr) {
+					r.retainReason = fmt.Sprintf("read complete.json: %v", getErr)
 				}
-				if json.Unmarshal(data, &complete) == nil && complete.CompletedAt != "" {
-					if t, tErr := time.Parse(time.RFC3339, complete.CompletedAt); tErr == nil {
+			} else {
+				r.hasComplete = true
+				summary, summaryErr := summarizeHubRunMarker(data)
+				if summaryErr != nil {
+					r.retainReason = fmt.Sprintf("parse complete.json: %v", summaryErr)
+				} else {
+					r.format = summary.Format
+					r.artifacts = summary.Artifacts
+					completedAt := strings.TrimSpace(summary.CompletedAt)
+					if completedAt == "" {
+						r.retainReason = "parse complete.json: completed_at is required for GC"
+					} else if t, tErr := time.Parse(time.RFC3339, completedAt); tErr != nil {
+						r.retainReason = fmt.Sprintf("parse complete.json: invalid completed_at: %v", tErr)
+					} else {
 						r.completedAt = t
 					}
 				}
@@ -898,6 +1060,10 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 
 			kept := 0
 			for _, r := range candidates {
+				if r.retainReason != "" {
+					warnRetainingUnreadableComplete(setID, r.runID, r.retainReason)
+					continue
+				}
 				if !r.hasComplete {
 					toRemove = append(toRemove, gcRunCandidate{
 						IndexSetID: setID,
@@ -916,13 +1082,19 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 				toRemove = append(toRemove, gcRunCandidate{
 					IndexSetID:  setID,
 					RunID:       r.runID,
+					Format:      r.format,
 					CompletedAt: r.completedAt.Format(time.RFC3339),
+					ArtifactSet: artifactSummaryPtr(r.artifacts),
 				})
 			}
 		} else {
 			// --before mode
 			for _, r := range candidates {
 				if r.isLatest {
+					continue
+				}
+				if r.retainReason != "" {
+					warnRetainingUnreadableComplete(setID, r.runID, r.retainReason)
 					continue
 				}
 				if !r.hasComplete {
@@ -936,7 +1108,9 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 					toRemove = append(toRemove, gcRunCandidate{
 						IndexSetID:  setID,
 						RunID:       r.runID,
+						Format:      r.format,
 						CompletedAt: r.completedAt.Format(time.RFC3339),
+						ArtifactSet: artifactSummaryPtr(r.artifacts),
 					})
 				}
 			}
@@ -962,7 +1136,7 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "Would remove %d run(s):\n", len(toRemove))
 		for _, r := range toRemove {
-			_, _ = fmt.Fprintf(os.Stderr, "  %s / %s\n", r.IndexSetID, r.RunID)
+			_, _ = fmt.Fprintf(os.Stderr, "  %s / %s (%s)\n", r.IndexSetID, r.RunID, gcVisibilityString(r))
 		}
 		return nil
 	}
@@ -1031,6 +1205,33 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(os.Stderr, "  with %d error(s)\n", errors)
 	}
 	return nil
+}
+
+func artifactSummaryPtr(summary hubArtifactSummary) *hubArtifactSummary {
+	if summary.Count == 0 && summary.TotalBytes == 0 && summary.Segments == 0 {
+		return nil
+	}
+	return &summary
+}
+
+func gcVisibilityString(r gcRunCandidate) string {
+	parts := []string{}
+	if r.Format != "" {
+		parts = append(parts, "format="+r.Format)
+	}
+	if r.ArtifactSet != nil {
+		parts = append(parts, fmt.Sprintf("artifact_refs=%d", r.ArtifactSet.Count))
+		if r.ArtifactSet.Segments > 0 {
+			parts = append(parts, fmt.Sprintf("segments=%d", r.ArtifactSet.Segments))
+		}
+		if r.ArtifactSet.TotalBytes > 0 {
+			parts = append(parts, fmt.Sprintf("declared_bytes=%d", r.ArtifactSet.TotalBytes))
+		}
+	}
+	if len(parts) == 0 {
+		return "format=unknown"
+	}
+	return strings.Join(parts, " ")
 }
 
 // parseFlexibleTime parses time as RFC 3339 or YYYY-MM-DD.

@@ -261,7 +261,7 @@ func readLatestPointerVersioned(ctx context.Context, getter provider.VersionedGe
 
 func readCompleteDoc(ctx context.Context, getter provider.ObjectGetter, hub *hubDestSpec, indexSetID, runID string) (hubCompleteDoc, error) {
 	key := hubArtifactKey(hub, "index-sets", indexSetID, "runs", runID, "complete.json")
-	data, err := downloadBytesBounded(ctx, getter, key, maxHubMarkerBytes, "complete.json")
+	data, err := downloadBytesBounded(ctx, getter, key, maxHubCompleteMarkerBytes, "complete.json")
 	if err != nil {
 		return hubCompleteDoc{}, err
 	}

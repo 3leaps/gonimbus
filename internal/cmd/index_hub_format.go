@@ -21,6 +21,7 @@ const (
 
 	maxHubMarkerBytes             = 1 << 20
 	maxDurableManifestBytes       = 64 << 20
+	maxHubCompleteMarkerBytes     = maxDurableManifestBytes
 	maxDurableHubSegments         = 200_000
 	maxDurableDeclaredArtifactSum = 100 << 40
 )
