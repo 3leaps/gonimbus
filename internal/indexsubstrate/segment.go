@@ -38,20 +38,22 @@ type SegmentWriterConfig struct {
 	TargetRowsPerSegment   int
 	AllowExistingIdentical bool
 	ParentManifests        []ManifestReference
+	Coverage               []CoverageAttestation
 }
 
 type InternalManifest struct {
-	Type               string               `json:"type"`
-	Render             string               `json:"render"`
-	IndexSetID         string               `json:"index_set_id"`
-	RunID              string               `json:"run_id"`
-	IndexSchemaVersion int                  `json:"index_schema_version"`
-	CreatedAt          time.Time            `json:"created_at"`
-	ParentManifests    []ManifestReference  `json:"parent_manifests"`
-	Reachability       ManifestReachability `json:"reachability"`
-	SegmentSizing      SegmentSizing        `json:"segment_sizing"`
-	Counts             ManifestCounts       `json:"counts"`
-	Segments           []SegmentDescriptor  `json:"segments"`
+	Type               string                `json:"type"`
+	Render             string                `json:"render"`
+	IndexSetID         string                `json:"index_set_id"`
+	RunID              string                `json:"run_id"`
+	IndexSchemaVersion int                   `json:"index_schema_version"`
+	CreatedAt          time.Time             `json:"created_at"`
+	ParentManifests    []ManifestReference   `json:"parent_manifests"`
+	Reachability       ManifestReachability  `json:"reachability"`
+	SegmentSizing      SegmentSizing         `json:"segment_sizing"`
+	Coverage           []CoverageAttestation `json:"coverage"`
+	Counts             ManifestCounts        `json:"counts"`
+	Segments           []SegmentDescriptor   `json:"segments"`
 }
 
 type ManifestReference struct {
@@ -144,6 +146,7 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		CreatedAt:          config.CreatedAt,
 		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
 		Reachability:       DefaultManifestReachability(),
+		Coverage:           copyCoverageAttestations(config.Coverage),
 		SegmentSizing: SegmentSizing{
 			TargetRowsPerSegment: config.TargetRowsPerSegment,
 			Rationale:            SegmentSizingRationale,
@@ -520,6 +523,25 @@ func validateManifestReferences(refs []ManifestReference) error {
 		}
 	}
 	return nil
+}
+
+func copyCoverageAttestations(in []CoverageAttestation) []CoverageAttestation {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CoverageAttestation, 0, len(in))
+	for _, entry := range in {
+		copied := entry
+		if entry.Scope != nil {
+			scope := *entry.Scope
+			copied.Scope = &scope
+		}
+		if len(entry.Gaps) > 0 {
+			copied.Gaps = append([]Scope(nil), entry.Gaps...)
+		}
+		out = append(out, copied)
+	}
+	return out
 }
 
 func normalizeAndSortSegmentRows(rows []CurrentObjectRow, indexSetID string) ([]CurrentObjectRow, error) {
