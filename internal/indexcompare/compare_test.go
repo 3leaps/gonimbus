@@ -40,6 +40,7 @@ func TestCompareProjectionParityIgnoresOrdering(t *testing.T) {
 	require.Equal(t, int64(0), report.ContentIdentityCheck.Mismatches)
 	require.NotEmpty(t, report.SQLiteProjectionSHA256)
 	require.Equal(t, report.SQLiteProjectionSHA256, report.DurableProjectionSHA256)
+	require.Equal(t, DefaultProjectionSemantics(), report.ProjectionSemantics)
 }
 
 func TestCompareProjectionChecksContentIdentitySeparately(t *testing.T) {
@@ -59,6 +60,28 @@ func TestCompareProjectionChecksContentIdentitySeparately(t *testing.T) {
 	require.Equal(t, int64(1), report.ContentIdentityCheck.Mismatches)
 	require.Equal(t, "provider_etag_equivalence", report.ContentIdentityCheck.Semantics)
 	require.Equal(t, "content_identity_mismatch", report.Mismatches[0].Kind)
+}
+
+func TestDefaultProjectionSemanticsDescribesResultContract(t *testing.T) {
+	semantics := DefaultProjectionSemantics()
+	require.Equal(t, "LIST-projection fidelity (sqlite vs durable row projection over one crawl)", semantics.Certifies)
+	require.Equal(t, "reflow-input readiness (HEAD-enrichment parity)", semantics.DoesNotCertify)
+	require.Equal(t, []string{"rel_key", "size_bytes", "last_modified", "storage_class"}, semantics.IncludedFields)
+	require.Contains(t, semantics.ContentIdentity, "provider_etag_equivalence")
+	require.Contains(t, semantics.ContentIdentity, "not a portable content hash")
+
+	require.Len(t, semantics.ExcludedFields, 4)
+	require.Equal(t, ExcludedFieldSemantics{
+		FieldClass: "HEAD-derived enrichment metadata",
+		Reason:     "not present in LIST; needs a separate enrich-with-HEAD pass",
+		OwningGate: "projection v2 / enrichment-parity (over enriched-index runs; future)",
+	}, semantics.ExcludedFields[0])
+	require.Equal(t, "run-scoped temporal fields (first_seen, last_seen, last_changed)", semantics.ExcludedFields[1].FieldClass)
+	require.Equal(t, "temporal-delta comparator (durable_delta.v1)", semantics.ExcludedFields[1].OwningGate)
+	require.Equal(t, "coverage attestation", semantics.ExcludedFields[2].FieldClass)
+	require.Equal(t, "temporal-delta comparator", semantics.ExcludedFields[2].OwningGate)
+	require.Equal(t, "physical/format-internal metadata", semantics.ExcludedFields[3].FieldClass)
+	require.Equal(t, "excluded by design (format-specific)", semantics.ExcludedFields[3].OwningGate)
 }
 
 func TestCompareProjectionRejectsUnknownVersion(t *testing.T) {

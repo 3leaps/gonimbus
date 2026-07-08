@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	// CompareResultType is the JSONL record type for index comparison reports.
+	CompareResultType    = "gonimbus.index.compare_result.v1"
 	ProjectionVersion    = "gonimbus.index.compare_projection.v1"
 	ComparatorVersion    = "gonimbus.index.comparator.v1"
 	DefaultMaxMismatches = 20
@@ -41,15 +43,20 @@ type Input struct {
 	Options              Options
 }
 
+// Report describes a compare_result.v1 parity check. ParityPassed certifies
+// only the ProjectionSemantics contract carried on the same result.
 type Report struct {
-	Type                    string               `json:"type"`
-	ProjectionVersion       string               `json:"projection_version"`
-	ComparatorVersion       string               `json:"comparator_version"`
-	ObservationRunID        string               `json:"observation_run_id,omitempty"`
-	ObservationStartedAt    string               `json:"observation_started_at,omitempty"`
-	SQLiteMaterialized      bool                 `json:"sqlite_materialized"`
-	DurablePublished        bool                 `json:"durable_published"`
-	ComparisonRan           bool                 `json:"comparison_ran"`
+	Type                 string              `json:"type"`
+	ProjectionVersion    string              `json:"projection_version"`
+	ProjectionSemantics  ProjectionSemantics `json:"projection_semantics"`
+	ComparatorVersion    string              `json:"comparator_version"`
+	ObservationRunID     string              `json:"observation_run_id,omitempty"`
+	ObservationStartedAt string              `json:"observation_started_at,omitempty"`
+	SQLiteMaterialized   bool                `json:"sqlite_materialized"`
+	DurablePublished     bool                `json:"durable_published"`
+	ComparisonRan        bool                `json:"comparison_ran"`
+	// ParityPassed means LIST-projection fidelity for one crawl; it does not
+	// certify reflow-input readiness or HEAD-enrichment parity.
 	ParityPassed            bool                 `json:"parity_passed"`
 	SQLiteArtifact          Artifact             `json:"sqlite_artifact"`
 	DurableArtifact         Artifact             `json:"durable_artifact"`
@@ -60,6 +67,25 @@ type Report struct {
 	ProjectionMismatches    int64                `json:"projection_mismatches"`
 	ContentIdentityCheck    ContentIdentityCheck `json:"content_identity_check"`
 	Mismatches              []Mismatch           `json:"mismatches,omitempty"`
+}
+
+// ProjectionSemantics is the machine-carried contract for ProjectionVersion.
+// It keeps compare_result.v1 consumers from treating LIST-projection parity as
+// a broader reflow-readiness or enrichment-parity claim.
+type ProjectionSemantics struct {
+	Certifies       string                   `json:"certifies"`
+	DoesNotCertify  string                   `json:"does_not_certify"`
+	IncludedFields  []string                 `json:"included_fields"`
+	ContentIdentity string                   `json:"content_identity"`
+	ExcludedFields  []ExcludedFieldSemantics `json:"excluded_fields"`
+}
+
+// ExcludedFieldSemantics describes one field class intentionally outside the
+// projection and names the gate that owns it.
+type ExcludedFieldSemantics struct {
+	FieldClass string `json:"field_class"`
+	Reason     string `json:"reason"`
+	OwningGate string `json:"owning_gate"`
 }
 
 type ContentIdentityCheck struct {
@@ -85,6 +111,38 @@ type projectionRow struct {
 	ETag         string `json:"-"`
 }
 
+// DefaultProjectionSemantics returns the static contract for projection v1.
+func DefaultProjectionSemantics() ProjectionSemantics {
+	return ProjectionSemantics{
+		Certifies:       "LIST-projection fidelity (sqlite vs durable row projection over one crawl)",
+		DoesNotCertify:  "reflow-input readiness (HEAD-enrichment parity)",
+		IncludedFields:  []string{"rel_key", "size_bytes", "last_modified", "storage_class"},
+		ContentIdentity: "provider_etag_equivalence: same-provider ETag-to-ETag check; not a portable content hash (multipart/composite ETag can differ from content hash). Checked separately, not in the row digest.",
+		ExcludedFields: []ExcludedFieldSemantics{
+			{
+				FieldClass: "HEAD-derived enrichment metadata",
+				Reason:     "not present in LIST; needs a separate enrich-with-HEAD pass",
+				OwningGate: "projection v2 / enrichment-parity (over enriched-index runs; future)",
+			},
+			{
+				FieldClass: "run-scoped temporal fields (first_seen, last_seen, last_changed)",
+				Reason:     "tracks durable temporal state outside one LIST projection",
+				OwningGate: "temporal-delta comparator (durable_delta.v1)",
+			},
+			{
+				FieldClass: "coverage attestation",
+				Reason:     "durable-only; sqlite has no equivalent coverage contract",
+				OwningGate: "temporal-delta comparator",
+			},
+			{
+				FieldClass: "physical/format-internal metadata",
+				Reason:     "segment digests, journal/shard ids, sqlite rowids, and internal manifest metadata are format-specific",
+				OwningGate: "excluded by design (format-specific)",
+			},
+		},
+	}
+}
+
 func Compare(ctx context.Context, input Input) (Report, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -100,8 +158,9 @@ func Compare(ctx context.Context, input Input) (Report, error) {
 		return Report{}, fmt.Errorf("sqlite index_set_id is required")
 	}
 	report := Report{
-		Type:                 "gonimbus.index.compare_result.v1",
+		Type:                 CompareResultType,
 		ProjectionVersion:    ProjectionVersion,
+		ProjectionSemantics:  DefaultProjectionSemantics(),
 		ComparatorVersion:    ComparatorVersion,
 		ObservationRunID:     strings.TrimSpace(input.ObservationRunID),
 		SQLiteMaterialized:   true,

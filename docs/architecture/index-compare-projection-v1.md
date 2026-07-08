@@ -40,6 +40,8 @@ unchecked.
 The comparator emits `gonimbus.index.compare_result.v1` with:
 
 - projection and comparator versions
+- a `projection_semantics` block that machine-carries what the result
+  certifies and what it does not certify
 - observation/run identity
 - SQLite and durable artifact identities
 - materialization booleans for SQLite, durable publication, comparison run, and
@@ -49,3 +51,16 @@ The comparator emits `gonimbus.index.compare_result.v1` with:
 - separate content-identity semantics and mismatch count
 
 Unknown projection versions must be rejected explicitly.
+
+## Reading A Green Result
+
+`parity_passed: true` means the SQLite and durable indexes agree on the
+LIST-derived projection for the same crawl: `rel_key`, `size_bytes`,
+`last_modified`, and `storage_class`. The provider ETag check is a
+same-provider equivalence guard and is not a portable content hash.
+
+A green result does not mean the durable index is reflow-ready. HEAD-derived
+enrichment metadata is outside projection v1 and requires a separate
+`enrich-with-head` pass plus a future enriched-run projection. Run-scoped
+temporal fields, coverage attestations, and physical format metadata are also
+outside this projection.
