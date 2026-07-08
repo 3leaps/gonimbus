@@ -21,8 +21,8 @@ const (
 	SegmentFormatParquet = "parquet"
 	ManifestRenderType   = "internal"
 
-	DefaultTargetRowsPerSegment = 100_000
-	SegmentSizingRationale      = "temporary conservative default pending real-corpus sizing evidence"
+	DefaultTargetRowsPerSegment = 500_000
+	SegmentSizingRationale      = "real-corpus rebaseline for hub export and hydrate artifact counts"
 
 	ManifestReachabilityModel = "retained_manifests_parent_chain_latest_pointers"
 	SegmentNamespaceShared    = "shared_immutable_segments"
