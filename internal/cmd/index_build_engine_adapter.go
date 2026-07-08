@@ -431,8 +431,9 @@ func indexBuildEngineCoverage(basePrefix string) []indexbuild.CoverageAttestatio
 
 func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, resolvedDB resolvedIndexDB, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {
 	report := &indexcompare.Report{
-		Type:                 "gonimbus.index.compare_result.v1",
+		Type:                 indexcompare.CompareResultType,
 		ProjectionVersion:    indexcompare.ProjectionVersion,
+		ProjectionSemantics:  indexcompare.DefaultProjectionSemantics(),
 		ComparatorVersion:    indexcompare.ComparatorVersion,
 		SQLiteMaterialized:   true,
 		DurablePublished:     durablePublished,

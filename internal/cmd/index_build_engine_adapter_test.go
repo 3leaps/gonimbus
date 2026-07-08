@@ -139,6 +139,12 @@ build:
 	var report map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
 	require.Equal(t, "gonimbus.index.compare_result.v1", report["type"])
+	semantics, ok := report["projection_semantics"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "LIST-projection fidelity (sqlite vs durable row projection over one crawl)", semantics["certifies"])
+	require.Equal(t, "reflow-input readiness (HEAD-enrichment parity)", semantics["does_not_certify"])
+	require.Equal(t, []any{"rel_key", "size_bytes", "last_modified", "storage_class"}, semantics["included_fields"])
+	require.Contains(t, semantics["content_identity"], "not a portable content hash")
 	require.Equal(t, true, report["sqlite_materialized"])
 	require.Equal(t, true, report["durable_published"])
 	require.Equal(t, true, report["comparison_ran"])
@@ -147,6 +153,18 @@ build:
 	latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, err)
 	require.Len(t, latestFiles, 1)
+}
+
+func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
+	report := indexBuildBothFormatsFailureReport(nil, nil, resolvedIndexDB{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
+	require.Equal(t, "gonimbus.index.compare_result.v1", report.Type)
+	require.Equal(t, "LIST-projection fidelity (sqlite vs durable row projection over one crawl)", report.ProjectionSemantics.Certifies)
+	require.Equal(t, "reflow-input readiness (HEAD-enrichment parity)", report.ProjectionSemantics.DoesNotCertify)
+	require.Equal(t, []string{"rel_key", "size_bytes", "last_modified", "storage_class"}, report.ProjectionSemantics.IncludedFields)
+	require.Contains(t, report.ProjectionSemantics.ContentIdentity, "not a portable content hash")
+	require.Len(t, report.ProjectionSemantics.ExcludedFields, 4)
+	require.False(t, report.ComparisonRan)
+	require.False(t, report.ParityPassed)
 }
 
 func TestIndexBuildFormatBothRejectsBuildScopeBeforeDurablePublish(t *testing.T) {
