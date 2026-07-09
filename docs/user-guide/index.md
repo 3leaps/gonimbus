@@ -50,11 +50,11 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 
 ### Artifact formats
 
-| Format | Build flag | What it produces | Local consumers today |
-| ------ | ---------- | ---------------- | --------------------- |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths |
-| **sqlite** | `--format sqlite` | Classic `index.db` under `indexes/idx_*/` | `index query`, `enrich-head`, `stats`, most `doctor` |
-| **both** | `--format both` | Dual-build + parity report for migration validation | Both surfaces for the same crawl |
+| Format                | Build flag         | What it produces                                           | Local consumers today                                |
+| --------------------- | ------------------ | ---------------------------------------------------------- | ---------------------------------------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths           |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | `index query`, `enrich-head`, `stats`, most `doctor` |
+| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl                     |
 
 Durable is now the default index artifact format in this build. SQLite remains an
 explicit compatibility/transition mode. Durable hydrate restores
