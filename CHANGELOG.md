@@ -85,9 +85,16 @@ walkthrough.
 
 - Added this v0.4.0 release page and refreshed rolling release notes.
 - Updated the current-release README pointer for the durable default.
-- User-guide index docs already describe durable default, export auto, and
-  SQLite compatibility (further operator/library expansion may follow in the
-  marketing pass before tag).
+- Added operator guide [`docs/user-guide/durable-index.md`](docs/user-guide/durable-index.md)
+  covering durable-default workflow, dual-format parity semantics, durable-delta
+  compare, hub round-trip, SQLite-bound `list`/`gc`, segment packing defaults,
+  and internal-render boundary framing.
+- Expanded Local Index user guide (list/gc caveats, compare commands, hub export
+  dual-format scale story) and index-build mental model for multi-format output.
+- Expanded library-consumer guidance for `pkg/indexbuild`, hub markers, and
+  consumers that assumed every build produces `index.db`.
+- Refreshed architecture notes for durable-default (no longer experimental-only)
+  and compare projection semantics.
 
 ## [0.3.7] - 2026-07-05
 

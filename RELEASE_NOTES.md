@@ -14,9 +14,8 @@ instead of centering the operator workflow on a single SQLite `index.db`.
 
 SQLite remains a first-class compatibility path via `--format sqlite` or dual
 `--format both`. Existing `index.db` files are not rewritten. Local query,
-enrich-head, stats, most doctor paths, **`index list`**, and **`index gc`**
-still need an `index.db` today — durable-only sets are not yet listed by
-`list` / `gc`.
+enrich-head, stats, doctor, **`index list`**, and **`index gc`** still need an
+`index.db` today — durable-only sets are not yet listed by `list` / `gc`.
 
 ### Why this matters
 
@@ -24,6 +23,7 @@ Large indexes hit single-object export ceilings when published as one database
 file. Durable packing splits the snapshot into segment objects (plus a small
 manifest), so hub export and hydrate scale past the old monolith wall while
 keeping row-level LIST-projection parity against SQLite on validated field runs.
+The largest individual hub PUT becomes a segment, not the whole inventory.
 
 ### Operator quick path
 
@@ -31,7 +31,7 @@ keeping row-level LIST-projection parity against SQLite on validated field runs.
 # Default durable build
 gonimbus index build --job index.yaml
 
-# SQLite compatibility (query / enrich-head / stats / list / gc)
+# SQLite compatibility (query / enrich-head / stats / list / gc / doctor)
 gonimbus index build --job index.yaml --format sqlite
 
 # Dual-format parity + local inventory visibility from one crawl
@@ -39,6 +39,13 @@ gonimbus index build --job index.yaml --format both
 
 # Export auto-selects durable when a local durable complete marker exists
 gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_...
+
+# Temporal compare between two durable snapshots
+gonimbus index compare durable-delta \
+  --before-manifest /path/to/before/manifest.json \
+  --before-segments /path/to/before/segments \
+  --after-manifest /path/to/after/manifest.json \
+  --after-segments /path/to/after/segments
 ```
 
 ### Also in this cut
@@ -50,6 +57,8 @@ gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_...
 - stderr progress for durable crawl and segmenting tails
 - Compare result `projection_semantics` (green parity = LIST fidelity, not
   reflow readiness)
+- Default segment packing of 500k rows (engine lever; not operator-configurable
+  in this cut)
 
 ### Boundary framing
 
@@ -64,7 +73,8 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.0
 ```
 
 See [docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the complete release
-notes.
+notes and [docs/user-guide/durable-index.md](docs/user-guide/durable-index.md)
+for the operator migration map.
 
 ---
 

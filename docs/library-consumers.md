@@ -30,6 +30,9 @@ Experimental workflow surface:
   includes metadata planning, dry-run planning, record-stream copy execution,
   collision decisions, adaptive concurrency, typed run/summary records, and the
   provider-error redaction helpers used by CLI `transfer reflow`.
+- `github.com/3leaps/gonimbus/pkg/indexbuild` is the durable index build
+  workflow engine (v0.4.0 default artifact path). See
+  [Durable index builds (pkg/indexbuild)](#durable-index-builds-pkgindexbuild) below.
 
 Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
 notification protocol documented in [`docs/api-stability.md`](api-stability.md);
@@ -244,9 +247,9 @@ through the reflow redaction helpers.
 
 ## Experimental Reflow Engine
 
-`pkg/reflow` is the first workflow-oriented library surface in Gonimbus. It is
-useful when an embedding application wants the same reflow decision engine that
-the CLI uses for stdin record-stream copy runs, while still owning provider
+`pkg/reflow` is a workflow-oriented library surface in Gonimbus. It is useful
+when an embedding application wants the same reflow decision engine that the
+CLI uses for stdin record-stream copy runs, while still owning provider
 construction, orchestration, logging, and release pinning.
 
 The package remains **Experimental**. Embedders should pin an exact Gonimbus
@@ -259,6 +262,52 @@ Use the CLI when you want a supported operator interface. Use `pkg/reflow` when
 you are building a Go application that needs to compose the reflow data and
 decision plane directly. Do not import `internal/cmd` to reuse CLI behavior;
 that path is intentionally private and outside the library contract.
+
+## Durable index builds (pkg/indexbuild)
+
+As of v0.4.0, durable-v2 is the default CLI index artifact. `pkg/indexbuild` is
+the **Experimental** embeddable engine behind that path: crawl with an injected
+provider, seal journals, compact, publish immutable segments and an internal
+manifest, write the complete marker, and advance the local latest pointer.
+
+Embedding contract highlights:
+
+- **Providers are injected.** The package does not import concrete provider
+  packages, command packages, cobra/viper, or SQLite-backed `pkg/indexstore`.
+  Callers construct a `pkg/provider` handle and pass it as `Config.Source`.
+- **Plan input is explicit.** Optional `Config.CrawlPrefixes` is the exact
+  provider-prefix observation plan (the library form of a compiled
+  `build.scope`). Faithful-coverage publication expects coverage attestations
+  to match that plan.
+- **Paths are caller-owned.** `PathConfig` points at journal/segment/manifest
+  locations resolved by the adapter. The engine rejects journal/segment paths
+  under a supplied `IndexDBDir` so v2 working state is not silently nested
+  under a legacy SQLite directory.
+- **Observation fanout is library-owned.** `ObservationSinks` receive the same
+  crawl stream as the durable journal materializer — this is how dual-format
+  CLI builds share one crawl without forking providers.
+- **Progress is observational.** Optional `OnSegmentProgress` emits count-only
+  segment progress; it must never be a publish failure vector.
+- **Segment packing default** is 500,000 rows per segment when
+  `TargetRowsPerSegment` is unset. Treat that as an engine default, not a
+  Stable configuration surface.
+
+Hub and parity consumers outside the build engine should:
+
+1. Branch on hub markers `sqlite-v1` and `durable-v2`; **reject unknown formats**.
+2. For durable artifacts, verify manifest and per-segment digests before trust
+   (the CLI hydrate path does this).
+3. Read `gonimbus.index.compare_result.v1` `projection_semantics` when consuming
+   dual-format parity — green means LIST-projection fidelity, not reflow
+   readiness or HEAD-enrichment parity.
+4. Stop assuming every successful build produces `index.db`. Open SQLite only
+   when the embedding path requested sqlite or dual-format materialization.
+
+`pkg/indexbuild` and `pkg/indexstore` remain **Experimental**. Pin an exact
+release. `pkg/reflow` is unchanged in stability tier in v0.4.0 (still
+Experimental; no Stable library API break). See
+[`docs/api-stability.md`](api-stability.md) and the
+[v0.4.0 release notes](releases/v0.4.0.md).
 
 ## Dependency Boundary
 

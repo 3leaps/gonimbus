@@ -1,8 +1,10 @@
 # Index Compare Projection v1
 
-`gonimbus.index.compare_projection.v1` is the Slice A parity projection for
-comparing the legacy SQLite index format with the experimental durable index
-format over one observed crawl.
+`gonimbus.index.compare_projection.v1` is the parity projection for comparing
+the SQLite index format with the durable-v2 index format (the v0.4.0 default)
+over one observed crawl. Dual-format builds (`index build --format both`) emit
+a `gonimbus.index.compare_result.v1` report that includes this projection's
+`projection_semantics` block.
 
 ## Scope
 

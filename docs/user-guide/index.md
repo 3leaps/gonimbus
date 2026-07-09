@@ -13,6 +13,10 @@ run-history, and soft-delete guidance.
 For content-addressed post-pass artifacts over completed index runs, see
 [Atlas Artifacts](atlas.md).
 
+For the v0.4.0 durable-default operator map (parity, hub round-trip, SQLite
+escape hatches, boundary framing), see
+[Durable Index Format](durable-index.md).
+
 ## When to Use the Index
 
 Gonimbus supports two workflows based on bucket scale:
@@ -50,17 +54,21 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 
 ### Artifact formats
 
-| Format                | Build flag         | What it produces                                           | Local consumers today                                |
-| --------------------- | ------------------ | ---------------------------------------------------------- | ---------------------------------------------------- |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths           |
-| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | `index query`, `enrich-head`, `stats`, most `doctor` |
-| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl                     |
+| Format                | Build flag         | What it produces                                           | Local consumers today                                                      |
+| --------------------- | ------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths                                 |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | `index query`, `enrich-head`, `stats`, most `doctor`, **`list`**, **`gc`** |
+| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl                                           |
 
-Durable is now the default index artifact format in this build. SQLite remains an
-explicit compatibility/transition mode. Durable hydrate restores
-`manifest.json` + segments, **not** `index.db`. If you still need local SQLite
-query or enrichment workflows during the transition, pass `--format sqlite` or
-`--format both`.
+Durable is now the default index artifact format. SQLite remains an explicit
+compatibility/transition mode. Durable hydrate restores `manifest.json` +
+segments, **not** `index.db`. If you still need local SQLite query, enrichment,
+doctor, or **local inventory** (`list` / `gc`) during the transition, pass
+`--format sqlite` or `--format both`.
+
+See [Durable Index Format](durable-index.md) for the full migration map, green
+parity semantics, hub round-trip, segment packing defaults, and internal-render
+boundary framing.
 
 ## Index Manifest
 
@@ -341,6 +349,12 @@ ID, and identity health. If the latest index run is `failed-resumable`, list
 output includes a `gonimbus index ... --resume-run <run_id>` hint for the
 operation that wrote the checkpoint.
 
+**SQLite-bound today:** `index list` enumerates directories that contain an
+`index.db`. Under the durable default a plain build produces no `index.db`, so
+durable-only sets are not listed (you may see "No indexes found"). Build with
+`--format sqlite` or `--format both` if you need local inventory during the
+transition. See [Durable Index Format](durable-index.md).
+
 ### `index query`
 
 Query indexed objects by pattern and filters.
@@ -485,6 +499,37 @@ gonimbus index gc --max-age 30d
 
 # Preview what would be removed
 gonimbus index gc --keep-last 1 --dry-run
+```
+
+**SQLite-bound today:** like `index list`, `index gc` only sees index directories
+that contain an `index.db`. Durable-only default builds are not yet in scope for
+local GC. Use `--format sqlite` or `both` when you need local retention control
+during the transition; hub retention remains `index hub gc`.
+
+### `index compare`
+
+Compare index artifacts.
+
+**Dual-format parity** is produced by the build itself:
+
+```bash
+gonimbus index build --job index-manifest.yaml --format both
+```
+
+That single crawl materializes SQLite and durable artifacts and emits a
+`gonimbus.index.compare_result.v1` report. Green parity certifies LIST-projection
+fidelity only — not reflow readiness. See
+[Durable Index Format](durable-index.md#dual-format-parity) and
+[Index Compare Projection v1](../architecture/index-compare-projection-v1.md).
+
+**Temporal durable delta** compares two durable snapshots:
+
+```bash
+gonimbus index compare durable-delta \
+  --before-manifest /path/to/before/manifest.json \
+  --before-segments /path/to/before/segments \
+  --after-manifest /path/to/after/manifest.json \
+  --after-segments /path/to/after/segments
 ```
 
 ## Job Management
@@ -939,6 +984,8 @@ gonimbus index build --job index-manifest.yaml
 ## Index Hub
 
 For team and production use, indexes can be published to a shared hub (S3 or local filesystem) and hydrated on demand.
+v0.4.0 hubs are format-aware: runs carry a `sqlite-v1` or `durable-v2` marker.
+Operator detail: [Durable Index Format — Hub export and hydrate](durable-index.md#hub-export-and-hydrate).
 
 ```bash
 # Export to hub (default --format auto: durable if local durable snapshot exists, else sqlite)
@@ -989,35 +1036,46 @@ at the index-set level and per-run artifact summaries. `index hub gc --dry-run
 candidates, so operators can see when retention would remove a durable manifest
 and its segment set rather than a single SQLite database artifact.
 
+Durable hub artifacts are a full-fidelity **internal render** for trusted
+operators and pipelines — not a reduced-trust third-party share format. See
+[boundary framing](durable-index.md#internal-render-framing-mandatory).
+
 ### Large Hub Exports
 
-Large index runs can produce an `index.db` that is too large for a provider's
+There are two different scale stories depending on format:
+
+**Durable (default).** A durable export publishes multiple segment objects plus
+a small manifest and markers. The largest individual PUT is a segment (typically
+tens of megabytes under default packing), which is how durable clears the
+historical single-object PUT wall that multi-gigabyte SQLite inventories hit.
+
+**SQLite compatibility.** Large `index.db` files can still exceed a provider's
 single-object PUT limit. For S3-compatible hubs, `index export` automatically
 uses multipart upload through the shared transfer uploader when an artifact
 crosses the default multipart threshold (64 MiB). The default part size is 8 MiB;
 very large known-size artifacts increase part size automatically when needed to
 stay within provider part-count limits.
 
-The operator effect is that a large index hub export should complete as one
-published run instead of failing at the >5 GiB single-PUT boundary. The export
-still follows the same commit order: upload immutable artifacts, write
-`complete.json`, then advance `latest.json`.
+In both cases the export still follows the same commit order: upload immutable
+artifacts, write `complete.json`, then advance `latest.json`.
 
-Plan local disk with two separate facts in mind:
+Plan local disk with these facts in mind:
 
-- The local `index.db` already exists before export and remains the source file
-  for the upload. `index export` does not need a second full-size copy of that
-  database just to use multipart upload.
+- For **sqlite** export, the local `index.db` already exists before upload and
+  remains the source file. Multipart does not require a second full-size copy of
+  that database just to cross the PUT wall.
+- For **durable** export, segments already exist under the segment cache before
+  hub upload; export does not re-pack the inventory.
 - Small commit-marker files may use temporary files, and provider/retry paths may
   use system temp space. Keep the system temp directory outside the repository
   working tree and leave headroom for normal OS and checkpoint activity.
 
-Provider cleanup still matters. Gonimbus aborts multipart uploads on failure
-paths it controls, but a killed process, host failure, or provider-side partial
-state can leave incomplete uploads behind. Configure the destination bucket's
-lifecycle cleanup for incomplete multipart uploads, such as an S3
-`AbortIncompleteMultipartUpload` lifecycle rule, before relying on repeated large
-exports.
+Provider cleanup still matters for multipart paths. Gonimbus aborts multipart
+uploads on failure paths it controls, but a killed process, host failure, or
+provider-side partial state can leave incomplete uploads behind. Configure the
+destination bucket's lifecycle cleanup for incomplete multipart uploads, such as
+an S3 `AbortIncompleteMultipartUpload` lifecycle rule, before relying on repeated
+large SQLite exports.
 
 Multipart ETags are provider-specific and should not be treated as universal
 content hashes. Trust the hub's `complete.json` artifact sizes and SHA-256 values

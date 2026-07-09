@@ -104,10 +104,11 @@ segment or snapshot-backed index format.
 
 ### Durable Snapshot Manifests
 
-The experimental durable index path writes immutable segment snapshots behind an
-internal manifest. Internal manifests may expose exact segment shape metadata
-needed for engine validation, including segment key ranges, tombstone counts,
-and artifact-level ETag counts.
+As of v0.4.0, durable-v2 is the **default** index build format. The durable path
+writes immutable segment snapshots behind an internal manifest. Internal
+manifests may expose exact segment shape metadata needed for engine validation,
+including segment key ranges, tombstone counts, and artifact-level ETag counts.
+SQLite remains an explicit compatibility path (`--format sqlite` or `both`).
 
 Durable snapshots store segment files in a shared immutable segment namespace.
 Phase 1 manifests carry parent manifest references and an explicit reachability
