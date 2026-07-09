@@ -81,6 +81,10 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	if err != nil {
 		return out, err
 	}
+	coverage, err := indexBuildEngineCoverageFromCrawl(basePrefix, crawlPrefixes)
+	if err != nil {
+		return out, err
+	}
 	journalDir, err := indexSubstrateJournalRunDir(indexSet.IndexSetID, run.RunID)
 	if err != nil {
 		return out, err
@@ -111,7 +115,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		CrawlPrefixes:        crawlPrefixes,
 		ObservationSinks:     []output.Writer{sqliteWriter},
 		Paths:                paths,
-		Coverage:             indexBuildEngineCoverage(basePrefix),
+		Coverage:             coverage,
 		RunStartedAt:         run.StartedAt,
 		CreatedAt:            time.Now().UTC(),
 		TargetRowsPerSegment: 0,
@@ -212,6 +216,15 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		}
 	}
 
+	crawlPrefixes, err := indexBuildEngineCrawlPrefixes(ctx, m, basePrefix, prov)
+	if err != nil {
+		return indexbuild.Summary{}, "", err
+	}
+	coverage, err := indexBuildEngineCoverageFromCrawl(basePrefix, crawlPrefixes)
+	if err != nil {
+		return indexbuild.Summary{}, "", err
+	}
+
 	now := time.Now().UTC()
 	cfg := indexbuild.Config{
 		IndexSetID: identityResult.IndexSetID,
@@ -224,8 +237,9 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		Match:                indexBuildEngineMatchConfig(m),
 		Filter:               nil,
 		Crawl:                indexBuildEngineCrawlConfig(m),
+		CrawlPrefixes:        crawlPrefixes,
 		Paths:                indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, resolvedDB.IdentityDir),
-		Coverage:             indexBuildEngineCoverage(basePrefix),
+		Coverage:             coverage,
 		RunStartedAt:         now,
 		CreatedAt:            now,
 		TargetRowsPerSegment: 0,
@@ -299,10 +313,10 @@ func validateIndexBuildFormatManifest(m *manifest.IndexManifest) error {
 		return nil
 	case "durable", "both":
 		flagName := "--format " + format
+		// build.scope is allowed: it compiles to an explicit LIST prefix plan.
+		// Match predicates that drop objects inside a covered prefix stay rejected
+		// via validateIndexBuildDurableFullBaseMatch (faithful coverage).
 		if m != nil && m.Build != nil {
-			if m.Build.Scope != nil {
-				return fmt.Errorf("%s does not support build.scope in this slice", flagName)
-			}
 			switch strings.TrimSpace(m.Build.Source) {
 			case "", manifest.DefaultIndexSource:
 				// ok
@@ -428,15 +442,149 @@ func indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, i
 	}
 }
 
-func indexBuildEngineCoverage(basePrefix string) []indexbuild.CoverageAttestation {
-	// This adapter does not load PriorRows in this slice, so full-base coverage
-	// cannot tombstone CLI rows. When prior-row loading is added, coverage must
-	// account for active match exclusions before attesting complete coverage.
-	return []indexbuild.CoverageAttestation{{
-		Scope:    &indexbuild.Scope{Prefix: basePrefix},
-		Basis:    indexbuild.CoverageBasisConfirmed,
-		Complete: true,
-	}}
+// indexBuildEngineCoverageFromCrawl derives durable coverage from the exact
+// crawl-prefix plan that drives observation, then fail-closed verifies set
+// equality. Both durable-only and --format both must call this helper so no
+// path can skip the faithful-coverage gate.
+//
+// Unscoped (empty crawl plan): single confirmed-complete attestation over the
+// base prefix. Scoped: one confirmed-complete, non-windowed attestation per
+// crawl prefix. Never roll up to a parent/base prefix.
+//
+// This adapter does not load PriorRows in this slice; when prior-row loading
+// lands alongside scope, scoped incremental tombstone soundness needs re-review.
+func indexBuildEngineCoverageFromCrawl(basePrefix string, crawlPrefixes []string) ([]indexbuild.CoverageAttestation, error) {
+	coverage, err := deriveIndexBuildCoverageFromCrawlPrefixes(basePrefix, crawlPrefixes)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFaithfulIndexBuildCoverage(basePrefix, crawlPrefixes, coverage); err != nil {
+		return nil, err
+	}
+	return coverage, nil
+}
+
+func deriveIndexBuildCoverageFromCrawlPrefixes(basePrefix string, crawlPrefixes []string) ([]indexbuild.CoverageAttestation, error) {
+	if len(crawlPrefixes) == 0 {
+		// Bucket-root base_uri (s3://bucket/) yields empty provider key; use the
+		// relative-root sentinel so faithful-coverage validation and later
+		// normalizeCoverageForBaseURI agree (blank is not a missing prefix).
+		return []indexbuild.CoverageAttestation{{
+			Scope:    &indexbuild.Scope{Prefix: unscopedBaseCoveragePrefix(basePrefix)},
+			Basis:    indexbuild.CoverageBasisConfirmed,
+			Complete: true,
+		}}, nil
+	}
+	out := make([]indexbuild.CoverageAttestation, 0, len(crawlPrefixes))
+	for _, raw := range crawlPrefixes {
+		prefix := exactCoveragePrefixKey(raw)
+		if prefix == "" {
+			return nil, fmt.Errorf("crawl prefix plan contains an empty prefix")
+		}
+		out = append(out, indexbuild.CoverageAttestation{
+			// Window must stay nil: date_partitions ranges are discovery-time
+			// prefix selection, never post-LIST temporal windows.
+			Scope:    &indexbuild.Scope{Prefix: prefix},
+			Basis:    indexbuild.CoverageBasisConfirmed,
+			Complete: true,
+		})
+	}
+	return out, nil
+}
+
+// unscopedBaseCoveragePrefix maps the unscoped base provider key into the
+// coverage equality key. Empty key (bucket root) is the relative-root sentinel.
+func unscopedBaseCoveragePrefix(basePrefix string) string {
+	key := exactCoveragePrefixKey(basePrefix)
+	if key == "" {
+		return indexsubstrate.RelativeRootScopePrefix
+	}
+	return key
+}
+
+// validateFaithfulIndexBuildCoverage enforces exact SET EQUALITY between the
+// crawl-prefix plan and coverage attestation prefixes. Subset and parent/child
+// containment checks are intentionally rejected (they enable roll-up overclaim).
+func validateFaithfulIndexBuildCoverage(basePrefix string, crawlPrefixes []string, coverage []indexbuild.CoverageAttestation) error {
+	if len(coverage) == 0 {
+		return fmt.Errorf("durable coverage attestation is required")
+	}
+	for i, entry := range coverage {
+		if entry.Scope == nil {
+			return fmt.Errorf("durable coverage[%d] scope is required", i)
+		}
+		if entry.Scope.Window != nil {
+			return fmt.Errorf("durable coverage[%d] must not set a temporal window", i)
+		}
+		if entry.Basis != indexbuild.CoverageBasisConfirmed || !entry.Complete {
+			return fmt.Errorf("durable coverage[%d] must be confirmed and complete", i)
+		}
+		if len(entry.Gaps) > 0 {
+			return fmt.Errorf("durable coverage[%d] must not declare gaps in this slice", i)
+		}
+	}
+
+	if len(crawlPrefixes) == 0 {
+		// Unscoped full-base path: exactly one base attestation.
+		if len(coverage) != 1 {
+			return fmt.Errorf("unscoped durable coverage must have exactly one base attestation, got %d", len(coverage))
+		}
+		got := exactCoveragePrefixKey(coverage[0].Scope.Prefix)
+		// Accept legacy blank root or the relative-root sentinel as equivalent.
+		if got == "" {
+			got = indexsubstrate.RelativeRootScopePrefix
+		}
+		want := unscopedBaseCoveragePrefix(basePrefix)
+		if got != want {
+			return fmt.Errorf("unscoped durable coverage prefix %q does not match base prefix %q", got, want)
+		}
+		return nil
+	}
+
+	for i, entry := range coverage {
+		if exactCoveragePrefixKey(entry.Scope.Prefix) == "" {
+			return fmt.Errorf("durable coverage[%d] prefix is required", i)
+		}
+	}
+
+	crawlSet := make(map[string]struct{}, len(crawlPrefixes))
+	for _, raw := range crawlPrefixes {
+		key := exactCoveragePrefixKey(raw)
+		if key == "" {
+			return fmt.Errorf("crawl prefix plan contains an empty prefix")
+		}
+		crawlSet[key] = struct{}{}
+	}
+	if len(crawlSet) != len(crawlPrefixes) {
+		return fmt.Errorf("crawl prefix plan has duplicate prefixes after normalize")
+	}
+
+	covSet := make(map[string]struct{}, len(coverage))
+	for i, entry := range coverage {
+		key := exactCoveragePrefixKey(entry.Scope.Prefix)
+		if _, dup := covSet[key]; dup {
+			return fmt.Errorf("durable coverage has duplicate prefix %q", key)
+		}
+		covSet[key] = struct{}{}
+		if _, ok := crawlSet[key]; !ok {
+			return fmt.Errorf("durable coverage[%d] prefix %q is not in the crawl plan (roll-up or extra coverage is not publishable)", i, key)
+		}
+	}
+	if len(covSet) != len(crawlSet) {
+		return fmt.Errorf("durable coverage prefixes (%d) must equal crawl plan prefixes (%d) exactly", len(covSet), len(crawlSet))
+	}
+	for key := range crawlSet {
+		if _, ok := covSet[key]; !ok {
+			return fmt.Errorf("durable coverage is missing crawl plan prefix %q", key)
+		}
+	}
+	return nil
+}
+
+// exactCoveragePrefixKey is the equality key for crawl↔coverage set checks.
+// It trims whitespace only — no parent-prefix collapsing (that would be roll-up).
+func exactCoveragePrefixKey(prefix string) string {
+	return strings.TrimSpace(prefix)
 }
 
 func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, resolvedDB resolvedIndexDB, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {
