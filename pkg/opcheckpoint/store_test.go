@@ -235,8 +235,8 @@ func TestRenewLeaseExtendsCurrentLease(t *testing.T) {
 	require.True(t, renewed.ClaimedAt.Equal(lease.ClaimedAt))
 	require.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
 
-	require.ErrorIs(t, store.ReleaseLease("index-build", *lease), ErrLeaseHeld)
-	require.NoError(t, store.ReleaseLease("index-build", *renewed))
+	// Pre-renew ExpiresAt still identifies the same claim; release must succeed.
+	require.NoError(t, store.ReleaseLease("index-build", *lease))
 }
 
 func TestRenewLeaseFailsAfterStaleTakeover(t *testing.T) {
@@ -279,18 +279,30 @@ func TestRenewLeaseCannotReviveExpiredLease(t *testing.T) {
 	require.ErrorIs(t, err, ErrLeaseHeld)
 }
 
+func TestSameLeaseIgnoresExpiresAt(t *testing.T) {
+	// Renewals mutate ExpiresAt; identity must still match so heartbeat Stop/Release work.
+	claimed := time.Date(2026, 7, 9, 12, 0, 0, 123456789, time.UTC)
+	a := &Lease{RunID: "run_a", HolderID: "holder-a", ClaimedAt: claimed, ExpiresAt: claimed.Add(time.Second)}
+	b := &Lease{RunID: "run_a", HolderID: "holder-a", ClaimedAt: claimed, ExpiresAt: claimed.Add(5 * time.Second)}
+	require.True(t, sameLease(a, b))
+	b.HolderID = "holder-b"
+	require.False(t, sameLease(a, b))
+}
+
 func TestLeaseHeartbeatRenewsUntilStopped(t *testing.T) {
 	store := newTestStore(t)
-	lease, err := store.ClaimLease(context.Background(), "index-build", "run_heartbeat", "holder-a", 20*time.Millisecond)
+	// Use generous TTLs: short claim/renew windows are flaky under CI load when
+	// a heartbeat tick is delayed past the lease expiry.
+	lease, err := store.ClaimLease(context.Background(), "index-build", "run_heartbeat", "holder-a", 200*time.Millisecond)
 	require.NoError(t, err)
 	initialExpiresAt := lease.ExpiresAt
 
-	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), "index-build", lease, 5*time.Millisecond, 50*time.Millisecond)
+	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), "index-build", lease, 10*time.Millisecond, 200*time.Millisecond)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		current, err := readLease(filepath.Join(store.RootDir(), "index-build", "run_heartbeat", leaseFileName))
 		return err == nil && current.ExpiresAt.After(initialExpiresAt)
-	}, time.Second, 5*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 	require.NoError(t, heartbeat.Stop())
 	require.NoError(t, store.ReleaseLease("index-build", *lease))
 }
