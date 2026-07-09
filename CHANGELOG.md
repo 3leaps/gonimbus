@@ -15,6 +15,87 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-09
+
+**Durable index format is now the default.**
+
+v0.4.0 is the index-substrate epoch: segmented immutable durable indexes
+(journals → Snappy-Parquet segments → internal manifests → hub markers) become
+the default `index build` artifact, with SQLite retained as an explicit
+compatibility path. The release closes the multi-release durable substrate and
+operator-usability arc, including dual-format parity, hub export/hydrate for
+`durable-v2`, hub visibility, scoped dual-format builds with faithful coverage,
+and stderr progress for multi-minute durable builds. See
+[`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) for the narrative
+walkthrough.
+
+### Added
+
+- **Durable index substrate:** crawl journals, compaction, immutable segment
+  writer, publication gate (sealed journal → coverage → segments → manifest →
+  complete → latest), durable build engine (`pkg/indexbuild`), boundary render
+  guard, and parent-chain reachability for internal manifests.
+- **Dual-format index builds:** `index build --format durable|sqlite|both` with
+  shared observation for dual-format parity comparison.
+- **Parity and delta comparators:** old-vs-new projection-v1 compare (LIST
+  fidelity) and durable snapshot-to-snapshot temporal delta; compare results
+  carry an explicit `projection_semantics` block stating what green parity
+  certifies and does not certify.
+- **Format-aware hub export and hydrate:** hub commit markers distinguish
+  `sqlite-v1` and `durable-v2`; unknown formats reject; durable paths verify
+  manifest and per-segment digests before trust.
+- **Hub run format visibility:** `index hub` surfaces per-run formats; latest
+  pointer reads are bounded and semantically validated for delete authority.
+- **Scoped durable / both builds:** `build.scope` (explicit LIST prefix plan)
+  is allowed under durable and `--format both`, with fail-closed set-equality
+  between crawl-plan prefixes and coverage attestations (no silent roll-up).
+- **Durable build progress:** multi-minute durable builds emit crawl `progress:`
+  lines and a segmenting-tail `phase=segmenting segment=k/N rows=…` on stderr
+  without changing artifact bytes.
+
+### Changed
+
+- **Default build format is durable:** `index build` defaults to durable-v2
+  snapshots under the segment cache. SQLite remains available via
+  `--format sqlite` or dual-format `--format both`.
+- **Export default is auto:** `index export --format auto` prefers a local
+  durable snapshot when present, otherwise sqlite-v1, without requiring
+  `index.db` for durable export.
+- **Default segment packing:** target rows per segment is 500k (packing lever;
+  not operator-facing configuration in this cut).
+- **Resume remains SQLite lifecycle:** printed `index build --resume-run <id>`
+  still reaches the checkpoint resume path under the durable default when
+  `--format` is omitted.
+
+### Compatibility
+
+- Existing SQLite `index.db` files are not rewritten, migrated, or invalidated.
+- Local SQLite-bound consumers and inventory: `index query`, `enrich-head`,
+  `stats`, most `doctor` paths, **`index list`**, and **`index gc`** still
+  require an `index.db`. Under the durable default a plain build produces no
+  `index.db`, so durable-only index sets are not yet visible to `list` / `gc`
+  ("No indexes found"). Build with `--format sqlite` or `both` during the
+  transition if you need those local workflows or local enumeration. Durable
+  hydrate restores manifest + segments, not `index.db`.
+- Durable-v2 artifacts in this release are a full-fidelity **internal render**
+  for trusted operator workflows. They are not a reduced-trust / de-identified
+  publication format; that path remains a future boundary-render surface.
+
+### Documentation
+
+- Added this v0.4.0 release page and refreshed rolling release notes.
+- Updated the current-release README pointer for the durable default.
+- Added operator guide [`docs/user-guide/durable-index.md`](docs/user-guide/durable-index.md)
+  covering durable-default workflow, dual-format parity semantics, durable-delta
+  compare, hub round-trip, SQLite-bound `list`/`gc`, segment packing defaults,
+  and internal-render boundary framing.
+- Expanded Local Index user guide (list/gc caveats, compare commands, hub export
+  dual-format scale story) and index-build mental model for multi-format output.
+- Expanded library-consumer guidance for `pkg/indexbuild`, hub markers, and
+  consumers that assumed every build produces `index.db`.
+- Refreshed architecture notes for durable-default (no longer experimental-only)
+  and compare projection semantics.
+
 ## [0.3.7] - 2026-07-05
 
 **Operational data root overrides and repository-local state guardrails.**
@@ -1264,7 +1345,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/3leaps/gonimbus/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/3leaps/gonimbus/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/3leaps/gonimbus/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/3leaps/gonimbus/compare/v0.3.4...v0.3.5

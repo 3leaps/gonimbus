@@ -20,10 +20,16 @@ An index build is a streaming crawl-to-index pipeline:
 2. List every object under each crawl prefix.
 3. Apply glob matching and hidden-file rules.
 4. Apply build-time metadata filters.
-5. Store only matched objects in the index database.
+5. Materialize the selected artifact format(s) for matched objects:
+   - **durable** (default) — sealed journals → immutable segments + internal
+     manifest under the segment cache (no `index.db`)
+   - **sqlite** — classic embedded database under `indexes/idx_*/index.db`
+   - **both** — one crawl fans out to both writers, then emits a LIST-projection
+     parity report
 
 The build is streaming and batched. It does not keep the full provider listing
-in memory.
+in memory. See [Durable Index Format](durable-index.md) for the operator map of
+the durable default and SQLite compatibility path.
 
 ## Listing Scope Versus Ingest Filtering
 
