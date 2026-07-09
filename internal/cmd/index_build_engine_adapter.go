@@ -119,6 +119,9 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		RunStartedAt:         run.StartedAt,
 		CreatedAt:            time.Now().UTC(),
 		TargetRowsPerSegment: 0,
+		// Crawl progress already flows via sqliteWriter; segmenting tail is
+		// after the crawl and needs an explicit observational hook.
+		OnSegmentProgress: newStderrSegmentProgress(os.Stderr),
 	}
 	if buildFilters != nil {
 		cfg.Filter = buildFilters.Filter
@@ -234,15 +237,19 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 			Provider:     prov,
 			ProviderName: m.Connection.Provider,
 		},
-		Match:                indexBuildEngineMatchConfig(m),
-		Filter:               nil,
-		Crawl:                indexBuildEngineCrawlConfig(m),
-		CrawlPrefixes:        crawlPrefixes,
+		Match:         indexBuildEngineMatchConfig(m),
+		Filter:        nil,
+		Crawl:         indexBuildEngineCrawlConfig(m),
+		CrawlPrefixes: crawlPrefixes,
+		// Progress-only sink: journalWriter no-ops progress; durable-only had
+		// no ObservationSinks and ran silent. Do not reuse indexIngestWriter.
+		ObservationSinks:     []output.Writer{newStderrProgressWriter(os.Stderr)},
 		Paths:                indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, resolvedDB.IdentityDir),
 		Coverage:             coverage,
 		RunStartedAt:         now,
 		CreatedAt:            now,
 		TargetRowsPerSegment: 0,
+		OnSegmentProgress:    newStderrSegmentProgress(os.Stderr),
 	}
 	if buildFilters != nil {
 		cfg.Filter = buildFilters.Filter

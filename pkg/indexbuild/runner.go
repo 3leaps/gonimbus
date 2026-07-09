@@ -134,6 +134,7 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 		Events:               cfg.Events,
+		OnSegmentProgress:    cfg.OnSegmentProgress,
 	}
 	result, err := Retry(ctx, retryCfg)
 	if err != nil {
@@ -169,6 +170,7 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		CompletePath:         cfg.Paths.CompletePath,
 		LatestPath:           cfg.Paths.LatestPath,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
+		OnSegmentProgress:    toSubstrateSegmentProgress(cfg.OnSegmentProgress),
 	})
 	if err != nil {
 		return Summary{}, err
@@ -370,6 +372,20 @@ func toSubstrateCoverage(in []CoverageAttestation) []indexsubstrate.CoverageAtte
 		})
 	}
 	return out
+}
+
+func toSubstrateSegmentProgress(fn OnSegmentProgressFunc) indexsubstrate.OnSegmentProgressFunc {
+	if fn == nil {
+		return nil
+	}
+	return func(progress indexsubstrate.SegmentProgress) {
+		fn(SegmentProgress{
+			Segment:  progress.Segment,
+			Total:    progress.Total,
+			Rows:     progress.Rows,
+			RowsDone: progress.RowsDone,
+		})
+	}
 }
 
 func toSubstrateScope(scope *Scope) *indexsubstrate.Scope {

@@ -147,14 +147,29 @@ type Config struct {
 	Clock                Clock
 	TargetRowsPerSegment int
 	Events               EventSink
+	// OnSegmentProgress is optional observational progress during segment write
+	// (counts only). Outside artifact bytes; never a publish failure vector.
+	OnSegmentProgress OnSegmentProgressFunc
 }
+
+// SegmentProgress is a sanitized segment-write progress signal (counts only).
+type SegmentProgress struct {
+	Segment  int
+	Total    int
+	Rows     int
+	RowsDone int
+}
+
+// OnSegmentProgressFunc is observational best-effort segment progress.
+type OnSegmentProgressFunc func(progress SegmentProgress)
 
 // String returns a redacted config summary. Provider handles, callbacks, and
 // local paths are rendered by presence only.
 func (c Config) String() string {
-	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, CrawlPrefixes:%d, ObservationSinks:%d, Paths:%s, Coverage:%d, PriorRows:%d, Events:%s}",
+	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, CrawlPrefixes:%d, ObservationSinks:%d, Paths:%s, Coverage:%d, PriorRows:%d, Events:%s, OnSegmentProgress:%s}",
 		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Source, c.Match, ifacePresence(c.Filter == nil), c.Crawl,
-		len(c.CrawlPrefixes), len(c.ObservationSinks), c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil))
+		len(c.CrawlPrefixes), len(c.ObservationSinks), c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil),
+		ifacePresence(c.OnSegmentProgress == nil))
 }
 
 // GoString implements fmt %#v with the same redaction as String.
@@ -175,12 +190,14 @@ type RetryConfig struct {
 	Clock                Clock
 	TargetRowsPerSegment int
 	Events               EventSink
+	OnSegmentProgress    OnSegmentProgressFunc
 }
 
 // String returns a redacted retry config summary.
 func (c RetryConfig) String() string {
-	return fmt.Sprintf("indexbuild.RetryConfig{IndexSetID:%q, RunID:%q, BaseURI:%q, Paths:%s, JournalPaths:%d, Coverage:%d, PriorRows:%d, Events:%s}",
-		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Paths, len(c.JournalPaths), len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil))
+	return fmt.Sprintf("indexbuild.RetryConfig{IndexSetID:%q, RunID:%q, BaseURI:%q, Paths:%s, JournalPaths:%d, Coverage:%d, PriorRows:%d, Events:%s, OnSegmentProgress:%s}",
+		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Paths, len(c.JournalPaths), len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil),
+		ifacePresence(c.OnSegmentProgress == nil))
 }
 
 // GoString implements fmt %#v with the same redaction as String.
