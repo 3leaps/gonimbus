@@ -569,14 +569,16 @@ func validateLeaseIdentity(lease Lease) error {
 	return nil
 }
 
+// sameLease reports whether two lease values refer to the same claim identity.
+// ExpiresAt is intentionally excluded: renewals mutate expiry while keeping the
+// same claim, and JSON round-trips can also change time precision.
 func sameLease(a, b *Lease) bool {
 	if a == nil || b == nil {
 		return false
 	}
 	return a.RunID == b.RunID &&
 		a.HolderID == b.HolderID &&
-		a.ClaimedAt.Equal(b.ClaimedAt) &&
-		a.ExpiresAt.Equal(b.ExpiresAt)
+		a.ClaimedAt.Equal(b.ClaimedAt)
 }
 
 func FingerprintConfig(v any) (string, error) {
