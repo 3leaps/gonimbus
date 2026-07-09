@@ -14,7 +14,9 @@ instead of centering the operator workflow on a single SQLite `index.db`.
 
 SQLite remains a first-class compatibility path via `--format sqlite` or dual
 `--format both`. Existing `index.db` files are not rewritten. Local query,
-enrich-head, and stats still need SQLite today.
+enrich-head, stats, most doctor paths, **`index list`**, and **`index gc`**
+still need an `index.db` today — durable-only sets are not yet listed by
+`list` / `gc`.
 
 ### Why this matters
 
@@ -29,10 +31,10 @@ keeping row-level LIST-projection parity against SQLite on validated field runs.
 # Default durable build
 gonimbus index build --job index.yaml
 
-# SQLite compatibility (query / enrich-head / stats)
+# SQLite compatibility (query / enrich-head / stats / list / gc)
 gonimbus index build --job index.yaml --format sqlite
 
-# Dual-format parity from one crawl
+# Dual-format parity + local inventory visibility from one crawl
 gonimbus index build --job index.yaml --format both
 
 # Export auto-selects durable when a local durable complete marker exists

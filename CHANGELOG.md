@@ -70,10 +70,13 @@ walkthrough.
 ### Compatibility
 
 - Existing SQLite `index.db` files are not rewritten, migrated, or invalidated.
-- Local query, enrich-head, stats, and most doctor paths remain SQLite-bound;
-  operators who need those workflows should build with `--format sqlite` or
-  `both` during the transition. Durable hydrate restores manifest + segments,
-  not `index.db`.
+- Local SQLite-bound consumers and inventory: `index query`, `enrich-head`,
+  `stats`, most `doctor` paths, **`index list`**, and **`index gc`** still
+  require an `index.db`. Under the durable default a plain build produces no
+  `index.db`, so durable-only index sets are not yet visible to `list` / `gc`
+  ("No indexes found"). Build with `--format sqlite` or `both` during the
+  transition if you need those local workflows or local enumeration. Durable
+  hydrate restores manifest + segments, not `index.db`.
 - Durable-v2 artifacts in this release are a full-fidelity **internal render**
   for trusted operator workflows. They are not a reduced-trust / de-identified
   publication format; that path remains a future boundary-render surface.
