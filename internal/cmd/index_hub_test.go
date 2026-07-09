@@ -499,6 +499,27 @@ func TestRunIndexHubRmRun_FailsClosedOnMalformedLatestPointer(t *testing.T) {
 	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID, "index.db"))
 }
 
+func TestRunIndexHubRmRun_FailsClosedOnWrongIndexSetIDLatestPointer(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	runID := "run_2000000000000000000"
+	// Syntactically valid pointer that points at a foreign index set.
+	pointer, err := json.Marshal(map[string]string{
+		"version":      "1.0",
+		"index_set_id": "idx_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"run_id":       "run_1000000000000000000",
+		"updated_at":   "2026-03-06T00:00:00Z",
+	})
+	require.NoError(t, err)
+	writeLatestPointer(t, hubDir, pointer)
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, runID, false)
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read latest.json")
+	assert.Contains(t, err.Error(), "index_set_id")
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID, "index.db"))
+}
+
 func TestRunIndexHubRmRun_ForceLatest(t *testing.T) {
 	hubDir := setupHubWithRuns(t)
 	latestRunID := "run_1000000000000000000"

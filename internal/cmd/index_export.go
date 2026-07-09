@@ -23,11 +23,22 @@ var indexExportCmd = &cobra.Command{
 	Short: "Export an index run to a hub",
 	Long: `Export an index run from the local index store to a hub (S3 or file).
 
-The export uploads immutable artifacts to the hub in a deterministic layout:
+Default --format is auto: prefer a local durable-v2 snapshot when present,
+otherwise export sqlite-v1. Explicit --format durable and --format sqlite remain
+available. Durable export resolves from the local durable complete marker and
+does not require index.db.
+
+SQLite export layout:
 
   <hub>/index-sets/<index_set_id>/runs/<run_id>/index.db
   <hub>/index-sets/<index_set_id>/runs/<run_id>/identity.json
   <hub>/index-sets/<index_set_id>/runs/<run_id>/complete.json  (commit marker)
+
+Durable export layout:
+
+  <hub>/index-sets/<index_set_id>/runs/<run_id>/manifest.json
+  <hub>/index-sets/<index_set_id>/runs/<run_id>/segments/...
+  <hub>/index-sets/<index_set_id>/runs/<run_id>/complete.json
 
 After a successful upload, the command attempts to advance the latest pointer:
 
@@ -37,7 +48,7 @@ The complete.json marker is written last and serves as the commit signal.
 Consumers should only trust runs where complete.json is present.
 
 Examples:
-  # Export latest successful run to a local hub
+  # Export latest local artifact (auto: durable if present, else sqlite)
   gonimbus index export --hub file:///data/index-hub/ --index-set idx_da038d8171b4a9ba
 
   # Export to S3 hub with explicit profile
@@ -46,7 +57,11 @@ Examples:
 
   # Export a specific run
   gonimbus index export --hub s3://my-bucket/index-hub/ \
-    --index-set idx_da038d8171b4a9ba --run-id run_1709654400000000000`,
+    --index-set idx_da038d8171b4a9ba --run-id run_1709654400000000000
+
+  # Force SQLite compatibility export
+  gonimbus index export --hub file:///data/index-hub/ \
+    --index-set idx_da038d8171b4a9ba --format sqlite`,
 	RunE: runIndexExport,
 }
 
@@ -57,7 +72,7 @@ func init() {
 	indexExportCmd.Flags().String("index-set", "", "Index set ID to export (required)")
 	indexExportCmd.Flags().String("run-id", "", "Specific run ID to export (default: latest successful)")
 	indexExportCmd.Flags().String("db", "", "Explicit local DB path (overrides index-set lookup)")
-	indexExportCmd.Flags().String("format", indexHubFormatSQLiteV1, "Index format to export (sqlite, sqlite-v1, durable, durable-v2)")
+	indexExportCmd.Flags().String("format", "auto", "Index format to export (auto, sqlite, sqlite-v1, durable, durable-v2)")
 
 	// Hub provider auth
 	indexExportCmd.Flags().String("hub-profile", "", "AWS profile for hub destination")
@@ -191,7 +206,48 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", indexSetFlag)
 	}
 
-	// Open local index DB and resolve artifact paths
+	formatMode, err := normalizeIndexExportFormat(formatFlag)
+	if err != nil {
+		return err
+	}
+
+	// Create hub provider once for either path.
+	putter, err := newHubProvider(ctx, hub)
+	if err != nil {
+		return fmt.Errorf("hub provider: %w", err)
+	}
+	if closer, ok := putter.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
+	getter, err := newHubGetter(ctx, hub)
+	if err != nil {
+		return fmt.Errorf("hub provider: %w", err)
+	}
+	if closer, ok := getter.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
+
+	// Durable-first auto selection (and explicit durable) without requiring index.db.
+	// Explicit --db remains a SQLite-centric operator path: resolve the SQLite run first.
+	if dbFlag == "" && (formatMode == "auto" || formatMode == indexHubFormatDurableV2) {
+		if durableIndexSetID, durableRunID, durableErr := resolveLocalDurableExportTarget(indexSetFlag, runIDFlag); durableErr == nil {
+			if _, loadErr := loadLocalDurableSnapshotForExport(durableIndexSetID, durableRunID); loadErr == nil {
+				if formatMode == "auto" {
+					_, _ = fmt.Fprintf(os.Stderr, "export format auto selected: %s\n", indexHubFormatDurableV2)
+				}
+				indexSet := &indexstore.IndexSet{IndexSetID: durableIndexSetID}
+				run := &indexstore.IndexRun{RunID: durableRunID}
+				_, _ = fmt.Fprintf(os.Stderr, "Exporting index_set=%s run=%s format=%s to %s\n", durableIndexSetID, durableRunID, indexHubFormatDurableV2, hubURI)
+				return runIndexExportDurable(ctx, cmd, hub, getter, putter, indexSet, run)
+			} else if formatMode == indexHubFormatDurableV2 {
+				return loadErr
+			}
+		} else if formatMode == indexHubFormatDurableV2 {
+			return durableErr
+		}
+	}
+
+	// Open local index DB and resolve artifact paths (sqlite path / auto fallback)
 	var db *sql.DB
 	var indexSet *indexstore.IndexSet
 	var localDBPath string
@@ -210,27 +266,43 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	} else {
 		db, indexSet, err = openIndexDBByID(ctx, indexSetFlag)
 		if err != nil {
+			if formatMode == "auto" {
+				return fmt.Errorf("auto export found neither a local durable snapshot nor a local sqlite index for %s: %w", indexSetFlag, err)
+			}
 			return err
 		}
 		// Resolve artifact path via shared resolver
 		localDBPath, err = resolveLocalDBPath(indexSetFlag)
 		if err != nil {
+			_ = db.Close()
 			return err
 		}
 	}
 	defer func() { _ = db.Close() }()
 
-	// Resolve run
+	// Resolve run from SQLite
 	run, err := resolveExportRun(ctx, db, indexSet.IndexSetID, runIDFlag)
 	if err != nil {
 		return err
 	}
-	format, err := normalizeIndexHubFormat(formatFlag)
-	if err != nil {
-		return err
+
+	// With --db (or auto after durable miss), prefer durable when the selected run has a durable complete marker.
+	if formatMode == "auto" || formatMode == indexHubFormatDurableV2 {
+		if _, loadErr := loadLocalDurableSnapshotForExport(indexSet.IndexSetID, run.RunID); loadErr == nil {
+			if formatMode == "auto" {
+				_, _ = fmt.Fprintf(os.Stderr, "export format auto selected: %s\n", indexHubFormatDurableV2)
+			}
+			_, _ = fmt.Fprintf(os.Stderr, "Exporting index_set=%s run=%s format=%s to %s\n", indexSet.IndexSetID, run.RunID, indexHubFormatDurableV2, hubURI)
+			return runIndexExportDurable(ctx, cmd, hub, getter, putter, indexSet, run)
+		} else if formatMode == indexHubFormatDurableV2 {
+			return loadErr
+		}
 	}
 
-	_, _ = fmt.Fprintf(os.Stderr, "Exporting index_set=%s run=%s to %s\n", indexSet.IndexSetID, run.RunID, hubURI)
+	if formatMode == "auto" {
+		_, _ = fmt.Fprintf(os.Stderr, "export format auto selected: %s\n", indexHubFormatSQLiteV1)
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "Exporting index_set=%s run=%s format=%s to %s\n", indexSet.IndexSetID, run.RunID, indexHubFormatSQLiteV1, hubURI)
 
 	localDir := filepath.Dir(localDBPath)
 	localIdentityPath := filepath.Join(localDir, "identity.json")
@@ -260,25 +332,6 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	summary, err := indexstore.GetIndexSetSummary(ctx, db, indexSet.IndexSetID)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: could not get index summary: %v\n", err)
-	}
-
-	// Create hub provider
-	putter, err := newHubProvider(ctx, hub)
-	if err != nil {
-		return fmt.Errorf("hub provider: %w", err)
-	}
-	if closer, ok := putter.(io.Closer); ok {
-		defer func() { _ = closer.Close() }()
-	}
-	getter, err := newHubGetter(ctx, hub)
-	if err != nil {
-		return fmt.Errorf("hub provider: %w", err)
-	}
-	if closer, ok := getter.(io.Closer); ok {
-		defer func() { _ = closer.Close() }()
-	}
-	if format == indexHubFormatDurableV2 {
-		return runIndexExportDurable(ctx, cmd, hub, getter, putter, indexSet, run)
 	}
 
 	// Publish sequence (brief contract): index.db + identity.json first, complete.json last, then latest.json
@@ -325,6 +378,123 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Export complete: %s/runs/%s/\n", indexSet.IndexSetID, run.RunID)
 	return nil
+}
+
+// normalizeIndexExportFormat accepts auto plus the hub format aliases.
+// Returns "auto", sqlite-v1, or durable-v2.
+func normalizeIndexExportFormat(raw string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", "auto":
+		return "auto", nil
+	default:
+		format, err := normalizeIndexHubFormat(raw)
+		if err != nil {
+			return "", fmt.Errorf("--format must be one of: auto, sqlite, sqlite-v1, durable, durable-v2")
+		}
+		return format, nil
+	}
+}
+
+// resolveLocalDurableExportTarget finds a local durable index set + run without opening SQLite.
+func resolveLocalDurableExportTarget(indexSetFlag, runIDFlag string) (string, string, error) {
+	indexSetID, err := resolveLocalDurableIndexSetID(indexSetFlag)
+	if err != nil {
+		return "", "", err
+	}
+	runID := strings.TrimSpace(runIDFlag)
+	if runID == "" {
+		runID, err = resolveLocalDurableLatestRunID(indexSetID)
+		if err != nil {
+			return "", "", err
+		}
+	} else if err := validateRunID(runID); err != nil {
+		return "", "", err
+	}
+	return indexSetID, runID, nil
+}
+
+func resolveLocalDurableIndexSetID(indexSetFlag string) (string, error) {
+	cleanID := strings.TrimPrefix(strings.TrimSpace(indexSetFlag), "idx_")
+	if cleanID == "" || !validHexPattern.MatchString(cleanID) {
+		return "", fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", indexSetFlag)
+	}
+	// Full IDs can be used directly for the segment-cache path.
+	if len(cleanID) == 64 {
+		fullID := "idx_" + cleanID
+		if _, err := indexSubstrateSegmentCacheDir(fullID); err != nil {
+			return "", err
+		}
+		return fullID, nil
+	}
+
+	segmentRoot, err := appDataPath(appDataClassSegmentCache)
+	if err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(segmentRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no local durable snapshots found")
+		}
+		return "", fmt.Errorf("read durable segment cache: %w", err)
+	}
+	var matches []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		dirHex := strings.TrimPrefix(name, "idx_")
+		if strings.HasPrefix(dirHex, cleanID) || (len(cleanID) == 64 && strings.HasPrefix(cleanID, dirHex)) {
+			// Prefer directories that actually look like durable snapshots.
+			if _, statErr := os.Stat(filepath.Join(segmentRoot, name, "latest.json")); statErr == nil {
+				matches = append(matches, name)
+				continue
+			}
+			if runs, readErr := os.ReadDir(filepath.Join(segmentRoot, name, "runs")); readErr == nil && len(runs) > 0 {
+				matches = append(matches, name)
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no local durable snapshot matching index set %s", indexSetFlag)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("ambiguous durable index set ID %s matches %d snapshots: %s", indexSetFlag, len(matches), strings.Join(matches, ", "))
+	}
+	return matches[0], nil
+}
+
+func resolveLocalDurableLatestRunID(indexSetID string) (string, error) {
+	segmentRoot, err := indexSubstrateSegmentCacheDir(indexSetID)
+	if err != nil {
+		return "", err
+	}
+	latestPath := filepath.Join(segmentRoot, "latest.json")
+	data, err := os.ReadFile(latestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no local durable latest.json for index set %s; pass --run-id", indexSetID)
+		}
+		return "", fmt.Errorf("read local durable latest.json: %w", err)
+	}
+	var latest struct {
+		IndexSetID string `json:"index_set_id"`
+		RunID      string `json:"run_id"`
+	}
+	if err := json.Unmarshal(data, &latest); err != nil {
+		return "", fmt.Errorf("parse local durable latest.json: %w", err)
+	}
+	if strings.TrimSpace(latest.RunID) == "" {
+		return "", fmt.Errorf("local durable latest.json missing run_id")
+	}
+	if strings.TrimSpace(latest.IndexSetID) != "" && latest.IndexSetID != indexSetID {
+		return "", fmt.Errorf("local durable latest.json index_set_id mismatch")
+	}
+	if err := validateRunID(latest.RunID); err != nil {
+		return "", fmt.Errorf("local durable latest.json: %w", err)
+	}
+	return latest.RunID, nil
 }
 
 func runIndexExportDurable(ctx context.Context, cmd *cobra.Command, hub *hubDestSpec, getter provider.ObjectGetter, putter provider.ObjectPutter, indexSet *indexstore.IndexSet, run *indexstore.IndexRun) error {

@@ -823,6 +823,16 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 	data, err := json.MarshalIndent(complete, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), append(data, '\n'), 0o600))
+	latest := map[string]any{
+		"type":          "gonimbus.index.latest.v1",
+		"index_set_id":  indexSetID,
+		"run_id":        runID,
+		"updated_at":    base.Format(time.RFC3339),
+		"complete_path": filepath.Join(runDir, "complete.json"),
+	}
+	latestData, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(segmentRoot, "latest.json"), append(latestData, '\n'), 0o600))
 	return manifest
 }
 

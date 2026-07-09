@@ -42,24 +42,37 @@ var indexBuildCmd = &cobra.Command{
 	Short: "Build an index from crawl results",
 	Long: `Build a local index by crawling a cloud storage location.
 
-By default, index builds use a per-index directory under the app data dir:
-  indexes/idx_<hashprefix>/index.db
+Default artifact format is durable (segment-backed durable-v2). Compatibility
+SQLite indexes remain available via --format sqlite, and dual-format parity
+builds via --format both.
 
-An identity file is written alongside the DB for interpretability:
+Default durable builds write identity under the per-index directory and publish
+a durable snapshot under the segment cache. They do not create index.db.
+
   indexes/idx_<hashprefix>/identity.json
+  cache/segments/<index_set_id>/runs/<run_id>/...
+
+SQLite compatibility builds still use:
+  indexes/idx_<hashprefix>/index.db
+  indexes/idx_<hashprefix>/identity.json
+
+Local consumer note: index query, enrich-head, stats, and most doctor paths are
+still SQLite-bound. Use --format sqlite or --format both when you need those
+local workflows during the transition. Durable hydrate restores
+manifest+segments, not index.db.
 
 The index build process:
 1. Loads and validates the index manifest
-2. Creates or finds an existing IndexSet based on identity + build params
-3. Creates a new IndexRun to track this execution
-4. Runs a crawl and ingests object/prefix records into the index
+2. Computes IndexSet identity from connection + build params
+3. Creates a new run and crawls the source
+4. Publishes the selected artifact format(s)
 5. Handles partial runs (throttling, access denied) with structured events
-6. Marks objects not seen in this run as soft-deleted
 
 Tip: use 'gonimbus index list' to see IDENTITY status, and 'gonimbus index doctor' to explain a specific idx_<hashprefix> directory.
 
 Example:
   gonimbus index build --job index.yaml
+  gonimbus index build --job index.yaml --format sqlite
   gonimbus index build --job index.yaml --storage-provider wasabi --region us-east-1`,
 	RunE: runIndexBuild,
 }
@@ -104,8 +117,8 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
-	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "sqlite", "Index artifact format to build (sqlite, both)")
-	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(experimental) build durable v2 snapshot through pkg/indexbuild")
+	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "durable", "Index artifact format to build (durable, sqlite, both)")
+	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(deprecated) alias for --format durable")
 	_ = indexBuildCmd.Flags().MarkHidden("experimental-engine")
 	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
 		flag.NoOptDefVal = "auto"
@@ -121,6 +134,19 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildEndpointHost, "endpoint-host", "", "Endpoint host (host[:port])")
 }
 
+// validateIndexBuildResumeInvocation checks flags that conflict with --resume-run.
+// Resume is always the SQLite checkpoint path; the durable default must not reject
+// the printed `index build --resume-run <id>` command when --format was omitted.
+func validateIndexBuildResumeInvocation(cmd *cobra.Command) error {
+	if indexBuildExperimentalEngine {
+		return fmt.Errorf("--experimental-engine is not compatible with --resume-run")
+	}
+	if cmd != nil && cmd.Flags().Changed("format") && selectedIndexBuildFormat() != "sqlite" {
+		return fmt.Errorf("--resume-run is not compatible with --format %s; resume uses the SQLite checkpoint lifecycle (omit --format or pass --format sqlite)", selectedIndexBuildFormat())
+	}
+	return nil
+}
+
 func runIndexBuild(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -129,15 +155,19 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	resumeRun := strings.TrimSpace(indexBuildResumeRun)
 	if indexBuildExperimentalEngine {
-		if err := validateIndexBuildExperimentalEngineGlobalFlags(resumeRun); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "warning: --experimental-engine is deprecated; use --format durable")
+	}
+	// Resume is a SQLite checkpoint lifecycle path. Dispatch it before build-format
+	// validation so the durable default does not break the printed operator hint
+	// (`gonimbus index build --resume-run <run_id>` with no --format).
+	if resumeRun != "" {
+		if err := validateIndexBuildResumeInvocation(cmd); err != nil {
 			return err
 		}
-	}
-	if err := validateIndexBuildFormatFlags(resumeRun); err != nil {
-		return err
-	}
-	if resumeRun != "" {
 		return runIndexBuildResume(ctx, cmd, resumeRun)
+	}
+	if err := validateIndexBuildFormatFlags(""); err != nil {
+		return err
 	}
 	if strings.TrimSpace(indexBuildJobPath) == "" {
 		return fmt.Errorf("--job is required")
@@ -293,12 +323,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan)
 	}
 
-	if indexBuildExperimentalEngine {
-		if err := validateIndexBuildExperimentalEngineManifest(m); err != nil {
-			return err
-		}
+	if selectedIndexBuildFormat() == "durable" {
 		cmd.SilenceUsage = true
-		summary, identityDir, err := runIndexBuildExperimentalEngine(ctx, m, identityResult, buildFilters)
+		summary, identityDir, err := runIndexBuildDurable(ctx, m, identityResult, buildFilters)
 		if err != nil {
 			if store != nil && job != nil {
 				job.State = jobregistry.JobStateFailed
@@ -318,7 +345,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			job.EndedAt = &ended
 			_ = store.Write(job)
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "\nIndex build completed (experimental engine)\n")
+		_, _ = fmt.Fprintf(os.Stderr, "\nIndex build completed\n")
+		_, _ = fmt.Fprintf(os.Stderr, "  format: durable\n")
 		_, _ = fmt.Fprintf(os.Stderr, "  run_id: %s\n", summary.RunID)
 		_, _ = fmt.Fprintf(os.Stderr, "  index_set_id: %s\n", summary.IndexSetID)
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_observed: %d\n", summary.ObjectsObserved)
@@ -1368,9 +1396,27 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 }
 
 // showIndexBuildPlan displays the build plan without executing.
+//
+// Stream convention note (deliberate departure — do not copy elsewhere):
+// CLI progress, warnings, and status go to stderr; stdout is reserved for
+// structured command output (JSON/JSONL, machine-consumed results). See
+// ADR-0004 (progress/errors out of the content payload) and the general
+// adapter stream split in ADR-0006. Dry-run plans are an intentional exception:
+// the plan *is* the command result (human-readable text on stdout), same as
+// crawl --dry-run. Keep operator chatter on stderr for non-dry-run paths.
 func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters, sincePlan *indexBuildSincePlan) error {
 	_, _ = fmt.Fprintln(os.Stdout, "Index Build Plan (dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "==========================")
+	_, _ = fmt.Fprintln(os.Stdout)
+	_, _ = fmt.Fprintf(os.Stdout, "Artifact format: %s\n", selectedIndexBuildFormat())
+	switch selectedIndexBuildFormat() {
+	case "durable":
+		_, _ = fmt.Fprintln(os.Stdout, "  note: durable default publishes manifest+segments; no index.db is created")
+	case "sqlite":
+		_, _ = fmt.Fprintln(os.Stdout, "  note: sqlite compatibility mode materializes index.db")
+	case "both":
+		_, _ = fmt.Fprintln(os.Stdout, "  note: both mode dual-builds sqlite + durable and emits a parity report")
+	}
 	_, _ = fmt.Fprintln(os.Stdout)
 
 	_, _ = fmt.Fprintln(os.Stdout, "Connection:")
