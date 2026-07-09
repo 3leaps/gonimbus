@@ -146,8 +146,10 @@ current objects added or changed after a known run; see
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-See [docs/releases/v0.3.7.md](docs/releases/v0.3.7.md) for the current
-operator notes.
+**Durable is now the default index format** (`index build` publishes durable-v2
+segments + manifest unless you pass `--format sqlite` or `--format both`). Local
+query/enrich-head/stats still need SQLite today. See
+[docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the current operator notes.
 
 ### Outputs
 

@@ -4,6 +4,68 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.4.0 (2026-07-09)
+
+**Durable Index Format Is the Default**
+
+v0.4.0 is the index-substrate epoch. `index build` defaults to durable-v2
+snapshots (immutable Snappy-Parquet segments + internal manifest + hub markers)
+instead of centering the operator workflow on a single SQLite `index.db`.
+
+SQLite remains a first-class compatibility path via `--format sqlite` or dual
+`--format both`. Existing `index.db` files are not rewritten. Local query,
+enrich-head, and stats still need SQLite today.
+
+### Why this matters
+
+Large indexes hit single-object export ceilings when published as one database
+file. Durable packing splits the snapshot into segment objects (plus a small
+manifest), so hub export and hydrate scale past the old monolith wall while
+keeping row-level LIST-projection parity against SQLite on validated field runs.
+
+### Operator quick path
+
+```bash
+# Default durable build
+gonimbus index build --job index.yaml
+
+# SQLite compatibility (query / enrich-head / stats)
+gonimbus index build --job index.yaml --format sqlite
+
+# Dual-format parity from one crawl
+gonimbus index build --job index.yaml --format both
+
+# Export auto-selects durable when a local durable complete marker exists
+gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_...
+```
+
+### Also in this cut
+
+- Format-aware hub export/hydrate (`sqlite-v1` / `durable-v2`) with digest
+  verification on durable artifacts
+- Scoped durable and `--format both` with fail-closed coverage equal to the
+  crawl prefix plan
+- stderr progress for durable crawl and segmenting tails
+- Compare result `projection_semantics` (green parity = LIST fidelity, not
+  reflow readiness)
+
+### Boundary framing
+
+Durable-v2 here is a full-fidelity **internal render** for trusted operators and
+pipelines — not a reduced-trust third-party publication format. That publication
+path is a separate future surface.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.0
+```
+
+See [docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the complete release
+notes.
+
+---
+
 ## v0.3.7 (2026-07-05)
 
 **Operational Data Root Overrides**
@@ -78,38 +140,16 @@ Use `--since <timestamp>` when a recurring build has a known lower bound, or
 same IndexSet.
 
 On date-partitioned scopes, Gonimbus narrows the listing plan before provider
-enumeration. On layouts that cannot be narrowed safely, the run falls back to
-full enumeration with a last-modified ingest filter and reports that reduction
-was not applied. That signal is intentional: operators should verify the
-since-plan output instead of assuming every since run was cheaper.
+LIST when possible, then applies a last-modified ingest filter. Builds that
+cannot safely reduce enumeration still run and report that reduction was
+unavailable rather than silently paying full cost without a signal.
 
-Since builds are not full-coverage audits. They skip soft-delete and can leave
-deleted objects visible until a periodic full audit build runs.
-
-### Forward deltas with `--since-run`
+### Query-time deltas with `--since-run`
 
 `index query --since-run <run_id>` emits current active rows first seen or
-changed after a successful run in the same IndexSet. Output keeps the existing
-`gonimbus.index.object.v1` record type and adds optional delta fields such as
-`change_kind`, `first_seen_run_id`, and `last_changed_run_id`.
-
-This is latest-state delta query, not point-in-time history. The current index
-does not ship `--at-run`, and `--include-deleted --since-run` is rejected
-instead of implying deletion history.
-
-### Compatibility
-
-Index schema v8 adds first-seen and last-changed run metadata. Older indexes
-migrate forward automatically, but `--since-run` rejects boundary runs before
-the migration baseline because precise added/changed classification starts at
-that point.
-
-Index database timestamp storage is now normalized to a fixed-width UTC text
-form preserved by both the default SQLite driver and optional
-`gonimbus_libsql` builds. CLI and JSON output timestamps remain unchanged, but
-direct `index.db` queriers may see internal timestamp fields stored with a
-`+0000 UTC` suffix instead of `Z`. Existing RFC3339/RFC3339Nano stored values
-remain readable and migrate automatically.
+meaningfully changed after a successful boundary run in the same IndexSet.
+Output keeps the existing object record shape and adds optional delta fields
+for change classification and run identity.
 
 ### Upgrade
 
@@ -117,90 +157,5 @@ remain readable and migrate automatically.
 go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.6
 ```
 
-Existing full-build and normal query workflows remain compatible with v0.3.5.
-Add `--since auto` only after confirming the manifest identity is stable for
-the shard you intend to top up, and keep periodic full-coverage audits when
-deletion detection matters.
-
 See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the complete release
 notes.
-
----
-
-## v0.3.5 (2026-07-02)
-
-**Multipart Export/Reflow and the Migrated Reflow Engine**
-
-v0.3.5 removes the practical single-PUT ceiling from the release's largest
-operator workflows. `index export` can publish a large `index.db` to an
-S3-compatible hub through multipart upload, and `transfer reflow` can copy large
-objects through the same shared upload primitive. The release also moves the
-migrated stdin reflow subset onto the Experimental `pkg/reflow` engine and
-tightens two error paths that matter during long runs: content-probe terminal
-errors keep their original code, and throttled reflow probes retry before falling
-back to per-object failure handling.
-
-### Multipart for large exports and reflow writes
-
-Large writes now use a shared multipart primitive in `pkg/transfer`. Once a
-known-size write crosses the default 64 MiB multipart threshold, Gonimbus uploads
-bounded parts, completes conditionally when the destination supports IfAbsent,
-and aborts the multipart upload on every failure path it controls.
-
-The immediate operator effect is simple: a large hub export or reflow write no
-longer fails only because the destination enforces a >5 GiB single-PUT limit.
-Multipart-form ETags are still treated carefully; Gonimbus does not use them as
-blind byte-equality proof for collision decisions.
-
-### Reflow engine migration (Experimental)
-
-The stdin `transfer reflow` subset now routes through the Experimental
-`pkg/reflow` engine for metadata planning, dry-run planning, record-stream copy
-execution, collision decisions, adaptive concurrency, and typed run / summary
-records. CLI behavior is intended to remain compatible; unsupported forms keep
-using the legacy path until later migration work.
-
-`pkg/reflow` remains **Experimental**. There are no Stable library API breaks in
-this release.
-
-### Error-path hardening
-
-- `content probe` now recognizes `gonimbus.error.v1` input records as terminal
-  records, preserves their original error code, and avoids wrapping retryable
-  records as `INTERNAL`.
-- Content-probe error output now uses the same provider-error sanitizer as
-  reflow and no longer carries raw input JSONL lines forward in parser
-  diagnostics.
-- Reflow HEAD/body-compare probe operations now retry throttled provider
-  attempts through the adaptive limiter. If throttling never clears, the
-  existing per-object failure behavior remains in place; the checkpoint/resume
-  classifier boundary is unchanged.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.5
-```
-
-Existing CLI workflows remain compatible with v0.3.4. Operators planning large
-multipart writes should verify local disk headroom for the index database,
-checkpoint files, and any retry/temp spooling, and configure provider lifecycle
-cleanup for incomplete multipart uploads, such as S3
-`AbortIncompleteMultipartUpload` lifecycle rules.
-
-See [docs/releases/v0.3.5.md](docs/releases/v0.3.5.md) for the complete release
-notes.
-
----
-
-For v0.3.4 and earlier release notes, see [docs/releases/](docs/releases/) or
-the [CHANGELOG](CHANGELOG.md).
-
-<!-- v0.3.0 entry removed when v0.3.3 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.0.md -->
-<!-- v0.2.3 entry removed when v0.3.2 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.3.md -->
-<!-- v0.2.2 entry removed when v0.3.1 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.2.md -->
-<!-- v0.2.1 entry removed when v0.3.0 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.2.1.md -->
-<!-- v0.3.1 entry removed when v0.3.4 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.1.md -->
-<!-- v0.3.2 entry removed when v0.3.5 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.2.md -->
-<!-- v0.3.3 entry removed when v0.3.6 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.3.md -->
-<!-- v0.3.4 entry removed when v0.3.7 rolled into the 3-most-recent window; full notes preserved at docs/releases/v0.3.4.md -->
