@@ -30,6 +30,19 @@ const (
 	CompactOwnerIndexCompact  = "index compact"
 )
 
+// SegmentProgress is a sanitized, observational progress signal for segment
+// writes. Counts/phase only — never object keys, rel_keys, or prefixes.
+type SegmentProgress struct {
+	Segment  int // 1-based index of the segment just written
+	Total    int // planned segment count for this write
+	Rows     int // rows in the segment just written
+	RowsDone int // cumulative rows written across segments so far
+}
+
+// OnSegmentProgressFunc is optional and observational. Callers treat it as
+// best-effort and never use its outcome as a publish failure vector.
+type OnSegmentProgressFunc func(progress SegmentProgress)
+
 type SegmentWriterConfig struct {
 	Dir                    string
 	IndexSetID             string
@@ -39,6 +52,9 @@ type SegmentWriterConfig struct {
 	AllowExistingIdentical bool
 	ParentManifests        []ManifestReference
 	Coverage               []CoverageAttestation
+	// OnSegmentProgress is optional. Invoked after each segment file is written;
+	// outside persisted artifact bytes and ignored for failure control.
+	OnSegmentProgress OnSegmentProgressFunc
 }
 
 type InternalManifest struct {
@@ -154,6 +170,11 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		Counts: manifestCounts(sortedRows),
 	}
 
+	totalSegments := 0
+	if len(sortedRows) > 0 && config.TargetRowsPerSegment > 0 {
+		totalSegments = (len(sortedRows) + config.TargetRowsPerSegment - 1) / config.TargetRowsPerSegment
+	}
+	rowsDone := 0
 	for start := 0; start < len(sortedRows); start += config.TargetRowsPerSegment {
 		end := start + config.TargetRowsPerSegment
 		if end > len(sortedRows) {
@@ -164,6 +185,16 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 			return InternalManifest{}, err
 		}
 		manifest.Segments = append(manifest.Segments, descriptor)
+		rowsDone += end - start
+		if config.OnSegmentProgress != nil {
+			// Observational only: never treat progress callback outcome as publish failure.
+			config.OnSegmentProgress(SegmentProgress{
+				Segment:  len(manifest.Segments),
+				Total:    totalSegments,
+				Rows:     end - start,
+				RowsDone: rowsDone,
+			})
+		}
 	}
 	return manifest, nil
 }

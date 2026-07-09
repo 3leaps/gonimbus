@@ -42,6 +42,9 @@ type PublishConfig struct {
 	LatestPath           string
 	TargetRowsPerSegment int
 	AfterStep            func(PublishStep) error
+	// OnSegmentProgress is optional observational segment-write progress
+	// (counts only). Outside persisted artifacts; never a publish failure vector.
+	OnSegmentProgress OnSegmentProgressFunc
 }
 
 type PublishResult struct {
@@ -115,6 +118,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		AllowExistingIdentical: true,
 		ParentManifests:        config.ParentManifests,
 		Coverage:               config.Coverage,
+		OnSegmentProgress:      config.OnSegmentProgress,
 	}, compaction.Rows)
 	if err != nil {
 		return result, err

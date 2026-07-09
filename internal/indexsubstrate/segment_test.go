@@ -82,6 +82,64 @@ func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
 	require.Equal(t, expected, reconstructed)
 }
 
+func TestWriteSegmentSetProgressHookDoesNotChangeArtifacts(t *testing.T) {
+	// Side-effect-free gate: multi-segment write with/without OnSegmentProgress
+	// must produce byte-identical segment digests and equivalent manifest bytes
+	// (ignoring only non-persisted callback side effects).
+	base := time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)
+	rows := []CurrentObjectRow{
+		segmentTestRow("idx_test", "data/a.xml", 10, `"etag-a"`, base.Add(time.Minute), nil, nil, nil, nil),
+		segmentTestRow("idx_test", "data/b.xml", 20, `"etag-b"`, base.Add(2*time.Minute), nil, nil, nil, nil),
+		segmentTestRow("idx_test", "data/c.xml", 30, `"etag-c"`, base.Add(3*time.Minute), nil, nil, nil, nil),
+	}
+	cfgBase := SegmentWriterConfig{
+		IndexSetID:           "idx_test",
+		RunID:                "run_test",
+		CreatedAt:            base,
+		TargetRowsPerSegment: 1, // force ≥2 segments (actually 3)
+	}
+
+	dirOff := t.TempDir()
+	cfgOff := cfgBase
+	cfgOff.Dir = dirOff
+	manifestOff, err := WriteSegmentSet(cfgOff, rows)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(manifestOff.Segments), 2)
+
+	dirOn := t.TempDir()
+	cfgOn := cfgBase
+	cfgOn.Dir = dirOn
+	var calls []SegmentProgress
+	cfgOn.OnSegmentProgress = func(p SegmentProgress) {
+		calls = append(calls, p)
+	}
+	manifestOn, err := WriteSegmentSet(cfgOn, rows)
+	require.NoError(t, err)
+	require.Len(t, calls, len(manifestOn.Segments))
+	require.Equal(t, 1, calls[0].Segment)
+	require.Equal(t, len(manifestOn.Segments), calls[0].Total)
+
+	require.Equal(t, len(manifestOff.Segments), len(manifestOn.Segments))
+	for i := range manifestOff.Segments {
+		require.Equal(t, manifestOff.Segments[i].Digest.Hex, manifestOn.Segments[i].Digest.Hex)
+		require.Equal(t, manifestOff.Segments[i].Path, manifestOn.Segments[i].Path)
+		require.Equal(t, manifestOff.Segments[i].Rows, manifestOn.Segments[i].Rows)
+		offBytes, err := os.ReadFile(filepath.Join(dirOff, manifestOff.Segments[i].Path))
+		require.NoError(t, err)
+		onBytes, err := os.ReadFile(filepath.Join(dirOn, manifestOn.Segments[i].Path))
+		require.NoError(t, err)
+		require.Equal(t, offBytes, onBytes)
+	}
+
+	// Manifest JSON equality after clearing path-independent fields that are
+	// identical by construction when digests/paths/counts match.
+	offJSON, err := marshalIndentedJSON(manifestOff)
+	require.NoError(t, err)
+	onJSON, err := marshalIndentedJSON(manifestOn)
+	require.NoError(t, err)
+	require.Equal(t, string(offJSON), string(onJSON))
+}
+
 func TestWriteSegmentSetRejectsOverwritingImmutableSegment(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
