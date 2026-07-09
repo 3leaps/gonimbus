@@ -358,15 +358,9 @@ func runIndexHubLs(cmd *cobra.Command, args []string) error {
 	for _, setID := range indexSetIDs {
 		info := hubIndexSetInfo{IndexSetID: setID, FormatCounts: make(map[string]int)}
 
-		// Try to read latest.json
 		latestKey := hubArtifactKey(hub, "index-sets", setID, "latest.json")
-		if data, getErr := downloadBytes(ctx, getter, latestKey); getErr == nil {
-			var latest struct {
-				RunID string `json:"run_id"`
-			}
-			if json.Unmarshal(data, &latest) == nil {
-				info.LatestRun = latest.RunID
-			}
+		if latest, ok, latestErr := readHubLatestPointer(ctx, getter, latestKey, setID); latestErr == nil && ok {
+			info.LatestRun = latest.RunID
 		}
 
 		// Count runs
@@ -423,6 +417,30 @@ func readHubRunMarkerSummary(ctx context.Context, getter provider.ObjectGetter, 
 		return hubRunMarkerSummary{}, false
 	}
 	return summary, true
+}
+
+func readHubLatestPointer(ctx context.Context, getter provider.ObjectGetter, key, expectedIndexSetID string) (latestPointerDoc, bool, error) {
+	data, err := downloadBytesBounded(ctx, getter, key, maxHubMarkerBytes, "latest.json")
+	if err != nil {
+		if provider.IsNotFound(err) {
+			return latestPointerDoc{}, false, nil
+		}
+		return latestPointerDoc{}, false, err
+	}
+	var latest latestPointerDoc
+	if err := json.Unmarshal(data, &latest); err != nil {
+		return latestPointerDoc{}, false, fmt.Errorf("parse latest.json: %w", err)
+	}
+	if strings.TrimSpace(latest.RunID) == "" {
+		return latestPointerDoc{}, false, fmt.Errorf("parse latest.json: run_id is required")
+	}
+	if err := validateRunID(latest.RunID); err != nil {
+		return latestPointerDoc{}, false, fmt.Errorf("parse latest.json: invalid run_id: %w", err)
+	}
+	if latest.IndexSetID != "" && latest.IndexSetID != expectedIndexSetID {
+		return latestPointerDoc{}, false, fmt.Errorf("parse latest.json: index_set_id %q does not match %q", latest.IndexSetID, expectedIndexSetID)
+	}
+	return latest, true, nil
 }
 
 func summarizeHubRunMarker(data []byte) (hubRunMarkerSummary, error) {
@@ -609,16 +627,10 @@ func runIndexHubShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("hub provider does not support listing")
 	}
 
-	// Read latest.json
 	var latestRunID string
 	latestKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "latest.json")
-	if data, getErr := downloadBytes(ctx, getter, latestKey); getErr == nil {
-		var latest struct {
-			RunID string `json:"run_id"`
-		}
-		if json.Unmarshal(data, &latest) == nil {
-			latestRunID = latest.RunID
-		}
+	if latest, ok, latestErr := readHubLatestPointer(ctx, getter, latestKey, indexSetFlag); latestErr == nil && ok {
+		latestRunID = latest.RunID
 	}
 
 	// Discover runs
@@ -795,13 +807,12 @@ func runIndexHubRmRun(cmd *cobra.Command, args []string) error {
 	// Check if this is the latest run
 	if !force {
 		latestKey := hubArtifactKey(hub, "index-sets", indexSetFlag, "latest.json")
-		if data, getErr := downloadBytes(ctx, getter, latestKey); getErr == nil {
-			var latest struct {
-				RunID string `json:"run_id"`
-			}
-			if json.Unmarshal(data, &latest) == nil && latest.RunID == runIDFlag {
-				return fmt.Errorf("run %s is the current latest; use --force to remove it", runIDFlag)
-			}
+		latest, ok, latestErr := readHubLatestPointer(ctx, getter, latestKey, indexSetFlag)
+		if latestErr != nil {
+			return fmt.Errorf("read latest.json: %w", latestErr)
+		}
+		if ok && latest.RunID == runIDFlag {
+			return fmt.Errorf("run %s is the current latest; use --force to remove it", runIDFlag)
 		}
 	}
 
@@ -971,16 +982,13 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 
 	var toRemove []gcRunCandidate
 	for _, setID := range indexSetIDs {
-		// Read latest pointer
 		var latestRunID string
 		latestKey := hubArtifactKey(hub, "index-sets", setID, "latest.json")
-		if data, getErr := downloadBytes(ctx, getter, latestKey); getErr == nil {
-			var latest struct {
-				RunID string `json:"run_id"`
-			}
-			if json.Unmarshal(data, &latest) == nil {
-				latestRunID = latest.RunID
-			}
+		if latest, ok, latestErr := readHubLatestPointer(ctx, getter, latestKey, setID); latestErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: skipping gc for %s: latest.json is present but unreadable: %v\n", setID, latestErr)
+			continue
+		} else if ok {
+			latestRunID = latest.RunID
 		}
 
 		// Discover runs
@@ -1064,6 +1072,9 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 					warnRetainingUnreadableComplete(setID, r.runID, r.retainReason)
 					continue
 				}
+				if r.isLatest {
+					continue // latest is always kept, even in a corrupt partial hub
+				}
 				if !r.hasComplete {
 					toRemove = append(toRemove, gcRunCandidate{
 						IndexSetID: setID,
@@ -1071,9 +1082,6 @@ func runIndexHubGC(cmd *cobra.Command, args []string) error {
 						IsLatest:   false,
 					})
 					continue
-				}
-				if r.isLatest {
-					continue // always kept, slot already reserved
 				}
 				kept++
 				if kept <= nonLatestSlots {

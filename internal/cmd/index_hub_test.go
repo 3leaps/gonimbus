@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -197,6 +198,40 @@ func TestRunIndexHubLs_JSONSurfacesMixedFormats(t *testing.T) {
 	require.Equal(t, 1, result[0].FormatCounts[indexHubFormatDurableV2])
 }
 
+func TestRunIndexHubLs_IgnoresOversizedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+	writeOversizedLatestPointer(t, hubDir, "run_3000000000000000000")
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubLsCmd(t, hubDir, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result []hubIndexSetInfo
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Len(t, result, 1)
+	require.Empty(t, result[0].LatestRun)
+	require.Empty(t, result[0].LatestFormat)
+	require.Equal(t, 3, result[0].RunCount)
+}
+
+func TestRunIndexHubLs_IgnoresMalformedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+	writeLatestPointer(t, hubDir, []byte(`{}`))
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubLsCmd(t, hubDir, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result []hubIndexSetInfo
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Len(t, result, 1)
+	require.Empty(t, result[0].LatestRun)
+	require.Empty(t, result[0].LatestFormat)
+	require.Equal(t, 3, result[0].RunCount)
+}
+
 func TestRunIndexHubLs_PositionalHubURI(t *testing.T) {
 	hubDir := setupHubWithRuns(t)
 
@@ -328,6 +363,46 @@ func TestRunIndexHubShow_JSONSurfacesRunFormatAndArtifacts(t *testing.T) {
 	require.Equal(t, 2, durableRun.Artifacts.Segments)
 }
 
+func TestRunIndexHubShow_IgnoresOversizedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+	writeOversizedLatestPointer(t, hubDir, "run_3000000000000000000")
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubShowCmd(t, hubDir, testFullIndexSetID, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result struct {
+		LatestRun string       `json:"latest_run"`
+		Runs      []hubRunInfo `json:"runs"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Empty(t, result.LatestRun)
+	for _, run := range result.Runs {
+		require.False(t, run.IsLatest)
+	}
+}
+
+func TestRunIndexHubShow_IgnoresMalformedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithMixedFormats(t, "run_3000000000000000000")
+	writeLatestPointer(t, hubDir, []byte(`{}`))
+
+	captured, err := captureHubStdout(t, func() error {
+		return newHubShowCmd(t, hubDir, testFullIndexSetID, true).Execute()
+	})
+	require.NoError(t, err)
+
+	var result struct {
+		LatestRun string       `json:"latest_run"`
+		Runs      []hubRunInfo `json:"runs"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &result))
+	require.Empty(t, result.LatestRun)
+	for _, run := range result.Runs {
+		require.False(t, run.IsLatest)
+	}
+}
+
 // --- hub set-latest ---
 
 func TestRunIndexHubSetLatest(t *testing.T) {
@@ -396,6 +471,32 @@ func TestRunIndexHubRmRun_ProtectsLatest(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "current latest")
+}
+
+func TestRunIndexHubRmRun_FailsClosedOnOversizedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	latestRunID := "run_1000000000000000000"
+	writeOversizedLatestPointer(t, hubDir, latestRunID)
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, latestRunID, false)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read latest.json")
+	assert.Contains(t, err.Error(), "size")
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", latestRunID, "index.db"))
+}
+
+func TestRunIndexHubRmRun_FailsClosedOnMalformedLatestPointer(t *testing.T) {
+	hubDir := setupHubWithRuns(t)
+	runID := "run_2000000000000000000"
+	writeLatestPointer(t, hubDir, []byte(`{}`))
+
+	cmd := newHubRmRunCmd(t, hubDir, testFullIndexSetID, runID, false)
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read latest.json")
+	assert.Contains(t, err.Error(), "run_id")
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID, "index.db"))
 }
 
 func TestRunIndexHubRmRun_ForceLatest(t *testing.T) {
@@ -534,6 +635,78 @@ func TestRunIndexHubGC_RetainsPresentUnreadableCompleteMarker(t *testing.T) {
 	oldestRunDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000")
 	_, err = os.Stat(filepath.Join(oldestRunDir, "index.db"))
 	assert.True(t, os.IsNotExist(err), "oldest valid non-latest run should still be deleted")
+}
+
+func TestRunIndexHubGC_KeepRetainsLatestWithMissingCompleteMarker(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+	latestRunID := "run_3000000000000000000"
+	latestRunDir := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", latestRunID)
+	require.NoError(t, os.Remove(filepath.Join(latestRunDir, "complete.json")))
+
+	cmd := newHubGCCmd(t, hubDir, "", 1, "", false, false)
+	require.NoError(t, cmd.Execute())
+
+	assert.FileExists(t, filepath.Join(latestRunDir, "index.db"), "latest pointer target should be retained even without complete.json")
+	assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_2000000000000000000", "index.db"),
+		"newest committed non-latest run should fill the available keep slot")
+	run1DB := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", "run_1000000000000000000", "index.db")
+	_, err := os.Stat(run1DB)
+	assert.True(t, os.IsNotExist(err), "oldest committed non-latest run should be deleted")
+}
+
+func TestRunIndexHubGC_SkipsIndexSetWithOversizedLatestPointer(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+	writeOversizedLatestPointer(t, hubDir, "run_3000000000000000000")
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	execErr := newHubGCCmd(t, hubDir, "", 1, "", false, false).Execute()
+
+	require.NoError(t, w.Close())
+	os.Stderr = origStderr
+	captured, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+
+	require.NoError(t, execErr)
+	assert.Contains(t, string(captured), "skipping gc for "+testFullIndexSetID)
+	for _, runID := range []string{
+		"run_1000000000000000000",
+		"run_2000000000000000000",
+		"run_3000000000000000000",
+	} {
+		assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID, "index.db"))
+	}
+}
+
+func TestRunIndexHubGC_SkipsIndexSetWithMalformedLatestPointer(t *testing.T) {
+	hubDir := setupHubWith3Runs(t)
+	writeLatestPointer(t, hubDir, []byte(`{}`))
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	execErr := newHubGCCmd(t, hubDir, "", 1, "", false, false).Execute()
+
+	require.NoError(t, w.Close())
+	os.Stderr = origStderr
+	captured, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+
+	require.NoError(t, execErr)
+	assert.Contains(t, string(captured), "skipping gc for "+testFullIndexSetID)
+	assert.Contains(t, string(captured), "run_id")
+	for _, runID := range []string{
+		"run_1000000000000000000",
+		"run_2000000000000000000",
+		"run_3000000000000000000",
+	} {
+		assert.FileExists(t, filepath.Join(hubDir, "index-sets", testFullIndexSetID, "runs", runID, "index.db"))
+	}
 }
 
 func TestRunIndexHubGC_KeepWithStaleLatest(t *testing.T) {
@@ -850,6 +1023,27 @@ func setupHubWith3Runs(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(latestDir, "latest.json"), data, 0644))
 
 	return hubDir
+}
+
+func writeOversizedLatestPointer(t *testing.T, hubDir, runID string) {
+	t.Helper()
+	latest := map[string]interface{}{
+		"version":      "1.0",
+		"index_set_id": testFullIndexSetID,
+		"run_id":       runID,
+		"updated_at":   "2026-03-06T00:00:00Z",
+		"padding":      strings.Repeat("x", int(maxHubMarkerBytes)),
+	}
+	data, err := json.Marshal(latest)
+	require.NoError(t, err)
+	require.Greater(t, len(data), maxHubMarkerBytes)
+	writeLatestPointer(t, hubDir, data)
+}
+
+func writeLatestPointer(t *testing.T, hubDir string, data []byte) {
+	t.Helper()
+	latestPath := filepath.Join(hubDir, "index-sets", testFullIndexSetID, "latest.json")
+	require.NoError(t, os.WriteFile(latestPath, data, 0644))
 }
 
 func captureHubStdout(t *testing.T, run func() error) ([]byte, error) {
