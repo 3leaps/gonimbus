@@ -547,6 +547,7 @@ func TestRunIndexExport_FileHub(t *testing.T) {
 	cmd.Flags().String("index-set", "", "")
 	cmd.Flags().String("run-id", "", "")
 	cmd.Flags().String("db", "", "")
+	cmd.Flags().String("format", "auto", "")
 	cmd.Flags().String("hub-profile", "", "")
 	cmd.Flags().String("hub-region", "", "")
 	cmd.Flags().String("hub-endpoint", "", "")
@@ -557,6 +558,7 @@ func TestRunIndexExport_FileHub(t *testing.T) {
 		"--index-set", indexSet.IndexSetID,
 		"--run-id", run.RunID,
 		"--db", dbPath,
+		"--format", "sqlite",
 	})
 	cmd.SetContext(ctx)
 
@@ -606,6 +608,70 @@ func TestRunIndexExport_FileHub(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, dbChecksum, hubDBChecksum)
 	assert.Equal(t, dbSize, hubDBSize)
+}
+
+func TestRunIndexExport_AutoSelectsDurableWithoutSQLite(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	ctx := context.Background()
+
+	indexSetID := "idx_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	runID := "run_1709654400000000001"
+	localManifest := writeLocalDurableSnapshotForHubTest(t, indexSetID, runID)
+	require.NotEmpty(t, localManifest.Segments)
+
+	// No indexes/*/index.db — durable-only local store.
+	indexDBs, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "*", "index.db"))
+	require.NoError(t, err)
+	require.Empty(t, indexDBs)
+
+	hubDir := t.TempDir()
+	hubURI := "file://" + hubDir + "/"
+
+	cmd := &cobra.Command{Use: "export", RunE: runIndexExport}
+	cmd.Flags().String("hub", "", "")
+	cmd.Flags().String("index-set", "", "")
+	cmd.Flags().String("run-id", "", "")
+	cmd.Flags().String("db", "", "")
+	cmd.Flags().String("format", "auto", "")
+	cmd.Flags().String("hub-profile", "", "")
+	cmd.Flags().String("hub-region", "", "")
+	cmd.Flags().String("hub-endpoint", "", "")
+	cmd.Flags().String("hub-gcp-project", "", "")
+	addLatestPointerFlags(cmd)
+	// Omit --run-id to force local durable latest.json resolution.
+	cmd.SetArgs([]string{
+		"--hub", hubURI,
+		"--index-set", indexSetID,
+		"--format", "auto",
+	})
+	cmd.SetContext(ctx)
+	require.NoError(t, cmd.Execute())
+
+	runDir := filepath.Join(hubDir, "index-sets", indexSetID, "runs", runID)
+	require.NoFileExists(t, filepath.Join(runDir, "index.db"))
+	require.FileExists(t, filepath.Join(runDir, "manifest.json"))
+	require.FileExists(t, filepath.Join(runDir, "complete.json"))
+	completeData, err := os.ReadFile(filepath.Join(runDir, "complete.json"))
+	require.NoError(t, err)
+	var complete map[string]any
+	require.NoError(t, json.Unmarshal(completeData, &complete))
+	require.Equal(t, indexHubFormatDurableV2, complete["format"])
+}
+
+func TestNormalizeIndexExportFormat(t *testing.T) {
+	got, err := normalizeIndexExportFormat("auto")
+	require.NoError(t, err)
+	require.Equal(t, "auto", got)
+	got, err = normalizeIndexExportFormat("")
+	require.NoError(t, err)
+	require.Equal(t, "auto", got)
+	got, err = normalizeIndexExportFormat("durable")
+	require.NoError(t, err)
+	require.Equal(t, indexHubFormatDurableV2, got)
+	_, err = normalizeIndexExportFormat("parquet")
+	require.Error(t, err)
 }
 
 // --- helpers ---

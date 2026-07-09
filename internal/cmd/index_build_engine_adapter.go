@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/3leaps/gonimbus/internal/indexcompare"
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
@@ -154,14 +152,15 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	return out, nil
 }
 
-func runIndexBuildExperimentalEngine(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexbuild.Summary, string, error) {
+func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexbuild.Summary, string, error) {
 	if m == nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("index manifest is required")
 	}
 	if identityResult == nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("index identity is required")
 	}
-	runID := "run_" + uuid.NewString()
+	// Match SQLite/hub run-id contract: run_<digits> (not UUID-with-hyphens).
+	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	baseBucket, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("parse base_uri: %w", err)
@@ -198,7 +197,9 @@ func runIndexBuildExperimentalEngine(ctx context.Context, m *manifest.IndexManif
 		return indexbuild.Summary{}, "", err
 	}
 	runSegmentDir := filepath.Join(segmentRoot, "runs", runID)
-	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
+	// Durable-only builds never take --db; identity lands under the default
+	// per-index directory so operators can still locate the set.
+	resolvedDB, err := resolveIndexDBPath("", identityResult)
 	if err != nil {
 		return indexbuild.Summary{}, "", err
 	}
@@ -239,81 +240,80 @@ func runIndexBuildExperimentalEngine(ctx context.Context, m *manifest.IndexManif
 	return summary, resolvedDB.IdentityDir, nil
 }
 
-func validateIndexBuildExperimentalEngineGlobalFlags(resumeRun string) error {
-	switch {
-	case strings.TrimSpace(resumeRun) != "":
-		return fmt.Errorf("--experimental-engine is not compatible with --resume-run")
-	case indexBuildDryRun:
-		return fmt.Errorf("--experimental-engine is not compatible with --dry-run")
-	case indexBuildBackground:
-		return fmt.Errorf("--experimental-engine is not compatible with --background")
-	case indexBuildDedupe:
-		return fmt.Errorf("--experimental-engine is not compatible with --dedupe")
-	case indexBuildSummary:
-		return fmt.Errorf("--experimental-engine is not compatible with --summary")
-	case strings.TrimSpace(indexBuildDBPath) != "":
-		return fmt.Errorf("--experimental-engine is not compatible with --db")
-	case strings.TrimSpace(indexBuildSince) != "":
-		return fmt.Errorf("--experimental-engine is not compatible with --since")
-	default:
-		return nil
-	}
-}
-
-func validateIndexBuildExperimentalEngineManifest(m *manifest.IndexManifest) error {
-	if m != nil && m.Build != nil {
-		if m.Build.Scope != nil {
-			return fmt.Errorf("--experimental-engine does not support build.scope in this slice")
-		}
-		if err := validateIndexBuildDurableFullBaseMatch(m, "--experimental-engine"); err != nil {
-			return err
-		}
-		switch strings.TrimSpace(m.Build.Source) {
-		case "", manifest.DefaultIndexSource:
-			return nil
-		default:
-			return fmt.Errorf("--experimental-engine supports crawl source only")
-		}
-	}
-	return nil
-}
-
 func validateIndexBuildFormatFlags(resumeRun string) error {
-	switch selectedIndexBuildFormat() {
+	// resumeRun is unused: resume is validated/dispatched before format validation.
+	_ = resumeRun
+	format := selectedIndexBuildFormat()
+	switch format {
 	case "sqlite":
-		return nil
-	case "both":
-		switch {
-		case strings.TrimSpace(resumeRun) != "":
-			return fmt.Errorf("--format both is not compatible with --resume-run in this slice")
-		case indexBuildDryRun:
-			return fmt.Errorf("--format both is not compatible with --dry-run in this slice")
-		case indexBuildBackground:
-			return fmt.Errorf("--format both is not compatible with --background in this slice")
-		case indexBuildDedupe:
-			return fmt.Errorf("--format both is not compatible with --dedupe in this slice")
-		case indexBuildExperimentalEngine:
-			return fmt.Errorf("--format both is not compatible with --experimental-engine")
-		case strings.TrimSpace(indexBuildDBPath) != "":
-			return fmt.Errorf("--format both is not compatible with --db in this slice")
-		case strings.TrimSpace(indexBuildSince) != "":
-			return fmt.Errorf("--format both is not compatible with --since in this slice")
-		default:
-			return nil
+		if indexBuildExperimentalEngine {
+			return fmt.Errorf("--experimental-engine is not compatible with --format sqlite; use --format durable")
 		}
+		return nil
+	case "durable":
+		return validateIndexBuildDurableGlobalFlags("--format durable")
+	case "both":
+		if indexBuildExperimentalEngine {
+			return fmt.Errorf("--format both is not compatible with --experimental-engine")
+		}
+		return validateIndexBuildBothGlobalFlags()
 	default:
-		return fmt.Errorf("--format must be one of: sqlite, both")
+		return fmt.Errorf("--format must be one of: durable, sqlite, both")
+	}
+}
+
+func validateIndexBuildDurableGlobalFlags(flagName string) error {
+	switch {
+	case indexBuildBackground:
+		return fmt.Errorf("%s is not compatible with --background in this slice", flagName)
+	case indexBuildDedupe:
+		return fmt.Errorf("%s is not compatible with --dedupe in this slice", flagName)
+	case indexBuildSummary:
+		return fmt.Errorf("%s is not compatible with --summary in this slice", flagName)
+	case strings.TrimSpace(indexBuildDBPath) != "":
+		return fmt.Errorf("%s does not use --db; durable builds publish segment artifacts, not index.db. Use --format sqlite or --format both for SQLite compatibility", flagName)
+	case strings.TrimSpace(indexBuildSince) != "":
+		return fmt.Errorf("%s is not compatible with --since in this slice", flagName)
+	default:
+		return nil
+	}
+}
+
+func validateIndexBuildBothGlobalFlags() error {
+	switch {
+	case indexBuildBackground:
+		return fmt.Errorf("--format both is not compatible with --background in this slice")
+	case indexBuildDedupe:
+		return fmt.Errorf("--format both is not compatible with --dedupe in this slice")
+	case strings.TrimSpace(indexBuildSince) != "":
+		return fmt.Errorf("--format both is not compatible with --since in this slice")
+	default:
+		return nil
 	}
 }
 
 func validateIndexBuildFormatManifest(m *manifest.IndexManifest) error {
-	if selectedIndexBuildFormat() != "both" {
+	format := selectedIndexBuildFormat()
+	switch format {
+	case "sqlite":
 		return nil
+	case "durable", "both":
+		flagName := "--format " + format
+		if m != nil && m.Build != nil {
+			if m.Build.Scope != nil {
+				return fmt.Errorf("%s does not support build.scope in this slice", flagName)
+			}
+			switch strings.TrimSpace(m.Build.Source) {
+			case "", manifest.DefaultIndexSource:
+				// ok
+			default:
+				return fmt.Errorf("%s supports crawl source only", flagName)
+			}
+		}
+		return validateIndexBuildDurableFullBaseMatch(m, flagName)
+	default:
+		return fmt.Errorf("--format must be one of: durable, sqlite, both")
 	}
-	if m != nil && m.Build != nil && m.Build.Scope != nil {
-		return fmt.Errorf("--format both does not support build.scope in this slice")
-	}
-	return validateIndexBuildDurableFullBaseMatch(m, "--format both")
 }
 
 func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName string) error {
@@ -326,6 +326,9 @@ func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName 
 	}
 	if matchCfg.Filters != nil {
 		return fmt.Errorf("%s does not support build.match.filters in this slice", flagName)
+	}
+	if matchCfg.IncludeHidden {
+		return fmt.Errorf("%s does not support build.match.include_hidden=true in this slice", flagName)
 	}
 	if !isDefaultIndexBuildIncludes(matchCfg.Includes) {
 		return fmt.Errorf("%s supports only default build.match.includes %q in this slice", flagName, manifest.DefaultIndexIncludes)
@@ -344,9 +347,16 @@ func isDefaultIndexBuildIncludes(includes []string) bool {
 }
 
 func selectedIndexBuildFormat() string {
+	if indexBuildExperimentalEngine {
+		// Hidden alias forces the durable path for one compatibility cycle.
+		format := strings.TrimSpace(strings.ToLower(indexBuildFormat))
+		if format == "" || format == "durable" {
+			return "durable"
+		}
+	}
 	format := strings.TrimSpace(strings.ToLower(indexBuildFormat))
 	if format == "" {
-		return "sqlite"
+		return "durable"
 	}
 	return format
 }

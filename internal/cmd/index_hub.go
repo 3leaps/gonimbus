@@ -245,7 +245,7 @@ func runIndexHubInit(cmd *cobra.Command, args []string) error {
 	}
 
 	hubKey := hubArtifactKey(hub, "hub.json")
-	if _, getErr := downloadBytes(ctx, getter, hubKey); getErr == nil {
+	if _, getErr := downloadBytesBounded(ctx, getter, hubKey, maxHubMarkerBytes, "hub.json"); getErr == nil {
 		return fmt.Errorf("hub already initialized: %s", hubKey)
 	} else if !provider.IsNotFound(getErr) {
 		return fmt.Errorf("check existing hub.json: %w", getErr)

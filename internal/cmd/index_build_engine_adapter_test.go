@@ -14,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
+	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -37,6 +38,16 @@ func TestIndexBuildEngineAdapterMatchesLibraryManifestAndSegments(t *testing.T) 
 }
 
 func TestIndexBuildExperimentalEngineCommandBuildsSnapshot(t *testing.T) {
+	// Hidden --experimental-engine remains a durable alias during the compatibility window.
+	testIndexBuildDurableCommandBuildsSnapshot(t, true)
+}
+
+func TestIndexBuildFormatDurableDefaultBuildsSnapshot(t *testing.T) {
+	testIndexBuildDurableCommandBuildsSnapshot(t, false)
+}
+
+func testIndexBuildDurableCommandBuildsSnapshot(t *testing.T, experimentalAlias bool) {
+	t.Helper()
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
 	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
@@ -62,7 +73,8 @@ build:
 	restore := withIndexBuildExperimentalEngineTestState(t)
 	restore()
 	indexBuildJobPath = manifestPath
-	indexBuildExperimentalEngine = true
+	indexBuildFormat = "durable"
+	indexBuildExperimentalEngine = experimentalAlias
 
 	var gotSrc *uri.ObjectURI
 	var gotOpts providerdispatch.SourceOptions
@@ -91,7 +103,51 @@ build:
 	require.Len(t, rows, 2)
 	require.Equal(t, "a.xml", rows[0].RelKey)
 	require.Equal(t, "b.xml", rows[1].RelKey)
-	require.NoFileExists(t, filepath.Join(dataRoot, "indexes", "index.db"))
+	// Durable-only builds write identity, not index.db.
+	indexDBs, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "*", "index.db"))
+	require.NoError(t, err)
+	require.Empty(t, indexDBs)
+}
+
+func TestIndexBuildFormatDurableRejectsDBFlag(t *testing.T) {
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildFormat = "durable"
+	indexBuildDBPath = "/tmp/index.db"
+	err := validateIndexBuildFormatFlags("")
+	require.ErrorContains(t, err, "does not use --db")
+}
+
+func TestIndexBuildFormatDurableRejectsIncludeHidden(t *testing.T) {
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildFormat = "durable"
+	m := &manifest.IndexManifest{
+		Build: &manifest.IndexBuildConfig{
+			Match: &manifest.IndexMatchConfig{
+				Includes:      []string{"**"},
+				IncludeHidden: true,
+			},
+		},
+	}
+	err := validateIndexBuildFormatManifest(m)
+	require.ErrorContains(t, err, "include_hidden")
+}
+
+func TestIndexBuildFormatBothAllowsDBFlag(t *testing.T) {
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildFormat = "both"
+	indexBuildDBPath = "/tmp/index.db"
+	require.NoError(t, validateIndexBuildFormatFlags(""))
+}
+
+func TestIndexBuildFormatBothAllowsDryRunFlag(t *testing.T) {
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildFormat = "both"
+	indexBuildDryRun = true
+	require.NoError(t, validateIndexBuildFormatFlags(""))
 }
 
 func TestIndexBuildFormatBothUsesSingleObservedProviderStream(t *testing.T) {
@@ -419,7 +475,7 @@ build:
 	cmd := &cobra.Command{Use: "build"}
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
-	require.ErrorContains(t, err, "--experimental-engine does not support build.match.excludes in this slice")
+	require.ErrorContains(t, err, "--format durable does not support build.match.excludes in this slice")
 	require.Zero(t, prov.listCalls)
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
@@ -579,7 +635,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildSummary = false
 		indexBuildResumeRun = ""
 		indexBuildSince = ""
-		indexBuildFormat = "sqlite"
+		indexBuildFormat = "durable"
 		indexBuildExperimentalEngine = false
 	}
 }

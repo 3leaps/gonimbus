@@ -37,16 +37,30 @@ Gonimbus supports two workflows based on bucket scale:
 ## Quick Start
 
 ```bash
-# Initialize the index database (one-time)
-gonimbus index init
-
 # Create an index manifest (see below)
-# Then build the index
+# Then build the index (default format: durable)
 gonimbus index build --job index-manifest.yaml
 
-# Query the index
+# SQLite compatibility build when you need local query/enrich-head/stats
+gonimbus index build --job index-manifest.yaml --format sqlite
+
+# Query requires a SQLite index today
 gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 ```
+
+### Artifact formats
+
+| Format | Build flag | What it produces | Local consumers today |
+| ------ | ---------- | ---------------- | --------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths |
+| **sqlite** | `--format sqlite` | Classic `index.db` under `indexes/idx_*/` | `index query`, `enrich-head`, `stats`, most `doctor` |
+| **both** | `--format both` | Dual-build + parity report for migration validation | Both surfaces for the same crawl |
+
+Durable is now the default index artifact format in this build. SQLite remains an
+explicit compatibility/transition mode. Durable hydrate restores
+`manifest.json` + segments, **not** `index.db`. If you still need local SQLite
+query or enrichment workflows during the transition, pass `--format sqlite` or
+`--format both`.
 
 ## Index Manifest
 
@@ -927,12 +941,14 @@ gonimbus index build --job index-manifest.yaml
 For team and production use, indexes can be published to a shared hub (S3 or local filesystem) and hydrated on demand.
 
 ```bash
-# Export to hub
+# Export to hub (default --format auto: durable if local durable snapshot exists, else sqlite)
 gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_da038d...
 
-# Export an opt-in durable snapshot
+# Force durable or sqlite export
 gonimbus index export --hub s3://bucket/index-hub/ \
   --index-set idx_da038d... --format durable
+gonimbus index export --hub s3://bucket/index-hub/ \
+  --index-set idx_da038d... --format sqlite
 
 # Hydrate from hub
 gonimbus index hydrate --hub s3://bucket/index-hub/ \
@@ -955,15 +971,16 @@ newer run, or fails closed with manual reconciliation guidance. Use
 `--latest-write-mode unconditional` only for explicit recovery after you have
 verified hub state.
 
-Hub runs carry an explicit format marker. Existing exports and the default
-`index export` path use `sqlite-v1`, which hydrates `index.db` and optional
-`identity.json` exactly as before. `index export --format durable` publishes the
-opt-in `durable-v2` format: `manifest.json` plus immutable `segments/*.parquet`
-artifacts. `index hydrate` reads the marker, rejects unknown formats, and for
-durable runs verifies the manifest and every referenced segment by digest before
-writing them under the destination directory. A durable hydrate does not create
-an `index.db`; downstream commands must explicitly support durable manifests
-before using that hydrated output.
+Hub runs carry an explicit format marker. `index export --format auto` (default)
+selects `durable-v2` when a local durable complete marker is present for the
+target run, otherwise `sqlite-v1`. Explicit `--format durable` resolves from the
+local durable snapshot (complete marker + segments) and does not require
+`index.db`. Explicit `--format sqlite` publishes `index.db` and optional
+`identity.json` as before. `index hydrate` reads the marker, rejects unknown
+formats, and for durable runs verifies the manifest and every referenced segment
+by digest before writing them under the destination directory. A durable hydrate
+does not create an `index.db`; downstream commands must explicitly support
+durable manifests before using that hydrated output.
 
 `index hub ls` and `index hub show` display hub run formats so mixed
 `sqlite-v1` / `durable-v2` hubs are legible. JSON output includes format counts

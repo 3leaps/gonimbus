@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,12 +19,16 @@ func TestIndexBuildResumeRunDoesNotRequireJobFlag(t *testing.T) {
 	oldJob := indexBuildJobPath
 	oldResumeRun := indexBuildResumeRun
 	oldDryRun := indexBuildDryRun
+	oldFormat := indexBuildFormat
 	defer func() {
 		indexBuildJobPath = oldJob
 		indexBuildResumeRun = oldResumeRun
 		indexBuildDryRun = oldDryRun
+		indexBuildFormat = oldFormat
 	}()
 
+	// Resume is a SQLite-lifecycle path; keep format sqlite for this flag interaction test.
+	indexBuildFormat = "sqlite"
 	indexBuildJobPath = ""
 	indexBuildResumeRun = ""
 	indexBuildDryRun = false
@@ -34,6 +39,71 @@ func TestIndexBuildResumeRunDoesNotRequireJobFlag(t *testing.T) {
 	indexBuildDryRun = true
 	err = runIndexBuild(indexBuildCmd, nil)
 	require.ErrorContains(t, err, "--dry-run is not compatible with --resume-run")
+}
+
+func TestIndexBuildResumeRunWithDefaultDurableFormatReachesResumePath(t *testing.T) {
+	// After durable default flip, the printed operator hint
+	// `gonimbus index build --resume-run <run_id>` (no --format) must still
+	// enter the SQLite resume path, not fail durable format validation.
+	oldJob := indexBuildJobPath
+	oldResumeRun := indexBuildResumeRun
+	oldDryRun := indexBuildDryRun
+	oldFormat := indexBuildFormat
+	oldExperimental := indexBuildExperimentalEngine
+	defer func() {
+		indexBuildJobPath = oldJob
+		indexBuildResumeRun = oldResumeRun
+		indexBuildDryRun = oldDryRun
+		indexBuildFormat = oldFormat
+		indexBuildExperimentalEngine = oldExperimental
+	}()
+
+	indexBuildJobPath = ""
+	indexBuildResumeRun = "run_123"
+	indexBuildDryRun = false
+	indexBuildFormat = "durable" // default after Slice E
+	indexBuildExperimentalEngine = false
+	// Ensure cobra does not treat --format as operator-explicit.
+	if f := indexBuildCmd.Flags().Lookup("format"); f != nil {
+		_ = f.Value.Set("durable")
+		f.Changed = false
+	}
+
+	err := runIndexBuild(indexBuildCmd, nil)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "--format durable is not compatible with --resume-run")
+	require.NotContains(t, err.Error(), "not compatible with --resume-run in this slice")
+	// Reaches runIndexBuildResume before format rejection. Without app data
+	// identity / checkpoint store the resume path fails later — that is fine.
+	require.True(t,
+		strings.Contains(err.Error(), "read operation checkpoint") ||
+			strings.Contains(err.Error(), "app identity is not available"),
+		"expected resume-path error, got: %v", err)
+}
+
+func TestIndexBuildResumeRunRejectsExplicitDurableFormat(t *testing.T) {
+	oldResumeRun := indexBuildResumeRun
+	oldFormat := indexBuildFormat
+	oldExperimental := indexBuildExperimentalEngine
+	defer func() {
+		indexBuildResumeRun = oldResumeRun
+		indexBuildFormat = oldFormat
+		indexBuildExperimentalEngine = oldExperimental
+		if f := indexBuildCmd.Flags().Lookup("format"); f != nil {
+			f.Changed = false
+		}
+	}()
+
+	indexBuildResumeRun = "run_123"
+	indexBuildFormat = "durable"
+	indexBuildExperimentalEngine = false
+	if f := indexBuildCmd.Flags().Lookup("format"); f != nil {
+		_ = f.Value.Set("durable")
+		f.Changed = true
+	}
+
+	err := validateIndexBuildResumeInvocation(indexBuildCmd)
+	require.ErrorContains(t, err, "--resume-run is not compatible with --format durable")
 }
 
 func TestIndexBuildResumeIdentityRejectsTamperedCheckpointConfig(t *testing.T) {
