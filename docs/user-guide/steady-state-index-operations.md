@@ -31,6 +31,28 @@ not a durable human-selected name. Use `index list`, `index stats`, or
 `index doctor` to confirm which `idx_*` identity a manifest is using before
 comparing runs.
 
+### Exact build → export/query handoff
+
+Configured `build.scope` is part of index-set identity (`scope_hash`). Distinct
+scopes over the same `base_uri` produce distinct full `index_set_id` values.
+
+Automation that chains `index build` into `index export` or `index query` must
+pass the **exact** full `index_set_id` and `run_id` from the just-built
+artifact—do not rediscover the set from `index list` ordering or base-URI
+heuristics. Today `index list` enumerates SQLite `index.db` entries only; a
+durable-only sibling can be invisible next to a prior `both` set.
+
+Use `index build --json` for a machine-stable `gonimbus.index.build_result.v1`
+receipt (success status, requested/committed formats, full set/run/scope
+identity, committed counts, durable `manifest_sha256`). Progress stays on
+stderr. Dry-run prints the computed `index_set_id` and `scope_hash` without
+creating artifacts.
+
+For durable query of a specific snapshot, pass `--index-set` with `--run-id`
+to pin the receipt's run (bypasses `latest.json`). `transfer reflow` does not
+yet validate a snapshot-source receipt; exact export/query selection is the
+supported handoff boundary for this release train.
+
 ## Cadence Guidance
 
 Choose rebuild cadence based on how likely a partition is to receive new,

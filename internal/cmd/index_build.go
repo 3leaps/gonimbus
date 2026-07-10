@@ -25,6 +25,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/indexcompare"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/manifest"
@@ -73,7 +74,13 @@ Tip: use 'gonimbus index list' to see IDENTITY status, and 'gonimbus index docto
 Example:
   gonimbus index build --job index.yaml
   gonimbus index build --job index.yaml --format sqlite
-  gonimbus index build --job index.yaml --storage-provider wasabi --region us-east-1`,
+  gonimbus index build --job index.yaml --json
+  gonimbus index build --job index.yaml --storage-provider wasabi --region us-east-1
+
+Machine handoff: --json emits a post-commit gonimbus.index.build_result.v1
+receipt on stdout (exact index_set_id + run_id + scope_hash + formats). Do not
+rediscover the just-built set from index list. --json is rejected with
+--background (the immediate job id is not a committed receipt).`,
 	RunE: runIndexBuild,
 }
 
@@ -98,6 +105,7 @@ var (
 	indexBuildSince              string
 	indexBuildFormat             string
 	indexBuildExperimentalEngine bool
+	indexBuildJSON               bool
 )
 
 func init() {
@@ -112,6 +120,7 @@ func init() {
 	indexBuildCmd.Flags().BoolVar(&indexBuildBackground, "background", false, "Run index build as a managed background job")
 	indexBuildCmd.Flags().BoolVar(&indexBuildDedupe, "dedupe", false, "Refuse to start if an identical job is already running")
 	indexBuildCmd.Flags().BoolVar(&indexBuildSummary, "summary", false, "Print top-level object distribution after a completed build")
+	indexBuildCmd.Flags().BoolVar(&indexBuildJSON, "json", false, "Emit machine-stable build_result.v1 receipt on stdout after successful commit")
 	indexBuildCmd.Flags().StringVar(&indexBuildManagedJobID, "_managed-job-id", "", "(internal) Managed job id")
 	_ = indexBuildCmd.Flags().MarkHidden("_managed-job-id")
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
@@ -156,6 +165,16 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	resumeRun := strings.TrimSpace(indexBuildResumeRun)
 	if indexBuildExperimentalEngine {
 		_, _ = fmt.Fprintln(os.Stderr, "warning: --experimental-engine is deprecated; use --format durable")
+	}
+	// Receipt mode is commit-boundary only.
+	if indexBuildJSON && indexBuildBackground {
+		return fmt.Errorf("--json is not compatible with --background; the immediate job id is not a committed build receipt")
+	}
+	if indexBuildJSON && indexBuildDryRun {
+		return fmt.Errorf("--json is not compatible with --dry-run; dry-run does not emit a committed build receipt")
+	}
+	if indexBuildJSON && resumeRun != "" {
+		return fmt.Errorf("--json is not compatible with --resume-run; resume does not emit a build_result receipt in this cut")
 	}
 	// Resume is a SQLite checkpoint lifecycle path. Dispatch it before build-format
 	// validation so the durable default does not break the printed operator hint
@@ -320,7 +339,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan)
+		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan, identityResult, scopeHash)
 	}
 
 	if selectedIndexBuildFormat() == "durable" {
@@ -351,6 +370,12 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(os.Stderr, "  index_set_id: %s\n", summary.IndexSetID)
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_observed: %d\n", summary.ObjectsObserved)
 		_, _ = fmt.Fprintf(os.Stderr, "  segments: %d\n", len(summary.Manifest.Segments))
+		if indexBuildJSON {
+			rec := newDurableBuildResultRecord(summary, scopeHash, "durable", []string{"durable-v2"})
+			if err := emitIndexBuildResultJSON(cmd.OutOrStdout(), rec); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -463,10 +488,16 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	var result *indexBuildResult
 	var crawlErr error
 	var compareReport *indexcompare.Report
+	var bothSummary indexbuild.Summary
+	var bothSummaryOK bool
 	if selectedIndexBuildFormat() == "both" {
 		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters)
 		result = bothResult.Result
 		crawlErr = err
+		if err == nil {
+			bothSummary = bothResult.Summary
+			bothSummaryOK = true
+		}
 		if bothResult.Report != nil {
 			compareReport = bothResult.Report
 			enc := json.NewEncoder(cmd.OutOrStdout())
@@ -588,7 +619,54 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("index format parity failed")
 	}
 
+	// Terminal receipt after commit. Success is authoritative for consumers that
+	// require status=success. SQLite partial also emits an explicit non-authoritative
+	// terminal record so automation never sees exit 0 with empty stdout under --json.
+	// Fatal failure returns nonzero and emits no receipt.
+	if indexBuildJSON {
+		if err := emitCommittedIndexBuildJSON(cmd.OutOrStdout(), selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// emitCommittedIndexBuildJSON writes the terminal build_result record for a
+// committed sqlite/both path. Durable success is emitted on its own return path.
+// Failed final status emits nothing (caller already returns error).
+func emitCommittedIndexBuildJSON(
+	w io.Writer,
+	format string,
+	finalStatus indexstore.RunStatus,
+	bothSummary indexbuild.Summary,
+	bothSummaryOK bool,
+	indexSetID, runID, scopeHash string,
+	objectsIngested int64,
+) error {
+	switch format {
+	case "both":
+		if finalStatus != indexstore.RunStatusSuccess {
+			return nil
+		}
+		if !bothSummaryOK {
+			return fmt.Errorf("build result: both-format summary missing after success")
+		}
+		return emitIndexBuildResultJSON(w, newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested))
+	case "sqlite":
+		switch finalStatus {
+		case indexstore.RunStatusSuccess, indexstore.RunStatusPartial:
+			status := "success"
+			if finalStatus == indexstore.RunStatusPartial {
+				status = "partial"
+			}
+			return emitIndexBuildResultJSON(w, newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status, objectsIngested))
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
 }
 
 func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) error {
@@ -1404,7 +1482,7 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 // adapter stream split in ADR-0006. Dry-run plans are an intentional exception:
 // the plan *is* the command result (human-readable text on stdout), same as
 // crawl --dry-run. Keep operator chatter on stderr for non-dry-run paths.
-func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters, sincePlan *indexBuildSincePlan) error {
+func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.IndexManifest, ident effectiveIdentity, buildFilters *indexBuildFilters, sincePlan *indexBuildSincePlan, identityResult *indexstore.IndexSetIdentityResult, scopeHash string) error {
 	_, _ = fmt.Fprintln(os.Stdout, "Index Build Plan (dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "==========================")
 	_, _ = fmt.Fprintln(os.Stdout)
@@ -1440,6 +1518,13 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 	_, _ = fmt.Fprintf(os.Stdout, "  region_kind: %s\n", valueOrDefault(ident.RegionKind, "(not set)"))
 	_, _ = fmt.Fprintf(os.Stdout, "  region: %s\n", valueOrDefault(ident.Region, "(not set)"))
 	_, _ = fmt.Fprintf(os.Stdout, "  endpoint_host: %s\n", valueOrDefault(ident.EndpointHost, "(not set)"))
+	// Precomputed identity only — do not recompute a different path here.
+	if identityResult != nil && strings.TrimSpace(identityResult.IndexSetID) != "" {
+		_, _ = fmt.Fprintf(os.Stdout, "  index_set_id: %s\n", identityResult.IndexSetID)
+	}
+	if strings.TrimSpace(scopeHash) != "" {
+		_, _ = fmt.Fprintf(os.Stdout, "  scope_hash: %s\n", scopeHash)
+	}
 
 	_, _ = fmt.Fprintln(os.Stdout)
 	_, _ = fmt.Fprintln(os.Stdout, "Build:")

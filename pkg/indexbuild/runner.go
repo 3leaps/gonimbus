@@ -176,10 +176,11 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		return Summary{}, err
 	}
 	summary := Summary{
-		IndexSetID:   cfg.IndexSetID,
-		RunID:        cfg.RunID,
-		JournalPaths: append([]string(nil), cfg.JournalPaths...),
-		Manifest:     manifestSummary(result.Manifest),
+		IndexSetID:     cfg.IndexSetID,
+		RunID:          cfg.RunID,
+		JournalPaths:   append([]string(nil), cfg.JournalPaths...),
+		ManifestSHA256: result.ManifestSHA256,
+		Manifest:       manifestSummary(result.Manifest),
 	}
 	if err := emitEvent(ctx, cfg.Events, Event{
 		Type:  EventTypeSnapshotPublished,

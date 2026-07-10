@@ -85,6 +85,9 @@ type ResolveTarget struct {
 	BaseURI string
 	// IndexSetID is a full idx_<64hex> or a unique hex prefix / dir name.
 	IndexSetID string
+	// RunID, when set, pins a durable-v2 snapshot by complete marker and never
+	// consults latest.json. Requires IndexSetID. SQLite cannot satisfy a pin.
+	RunID string
 }
 
 // ListedIndex is one discovered local index for ListIndexReaders.
