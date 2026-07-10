@@ -257,11 +257,16 @@ func writeInternalManifestFile(path string, manifest InternalManifest, allowExis
 }
 
 func ReadInternalManifestFile(path string) (InternalManifest, error) {
+	return ReadInternalManifestFileBounded(path, DefaultMaxPublishedManifestBytes)
+}
+
+// ReadInternalManifestFileBounded loads a manifest with an explicit size bound.
+func ReadInternalManifestFileBounded(path string, maxBytes int64) (InternalManifest, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return InternalManifest{}, fmt.Errorf("manifest path is required")
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, maxBytes)
 	if err != nil {
 		return InternalManifest{}, fmt.Errorf("read manifest: %w", err)
 	}
@@ -284,20 +289,52 @@ func ReadSegmentFile(path string) ([]CurrentObjectRow, error) {
 }
 
 func WalkSegmentFile(path string, visit func(CurrentObjectRow) error) error {
-	dir, name, err := splitJournalPath(path)
+	file, root, err := openSegmentFile(path)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = file.Close()
+		_ = root.Close()
+	}()
+	return walkSegmentFile(file, visit)
+}
+
+// afterSegmentDigestVerifiedForTest is an optional test hook invoked after the
+// segment digest has been verified against an open file descriptor and before
+// that same descriptor is parsed. Tests replace the pathname contents to prove
+// the parser never re-opens the path.
+var afterSegmentDigestVerifiedForTest func(path string)
+
+func openSegmentFile(path string) (*os.File, *os.Root, error) {
+	dir, name, err := splitJournalPath(path)
+	if err != nil {
+		return nil, nil, err
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return fmt.Errorf("open segment directory: %w", err)
+		return nil, nil, fmt.Errorf("open segment directory: %w", err)
 	}
-	defer func() { _ = root.Close() }()
 	file, err := root.Open(name)
 	if err != nil {
-		return fmt.Errorf("open segment: %w", err)
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("open segment: %w", err)
 	}
-	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("stat segment: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("segment is not a regular file")
+	}
+	return file, root, nil
+}
+
+func walkSegmentFile(file *os.File, visit func(CurrentObjectRow) error) error {
 	reader := parquet.NewGenericReader[segmentParquetRow](file)
 	defer func() { _ = reader.Close() }()
 	rows := make([]segmentParquetRow, 64)
@@ -344,14 +381,41 @@ func WalkSegmentFileVerified(dir string, descriptor SegmentDescriptor, visit fun
 	if strings.TrimSpace(descriptor.Digest.Hex) == "" {
 		return fmt.Errorf("segment digest is required")
 	}
-	got, err := sha256HexFile(path)
+	// Same-open trust: open once under os.Root, digest that FD, seek, parse the
+	// same FD. Never hash then re-open the pathname (TOCTOU).
+	file, root, err := openSegmentFile(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+		_ = root.Close()
+	}()
+	got, err := sha256HexFileHandle(file)
 	if err != nil {
 		return err
 	}
 	if got != descriptor.Digest.Hex {
 		return fmt.Errorf("segment digest mismatch for %s", descriptor.Path)
 	}
-	return WalkSegmentFile(path, visit)
+	if afterSegmentDigestVerifiedForTest != nil {
+		afterSegmentDigestVerifiedForTest(path)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek segment after digest verify: %w", err)
+	}
+	return walkSegmentFile(file, visit)
+}
+
+func sha256HexFileHandle(file *os.File) (string, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("seek segment for digest: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func ReadManifestRows(segmentDir string, manifest InternalManifest) ([]CurrentObjectRow, error) {

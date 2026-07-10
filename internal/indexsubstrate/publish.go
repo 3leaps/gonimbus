@@ -1,9 +1,12 @@
 package indexsubstrate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,51 +175,126 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 	return result, nil
 }
 
-func ReadLatestPublishedRows(latestPath string) (InternalManifest, []CurrentObjectRow, error) {
+// PublishedSnapshot is a verified local durable snapshot opened from a latest
+// pointer + complete marker + digest-checked manifest. Segments are verified
+// per-file when walked.
+type PublishedSnapshot struct {
+	LatestPath string
+	Complete   publishedCompleteDoc
+	Manifest   InternalManifest
+	SegmentDir string
+}
+
+// DefaultMaxPublishedMarkerBytes is the default bound for latest/complete JSON.
+const DefaultMaxPublishedMarkerBytes = 1 << 20
+
+// DefaultMaxPublishedManifestBytes is the default bound for internal manifests.
+const DefaultMaxPublishedManifestBytes = 64 << 20
+
+// OpenLatestPublishedSnapshot opens and trust-checks the latest durable snapshot
+// without materializing rows. Marker and manifest reads are size-bounded.
+func OpenLatestPublishedSnapshot(latestPath string) (PublishedSnapshot, error) {
+	return OpenLatestPublishedSnapshotBounded(latestPath, DefaultMaxPublishedMarkerBytes, DefaultMaxPublishedManifestBytes)
+}
+
+// OpenLatestPublishedSnapshotBounded is OpenLatestPublishedSnapshot with explicit
+// marker/manifest size bounds.
+func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxManifestBytes int64) (PublishedSnapshot, error) {
 	latestPath = strings.TrimSpace(latestPath)
 	if latestPath == "" {
-		return InternalManifest{}, nil, fmt.Errorf("latest path is required")
+		return PublishedSnapshot{}, fmt.Errorf("latest path is required")
 	}
-	data, err := os.ReadFile(latestPath)
+	if maxMarkerBytes <= 0 {
+		maxMarkerBytes = DefaultMaxPublishedMarkerBytes
+	}
+	if maxManifestBytes <= 0 {
+		maxManifestBytes = DefaultMaxPublishedManifestBytes
+	}
+	data, err := readFileBounded(latestPath, maxMarkerBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return InternalManifest{}, nil, ErrSnapshotNotPublished
+			return PublishedSnapshot{}, ErrSnapshotNotPublished
 		}
-		return InternalManifest{}, nil, fmt.Errorf("read latest pointer: %w", err)
+		return PublishedSnapshot{}, fmt.Errorf("read latest pointer: %w", err)
 	}
 	var latest publishedLatestDoc
 	if err := json.Unmarshal(data, &latest); err != nil {
-		return InternalManifest{}, nil, fmt.Errorf("parse latest pointer: %w", err)
+		return PublishedSnapshot{}, fmt.Errorf("parse latest pointer: %w", err)
+	}
+	if strings.TrimSpace(latest.Type) != "gonimbus.index.latest.v1" {
+		if strings.TrimSpace(latest.Type) == "" {
+			return PublishedSnapshot{}, fmt.Errorf("latest pointer type is required (expected gonimbus.index.latest.v1)")
+		}
+		return PublishedSnapshot{}, fmt.Errorf("latest pointer type %q is not supported", latest.Type)
 	}
 	if strings.TrimSpace(latest.CompletePath) == "" {
-		return InternalManifest{}, nil, fmt.Errorf("latest pointer complete_path is required")
+		return PublishedSnapshot{}, fmt.Errorf("latest pointer complete_path is required")
 	}
-	complete, err := readCompleteDocFile(latest.CompletePath)
+	complete, err := readCompleteDocFileBounded(latest.CompletePath, maxMarkerBytes)
 	if err != nil {
-		return InternalManifest{}, nil, err
+		return PublishedSnapshot{}, err
+	}
+	if strings.TrimSpace(complete.Type) != "gonimbus.index.complete.v1" {
+		if strings.TrimSpace(complete.Type) == "" {
+			return PublishedSnapshot{}, fmt.Errorf("complete marker type is required (expected gonimbus.index.complete.v1)")
+		}
+		return PublishedSnapshot{}, fmt.Errorf("complete marker type %q is not supported", complete.Type)
 	}
 	if latest.IndexSetID != complete.IndexSetID || latest.RunID != complete.RunID {
-		return InternalManifest{}, nil, fmt.Errorf("latest pointer and complete marker disagree")
+		return PublishedSnapshot{}, fmt.Errorf("latest pointer and complete marker disagree")
 	}
-	manifestDigest, err := sha256HexFile(complete.ManifestPath)
+	// Same-bytes trust: read once, digest those exact bytes, then unmarshal them.
+	// Do not hash and parse through separate pathname opens (TOCTOU).
+	manifestData, err := readFileBounded(complete.ManifestPath, maxManifestBytes)
 	if err != nil {
-		return InternalManifest{}, nil, fmt.Errorf("hash manifest: %w", err)
+		return PublishedSnapshot{}, fmt.Errorf("read manifest: %w", err)
 	}
+	if afterManifestBytesReadForTest != nil {
+		afterManifestBytesReadForTest(complete.ManifestPath)
+	}
+	manifestDigest := sha256HexBytes(manifestData)
 	if manifestDigest != complete.ManifestSHA256 {
-		return InternalManifest{}, nil, fmt.Errorf("manifest digest mismatch")
+		return PublishedSnapshot{}, fmt.Errorf("manifest digest mismatch")
 	}
-	manifest, err := ReadInternalManifestFile(complete.ManifestPath)
-	if err != nil {
-		return InternalManifest{}, nil, err
+	var manifest InternalManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return PublishedSnapshot{}, fmt.Errorf("parse manifest: %w", err)
 	}
 	if err := validatePublishedManifest(complete, manifest); err != nil {
-		return InternalManifest{}, nil, err
+		return PublishedSnapshot{}, err
 	}
-	rows, err := ReadManifestRows(complete.SegmentDir, manifest)
+	return PublishedSnapshot{
+		LatestPath: latestPath,
+		Complete:   complete,
+		Manifest:   manifest,
+		SegmentDir: complete.SegmentDir,
+	}, nil
+}
+
+// WalkLatestPublishedRows walks the latest published snapshot with streaming
+// verify-before-emit semantics (per-segment digest check before that segment's
+// rows are visited). Rows are not materialised as a slice.
+func WalkLatestPublishedRows(latestPath string, visit func(CurrentObjectRow) error) (InternalManifest, error) {
+	snap, err := OpenLatestPublishedSnapshot(latestPath)
+	if err != nil {
+		return InternalManifest{}, err
+	}
+	if err := WalkManifestRows(snap.SegmentDir, snap.Manifest, visit); err != nil {
+		return InternalManifest{}, err
+	}
+	return snap.Manifest, nil
+}
+
+func ReadLatestPublishedRows(latestPath string) (InternalManifest, []CurrentObjectRow, error) {
+	snap, err := OpenLatestPublishedSnapshot(latestPath)
 	if err != nil {
 		return InternalManifest{}, nil, err
 	}
-	return manifest, rows, nil
+	rows, err := ReadManifestRows(snap.SegmentDir, snap.Manifest)
+	if err != nil {
+		return InternalManifest{}, nil, err
+	}
+	return snap.Manifest, rows, nil
 }
 
 func normalizePublishConfig(config PublishConfig) PublishConfig {
@@ -319,7 +397,11 @@ func runPublishHook(config PublishConfig, step PublishStep) error {
 }
 
 func readCompleteDocFile(path string) (publishedCompleteDoc, error) {
-	data, err := os.ReadFile(path)
+	return readCompleteDocFileBounded(path, DefaultMaxPublishedMarkerBytes)
+}
+
+func readCompleteDocFileBounded(path string, maxBytes int64) (publishedCompleteDoc, error) {
+	data, err := readFileBounded(path, maxBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return publishedCompleteDoc{}, ErrSnapshotNotPublished
@@ -331,6 +413,42 @@ func readCompleteDocFile(path string) (publishedCompleteDoc, error) {
 		return publishedCompleteDoc{}, fmt.Errorf("parse complete marker: %w", err)
 	}
 	return complete, nil
+}
+
+// afterManifestBytesReadForTest is an optional test hook invoked after the
+// manifest file has been read into memory and before digest check/parse.
+// Tests use it to replace the pathname contents and prove the parser never
+// re-opens the path for trust decisions.
+var afterManifestBytesReadForTest func(path string)
+
+func readFileBounded(path string, maxBytes int64) ([]byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("max bytes must be positive")
+	}
+	// Single open: size is enforced by LimitReader, not a pre-Stat that can race.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	limited := io.LimitReader(f, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file %s size exceeds limit %d", filepath.Base(path), maxBytes)
+	}
+	return data, nil
+}
+
+func sha256HexBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func validatePublishedManifest(complete publishedCompleteDoc, manifest InternalManifest) error {

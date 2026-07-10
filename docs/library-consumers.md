@@ -33,6 +33,10 @@ Experimental workflow surface:
 - `github.com/3leaps/gonimbus/pkg/indexbuild` is the durable index build
   workflow engine (v0.4.0 default artifact path). See
   [Durable index builds (pkg/indexbuild)](#durable-index-builds-pkgindexbuild) below.
+- `github.com/3leaps/gonimbus/pkg/indexreader` is the format-aware local index
+  read seam: `ResolveIndexReader` dispatches on `sqlite-v1` / `durable-v2`
+  markers and exposes streaming query over durable segments. **Experimental**;
+  durable-v2 remains internal-render-only.
 
 Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
 notification protocol documented in [`docs/api-stability.md`](api-stability.md);

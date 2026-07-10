@@ -46,7 +46,8 @@ gonimbus index build --job index.yaml --format both
 | Need                                                            | Format choice                                        |
 | --------------------------------------------------------------- | ---------------------------------------------------- |
 | Hub-scale export/hydrate, default new builds                    | `durable` (default)                                  |
-| Local `index query`, `enrich-with-head`, `stats`, most `doctor` | `sqlite` or `both`                                   |
+| Local `index query` (native segment scan; no `index.db` needed) | `durable`, `sqlite`, or `both`                       |
+| Local `enrich-with-head`, `stats`, most `doctor`                | `sqlite` or `both`                                   |
 | Local inventory (`index list` / `index gc`)                     | `sqlite` or `both` (dirs with `index.db` only today) |
 | Migration confidence (one crawl, two artifacts + parity report) | `both`                                               |
 
@@ -150,7 +151,9 @@ gonimbus index compare durable-delta \
 
 The report summarizes added / changed / tombstoned rows with fail-closed
 coverage attribution. This is a **snapshot-to-snapshot** tool, not a
-replacement for SQLite `index query --since-run` (which remains SQLite-bound).
+replacement for `index query --since-run`. Forward object deltas via
+`--since-run` still require a SQLite-backed index (`--format sqlite` or
+`both`); durable-only snapshots do not support `--since-run` yet.
 
 ## Hub export and hydrate
 
@@ -179,9 +182,19 @@ artifacts when needed.
 
 ## SQLite-bound commands during the transition
 
+`index query` is format-aware: it opens `sqlite-v1` when `index.db` is present,
+otherwise a verified durable-v2 latest snapshot. Plain query streams verified
+segment rows (emit-as-arrived; later-segment failure returns non-zero). Result
+order matches SQLite (`rel_key`). Canonical-by-ETag is intentionally
+non-constant-memory (`O(matched rows)` before grouping; `O(distinct non-empty
+ETags)` for selection/output).
+
+**`--since-run` requires SQLite today.** Against a durable-only index the
+command fails closed; use `--format sqlite` or `both` when you need forward
+deltas from a successful run boundary.
+
 These local workflows still require an `index.db` today:
 
-- `index query` (including `--since-run`)
 - `index enrich-with-head`
 - `index stats`
 - most `index doctor` paths
@@ -190,7 +203,7 @@ These local workflows still require an `index.db` today:
   commands report as if no indexes exist until you build with `--format sqlite`
   or `both`.
 
-Plan local inventory and query automation accordingly, or dual-build while you
+Plan local inventory and remaining stats/doctor automation accordingly, or dual-build while you
 migrate.
 
 ## Internal-render framing (mandatory)
