@@ -46,9 +46,9 @@ gonimbus index build --job index.yaml --format both
 | Need                                                            | Format choice                                        |
 | --------------------------------------------------------------- | ---------------------------------------------------- |
 | Hub-scale export/hydrate, default new builds                    | `durable` (default)                                  |
-| Local `index query` (native segment scan; no `index.db` needed) | `durable`, `sqlite`, or `both`                       |
-| Local `enrich-with-head`, `stats`, most `doctor`                | `sqlite` or `both`                                   |
-| Local inventory (`index list` / `index gc`)                     | `sqlite` or `both` (dirs with `index.db` only today) |
+| Local `index query` / `list` / `stats` / `doctor`               | `durable`, `sqlite`, or `both` (format-aware seam)   |
+| Local `enrich-with-head`                                        | `sqlite` or `both`                                   |
+| Local inventory GC (`index gc`)                                 | `sqlite` or `both` (dirs with `index.db` only today) |
 | Migration confidence (one crawl, two artifacts + parity report) | `both`                                               |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
@@ -180,31 +180,36 @@ the default threshold. Durable export naturally stays under single-PUT walls by
 publishing segment objects; multipart remains available for large individual
 artifacts when needed.
 
-## SQLite-bound commands during the transition
+## Format-aware local commands
 
-`index query` is format-aware: it opens `sqlite-v1` when `index.db` is present,
-otherwise a verified durable-v2 latest snapshot. Plain query streams verified
-segment rows (emit-as-arrived; later-segment failure returns non-zero). Result
-order matches SQLite (`rel_key`). Canonical-by-ETag is intentionally
-non-constant-memory (`O(matched rows)` before grouping; `O(distinct non-empty
-ETags)` for selection/output).
+`index query`, `index list`, `index stats`, and `index doctor` share a
+format-aware local reader seam:
 
-**`--since-run` requires SQLite today.** Against a durable-only index the
-command fails closed; use `--format sqlite` or `both` when you need forward
-deltas from a successful run boundary.
+- **sqlite-v1** when `index.db` is present (preferred when both formats exist
+  for the same set)
+- **durable-v2** when a verified latest → complete → manifest chain is present
+  (including durable-only default builds with no `index.db`)
 
-These local workflows still require an `index.db` today:
+`index query` streams verified segment rows on durable (emit-as-arrived;
+later-segment failure returns non-zero). Result order matches SQLite
+(`rel_key`). Canonical-by-ETag is intentionally non-constant-memory
+(`O(matched rows)` before grouping; `O(distinct non-empty ETags)` for
+selection/output).
 
-- `index enrich-with-head`
-- `index stats`
-- most `index doctor` paths
-- **`index list`** and **`index gc`** — they enumerate directories that contain
-  `index.db`. A durable-only default build produces **no** `index.db`, so those
-  commands report as if no indexes exist until you build with `--format sqlite`
-  or `both`.
+Durable-v2 limitations (fail closed or narrowed):
 
-Plan local inventory and remaining stats/doctor automation accordingly, or dual-build while you
-migrate.
+- **`--since-run`** on query requires SQLite today.
+- **`index stats --prefixes`** is sqlite-only (`prefix_stats` table).
+- **`index stats --runs`** on durable lists published complete markers only
+  (not the full SQLite run lifecycle / failed-resumable).
+- Durable size in stats/list is the sum of published **segment file sizes**,
+  not `SUM(objects_current.size_bytes)`.
+- **`index gc`** still enumerates directories that contain `index.db`.
+- **`index enrich-with-head`** remains SQLite-bound.
+
+Use exact build receipts (`index build --json`) plus `--index-set` / `--run-id`
+for automation handoff; do not rediscover just-built durable sets via list
+ordering alone when multiple scopes share a base URI.
 
 ## Internal-render framing (mandatory)
 

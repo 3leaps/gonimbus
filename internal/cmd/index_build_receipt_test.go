@@ -26,9 +26,8 @@ import (
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
-// TestMixedHistoryListSelectionTrap proves the post-build selection trap:
-// scope A via --format both leaves index.db visible; scope B via durable-only
-// creates a distinct set that index list (SQLite-only) cannot see.
+// TestMixedHistoryListSelectionTrap proves distinct scopes yield distinct sets
+// and that format-aware list surfaces durable-only siblings (not SQLite-only).
 func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
@@ -111,10 +110,26 @@ func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	_, err = os.Stat(dbB)
 	require.True(t, os.IsNotExist(err), "durable-only B must not create index.db")
 
-	entries, err := loadIndexEntriesWithPaths(context.Background())
+	// Legacy SQLite-only discovery still sees only A (trap for list-based rediscovery).
+	legacy, err := loadIndexEntriesWithPaths(context.Background())
 	require.NoError(t, err)
-	require.Len(t, entries, 1, "index list must see only the both/SQLite set A")
-	require.Equal(t, idA, entries[0].Info.IndexSetID)
+	require.Len(t, legacy, 1, "SQLite-only discovery must still see only both/SQLite set A")
+	require.Equal(t, idA, legacy[0].Info.IndexSetID)
+
+	// Format-aware list surfaces durable-only B as well.
+	opts, err := indexReaderResolveOptions()
+	require.NoError(t, err)
+	listed, err := indexreader.ListIndexReaders(context.Background(), opts)
+	require.NoError(t, err)
+	listed = preferListedIndexes(listed)
+	ids := make(map[string]string)
+	for _, item := range listed {
+		ids[item.Meta.IndexSetID] = string(item.Meta.Format)
+	}
+	require.Contains(t, ids, idA)
+	require.Contains(t, ids, idB, "format-aware list must surface durable-only set B")
+	require.Equal(t, string(indexreader.FormatSQLiteV1), ids[idA])
+	require.Equal(t, string(indexreader.FormatDurableV2), ids[idB])
 
 	snap, err := loadLocalDurableSnapshotForExport(idB, receiptB.RunID)
 	require.NoError(t, err)

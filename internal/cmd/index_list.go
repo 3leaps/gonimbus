@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 )
@@ -23,20 +26,24 @@ var indexListCmd = &cobra.Command{
 	Short: "List local indexes",
 	Long: `List all indexes in the local index directory.
 
-Indexes are stored one-per-directory under the app data dir:
+Indexes are stored under the app data dir. SQLite compatibility indexes use:
   indexes/idx_<hashprefix>/index.db
-
-A companion identity file is written alongside the DB:
   indexes/idx_<hashprefix>/identity.json
 
-The list output includes an IDENTITY status to help interpret hash-based directories:
-  ok        identity.json matches DB index_set_id
+Durable-default builds publish under the segment cache and may have identity
+without index.db:
+  indexes/idx_<hashprefix>/identity.json
+  cache/segments/<index_set_id>/latest.json
+
+list is format-aware (sqlite-v1 and durable-v2). When both formats exist for the
+same index set (format both), the SQLite entry is preferred for run metadata.
+Durable-only sets are always listed.
+
+IDENTITY status helps interpret hash-based directories:
+  ok        identity.json matches index_set_id
   missing   no identity.json found
   invalid   identity.json is unreadable or invalid JSON
-  mismatch  identity.json hash disagrees with the DB or directory name
-
-For deeper diagnosis (including base_uri/provider mismatches), use:
-  gonimbus index doctor
+  mismatch  identity.json hash disagrees with the set id or directory name
 
 Examples:
   # List all indexes
@@ -53,6 +60,7 @@ func init() {
 }
 
 type indexListDisplayEntry struct {
+	Format         string // sqlite-v1 | durable-v2
 	DBPath         string
 	Dir            string
 	DirName        string
@@ -65,28 +73,33 @@ func runIndexList(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
-	rawEntries, err := loadIndexEntriesWithPaths(ctx)
+	opts, err := indexReaderResolveOptions()
 	if err != nil {
 		return fmt.Errorf("list indexes: %w", err)
 	}
-
-	if len(rawEntries) == 0 {
+	listed, err := indexreader.ListIndexReaders(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("list indexes: %w", err)
+	}
+	listed = preferListedIndexes(listed)
+	if len(listed) == 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
 		return nil
 	}
 
-	entries := make([]indexListDisplayEntry, 0, len(rawEntries))
-	for _, e := range rawEntries {
-		dirName := filepath.Base(e.Dir)
-		identityPath := filepath.Join(e.Dir, "identity.json")
-		entries = append(entries, indexListDisplayEntry{
-			DBPath:         e.Path,
-			Dir:            e.Dir,
-			DirName:        dirName,
-			IdentityPath:   identityPath,
-			IdentityStatus: computeIndexIdentityStatus(identityPath, dirName, e.Info.IndexSetID),
-			Info:           e.Info,
-		})
+	entries := make([]indexListDisplayEntry, 0, len(listed))
+	for _, item := range listed {
+		entry, err := loadIndexListDisplayEntry(ctx, opts, item)
+		if err != nil {
+			// Surface discovery without aborting the full list.
+			warnIndexDB("skip index %s (%s): %v", item.Meta.IndexSetID, item.Meta.Format, err)
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
+		return nil
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -96,15 +109,180 @@ func runIndexList(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		return printIndexListJSON(entries)
 	}
-
 	return printIndexListTable(entries)
 }
 
+func loadIndexListDisplayEntry(ctx context.Context, opts indexreader.ResolveOptions, item indexreader.ListedIndex) (indexListDisplayEntry, error) {
+	meta := item.Meta
+	dir := meta.IdentityDir
+	if dir == "" && meta.SourcePath != "" {
+		// Durable SourcePath is latest.json under segment set root.
+		if meta.Format == indexreader.FormatDurableV2 {
+			dir = filepath.Dir(meta.SourcePath)
+		} else {
+			dir = filepath.Dir(meta.SourcePath)
+		}
+	}
+	dirName := filepath.Base(dir)
+	identityPath := ""
+	if meta.IdentityDir != "" {
+		identityPath = filepath.Join(meta.IdentityDir, "identity.json")
+		dirName = filepath.Base(meta.IdentityDir)
+		dir = meta.IdentityDir
+	}
+
+	switch meta.Format {
+	case indexreader.FormatSQLiteV1:
+		return loadSQLiteListDisplayEntry(ctx, meta, dir, dirName, identityPath)
+	case indexreader.FormatDurableV2:
+		return loadDurableListDisplayEntry(opts, meta, dir, dirName, identityPath)
+	default:
+		return indexListDisplayEntry{}, fmt.Errorf("unsupported index format %q", meta.Format)
+	}
+}
+
+func loadSQLiteListDisplayEntry(ctx context.Context, meta indexreader.Meta, dir, dirName, identityPath string) (indexListDisplayEntry, error) {
+	db, err := openIndexDB(ctx, meta.SourcePath)
+	if err != nil {
+		return indexListDisplayEntry{}, err
+	}
+	defer func() { _ = db.Close() }()
+
+	info, err := indexstore.ListIndexSetsWithStats(ctx, db)
+	if err != nil {
+		return indexListDisplayEntry{}, err
+	}
+	if len(info) == 0 {
+		return indexListDisplayEntry{}, fmt.Errorf("no index sets")
+	}
+	if len(info) > 1 {
+		return indexListDisplayEntry{}, fmt.Errorf("multiple index sets found")
+	}
+	entryInfo := info[0]
+	if meta.IndexSetID != "" {
+		entryInfo.IndexSetID = meta.IndexSetID
+	}
+	if meta.BaseURI != "" {
+		entryInfo.BaseURI = meta.BaseURI
+	}
+	if meta.Provider != "" {
+		entryInfo.Provider = meta.Provider
+	}
+	return indexListDisplayEntry{
+		Format:         formatLabel(meta.Format),
+		DBPath:         meta.SourcePath,
+		Dir:            dir,
+		DirName:        dirName,
+		IdentityPath:   identityPath,
+		IdentityStatus: computeIndexIdentityStatus(identityPath, dirName, entryInfo.IndexSetID),
+		Info:           entryInfo,
+	}, nil
+}
+
+func loadDurableListDisplayEntry(opts indexreader.ResolveOptions, meta indexreader.Meta, dir, dirName, identityPath string) (indexListDisplayEntry, error) {
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(meta.SourcePath, opts.MaxMarkerBytes, opts.MaxManifestBytes)
+	if err != nil {
+		return indexListDisplayEntry{}, err
+	}
+	// Prefer durable publication/complete time. Do not invent wall-clock now when
+	// artifact times are absent (identical artifacts must render identically).
+	var listTime time.Time
+	if ts, parseErr := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); parseErr == nil {
+		listTime = ts
+	} else if !snap.Manifest.CreatedAt.IsZero() {
+		listTime = snap.Manifest.CreatedAt
+	}
+	runCount, err := countDurablePublishedRuns(filepath.Dir(meta.SourcePath), opts.MaxMarkerBytes)
+	if err != nil {
+		// Still list the latest snapshot; note run count as 1.
+		runCount = 1
+	}
+	if runCount < 1 {
+		runCount = 1
+	}
+	status := string(indexstore.RunStatusSuccess)
+	info := indexstore.IndexListEntry{
+		IndexSetID:     snap.Manifest.IndexSetID,
+		BaseURI:        meta.BaseURI,
+		Provider:       meta.Provider,
+		CreatedAt:      listTime, // durable: publication/manifest time when known; zero if absent
+		ObjectCount:    int64(snap.Manifest.Counts.ActiveRows),
+		TotalSizeBytes: durableSegmentTotalSize(snap.Manifest),
+		RunCount:       runCount,
+		LatestRunID:    snap.Manifest.RunID,
+		LatestStatus:   status,
+	}
+	if !listTime.IsZero() {
+		t := listTime
+		info.LatestRunAt = &t
+	}
+	if info.IndexSetID == "" {
+		info.IndexSetID = meta.IndexSetID
+	}
+	return indexListDisplayEntry{
+		Format:         formatLabel(meta.Format),
+		DBPath:         "", // no index.db
+		Dir:            dir,
+		DirName:        dirName,
+		IdentityPath:   identityPath,
+		IdentityStatus: computeIndexIdentityStatus(identityPath, dirName, info.IndexSetID),
+		Info:           info,
+	}, nil
+}
+
+func durableSegmentTotalSize(manifest indexsubstrate.InternalManifest) int64 {
+	var total int64
+	for _, seg := range manifest.Segments {
+		total += seg.SizeBytes
+	}
+	return total
+}
+
+// countDurablePublishedRuns counts runs/<id>/complete.json that open as valid
+// complete markers. Bare run directories without complete are ignored.
+func countDurablePublishedRuns(segmentSetRoot string, maxMarkerBytes int64) (int, error) {
+	runsDir := filepath.Join(segmentSetRoot, "runs")
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if maxMarkerBytes <= 0 {
+		maxMarkerBytes = indexsubstrate.DefaultMaxPublishedMarkerBytes
+	}
+	n := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		completePath := filepath.Join(runsDir, entry.Name(), "complete.json")
+		if _, err := os.Stat(completePath); err != nil {
+			continue
+		}
+		// Trust-check only that a complete marker is parseable/openable; full
+		// manifest verify is owned by open/list snapshot paths.
+		if _, err := indexsubstrate.OpenPublishedRunSnapshotBounded(completePath, "", entry.Name(), maxMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes); err != nil {
+			continue
+		}
+		n++
+	}
+	return n, nil
+}
+
 func computeIndexIdentityStatus(identityPath, dirName, indexSetID string) string {
-	b, err := os.ReadFile(identityPath)
+	if strings.TrimSpace(identityPath) == "" {
+		return "missing"
+	}
+	// Bounded single-open read (same posture as durable marker discovery).
+	b, err := indexreader.ReadBoundedFile(identityPath, int64(maxHubMarkerBytes))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "missing"
+		}
+		if strings.Contains(err.Error(), "exceeds limit") {
+			return "invalid"
 		}
 		return "error"
 	}
@@ -129,8 +307,20 @@ func computeIndexIdentityStatus(identityPath, dirName, indexSetID string) string
 	if indexSetID != "" && expectedID != indexSetID {
 		return "mismatch"
 	}
-	if dirName != "" && expectedDir != dirName {
-		return "mismatch"
+	if dirName != "" && strings.HasPrefix(dirName, "idx_") && expectedDir != dirName {
+		// Durable segment root dirs use full idx_<64hex>; short identity dirs use 16-hex.
+		if len(dirName) == len(expectedDir) && dirName != expectedDir {
+			return "mismatch"
+		}
+		if len(dirName) > len(expectedDir) {
+			// Full set id directory under segment cache is not the identity dir name.
+			if !strings.HasPrefix(strings.TrimPrefix(dirName, "idx_"), shaHex[:16]) && dirName != expectedID {
+				// Only flag when it looks like an identity-style dir mismatch.
+				if len(strings.TrimPrefix(dirName, "idx_")) == 16 && dirName != expectedDir {
+					return "mismatch"
+				}
+			}
+		}
 	}
 	return "ok"
 }
@@ -139,8 +329,7 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer func() { _ = w.Flush() }()
 
-	// Header
-	_, _ = fmt.Fprintln(w, "DIR\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tRUN ID\tRESUME\tIDENTITY")
+	_, _ = fmt.Fprintln(w, "DIR\tFORMAT\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tRUN ID\tRESUME\tIDENTITY")
 
 	for _, e := range entries {
 		info := e.Info
@@ -166,8 +355,14 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 			resume = cmd
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
-			e.DirName,
+		dirName := e.DirName
+		if dirName == "" {
+			dirName = "-"
+		}
+
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			dirName,
+			e.Format,
 			info.BaseURI,
 			info.Provider,
 			info.ObjectCount,
@@ -187,6 +382,7 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 func printIndexListJSON(entries []indexListDisplayEntry) error {
 	type jsonEntry struct {
 		IndexSetID     string  `json:"index_set_id"`
+		Format         string  `json:"format"`
 		BaseURI        string  `json:"base_uri"`
 		Provider       string  `json:"provider"`
 		CreatedAt      string  `json:"created_at"`
@@ -199,8 +395,8 @@ func printIndexListJSON(entries []indexListDisplayEntry) error {
 		ResumeCommand  string  `json:"resume_command,omitempty"`
 
 		DirName        string `json:"dir_name"`
-		DBPath         string `json:"db_path"`
-		IdentityPath   string `json:"identity_path"`
+		DBPath         string `json:"db_path,omitempty"`
+		IdentityPath   string `json:"identity_path,omitempty"`
 		IdentityStatus string `json:"identity_status"`
 	}
 
@@ -209,6 +405,7 @@ func printIndexListJSON(entries []indexListDisplayEntry) error {
 		info := e.Info
 		out[i] = jsonEntry{
 			IndexSetID:     info.IndexSetID,
+			Format:         e.Format,
 			BaseURI:        info.BaseURI,
 			Provider:       info.Provider,
 			CreatedAt:      info.CreatedAt.Format(time.RFC3339),
