@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/match"
 )
@@ -223,37 +224,33 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	outputRegion, _ := cmd.Flags().GetString("output-region")
 	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
 
-	// Open index database: explicit --index-set or auto-select by base URI
-	var (
-		db       *sql.DB
-		indexSet *indexstore.IndexSet
-		err      error
-	)
-	if indexSetFlag != "" {
-		db, indexSet, err = openIndexDBByID(ctx, indexSetFlag)
-	} else {
-		db, indexSet, err = openIndexDBForBaseURI(ctx, baseURI)
-	}
+	// Format-aware read seam: sqlite-v1 or durable-v2.
+	reader, err := openIndexReader(ctx, baseURI, indexSetFlag)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = reader.Close() }()
+	meta := reader.Meta()
 
-	// When --index-set is provided, use the DB's authoritative base_uri.
+	// When --index-set is provided, use the reader's authoritative base_uri.
 	// A positional base-uri arg is accepted but ignored with a warning if it differs.
 	if indexSetFlag != "" {
-		if baseURI != "" && baseURI != indexSet.BaseURI {
-			_, _ = fmt.Fprintf(os.Stderr, "warning: positional base-uri %s differs from index base_uri %s; using index value\n", baseURI, indexSet.BaseURI)
+		if baseURI != "" && meta.BaseURI != "" && baseURI != meta.BaseURI {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: positional base-uri %s differs from index base_uri %s; using index value\n", baseURI, meta.BaseURI)
 		}
-		baseURI = indexSet.BaseURI
+		if meta.BaseURI != "" {
+			baseURI = meta.BaseURI
+		}
+	} else if baseURI == "" {
+		baseURI = meta.BaseURI
 	}
-	if err := warnIfLatestIndexRunFailedResumable(ctx, db, indexSet); err != nil {
+	if err := warnIfReaderLatestRunFailedResumable(ctx, reader); err != nil {
 		return err
 	}
 
 	// Build query params
 	params := indexstore.QueryParams{
-		IndexSetID:     indexSet.IndexSetID,
+		IndexSetID:     meta.IndexSetID,
 		Pattern:        pattern,
 		KeyRegex:       keyRegex,
 		IncludeDeleted: includeDeleted,
@@ -272,7 +269,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		if err := validateRunID(sinceRun); err != nil {
 			return err
 		}
-		filter, err := indexstore.ResolveSinceRunFilter(ctx, db, indexSet.IndexSetID, sinceRun)
+		filter, err := reader.ResolveSinceRunFilter(ctx, sinceRun)
 		if err != nil {
 			return fmt.Errorf("invalid --since-run: %w", err)
 		}
@@ -328,7 +325,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		countParams := params
 		countParams.Limit = 0
 		if canonicalByETag {
-			_, stats, err := indexstore.QueryCanonicalObjects(ctx, db, countParams)
+			_, stats, err := reader.QueryCanonicalObjects(ctx, countParams)
 			if err != nil {
 				return fmt.Errorf("count query failed: %w", err)
 			}
@@ -339,7 +336,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 			}
 			return nil
 		}
-		count, err := indexstore.QueryObjectCount(ctx, db, countParams)
+		count, err := reader.QueryObjectCount(ctx, countParams)
 		if err != nil {
 			return fmt.Errorf("count query failed: %w", err)
 		}
@@ -347,26 +344,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	var (
-		results          []indexstore.QueryResult
-		canonicalResults []indexstore.CanonicalOutputRecord
-		stats            indexstore.QueryStats
-		canonicalStats   indexstore.CanonicalQueryStats
-	)
-	if canonicalByETag {
-		canonicalResults, canonicalStats, err = indexstore.QueryCanonicalObjects(ctx, db, params)
-		stats = canonicalStats.QueryStats
-		if err != nil {
-			return fmt.Errorf("query failed: %w", err)
-		}
-	} else {
-		results, stats, err = indexstore.QueryObjects(ctx, db, params)
-		if err != nil {
-			return fmt.Errorf("query failed: %w", err)
-		}
-	}
-
-	// Set up output writer: temp file when --output is set, stdout otherwise.
+	// Set up output writer before streaming so plain query can emit as rows arrive.
 	var (
 		writer   *os.File
 		tempPath string
@@ -383,11 +361,22 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 		writer = os.Stdout
 	}
 
-	// Emit JSONL records
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	enc := json.NewEncoder(writer)
+	var (
+		matched          int
+		stats            indexstore.QueryStats
+		canonicalStats   indexstore.CanonicalQueryStats
+		canonicalResults []indexstore.CanonicalOutputRecord
+	)
 
 	if canonicalByETag {
+		// Canonical path is intentionally non-constant-memory (group-by ETag).
+		canonicalResults, canonicalStats, err = reader.QueryCanonicalObjects(ctx, params)
+		stats = canonicalStats.QueryStats
+		if err != nil {
+			return fmt.Errorf("query failed: %w", err)
+		}
 		for _, r := range canonicalResults {
 			if r.Passthrough != nil {
 				if err := enc.Encode(newIndexQueryRecord(baseURI, now, *r.Passthrough)); err != nil {
@@ -402,11 +391,20 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("encode record: %w", err)
 			}
 		}
+		matched = len(canonicalResults)
 	} else {
-		for _, r := range results {
-			if err := enc.Encode(newIndexQueryRecord(baseURI, now, r)); err != nil {
-				return fmt.Errorf("encode record: %w", err)
+		// Stream verified rows as they arrive (bounded memory on durable-v2).
+		// A later-segment failure may leave a verified prefix on the writer but
+		// still returns non-zero via this error path.
+		stats, err = reader.WalkObjects(ctx, params, func(r indexstore.QueryResult) error {
+			if encErr := enc.Encode(newIndexQueryRecord(baseURI, now, r)); encErr != nil {
+				return fmt.Errorf("encode record: %w", encErr)
 			}
+			matched++
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("query failed: %w", err)
 		}
 	}
 
@@ -439,27 +437,20 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		_, _ = fmt.Fprintf(os.Stderr, "Wrote %d records to %s\n", outputRecordCount(results, canonicalResults, canonicalByETag), outputURI)
+		_, _ = fmt.Fprintf(os.Stderr, "Wrote %d records to %s\n", matched, outputURI)
 	}
 
 	// Summary to stderr
 	if canonicalByETag {
 		_, _ = fmt.Fprintf(os.Stderr, "%d canonical groups, %d ungrouped empty-ETag rows, %d total records\n", canonicalStats.CanonicalGroups, canonicalStats.PassthroughRows, canonicalStats.TotalRecords)
 	} else {
-		_, _ = fmt.Fprintf(os.Stderr, "Matched %d objects\n", len(results))
+		_, _ = fmt.Fprintf(os.Stderr, "Matched %d objects\n", matched)
 	}
 	if stats.TimestampParseErrors > 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d rows had unparseable timestamps (fields set to null)\n", stats.TimestampParseErrors)
 	}
 
 	return nil
-}
-
-func outputRecordCount(results []indexstore.QueryResult, canonicalResults []indexstore.CanonicalOutputRecord, canonicalByETag bool) int {
-	if canonicalByETag {
-		return len(canonicalResults)
-	}
-	return len(results)
 }
 
 func parseStorageClassFilterValues(raw []string) ([]string, error) {
@@ -651,6 +642,60 @@ type indexDBEntry struct {
 	Path string
 	Dir  string
 	Info indexstore.IndexListEntry
+}
+
+// openIndexReader resolves a format-aware local index reader (sqlite-v1 or durable-v2).
+func openIndexReader(ctx context.Context, baseURI, indexSetID string) (indexreader.Reader, error) {
+	indexesRoot, err := indexRootDir()
+	if err != nil {
+		return nil, err
+	}
+	segmentRoot, err := appDataPath(appDataClassSegmentCache)
+	if err != nil {
+		return nil, err
+	}
+	return indexreader.ResolveIndexReader(ctx, indexreader.ResolveOptions{
+		IndexesRoot:      indexesRoot,
+		SegmentCacheRoot: segmentRoot,
+		MaxMarkerBytes:   int64(maxHubMarkerBytes),
+		MaxManifestBytes: int64(maxDurableManifestBytes),
+	}, indexreader.ResolveTarget{
+		BaseURI:    baseURI,
+		IndexSetID: indexSetID,
+	})
+}
+
+// warnIfReaderLatestRunFailedResumable emits the SQLite failed-resumable warning
+// when the resolved reader is sqlite-v1. Durable snapshots are publish-complete only.
+func warnIfReaderLatestRunFailedResumable(ctx context.Context, reader indexreader.Reader) error {
+	if reader == nil {
+		return nil
+	}
+	meta := reader.Meta()
+	if meta.Format != indexreader.FormatSQLiteV1 || meta.SourcePath == "" {
+		return nil
+	}
+	db, err := openMigratedIndexDB(ctx, meta.SourcePath)
+	if err != nil {
+		// Reader already opened successfully; skip advisory warning on reopen failure.
+		return nil
+	}
+	defer func() { _ = db.Close() }()
+	sets, err := indexstore.ListIndexSets(ctx, db, "")
+	if err != nil || len(sets) == 0 {
+		return nil
+	}
+	var indexSet *indexstore.IndexSet
+	for i := range sets {
+		if sets[i].IndexSetID == meta.IndexSetID {
+			indexSet = &sets[i]
+			break
+		}
+	}
+	if indexSet == nil {
+		indexSet = &sets[0]
+	}
+	return warnIfLatestIndexRunFailedResumable(ctx, db, indexSet)
 }
 
 // openIndexDB opens a local index database for reading.
