@@ -6,7 +6,10 @@ type Summary struct {
 	JournalPaths    []string
 	ObjectsObserved int64
 	PrefixesCrawled []string
-	Manifest        ManifestSummary
+	// ManifestSHA256 is the digest written into the durable complete marker at
+	// publish time. Prefer this over re-hashing the manifest path after commit.
+	ManifestSHA256 string
+	Manifest       ManifestSummary
 }
 
 type ManifestSummary struct {

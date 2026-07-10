@@ -50,6 +50,37 @@ func TestHashConfig_ChangesWhenScopeChanges(t *testing.T) {
 	require.NotEqual(t, h1, h2)
 }
 
+func TestHashConfig_ChangesWhenDiscoverAllowChanges(t *testing.T) {
+	cfg := &manifest.IndexScopeConfig{
+		Type:       "date_partitions",
+		BasePrefix: "data/",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, Allow: []string{"site-a", "site-b"}},
+			},
+		},
+		Date: &manifest.IndexScopeDateConfig{
+			SegmentIndex: 1,
+			Range: &manifest.IndexScopeDateRange{
+				After:  "2026-04-01",
+				Before: "2026-05-01",
+			},
+		},
+	}
+	h1, err := HashConfig(cfg)
+	require.NoError(t, err)
+
+	cfg.Discover.Segments[0].Allow = []string{"site-a"}
+	h2, err := HashConfig(cfg)
+	require.NoError(t, err)
+	require.NotEqual(t, h1, h2)
+
+	cfg.Discover.Segments[0].GlobAllow = []string{"site-*"}
+	h3, err := HashConfig(cfg)
+	require.NoError(t, err)
+	require.NotEqual(t, h2, h3)
+}
+
 func TestHashConfig_RejectsInvalidRange(t *testing.T) {
 	cfg := &manifest.IndexScopeConfig{
 		Type: "date_partitions",

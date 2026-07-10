@@ -63,6 +63,9 @@ Examples:
   # Query a specific index with explicit base-uri override
   gonimbus index query s3://bucket/prefix/ --index-set idx_da038d8171b4a9ba --pattern "**/*.xml"
 
+  # Pin a durable snapshot run (bypasses latest.json; requires --index-set)
+  gonimbus index query --index-set idx_da038d8171b4a9ba --run-id run_1783087200000000000 --pattern "**/*.xml"
+
   # Emit one canonical object per non-empty ETag group
   gonimbus index query s3://bucket/prefix/ --canonical-by-etag
 
@@ -103,6 +106,7 @@ func init() {
 
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
+	indexQueryCmd.Flags().String("run-id", "", "Pin durable snapshot run (requires --index-set; bypasses latest.json)")
 
 	// Output destination
 	indexQueryCmd.Flags().String("output", "", "Output destination URI (s3://bucket/key.jsonl or file:///path/file.jsonl)")
@@ -194,6 +198,16 @@ type indexCanonicalAlternateData struct {
 func runIndexQuery(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
+	runIDFlag, _ := cmd.Flags().GetString("run-id")
+	runIDFlag = strings.TrimSpace(runIDFlag)
+	if runIDFlag != "" {
+		if strings.TrimSpace(indexSetFlag) == "" {
+			return fmt.Errorf("--run-id requires --index-set")
+		}
+		if err := validateRunID(runIDFlag); err != nil {
+			return fmt.Errorf("invalid --run-id: %w", err)
+		}
+	}
 
 	// Resolve base URI: required unless --index-set is provided.
 	var baseURI string
@@ -223,9 +237,12 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	outputProfile, _ := cmd.Flags().GetString("output-profile")
 	outputRegion, _ := cmd.Flags().GetString("output-region")
 	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
+	if runIDFlag != "" && strings.TrimSpace(sinceRun) != "" {
+		return fmt.Errorf("--run-id and --since-run are distinct selectors; do not combine them")
+	}
 
-	// Format-aware read seam: sqlite-v1 or durable-v2.
-	reader, err := openIndexReader(ctx, baseURI, indexSetFlag)
+	// Format-aware read seam: sqlite-v1 or durable-v2 (pinned run forces durable-v2).
+	reader, err := openIndexReader(ctx, baseURI, indexSetFlag, runIDFlag)
 	if err != nil {
 		return err
 	}
@@ -645,7 +662,8 @@ type indexDBEntry struct {
 }
 
 // openIndexReader resolves a format-aware local index reader (sqlite-v1 or durable-v2).
-func openIndexReader(ctx context.Context, baseURI, indexSetID string) (indexreader.Reader, error) {
+// When runID is set, opens a pinned durable-v2 snapshot and never consults latest.json.
+func openIndexReader(ctx context.Context, baseURI, indexSetID, runID string) (indexreader.Reader, error) {
 	indexesRoot, err := indexRootDir()
 	if err != nil {
 		return nil, err
@@ -662,6 +680,7 @@ func openIndexReader(ctx context.Context, baseURI, indexSetID string) (indexread
 	}, indexreader.ResolveTarget{
 		BaseURI:    baseURI,
 		IndexSetID: indexSetID,
+		RunID:      runID,
 	})
 }
 

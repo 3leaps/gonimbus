@@ -54,6 +54,9 @@ type PublishResult struct {
 	Journals   []JournalSummary
 	Compaction CompactionResult
 	Manifest   InternalManifest
+	// ManifestSHA256 is the digest of the committed manifest bytes (same value
+	// written into complete.json). Prefer this over re-hashing after publish.
+	ManifestSHA256 string
 }
 
 type publishedCompleteDoc struct {
@@ -142,6 +145,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 	if err != nil {
 		return result, fmt.Errorf("hash manifest: %w", err)
 	}
+	result.ManifestSHA256 = manifestDigest
 	complete := publishedCompleteDoc{
 		Type:           "gonimbus.index.complete.v1",
 		IndexSetID:     config.IndexSetID,
@@ -230,7 +234,58 @@ func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxMa
 	if strings.TrimSpace(latest.CompletePath) == "" {
 		return PublishedSnapshot{}, fmt.Errorf("latest pointer complete_path is required")
 	}
-	complete, err := readCompleteDocFileBounded(latest.CompletePath, maxMarkerBytes)
+	snap, err := openPublishedCompleteBounded(latest.CompletePath, maxMarkerBytes, maxManifestBytes)
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	if latest.IndexSetID != snap.Complete.IndexSetID || latest.RunID != snap.Complete.RunID {
+		return PublishedSnapshot{}, fmt.Errorf("latest pointer and complete marker disagree")
+	}
+	snap.LatestPath = latestPath
+	return snap, nil
+}
+
+// OpenPublishedRunSnapshot opens a durable snapshot from a complete marker path
+// without consulting latest.json. Use this for receipt-pinned set/run selection
+// so a later latest advance cannot silently switch the opened snapshot.
+//
+// When expectedIndexSetID / expectedRunID are non-empty they must match the
+// complete marker (and the validated manifest identity).
+func OpenPublishedRunSnapshot(completePath, expectedIndexSetID, expectedRunID string) (PublishedSnapshot, error) {
+	return OpenPublishedRunSnapshotBounded(completePath, expectedIndexSetID, expectedRunID, DefaultMaxPublishedMarkerBytes, DefaultMaxPublishedManifestBytes)
+}
+
+// OpenPublishedRunSnapshotBounded is OpenPublishedRunSnapshot with explicit bounds.
+func OpenPublishedRunSnapshotBounded(completePath, expectedIndexSetID, expectedRunID string, maxMarkerBytes, maxManifestBytes int64) (PublishedSnapshot, error) {
+	if maxMarkerBytes <= 0 {
+		maxMarkerBytes = DefaultMaxPublishedMarkerBytes
+	}
+	if maxManifestBytes <= 0 {
+		maxManifestBytes = DefaultMaxPublishedManifestBytes
+	}
+	snap, err := openPublishedCompleteBounded(completePath, maxMarkerBytes, maxManifestBytes)
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	expectedIndexSetID = strings.TrimSpace(expectedIndexSetID)
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if expectedIndexSetID != "" && snap.Complete.IndexSetID != expectedIndexSetID {
+		return PublishedSnapshot{}, fmt.Errorf("complete marker index_set_id mismatch")
+	}
+	if expectedRunID != "" && snap.Complete.RunID != expectedRunID {
+		return PublishedSnapshot{}, fmt.Errorf("complete marker run_id mismatch")
+	}
+	return snap, nil
+}
+
+// openPublishedCompleteBounded trust-checks complete → same-bytes manifest
+// without reading latest.json.
+func openPublishedCompleteBounded(completePath string, maxMarkerBytes, maxManifestBytes int64) (PublishedSnapshot, error) {
+	completePath = strings.TrimSpace(completePath)
+	if completePath == "" {
+		return PublishedSnapshot{}, fmt.Errorf("complete path is required")
+	}
+	complete, err := readCompleteDocFileBounded(completePath, maxMarkerBytes)
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
@@ -239,9 +294,6 @@ func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxMa
 			return PublishedSnapshot{}, fmt.Errorf("complete marker type is required (expected gonimbus.index.complete.v1)")
 		}
 		return PublishedSnapshot{}, fmt.Errorf("complete marker type %q is not supported", complete.Type)
-	}
-	if latest.IndexSetID != complete.IndexSetID || latest.RunID != complete.RunID {
-		return PublishedSnapshot{}, fmt.Errorf("latest pointer and complete marker disagree")
 	}
 	// Same-bytes trust: read once, digest those exact bytes, then unmarshal them.
 	// Do not hash and parse through separate pathname opens (TOCTOU).
@@ -264,7 +316,6 @@ func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxMa
 		return PublishedSnapshot{}, err
 	}
 	return PublishedSnapshot{
-		LatestPath: latestPath,
 		Complete:   complete,
 		Manifest:   manifest,
 		SegmentDir: complete.SegmentDir,

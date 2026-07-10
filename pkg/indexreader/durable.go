@@ -3,6 +3,7 @@ package indexreader
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -39,6 +40,111 @@ func openDurableReader(opts ResolveOptions, c candidate) (*durableReader, error)
 		snap:             snap,
 		segmentCacheRoot: filepath.Dir(c.latest),
 	}, nil
+}
+
+// openPinnedDurableRun opens a durable-v2 snapshot by exact set/run complete
+// marker. It never reads latest.json, so a later latest advance cannot switch
+// the opened run.
+func openPinnedDurableRun(opts ResolveOptions, target ResolveTarget) (*durableReader, error) {
+	if opts.SegmentCacheRoot == "" {
+		return nil, fmt.Errorf("segment cache root is required for pinned durable run open")
+	}
+	if err := validatePinnedRunID(target.RunID); err != nil {
+		return nil, err
+	}
+	wantID := strings.TrimPrefix(target.IndexSetID, "idx_")
+	if !validHexPattern.MatchString(wantID) {
+		return nil, fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", target.IndexSetID)
+	}
+	fullID, err := matchSegmentCacheID(opts.SegmentCacheRoot, wantID)
+	if err != nil {
+		// Fall back: full 64-hex id may exist with runs even if latest is missing.
+		if len(wantID) == 64 {
+			fullID = "idx_" + wantID
+		} else {
+			return nil, fmt.Errorf("no durable snapshot matching index set %s: %w", target.IndexSetID, err)
+		}
+	}
+	completePath := filepath.Join(opts.SegmentCacheRoot, fullID, "runs", target.RunID, "complete.json")
+	snap, err := indexsubstrate.OpenPublishedRunSnapshotBounded(
+		completePath,
+		fullID,
+		target.RunID,
+		opts.MaxMarkerBytes,
+		opts.MaxManifestBytes,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open pinned durable run %s/%s: %w", fullID, target.RunID, err)
+	}
+	identityDir := ""
+	baseURI := ""
+	provider := ""
+	if opts.IndexesRoot != "" {
+		// Identity metadata is optional; only attach when recomputed full
+		// IndexSetID exactly matches the pinned set (no prefix-only guesses).
+		entries, readErr := os.ReadDir(opts.IndexesRoot)
+		if readErr == nil {
+			setHex := strings.TrimPrefix(fullID, "idx_")
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				dirHex := strings.TrimPrefix(entry.Name(), "idx_")
+				if !indexSetHexMatches(dirHex, setHex) && !indexSetHexMatches(setHex, dirHex) {
+					continue
+				}
+				dirPath := filepath.Join(opts.IndexesRoot, entry.Name())
+				identity, idErr := readIdentityMeta(dirPath, opts.MaxMarkerBytes)
+				if idErr != nil {
+					continue
+				}
+				if identity.IndexSetID == "" || identity.IndexSetID != fullID {
+					continue
+				}
+				identityDir = dirPath
+				baseURI = identity.BaseURI
+				provider = identity.Provider
+				break
+			}
+		}
+	}
+	return &durableReader{
+		meta: Meta{
+			Format:      FormatDurableV2,
+			IndexSetID:  snap.Manifest.IndexSetID,
+			BaseURI:     baseURI,
+			Provider:    provider,
+			IdentityDir: identityDir,
+			SourcePath:  completePath,
+			RunID:       snap.Manifest.RunID,
+		},
+		opts:             opts,
+		snap:             snap,
+		segmentCacheRoot: filepath.Join(opts.SegmentCacheRoot, fullID),
+	}, nil
+}
+
+// validatePinnedRunID requires a single safe path component at the package seam
+// so ResolveTarget.RunID cannot traverse out of the runs/ directory. CLI
+// validateRunID is stricter (schema form) but is not the only call path.
+func validatePinnedRunID(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") {
+		return fmt.Errorf("invalid run_id: must be a single path component")
+	}
+	if runID == "." || runID == ".." {
+		return fmt.Errorf("invalid run_id: must be a single path component")
+	}
+	if filepath.Base(runID) != runID || filepath.Clean(runID) != runID {
+		return fmt.Errorf("invalid run_id: must be a single path component")
+	}
+	if strings.Contains(runID, string(filepath.Separator)) {
+		return fmt.Errorf("invalid run_id: must be a single path component")
+	}
+	return nil
 }
 
 func (r *durableReader) Meta() Meta { return r.meta }

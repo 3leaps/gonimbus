@@ -31,6 +31,9 @@ func indexSetHexMatches(storedHex, wantHex string) bool {
 //   - index.db present → sqlite-v1 (preferred when both formats exist)
 //   - else durable latest+complete+manifest trust chain → durable-v2
 //   - absent/unknown/malformed markers → reject (no layout guessing)
+//
+// When target.RunID is set, dispatch is pin-mode: durable-v2 only, via the run
+// complete marker. latest.json is never consulted (receipt-pinned snapshot).
 func ResolveIndexReader(ctx context.Context, opts ResolveOptions, target ResolveTarget) (Reader, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -38,6 +41,15 @@ func ResolveIndexReader(ctx context.Context, opts ResolveOptions, target Resolve
 	opts = normalizeResolveOptions(opts)
 	target.BaseURI = strings.TrimSpace(target.BaseURI)
 	target.IndexSetID = strings.TrimSpace(target.IndexSetID)
+	target.RunID = strings.TrimSpace(target.RunID)
+	// Pin mode is explicit: run_id without index_set_id is a hard reject even
+	// when base_uri is also absent (clearer than the generic required-field error).
+	if target.RunID != "" {
+		if target.IndexSetID == "" {
+			return nil, fmt.Errorf("run_id requires index_set_id")
+		}
+		return openPinnedDurableRun(opts, target)
+	}
 	if target.BaseURI == "" && target.IndexSetID == "" {
 		return nil, fmt.Errorf("base_uri or index_set_id is required")
 	}
