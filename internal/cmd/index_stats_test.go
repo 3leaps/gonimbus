@@ -36,7 +36,7 @@ func TestPrintStatsJSONIncludesFailedResumableDiscovery(t *testing.T) {
 	runHistory := []indexstore.IndexRun{*summary.LatestRun}
 
 	stdout := captureStdout(t, func() {
-		require.NoError(t, printStatsJSON(summary, nil, runHistory, indexSet))
+		require.NoError(t, printStatsJSON(summary, nil, runHistory, indexSet, "sqlite-v1"))
 	})
 
 	var doc map[string]any

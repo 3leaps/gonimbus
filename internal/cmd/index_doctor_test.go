@@ -18,11 +18,14 @@ func executeIndexDoctorCommand(t *testing.T, args ...string) (string, string, er
 
 	oldRootDir := indexDoctorRootDir
 	oldDB := indexDoctorDB
+	oldFormat := indexDoctorFormat
 	indexDoctorRootDir = ""
 	indexDoctorDB = ""
+	indexDoctorFormat = ""
 	t.Cleanup(func() {
 		indexDoctorRootDir = oldRootDir
 		indexDoctorDB = oldDB
+		indexDoctorFormat = oldFormat
 	})
 
 	cmd := newIndexDoctorCommand()

@@ -398,52 +398,14 @@ type identityMeta struct {
 
 func readIdentityMeta(dir string, maxBytes int64) (identityMeta, error) {
 	path := filepath.Join(dir, "identity.json")
-	data, err := readBoundedFile(path, maxBytes)
+	file, err := ReadLocalIdentityFile(path, maxBytes)
 	if err != nil {
 		return identityMeta{}, err
 	}
-	var payload indexstore.IndexSetIdentityPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return identityMeta{}, fmt.Errorf("parse identity.json: %w", err)
-	}
-	// Recompute id from payload to recover full IndexSetID.
-	params := indexstore.IndexSetParams{
-		BaseURI:         payload.BaseURI,
-		Provider:        payload.Provider,
-		StorageProvider: payload.StorageProvider,
-		CloudProvider:   payload.CloudProvider,
-		RegionKind:      payload.RegionKind,
-		Region:          payload.Region,
-		EndpointHost:    payload.EndpointHost,
-		BuildParams: indexstore.BuildParams{
-			SourceType:      payload.Build.SourceType,
-			SchemaVersion:   payload.Build.SchemaVersion,
-			GonimbusVersion: payload.Build.GonimbusVersion,
-			Includes:        payload.Build.Includes,
-			Excludes:        payload.Build.Excludes,
-			IncludeHidden:   payload.Build.IncludeHidden,
-			FiltersHash:     payload.Build.FiltersHash,
-			ScopeHash:       payload.Build.ScopeHash,
-		},
-	}
-	if payload.PathDate != nil {
-		params.BuildParams.PathDateExtraction = &indexstore.PathDateExtraction{
-			Method:       payload.PathDate.Method,
-			Regex:        payload.PathDate.Regex,
-			SegmentIndex: payload.PathDate.SegmentIndex,
-		}
-	}
-	identity, err := indexstore.ComputeIndexSetID(params)
-	if err != nil {
-		return identityMeta{
-			BaseURI:  payload.BaseURI,
-			Provider: payload.Provider,
-		}, nil
-	}
 	return identityMeta{
-		IndexSetID: identity.IndexSetID,
-		BaseURI:    payload.BaseURI,
-		Provider:   payload.Provider,
+		IndexSetID: file.IndexSetID,
+		BaseURI:    file.Payload.BaseURI,
+		Provider:   file.Payload.Provider,
 	}, nil
 }
 
@@ -496,6 +458,12 @@ func dedupeCandidates(in []candidate) []candidate {
 	return out
 }
 
+// ReadBoundedFile reads a local file with a single open and LimitReader(max+1).
+// Oversized files fail closed. Default max is 1 MiB when maxBytes <= 0.
+func ReadBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	return readBoundedFile(path, maxBytes)
+}
+
 func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 1 << 20
@@ -515,4 +483,66 @@ func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("file %s size exceeds limit %d", filepath.Base(path), maxBytes)
 	}
 	return data, nil
+}
+
+// LocalIdentityFile is identity.json loaded with bounded single-open semantics.
+type LocalIdentityFile struct {
+	// Raw is the trimmed file content used for presentation hashing.
+	Raw []byte
+	// Payload is the parsed identity document.
+	Payload indexstore.IndexSetIdentityPayload
+	// IndexSetID is the recomputed full idx_<64hex> when ComputeIndexSetID succeeds.
+	IndexSetID string
+}
+
+// ReadLocalIdentityFile reads and parses identity.json with the same bounded
+// single-open posture as durable marker discovery. Prefer this over unbounded
+// os.ReadFile + ad-hoc ComputeIndexSetID assembly at call sites.
+func ReadLocalIdentityFile(path string, maxBytes int64) (LocalIdentityFile, error) {
+	data, err := readBoundedFile(path, maxBytes)
+	if err != nil {
+		return LocalIdentityFile{}, err
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return LocalIdentityFile{}, fmt.Errorf("identity.json is empty")
+	}
+	var payload indexstore.IndexSetIdentityPayload
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return LocalIdentityFile{}, fmt.Errorf("parse identity.json: %w", err)
+	}
+	out := LocalIdentityFile{
+		Raw:     []byte(trimmed),
+		Payload: payload,
+	}
+	params := indexstore.IndexSetParams{
+		BaseURI:         payload.BaseURI,
+		Provider:        payload.Provider,
+		StorageProvider: payload.StorageProvider,
+		CloudProvider:   payload.CloudProvider,
+		RegionKind:      payload.RegionKind,
+		Region:          payload.Region,
+		EndpointHost:    payload.EndpointHost,
+		BuildParams: indexstore.BuildParams{
+			SourceType:      payload.Build.SourceType,
+			SchemaVersion:   payload.Build.SchemaVersion,
+			GonimbusVersion: payload.Build.GonimbusVersion,
+			Includes:        payload.Build.Includes,
+			Excludes:        payload.Build.Excludes,
+			IncludeHidden:   payload.Build.IncludeHidden,
+			FiltersHash:     payload.Build.FiltersHash,
+			ScopeHash:       payload.Build.ScopeHash,
+		},
+	}
+	if payload.PathDate != nil {
+		params.BuildParams.PathDateExtraction = &indexstore.PathDateExtraction{
+			Method:       payload.PathDate.Method,
+			Regex:        payload.PathDate.Regex,
+			SegmentIndex: payload.PathDate.SegmentIndex,
+		}
+	}
+	if identity, err := indexstore.ComputeIndexSetID(params); err == nil {
+		out.IndexSetID = identity.IndexSetID
+	}
+	return out, nil
 }

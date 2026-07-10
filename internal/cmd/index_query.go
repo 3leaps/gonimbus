@@ -661,29 +661,6 @@ type indexDBEntry struct {
 	Info indexstore.IndexListEntry
 }
 
-// openIndexReader resolves a format-aware local index reader (sqlite-v1 or durable-v2).
-// When runID is set, opens a pinned durable-v2 snapshot and never consults latest.json.
-func openIndexReader(ctx context.Context, baseURI, indexSetID, runID string) (indexreader.Reader, error) {
-	indexesRoot, err := indexRootDir()
-	if err != nil {
-		return nil, err
-	}
-	segmentRoot, err := appDataPath(appDataClassSegmentCache)
-	if err != nil {
-		return nil, err
-	}
-	return indexreader.ResolveIndexReader(ctx, indexreader.ResolveOptions{
-		IndexesRoot:      indexesRoot,
-		SegmentCacheRoot: segmentRoot,
-		MaxMarkerBytes:   int64(maxHubMarkerBytes),
-		MaxManifestBytes: int64(maxDurableManifestBytes),
-	}, indexreader.ResolveTarget{
-		BaseURI:    baseURI,
-		IndexSetID: indexSetID,
-		RunID:      runID,
-	})
-}
-
 // warnIfReaderLatestRunFailedResumable emits the SQLite failed-resumable warning
 // when the resolved reader is sqlite-v1. Durable snapshots are publish-complete only.
 func warnIfReaderLatestRunFailedResumable(ctx context.Context, reader indexreader.Reader) error {
@@ -819,14 +796,6 @@ func loadIndexEntriesWithPaths(ctx context.Context) ([]indexDBEntry, error) {
 	return entries, nil
 }
 
-type indexDBCandidate struct {
-	Path          string
-	Dir           string
-	IndexSet      *indexstore.IndexSet
-	LatestRun     *indexstore.IndexRun
-	LatestSuccess *indexstore.IndexRun
-}
-
 // openIndexDBByID opens a local index database by its index set ID or directory name.
 // Accepts either a full index_set_id (idx_<64hex>) or directory name (idx_<16hex>).
 func openIndexDBByID(ctx context.Context, id string) (*sql.DB, *indexstore.IndexSet, error) {
@@ -931,169 +900,6 @@ func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *i
 	return db, &sets[0], nil
 }
 
-func openIndexDBForBaseURI(ctx context.Context, baseURI string) (*sql.DB, *indexstore.IndexSet, error) {
-	paths, err := listIndexDBPaths()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var candidates []indexDBCandidate
-	for _, path := range paths {
-		candidate, err := inspectIndexDBForBaseURI(ctx, path, baseURI)
-		if err != nil {
-			warnIndexDB("skip index db %s: %v", path, err)
-			continue
-		}
-		if candidate == nil {
-			continue
-		}
-		candidates = append(candidates, *candidate)
-	}
-
-	if len(candidates) == 0 {
-		return nil, nil, fmt.Errorf("no index found for base URI: %s", baseURI)
-	}
-
-	best, reason := selectBestCandidate(candidates)
-	if len(candidates) > 1 {
-		warnIndexSelection(baseURI, best, candidates, reason)
-	}
-
-	db, err := openMigratedIndexDB(ctx, best.Path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open index database: %w", err)
-	}
-
-	return db, best.IndexSet, nil
-}
-
-func inspectIndexDBForBaseURI(ctx context.Context, path string, baseURI string) (*indexDBCandidate, error) {
-	db, err := openIndexDB(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = db.Close() }()
-
-	indexSet, err := indexstore.GetIndexSetByBaseURI(ctx, db, baseURI)
-	if err != nil {
-		return nil, err
-	}
-	if indexSet == nil {
-		return nil, nil
-	}
-
-	runs, err := indexstore.ListIndexRuns(ctx, db, indexSet.IndexSetID)
-	if err != nil {
-		warnIndexDB("index runs unavailable for %s: %v", path, err)
-	}
-
-	var latestRun *indexstore.IndexRun
-	var latestSuccess *indexstore.IndexRun
-	if len(runs) > 0 {
-		latestRun = &runs[0]
-		for i := range runs {
-			if runs[i].Status == indexstore.RunStatusSuccess {
-				latestSuccess = &runs[i]
-				break
-			}
-		}
-	}
-
-	return &indexDBCandidate{
-		Path:          path,
-		Dir:           filepath.Dir(path),
-		IndexSet:      indexSet,
-		LatestRun:     latestRun,
-		LatestSuccess: latestSuccess,
-	}, nil
-}
-
-func selectBestCandidate(candidates []indexDBCandidate) (indexDBCandidate, string) {
-	best := candidates[0]
-	bestScore := scoreCandidate(best)
-
-	for i := 1; i < len(candidates); i++ {
-		score := scoreCandidate(candidates[i])
-		if compareCandidateScore(score, bestScore) > 0 {
-			best = candidates[i]
-			bestScore = score
-		}
-	}
-
-	switch {
-	case bestScore.HasSuccess:
-		return best, "latest successful run"
-	case bestScore.HasRun:
-		return best, "latest run"
-	default:
-		return best, "latest index set"
-	}
-}
-
-type candidateScore struct {
-	HasSuccess bool
-	SuccessAt  time.Time
-	HasRun     bool
-	RunAt      time.Time
-	CreatedAt  time.Time
-}
-
-func scoreCandidate(candidate indexDBCandidate) candidateScore {
-	score := candidateScore{CreatedAt: candidate.IndexSet.CreatedAt}
-	if candidate.LatestSuccess != nil {
-		score.HasSuccess = true
-		score.SuccessAt = runTimestamp(candidate.LatestSuccess)
-	}
-	if candidate.LatestRun != nil {
-		score.HasRun = true
-		score.RunAt = runTimestamp(candidate.LatestRun)
-	}
-	return score
-}
-
-func compareCandidateScore(a candidateScore, b candidateScore) int {
-	if a.HasSuccess || b.HasSuccess {
-		if a.HasSuccess && b.HasSuccess {
-			return compareTime(a.SuccessAt, b.SuccessAt)
-		}
-		if a.HasSuccess {
-			return 1
-		}
-		return -1
-	}
-	if a.HasRun || b.HasRun {
-		if a.HasRun && b.HasRun {
-			return compareTime(a.RunAt, b.RunAt)
-		}
-		if a.HasRun {
-			return 1
-		}
-		return -1
-	}
-	return compareTime(a.CreatedAt, b.CreatedAt)
-}
-
-func compareTime(a time.Time, b time.Time) int {
-	switch {
-	case a.After(b):
-		return 1
-	case b.After(a):
-		return -1
-	default:
-		return 0
-	}
-}
-
-func runTimestamp(run *indexstore.IndexRun) time.Time {
-	if run == nil {
-		return time.Time{}
-	}
-	if run.EndedAt != nil {
-		return *run.EndedAt
-	}
-	return run.StartedAt
-}
-
 func warnIfLatestIndexRunFailedResumable(ctx context.Context, db *sql.DB, indexSet *indexstore.IndexSet) error {
 	if db == nil || indexSet == nil {
 		return nil
@@ -1115,28 +921,6 @@ func warnIfLatestIndexRunFailedResumable(ctx context.Context, db *sql.DB, indexS
 
 func warnIndexDB(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
-}
-
-func warnIndexSelection(baseURI string, selected indexDBCandidate, candidates []indexDBCandidate, reason string) {
-	_, _ = fmt.Fprintf(os.Stderr, "warning: multiple indexes match base URI %s\n", baseURI)
-	_, _ = fmt.Fprintf(os.Stderr, "  selected: %s (reason: %s)\n", selected.IndexSet.IndexSetID, reason)
-	_, _ = fmt.Fprintf(os.Stderr, "  details: %s\n", formatCandidateDetails(selected))
-	_, _ = fmt.Fprintln(os.Stderr, "  alternatives:")
-	for _, candidate := range candidates {
-		if candidate.IndexSet.IndexSetID == selected.IndexSet.IndexSetID {
-			continue
-		}
-		_, _ = fmt.Fprintf(os.Stderr, "    - %s\n", formatCandidateDetails(candidate))
-	}
-}
-
-func formatCandidateDetails(candidate indexDBCandidate) string {
-	latestRunAt, latestStatus := "-", "-"
-	if candidate.LatestRun != nil {
-		latestRunAt = runTimestamp(candidate.LatestRun).Format(time.RFC3339)
-		latestStatus = string(candidate.LatestRun.Status)
-	}
-	return fmt.Sprintf("index_set_id=%s created_at=%s latest_run=%s status=%s", candidate.IndexSet.IndexSetID, candidate.IndexSet.CreatedAt.Format(time.RFC3339), latestRunAt, latestStatus)
 }
 
 // normalizeQueryBaseURI normalizes a base URI for query lookup.
