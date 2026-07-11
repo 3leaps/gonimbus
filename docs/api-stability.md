@@ -27,6 +27,7 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/indexstore`    | Experimental | Index storage substrate.                                                                                               |
 | `github.com/3leaps/gonimbus/pkg/indexreader`   | Experimental | Format-aware local index read seam (`sqlite-v1` / `durable-v2`) for query and follow-on consume ops.                   |
 | `github.com/3leaps/gonimbus/pkg/indexbuild`    | Experimental | Durable index build workflow engine (v0.4.0 default CLI path) over injected providers and journal/segment publication. |
+| `github.com/3leaps/gonimbus/pkg/indexenrich`   | Experimental | Durable HEAD-enrichment write transaction (lease, single parent, enrich-only publish) over an injected provider.       |
 | `github.com/3leaps/gonimbus/pkg/jobregistry`   | Experimental | Local job-control substrate.                                                                                           |
 | `github.com/3leaps/gonimbus/pkg/manifest`      | Experimental | Manifest parsing and validation substrate.                                                                             |
 | `github.com/3leaps/gonimbus/pkg/match`         | Stable       | Object-key pattern matching used by embedded consumers.                                                                |

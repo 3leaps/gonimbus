@@ -12,6 +12,16 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
+// ParentToken is the public expected-parent CAS token for durable latest advance.
+// Callers capture this from a verified latest snapshot before a write transaction.
+type ParentToken struct {
+	IndexSetID     string
+	RunID          string
+	ManifestSHA256 string
+	// CoverageSHA256 binds inherited coverage for enrich-only publications.
+	CoverageSHA256 string
+}
+
 // Clock returns the current time for run metadata. Supplying a deterministic
 // clock makes retry identity and CLI/library parity byte-testable.
 type Clock func() time.Time
@@ -141,6 +151,12 @@ type Config struct {
 	Paths            PathConfig
 	Coverage         []CoverageAttestation
 	PriorRows        []ObjectState
+	// ExpectedParent, when set, enforces latest-pointer CAS at publish advance.
+	// When nil, Build/Retry capture the current latest (or first-publish) under
+	// the write lease. Malformed latest fails closed (not first-publish).
+	// Stale provided tokens are validated immediately after lease acquisition
+	// and before any crawl/observation mutation.
+	ExpectedParent *ParentToken
 
 	RunStartedAt         time.Time
 	CreatedAt            time.Time
@@ -184,6 +200,8 @@ type RetryConfig struct {
 	JournalPaths []string
 	Coverage     []CoverageAttestation
 	PriorRows    []ObjectState
+	// ExpectedParent enforces latest CAS when republishing over an existing set.
+	ExpectedParent *ParentToken
 
 	RunStartedAt         time.Time
 	CreatedAt            time.Time

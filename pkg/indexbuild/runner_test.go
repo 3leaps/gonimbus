@@ -60,6 +60,32 @@ func TestRunnerBuildPublishesDeterministicSnapshotAndRetryParity(t *testing.T) {
 	require.Equal(t, manifestBefore, manifestAfter)
 }
 
+func TestPublicRetryRejectsWhenWriteLeaseHeld(t *testing.T) {
+	cfg := testConfig(t, "retry-lease")
+	summary, err := NewRunner(cfg).Build(context.Background())
+	require.NoError(t, err)
+
+	// Contending peer holds the set lease (as enrich or another build would).
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	held, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "peer-enrich", 0)
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+
+	_, err = Retry(context.Background(), RetryConfig{
+		IndexSetID:           cfg.IndexSetID,
+		RunID:                cfg.RunID + "-republish",
+		BaseURI:              cfg.BaseURI,
+		Paths:                cfg.Paths,
+		JournalPaths:         summary.JournalPaths,
+		Coverage:             cfg.Coverage,
+		RunStartedAt:         cfg.RunStartedAt,
+		CreatedAt:            cfg.CreatedAt,
+		Clock:                cfg.Clock,
+		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
+	})
+	require.ErrorIs(t, err, indexsubstrate.ErrWriteLeaseHeld)
+}
+
 func TestRunnerNormalizesProviderCoverageToRelKeyTombstones(t *testing.T) {
 	cfg := testConfig(t, "coverage-relkey")
 	priorSeen := cfg.RunStartedAt.Add(-24 * time.Hour)

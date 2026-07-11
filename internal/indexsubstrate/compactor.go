@@ -54,6 +54,19 @@ type Tombstone struct {
 	DeletedAt  time.Time
 }
 
+// PublicationMode selects compaction/publication policy for a snapshot write.
+type PublicationMode string
+
+const (
+	// PublicationModeDefault is crawl/observe publication: coverage may
+	// tombstone unobserved keys under confirmed complete scopes.
+	PublicationModeDefault PublicationMode = ""
+	// PublicationModeEnrichOnly is HEAD-enrichment republication: journals must
+	// contain only enrich ops, coverage is inherited and never re-attested as
+	// observation evidence, and coverage-driven tombstones are disabled.
+	PublicationModeEnrichOnly PublicationMode = "enrich-only"
+)
+
 type CompactionInput struct {
 	IndexSetID   string
 	RunID        string
@@ -61,6 +74,9 @@ type CompactionInput struct {
 	PriorRows    []CurrentObjectRow
 	Journals     []Journal
 	Coverage     []CoverageAttestation
+	// Mode selects tombstone and journal-shape policy. Prefer typed modes over
+	// ad-hoc booleans so observe journals cannot accidentally suppress deletes.
+	Mode PublicationMode
 }
 
 type CompactionResult struct {
@@ -109,6 +125,13 @@ func Compact(input CompactionInput) (CompactionResult, error) {
 	if err != nil {
 		return CompactionResult{}, err
 	}
+	if input.Mode == PublicationModeEnrichOnly {
+		for _, record := range records {
+			if record.Op != ObjectRecordOpEnrich {
+				return CompactionResult{}, fmt.Errorf("%w: enrich-only mode rejects journal op %q", ErrInvalidJournal, record.Op)
+			}
+		}
+	}
 
 	result := CompactionResult{}
 	enrichments := make(map[string][]ObjectRecord)
@@ -138,18 +161,21 @@ func Compact(input CompactionInput) (CompactionResult, error) {
 		state[relKey] = row
 	}
 
-	for relKey, row := range state {
-		if row.DeletedAt == nil {
-			if _, ok := observed[relKey]; !ok && coverageAllowsTombstone(input.Coverage, relKey) {
-				deletedAt := input.RunStartedAt.UTC()
-				row.DeletedAt = &deletedAt
-				state[relKey] = row
-				result.Tombstones = append(result.Tombstones, Tombstone{
-					IndexSetID: input.IndexSetID,
-					RelKey:     relKey,
-					RunID:      input.RunID,
-					DeletedAt:  deletedAt,
-				})
+	// Enrich-only republication never invents deletes from unobserved keys.
+	if input.Mode != PublicationModeEnrichOnly {
+		for relKey, row := range state {
+			if row.DeletedAt == nil {
+				if _, ok := observed[relKey]; !ok && coverageAllowsTombstone(input.Coverage, relKey) {
+					deletedAt := input.RunStartedAt.UTC()
+					row.DeletedAt = &deletedAt
+					state[relKey] = row
+					result.Tombstones = append(result.Tombstones, Tombstone{
+						IndexSetID: input.IndexSetID,
+						RelKey:     relKey,
+						RunID:      input.RunID,
+						DeletedAt:  deletedAt,
+					})
+				}
 			}
 		}
 	}

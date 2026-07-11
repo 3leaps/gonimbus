@@ -419,12 +419,45 @@ func sha256HexFileHandle(file *os.File) (string, error) {
 }
 
 func ReadManifestRows(segmentDir string, manifest InternalManifest) ([]CurrentObjectRow, error) {
-	rows := make([]CurrentObjectRow, 0, manifest.Counts.Rows)
+	return ReadManifestRowsBounded(segmentDir, manifest, -1)
+}
+
+// ReadManifestRowsBounded materializes rows with an optional hard cap.
+// maxRows < 0 means unlimited (after count-budget validation). When maxRows >= 0,
+// manifest counts are pre-validated against the cap and materialization stops if
+// actual rows would exceed maxRows (never allocates past cap+0).
+func ReadManifestRowsBounded(segmentDir string, manifest InternalManifest, maxRows int) ([]CurrentObjectRow, error) {
+	if err := validateManifestCountBudget(manifest, maxRows); err != nil {
+		return nil, err
+	}
+	capHint := manifest.Counts.Rows
+	if maxRows >= 0 && capHint > maxRows {
+		// unreachable when validateManifestCountBudget enforces maxRows
+		capHint = maxRows
+	}
+	if capHint < 0 {
+		capHint = 0
+	}
+	rows := make([]CurrentObjectRow, 0, capHint)
 	err := WalkManifestRows(segmentDir, manifest, func(row CurrentObjectRow) error {
+		// Stop at the first row beyond declared counts.rows (do not grow to the
+		// larger global cap when descriptors under-declare).
+		if len(rows) >= manifest.Counts.Rows {
+			return fmt.Errorf("manifest actual rows exceed declared counts.rows %d", manifest.Counts.Rows)
+		}
+		if maxRows >= 0 && len(rows) >= maxRows {
+			return fmt.Errorf("manifest actual rows exceed limit %d", maxRows)
+		}
 		rows = append(rows, row)
 		return nil
 	})
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) != manifest.Counts.Rows {
+		return nil, fmt.Errorf("manifest actual row count %d does not equal counts.rows %d", len(rows), manifest.Counts.Rows)
+	}
+	return rows, nil
 }
 
 func WalkManifestRows(segmentDir string, manifest InternalManifest, visit func(CurrentObjectRow) error) error {

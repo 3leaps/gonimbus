@@ -2,6 +2,7 @@ package indexbuild
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ func NewRunner(config Config) *Runner {
 
 // Build crawls the injected provider, seals journals, and publishes a snapshot
 // through the durable publication gate.
+//
+// The index-set write lease is acquired before any ObservationSink mutation
+// (including SQLite dual-format sinks) and held through durable latest advance.
 func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	cfg, err := normalizeConfig(r.config)
 	if err != nil {
@@ -43,6 +47,21 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	}); err != nil {
 		return Summary{}, err
 	}
+
+	// Acquire the shared durable write transaction before crawl sinks mutate
+	// any substrate (SQLite observation fanout in --format both).
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-"+cfg.RunID, 0)
+	if err != nil {
+		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
+	}
+	defer func() { _ = lease.Release() }()
+	// Capture/validate parent under the lease before any mutable sinks run.
+	parent, parentErr := resolveExpectedParent(cfg.Paths.LatestPath, cfg.ExpectedParent)
+	if parentErr != nil {
+		return Summary{}, parentErr
+	}
+	cfg.ExpectedParent = parent
 
 	basePrefix, err := basePrefixFromURI(cfg.BaseURI)
 	if err != nil {
@@ -129,6 +148,7 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		JournalPaths:         []string{journalPath},
 		Coverage:             cfg.Coverage,
 		PriorRows:            cfg.PriorRows,
+		ExpectedParent:       cfg.ExpectedParent,
 		RunStartedAt:         cfg.RunStartedAt,
 		CreatedAt:            cfg.CreatedAt,
 		Clock:                cfg.Clock,
@@ -136,7 +156,8 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		Events:               cfg.Events,
 		OnSegmentProgress:    cfg.OnSegmentProgress,
 	}
-	result, err := Retry(ctx, retryCfg)
+	// Private path: reuse the held Build lease (never a public forgeable guard).
+	result, err := retryWithLease(ctx, retryCfg, lease)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -148,15 +169,50 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 // Retry publishes a snapshot from already sealed journals. It is the library
 // recovery entry point for compaction or publication interruptions after a crawl
 // completed.
+//
+// Public Retry always acquires the real OS write lease (callers cannot inject
+// a no-op guard). Build reuses its held lease via unexported retryWithLease.
 func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 	cfg, err := normalizeRetryConfig(cfg)
 	if err != nil {
 		return Summary{}, err
 	}
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-publish-"+cfg.RunID, 0)
+	if err != nil {
+		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
+	}
+	defer func() { _ = lease.Release() }()
+	return retryWithLease(ctx, cfg, lease)
+}
+
+// retryWithLease publishes under an already-held package-owned lease.
+func retryWithLease(ctx context.Context, cfg RetryConfig, lease *indexsubstrate.WriteLease) (Summary, error) {
+	if lease == nil {
+		return Summary{}, fmt.Errorf("write lease is required")
+	}
+	if err := lease.AssertHeld(); err != nil {
+		return Summary{}, fmt.Errorf("write lease: %w", err)
+	}
 	coverage, err := normalizeCoverageForBaseURI(cfg.BaseURI, cfg.Coverage)
 	if err != nil {
 		return Summary{}, err
 	}
+
+	expectedParent, err := resolveExpectedParent(cfg.Paths.LatestPath, cfg.ExpectedParent)
+	if err != nil {
+		return Summary{}, err
+	}
+	var substrateParent *indexsubstrate.ExpectedParentToken
+	if expectedParent != nil {
+		substrateParent = &indexsubstrate.ExpectedParentToken{
+			IndexSetID:     expectedParent.IndexSetID,
+			RunID:          expectedParent.RunID,
+			ManifestSHA256: expectedParent.ManifestSHA256,
+			CoverageSHA256: expectedParent.CoverageSHA256,
+		}
+	}
+
 	result, err := indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
 		IndexSetID:           cfg.IndexSetID,
 		RunID:                cfg.RunID,
@@ -169,6 +225,8 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		ManifestPath:         cfg.Paths.ManifestPath,
 		CompletePath:         cfg.Paths.CompletePath,
 		LatestPath:           cfg.Paths.LatestPath,
+		ExpectedParent:       substrateParent,
+		WriteLease:           lease,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 		OnSegmentProgress:    toSubstrateSegmentProgress(cfg.OnSegmentProgress),
 	})
@@ -204,6 +262,50 @@ func ReadLatest(latestPath string) (ManifestSummary, []ObjectState, error) {
 		return ManifestSummary{}, nil, err
 	}
 	return manifestSummary(manifest), fromSubstrateRows(rows), nil
+}
+
+// resolveExpectedParent returns the CAS token derived from the live verified
+// latest under the caller's write lease. Only a true "not published" state
+// means first publish (nil token). Any other open/trust error fails closed.
+//
+// When provided is non-nil it must equal the live parent token (including
+// coverage digest); otherwise the token is rejected as stale before sinks run.
+func resolveExpectedParent(latestPath string, provided *ParentToken) (*ParentToken, error) {
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(
+		latestPath,
+		indexsubstrate.DefaultMaxPublishedMarkerBytes,
+		indexsubstrate.DefaultMaxPublishedManifestBytes,
+	)
+	if err != nil {
+		if errors.Is(err, indexsubstrate.ErrSnapshotNotPublished) {
+			if provided != nil {
+				return nil, fmt.Errorf("%w: ExpectedParent provided but latest is not published", indexsubstrate.ErrStaleParent)
+			}
+			return nil, nil
+		}
+		// Malformed/unreadable/digest-invalid latest must not be treated as
+		// first publication (would silently overwrite a damaged pointer).
+		return nil, fmt.Errorf("open durable latest for parent CAS: %w", err)
+	}
+	covDigest, err := indexsubstrate.CoverageSHA256(snap.Manifest.Coverage)
+	if err != nil {
+		return nil, fmt.Errorf("hash parent coverage: %w", err)
+	}
+	live := &ParentToken{
+		IndexSetID:     snap.Complete.IndexSetID,
+		RunID:          snap.Complete.RunID,
+		ManifestSHA256: snap.Complete.ManifestSHA256,
+		CoverageSHA256: covDigest,
+	}
+	if provided != nil {
+		if strings.TrimSpace(provided.IndexSetID) != live.IndexSetID ||
+			strings.TrimSpace(provided.RunID) != live.RunID ||
+			strings.TrimSpace(provided.ManifestSHA256) != live.ManifestSHA256 ||
+			(strings.TrimSpace(provided.CoverageSHA256) != "" && strings.TrimSpace(provided.CoverageSHA256) != live.CoverageSHA256) {
+			return nil, fmt.Errorf("%w: provided ExpectedParent does not match live latest", indexsubstrate.ErrStaleParent)
+		}
+	}
+	return live, nil
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

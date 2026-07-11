@@ -13,9 +13,11 @@ snapshots (immutable Snappy-Parquet segments + internal manifest + hub markers)
 instead of centering the operator workflow on a single SQLite `index.db`.
 
 SQLite remains a first-class compatibility path via `--format sqlite` or dual
-`--format both`. Existing `index.db` files are not rewritten. Local query,
-enrich-head, stats, doctor, **`index list`**, and **`index gc`** still need an
-`index.db` today — durable-only sets are not yet listed by `list` / `gc`.
+`--format both`. Existing `index.db` files are not rewritten. Format-aware local
+consumers include `query`, `list`, `stats`, `doctor`, and `enrich-with-head`.
+**`index gc`** still needs an `index.db` today; other SQLite-only surfaces are
+narrowed in the durable-index operator guide (`query --since-run`,
+`stats --prefixes`, full `--resume-run` recovery).
 
 ### Why this matters
 
@@ -31,10 +33,10 @@ The largest individual hub PUT becomes a segment, not the whole inventory.
 # Default durable build
 gonimbus index build --job index.yaml
 
-# SQLite compatibility (query / enrich-head / stats / list / gc / doctor)
+# SQLite when you still need gc / --since-run / full --resume-run recovery
 gonimbus index build --job index.yaml --format sqlite
 
-# Dual-format parity + local inventory visibility from one crawl
+# Dual-format parity + SQLite-only consumers from one crawl
 gonimbus index build --job index.yaml --format both
 
 # Export auto-selects durable when a local durable complete marker exists

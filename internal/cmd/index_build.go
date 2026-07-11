@@ -57,9 +57,10 @@ SQLite compatibility builds still use:
   indexes/idx_<hashprefix>/index.db
   indexes/idx_<hashprefix>/identity.json
 
-Local consumer note: index query, enrich-head, stats, and most doctor paths are
-still SQLite-bound. Use --format sqlite or --format both when you need those
-local workflows during the transition. Durable hydrate restores
+Local consumer note: query, list, stats, doctor, and enrich-with-head are
+format-aware (durable or SQLite). Use --format sqlite or --format both when you
+still need SQLite-only surfaces: index gc, query --since-run, stats --prefixes,
+or full --resume-run checkpoint recovery. Durable hydrate restores
 manifest+segments, not index.db.
 
 The index build process:

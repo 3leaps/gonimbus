@@ -203,6 +203,9 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 	if err != nil {
 		return indexbuild.Summary{}, "", err
 	}
+	// Write lease + parent CAS are acquired inside indexbuild.Retry (shared by
+	// durable-only, both-format, and library callers).
+
 	runSegmentDir := filepath.Join(segmentRoot, "runs", runID)
 	// Durable-only builds never take --db; identity lands under the default
 	// per-index directory so operators can still locate the set.

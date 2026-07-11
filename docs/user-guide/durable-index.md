@@ -37,9 +37,9 @@ SQLite and faithful coverage for scoped dual-format builds.
 # Default: durable snapshot (no index.db)
 gonimbus index build --job index.yaml
 
-# Still need local query / enrich-head / stats / list / gc?
+# SQLite when you still need SQLite-only surfaces (gc, --since-run, …)
 gonimbus index build --job index.yaml --format sqlite
-# or dual-format for migration confidence + SQLite consumers
+# Dual-format for migration confidence + SQLite-only consumers
 gonimbus index build --job index.yaml --format both
 ```
 
@@ -47,7 +47,7 @@ gonimbus index build --job index.yaml --format both
 | --------------------------------------------------------------- | ---------------------------------------------------- |
 | Hub-scale export/hydrate, default new builds                    | `durable` (default)                                  |
 | Local `index query` / `list` / `stats` / `doctor`               | `durable`, `sqlite`, or `both` (format-aware seam)   |
-| Local `enrich-with-head`                                        | `sqlite` or `both`                                   |
+| Local `enrich-with-head`                                        | `durable`, `sqlite`, or `both` (format-aware)        |
 | Local inventory GC (`index gc`)                                 | `sqlite` or `both` (dirs with `index.db` only today) |
 | Migration confidence (one crawl, two artifacts + parity report) | `both`                                               |
 
@@ -120,7 +120,8 @@ portable content hash. See
 ### What green parity does **not** certify
 
 - Reflow-input readiness
-- HEAD-enrichment parity (`index enrich-with-head` remains SQLite-bound)
+- HEAD-enrichment **substrate** parity (SQLite in-place vs durable append/new-run
+  are different write models; filters/`--resume` candidate selection align)
 - Coverage attestation structure, hub metadata, or physical segment shape
 - Reduced-trust / third-party publication safety (see boundary framing below)
 
@@ -198,14 +199,32 @@ selection/output).
 
 Durable-v2 limitations (fail closed or narrowed):
 
-- **`--since-run`** on query requires SQLite today.
+- **`index query --since-run`** requires SQLite today.
 - **`index stats --prefixes`** is sqlite-only (`prefix_stats` table).
 - **`index stats --runs`** on durable lists published complete markers only
   (not the full SQLite run lifecycle / failed-resumable).
 - Durable size in stats/list is the sum of published **segment file sizes**,
   not `SUM(objects_current.size_bytes)`.
 - **`index gc`** still enumerates directories that contain `index.db`.
-- **`index enrich-with-head`** remains SQLite-bound.
+- **Full run/checkpoint lifecycle** (`--resume-run` for build/enrich
+  operation recovery) remains SQLite/opcheckpoint-oriented; durable enrich
+  rejects `--resume-run` (row-level `--resume` is supported).
+- **`index enrich-with-head`** is format-aware via library workhorse
+  `pkg/indexenrich`: durable-only sets take an **OS-level exclusive write
+  lease** (Unix flock / Windows LockFileEx; shared with durable build/publish),
+  open **one** verified parent snapshot, HEAD-filter candidates from that
+  parent, seal an enrich-only journal, and publish a **new** internal-render
+  snapshot that advances `latest.json` only if the held lease is still valid
+  and the live parent CAS (set/run/manifest + coverage digest) still matches
+  (append/new-run; prior segments immutable). Unobserved keys are never
+  tombstoned (`enrich-only` publication mode). Dual-format sets with
+  `index.db` prefer SQLite enrich. Publication is all-or-nothing for
+  pre-latest failures; post-latest report failures still surface committed
+  identity when stdout cannot. Enrichment is internal-render-only — not a
+  boundary-safe share format.
+  **Scale bound:** refuses prior snapshots with validated manifest
+  `counts.rows` **> 2,000,000** before row materialization (descriptor sum and
+  non-negative counts enforced). Larger sets need a stream/spill engine.
 
 Use exact build receipts (`index build --json`) plus `--index-set` / `--run-id`
 for automation handoff; do not rediscover just-built durable sets via list
@@ -231,8 +250,10 @@ work (column suppression, opaque tokens, coverage/statistics redaction) and is
 2. On a representative unit, run `--format both` and confirm green LIST parity.
 3. Point hub export/hydrate at format-aware paths; prefer durable for new hub
    traffic.
-4. Keep `--format sqlite` or `both` for any automation that still calls query,
-   enrich-head, stats, doctor, list, or gc.
+4. Default durable builds support format-aware `query`, `list`, `stats`,
+   `doctor`, and `enrich-with-head`. Keep `--format sqlite` or `both` only for
+   **SQLite-only** surfaces: `index gc`, `query --since-run`,
+   `stats --prefixes`, and full `--resume-run` checkpoint recovery.
 5. Treat durable hub artifacts as internal pipeline inputs only until a later
    boundary-render release lands.
 
