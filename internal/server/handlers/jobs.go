@@ -16,12 +16,6 @@ import (
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
 
-const (
-	maxJobMetadataEntries = 32
-	maxJobMetadataKeyLen  = 64
-	maxJobMetadataValLen  = 512
-)
-
 type jobStore interface {
 	Get(string) (*jobregistry.JobRecord, error)
 	List() ([]jobregistry.JobRecord, error)
@@ -36,22 +30,32 @@ type jobStopper interface {
 }
 
 type JobsHandler struct {
-	store   jobStore
-	starter jobStarter
-	stopper jobStopper
+	store      jobStore
+	starter    jobStarter
+	stopper    jobStopper
+	invocation *jobregistry.IndexBuildInvocation
 }
 
-func NewJobsHandler(root string) *JobsHandler {
+func NewJobsHandler(root string, invocation *jobregistry.IndexBuildInvocation) *JobsHandler {
 	store := jobregistry.NewStore(root)
 	return &JobsHandler{
-		store:   store,
-		starter: jobregistry.NewExecutor(root),
-		stopper: store,
+		store:      store,
+		starter:    jobregistry.NewExecutor(root),
+		stopper:    store,
+		invocation: invocation,
 	}
 }
 
 func newJobsHandlerForTest(store jobStore, starter jobStarter, stopper jobStopper) *JobsHandler {
-	return &JobsHandler{store: store, starter: starter, stopper: stopper}
+	return &JobsHandler{
+		store: store, starter: starter, stopper: stopper,
+		invocation: &jobregistry.IndexBuildInvocation{
+			SchemaVersion:   jobregistry.IndexBuildInvocationVersion,
+			RequestedFormat: "durable", EffectiveFormat: "durable",
+			ScopeWarnPrefixes: jobregistry.DefaultScopeWarnPrefixes,
+			ScopeMaxPrefixes:  jobregistry.DefaultScopeMaxPrefixes,
+		},
+	}
 }
 
 type submitJobRequest struct {
@@ -87,17 +91,24 @@ func (h *JobsHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, r, apperrors.WrapInvalidInput(r.Context(), err, "invalid job request JSON"))
 		return
 	}
-	manifestPath, metadata, err := validateSubmitJobRequest(r.Context(), req)
+	manifestPath, _, err := validateSubmitJobRequest(r.Context(), req)
 	if err != nil {
 		respondWithError(w, r, err)
 		return
 	}
 
+	if h.invocation == nil {
+		respondWithError(w, r, apperrors.NewInternalError("job runner invocation is not configured"))
+		return
+	}
+	invocation := *h.invocation
+	invocation.Since = strings.TrimSpace(req.Since)
+	invocation.Name = strings.TrimSpace(req.Name)
 	job, err := h.starter.StartIndexBuildBackground(manifestPath, strings.TrimSpace(req.Name), jobregistry.BackgroundOptions{
-		Dedupe:   req.Dedupe,
-		Since:    strings.TrimSpace(req.Since),
-		JobType:  jobregistry.JobTypeIndexBuild,
-		Metadata: metadata,
+		Dedupe:     req.Dedupe,
+		Since:      strings.TrimSpace(req.Since),
+		JobType:    jobregistry.JobTypeIndexBuild,
+		Invocation: &invocation,
 	})
 	if err != nil {
 		respondWithError(w, r, mapJobStartError(r, err))
@@ -193,6 +204,12 @@ func validateSubmitJobRequest(ctx context.Context, req submitJobRequest) (string
 	if _, err := os.Stat(cleanPath); err != nil {
 		return "", nil, apperrors.WrapValidationError(ctx, err, "manifest_path is not readable")
 	}
+	if err := jobregistry.ValidateManagedJobName(strings.TrimSpace(req.Name)); err != nil {
+		return "", nil, apperrors.WrapValidationError(ctx, err, "invalid name")
+	}
+	if err := jobregistry.ValidateIndexBuildSince(strings.TrimSpace(req.Since)); err != nil {
+		return "", nil, apperrors.WrapValidationError(ctx, err, "invalid since")
+	}
 
 	metadata, err := validateJobMetadata(req.Metadata)
 	if err != nil {
@@ -205,24 +222,7 @@ func validateJobMetadata(metadata map[string]string) (map[string]string, error) 
 	if len(metadata) == 0 {
 		return nil, nil
 	}
-	if len(metadata) > maxJobMetadataEntries {
-		return nil, apperrors.NewInvalidInputError(fmt.Sprintf("metadata may contain at most %d entries", maxJobMetadataEntries))
-	}
-	out := make(map[string]string, len(metadata))
-	for key, value := range metadata {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return nil, apperrors.NewInvalidInputError("metadata keys must be non-empty")
-		}
-		if len(key) > maxJobMetadataKeyLen {
-			return nil, apperrors.NewInvalidInputError(fmt.Sprintf("metadata keys must be <= %d bytes", maxJobMetadataKeyLen))
-		}
-		if len(value) > maxJobMetadataValLen {
-			return nil, apperrors.NewInvalidInputError(fmt.Sprintf("metadata values must be <= %d bytes", maxJobMetadataValLen))
-		}
-		out[key] = value
-	}
-	return out, nil
+	return nil, apperrors.NewInvalidInputError("metadata is not supported for managed builds")
 }
 
 func parseJobListLimit(raw string) int {

@@ -288,10 +288,6 @@ func validateIndexBuildFormatFlags(resumeRun string) error {
 
 func validateIndexBuildDurableGlobalFlags(flagName string) error {
 	switch {
-	case indexBuildBackground:
-		return fmt.Errorf("%s is not compatible with --background in this slice", flagName)
-	case indexBuildDedupe:
-		return fmt.Errorf("%s is not compatible with --dedupe in this slice", flagName)
 	case indexBuildSummary:
 		return fmt.Errorf("%s is not compatible with --summary in this slice", flagName)
 	case strings.TrimSpace(indexBuildDBPath) != "":
@@ -305,10 +301,6 @@ func validateIndexBuildDurableGlobalFlags(flagName string) error {
 
 func validateIndexBuildBothGlobalFlags() error {
 	switch {
-	case indexBuildBackground:
-		return fmt.Errorf("--format both is not compatible with --background in this slice")
-	case indexBuildDedupe:
-		return fmt.Errorf("--format both is not compatible with --dedupe in this slice")
 	case strings.TrimSpace(indexBuildSince) != "":
 		return fmt.Errorf("--format both is not compatible with --since in this slice")
 	default:

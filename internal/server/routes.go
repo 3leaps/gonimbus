@@ -32,7 +32,7 @@ func (s *Server) registerRoutes(opts Options) {
 	s.registerAdminEndpoint()
 
 	if strings.TrimSpace(opts.JobsRoot) != "" {
-		jobs := handlers.NewJobsHandler(opts.JobsRoot)
+		jobs := handlers.NewJobsHandler(opts.JobsRoot, opts.JobsInvocation)
 		s.router.Post("/api/v1/jobs", jobs.Submit)
 		s.router.Get("/api/v1/jobs", jobs.List)
 		s.router.Get("/api/v1/jobs/{job_id}", jobs.Status)

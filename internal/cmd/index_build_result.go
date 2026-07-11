@@ -8,6 +8,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
+	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
 
 // Machine-stable build receipt type emitted by `index build --json` after a
@@ -173,4 +174,18 @@ func emitIndexBuildResultJSON(w io.Writer, rec indexBuildResultRecord) error {
 		return fmt.Errorf("emit build result: %w", err)
 	}
 	return nil
+}
+
+func jobBuildReceiptIdentity(rec indexBuildResultRecord) *jobregistry.BuildReceiptIdentity {
+	return &jobregistry.BuildReceiptIdentity{
+		Type:             rec.Type,
+		SchemaVersion:    rec.SchemaVersion,
+		Status:           rec.Status,
+		RequestedFormat:  rec.RequestedFormat,
+		FormatsCommitted: append([]string(nil), rec.FormatsCommitted...),
+		IndexSetID:       rec.IndexSetID,
+		RunID:            rec.RunID,
+		ScopeHash:        rec.ScopeHash,
+		ManifestSHA256:   rec.ManifestSHA256,
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/internal/server/handlers"
 	servermw "github.com/3leaps/gonimbus/internal/server/middleware"
+	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
 
 // Server represents the HTTP server
@@ -24,7 +25,8 @@ type Server struct {
 }
 
 type Options struct {
-	JobsRoot string
+	JobsRoot       string
+	JobsInvocation *jobregistry.IndexBuildInvocation
 }
 
 // New creates a new HTTP server instance
