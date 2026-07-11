@@ -45,26 +45,27 @@ Gonimbus supports two workflows based on bucket scale:
 # Then build the index (default format: durable)
 gonimbus index build --job index-manifest.yaml
 
-# SQLite compatibility build when you need local query/enrich-head/stats
+# SQLite when you need SQLite-only surfaces (gc, --since-run, --resume-run, …)
 gonimbus index build --job index-manifest.yaml --format sqlite
 
-# Query requires a SQLite index today
+# Format-aware query works on durable or SQLite sets
 gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 ```
 
 ### Artifact formats
 
-| Format                | Build flag         | What it produces                                           | Local consumers today                                                      |
-| --------------------- | ------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------- |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | Durable-aware export/hydrate/compare paths                                 |
-| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | `index query`, `enrich-head`, `stats`, most `doctor`, **`list`**, **`gc`** |
-| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl                                           |
+| Format                | Build flag         | What it produces                                           | Local consumers today                                                                |
+| --------------------- | ------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare       |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | All local consumers including **`gc`**, `--since-run`, full `--resume-run` lifecycle |
+| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl (SQLite preferred when `index.db` exists)           |
 
 Durable is now the default index artifact format. SQLite remains an explicit
 compatibility/transition mode. Durable hydrate restores `manifest.json` +
-segments, **not** `index.db`. If you still need local SQLite query, enrichment,
-doctor, or **local inventory** (`list` / `gc`) during the transition, pass
-`--format sqlite` or `--format both`.
+segments, **not** `index.db`. Format-aware local consumers work on durable-only
+sets; keep `--format sqlite` or `both` when you still need **`gc`**,
+**`query --since-run`**, **`stats --prefixes`**, or full **`--resume-run`**
+checkpoint recovery.
 
 See [Durable Index Format](durable-index.md) for the full migration map, green
 parity semantics, hub round-trip, segment packing defaults, and internal-render
@@ -349,11 +350,9 @@ ID, and identity health. If the latest index run is `failed-resumable`, list
 output includes a `gonimbus index ... --resume-run <run_id>` hint for the
 operation that wrote the checkpoint.
 
-**SQLite-bound today:** `index list` enumerates directories that contain an
-`index.db`. Under the durable default a plain build produces no `index.db`, so
-durable-only sets are not listed (you may see "No indexes found"). Build with
-`--format sqlite` or `--format both` if you need local inventory during the
-transition. See [Durable Index Format](durable-index.md).
+**Format-aware:** `index list` discovers durable segment sets and SQLite
+`index.db` directories. Dual-format sets list once (preferred identity). See
+[Durable Index Format](durable-index.md).
 
 ### `index query`
 
@@ -410,10 +409,11 @@ with the resumable run ID. Treat those query results as checkpoint-state
 inspection, not as a validated completed snapshot.
 
 `--since-run <run_id>` emits the current active rows first seen or meaningfully
-changed after a successful run in the same IndexSet. It is a forward delta over
-latest index state, intended for "only process new or changed objects" flows.
-It is not point-in-time history: the current SQLite index does not retain
-object snapshots for older runs, so it cannot reconstruct "state as of run X".
+changed after a successful run in the same IndexSet. **SQLite-only today**
+(durable query fails closed). It is a forward delta over latest index state,
+intended for "only process new or changed objects" flows. It is not
+point-in-time history: the current SQLite index does not retain object
+snapshots for older runs, so it cannot reconstruct "state as of run X".
 
 Delta tracking uses Gonimbus-written run metadata and compares run boundaries by
 stored run timestamps, not by run ID string sorting. Unknown, non-successful, or
@@ -501,10 +501,10 @@ gonimbus index gc --max-age 30d
 gonimbus index gc --keep-last 1 --dry-run
 ```
 
-**SQLite-bound today:** like `index list`, `index gc` only sees index directories
-that contain an `index.db`. Durable-only default builds are not yet in scope for
-local GC. Use `--format sqlite` or `both` when you need local retention control
-during the transition; hub retention remains `index hub gc`.
+**SQLite-bound today:** `index gc` only sees index directories that contain an
+`index.db`. Durable-only default builds are not yet in scope for local GC. Use
+`--format sqlite` or `both` when you need local retention control during the
+transition; hub retention remains `index hub gc`.
 
 ### `index compare`
 
@@ -673,7 +673,9 @@ case-sensitive. Objects whose provider did not return a storage class have no
 ## HEAD Enrichment
 
 Use `index enrich-with-head` to cache expensive HEAD-only metadata on an
-existing index:
+existing index. The command is **format-aware**: durable-only sets append a new
+enrich-only snapshot (OS write lease + parent CAS); sets with `index.db` use the
+SQLite in-place path. See [Durable Index Format](durable-index.md).
 
 ```bash
 gonimbus index enrich-with-head idx_da038d8171b4a9ba \
@@ -685,8 +687,8 @@ gonimbus index enrich-with-head idx_da038d8171b4a9ba \
 
 Supported v1 candidate filters are `--storage-class`, `--pattern`,
 `--key-regex`, `--min-size`, `--max-size`, and `--include-deleted`. Filters are
-applied before HEAD calls, so rows excluded by storage class or key/size filters
-do not incur provider HEAD cost.
+applied before HEAD calls on both substrates, so rows excluded by storage class
+or key/size filters do not incur provider HEAD cost.
 
 Provider reconstruction uses index metadata plus runtime inputs such as
 `--profile`, `--region`, `--endpoint`, and the normal SDK credential chain.
@@ -712,13 +714,16 @@ non-zero on any permanent per-object failure, unsupported provider, invalid
 filter, provider reconstruction failure, or interruption.
 
 Resumable fatal interruptions use the operation-level run ID, distinct from the
-row-skipping `--resume` flag:
+row-skipping `--resume` flag. **`--resume-run` is SQLite-only today** (operation
+checkpoint lifecycle). Durable-only sets reject `--resume-run` with a clear
+error; use row-level `--resume` to skip already-enriched keys, or re-run after
+fixing the failure cause. SQLite path:
 
 ```bash
-gonimbus index enrich-with-head --resume-run <run_id>
+gonimbus index enrich-with-head --resume-run <run_id>   # SQLite / dual with index.db
 ```
 
-When a failed enrichment run can be resumed, stdout includes a redacted
+When a failed SQLite enrichment run can be resumed, stdout includes a redacted
 `gonimbus.operation.error.v1` record and stderr includes `run_id`, `status`,
 `error_class`, progress counters, and the safe resume command. The
 `failed-resumable`, `resume_recovered`, `resume_started`, and

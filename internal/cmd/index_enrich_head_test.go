@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 )
 
 type fakeEnrichProvider struct {
+	mu        sync.Mutex
 	metas     map[string]*provider.ObjectMeta
 	errs      map[string]error
 	errSeq    map[string][]error
@@ -31,6 +33,8 @@ func (p *fakeEnrichProvider) List(context.Context, provider.ListOptions) (*provi
 }
 
 func (p *fakeEnrichProvider) Head(_ context.Context, key string) (*provider.ObjectMeta, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.headCalls = append(p.headCalls, key)
 	if p.counts == nil {
 		p.counts = map[string]int{}

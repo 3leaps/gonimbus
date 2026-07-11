@@ -131,6 +131,108 @@ func TestCompactMatchesIndexstoreSchemaV8MutationSemantics(t *testing.T) {
 	}
 }
 
+func TestCompactDuplicateEnrichSameKeyUsesJournalIDThenSequenceOrder(t *testing.T) {
+	// Two enrich records for the same key arrive out of insertion order across
+	// journal IDs. orderedJournalRecords sorts by journal_id then sequence;
+	// later apply wins for HEAD fields.
+	runStartedAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	prior := []CurrentObjectRow{{
+		IndexSetID: "idx_test", RelKey: "data/key.xml", SizeBytes: 10,
+		FirstSeenRunID: "run_old", FirstSeenAt: runStartedAt.Add(-time.Hour),
+		LastChangedRunID: "run_old", LastChangedAt: runStartedAt.Add(-time.Hour),
+		LastSeenRunID: "run_old", LastSeenAt: runStartedAt.Add(-time.Hour),
+	}}
+	earlyType := "application/early"
+	lateType := "application/late"
+	// Supply journals with jrn_b first in the input slice; sort must still apply
+	// jrn_a then jrn_b so lateType wins.
+	result, err := Compact(CompactionInput{
+		IndexSetID:   "idx_test",
+		RunID:        "run_enrich",
+		RunStartedAt: runStartedAt,
+		PriorRows:    prior,
+		Coverage: []CoverageAttestation{{
+			Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true,
+		}},
+		Mode: PublicationModeEnrichOnly,
+		Journals: []Journal{
+			// Input order: later journal first. Sort is by journal_id then sequence.
+			journalWithRecords("idx_test", "run_enrich", "jrn_b", []ObjectRecord{
+				enrich("jrn_b", 1, "data/key.xml", runStartedAt.Add(2*time.Minute), &lateType, nil, nil),
+			}),
+			journalWithRecords("idx_test", "run_enrich", "jrn_a", []ObjectRecord{
+				enrich("jrn_a", 1, "data/key.xml", runStartedAt.Add(30*time.Second), &earlyType, nil, nil),
+				enrich("jrn_a", 2, "data/key.xml", runStartedAt.Add(time.Minute), &earlyType, nil, nil),
+			}),
+		},
+	})
+	require.NoError(t, err)
+	row := rowsByRelKey(result.Rows)["data/key.xml"]
+	require.NotNil(t, row.ContentType)
+	require.Equal(t, lateType, *row.ContentType, "higher journal_id must win after full sequence apply")
+	require.NotNil(t, row.HeadEnrichedAt)
+	require.True(t, row.HeadEnrichedAt.Equal(runStartedAt.Add(2*time.Minute)))
+	require.Equal(t, 3, result.EnrichmentRecords)
+}
+
+func TestCompactDisableTombstonesPreservesUnobservedPriors(t *testing.T) {
+	runStartedAt := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	prior := []CurrentObjectRow{
+		{
+			IndexSetID: "idx_test", RelKey: "data/keep.xml", SizeBytes: 10,
+			FirstSeenRunID: "run_old", FirstSeenAt: runStartedAt.Add(-time.Hour),
+			LastChangedRunID: "run_old", LastChangedAt: runStartedAt.Add(-time.Hour),
+			LastSeenRunID: "run_old", LastSeenAt: runStartedAt.Add(-time.Hour),
+		},
+		{
+			IndexSetID: "idx_test", RelKey: "data/enrich.xml", SizeBytes: 20,
+			FirstSeenRunID: "run_old", FirstSeenAt: runStartedAt.Add(-time.Hour),
+			LastChangedRunID: "run_old", LastChangedAt: runStartedAt.Add(-time.Hour),
+			LastSeenRunID: "run_old", LastSeenAt: runStartedAt.Add(-time.Hour),
+		},
+	}
+	contentType := "application/xml"
+	result, err := Compact(CompactionInput{
+		IndexSetID:   "idx_test",
+		RunID:        "run_enrich",
+		RunStartedAt: runStartedAt,
+		PriorRows:    prior,
+		Coverage: []CoverageAttestation{{
+			Scope:    &Scope{Prefix: "data/"},
+			Basis:    CoverageBasisConfirmed,
+			Complete: true,
+		}},
+		Mode: PublicationModeEnrichOnly,
+		Journals: []Journal{journalWithRecords("idx_test", "run_enrich", "jrn_enrich", []ObjectRecord{
+			enrich("jrn_enrich", 1, "data/enrich.xml", runStartedAt.Add(time.Minute), &contentType, nil, nil),
+		})},
+	})
+	require.NoError(t, err)
+	require.Empty(t, result.Tombstones)
+	require.Nil(t, rowsByRelKey(result.Rows)["data/keep.xml"].DeletedAt)
+	require.Equal(t, int64(10), rowsByRelKey(result.Rows)["data/keep.xml"].SizeBytes)
+	require.NotNil(t, rowsByRelKey(result.Rows)["data/enrich.xml"].ContentType)
+	require.Equal(t, contentType, *rowsByRelKey(result.Rows)["data/enrich.xml"].ContentType)
+	require.NotNil(t, rowsByRelKey(result.Rows)["data/enrich.xml"].HeadEnrichedAt)
+	require.Equal(t, 1, result.EnrichmentRecords)
+}
+
+func TestCompactEnrichOnlyRejectsObserveJournal(t *testing.T) {
+	runStartedAt := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	size := int64(10)
+	_, err := Compact(CompactionInput{
+		IndexSetID:   "idx_test",
+		RunID:        "run_enrich",
+		RunStartedAt: runStartedAt,
+		Mode:         PublicationModeEnrichOnly,
+		Journals: []Journal{journalWithRecords("idx_test", "run_enrich", "jrn_mix", []ObjectRecord{
+			observe("jrn_mix", 1, "data/x.xml", runStartedAt, size, nil, `"e"`, nil),
+		})},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "enrich-only")
+}
+
 func TestCompactDoesNotTombstoneWithoutExactConfirmedCoverage(t *testing.T) {
 	runStartedAt := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
 	prior := []CurrentObjectRow{{

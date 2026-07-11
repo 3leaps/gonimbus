@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
@@ -44,8 +45,18 @@ var (
 var indexEnrichWithHeadCmd = &cobra.Command{
 	Use:   "enrich-with-head <index-set-id>",
 	Short: "Enrich indexed objects with HEAD-derived metadata",
-	Args:  validateEnrichHeadArgs,
-	RunE:  runIndexEnrichWithHead,
+	Long: `Enrich local index objects with HEAD-derived archive/restore/content-type fields.
+
+Format-aware:
+  - sqlite-v1 / dual-format with index.db: updates objects_current in place
+  - durable-v2 only: writes an enrich journal and publishes a new snapshot
+    (advances latest.json; prior segments remain immutable; no tombstones of
+    unobserved keys). Durable enrichment is internal-render-only.
+
+--resume skips keys that already have head_enriched_at.
+--resume-run is supported for sqlite runs only today.`,
+	Args: validateEnrichHeadArgs,
+	RunE: runIndexEnrichWithHead,
 }
 
 func init() {
@@ -151,12 +162,44 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 
 	resumeRun, _ := cmd.Flags().GetString("resume-run")
 	resumeRun = strings.TrimSpace(resumeRun)
-	if resumeRun != "" {
-		return runIndexEnrichWithHeadResume(ctx, cmd, args, resumeRun)
+	indexSetArg := ""
+	if len(args) > 0 {
+		indexSetArg = strings.TrimSpace(args[0])
 	}
 
-	indexSetID := strings.TrimSpace(args[0])
-	db, indexSet, err := openIndexDBByID(ctx, indexSetID)
+	// Resolve substrate before --resume-run so durable gets a truthful rejection
+	// instead of silently entering the SQLite checkpoint path.
+	if indexSetArg != "" {
+		reader, resolveErr := openIndexReader(ctx, "", indexSetArg, "")
+		if resolveErr != nil {
+			// Resolver is authoritative for named targets: surface trust/resolution
+			// failures (do not translate durable marker failures into SQLite-not-found).
+			return resolveErr
+		}
+		meta := reader.Meta()
+		_ = reader.Close()
+		switch meta.Format {
+		case indexreader.FormatDurableV2:
+			if resumeRun != "" {
+				return fmt.Errorf("durable enrich-with-head does not support --resume-run yet; use --resume to skip already-enriched keys")
+			}
+			return runIndexEnrichWithHeadDurable(ctx, cmd, meta)
+		case indexreader.FormatSQLiteV1:
+			if resumeRun != "" {
+				return runIndexEnrichWithHeadResume(ctx, cmd, args, resumeRun)
+			}
+			indexSetArg = meta.IndexSetID
+		default:
+			return fmt.Errorf("unsupported index format %q for enrich-with-head", meta.Format)
+		}
+	} else if resumeRun != "" {
+		// Resume by run id only (SQLite checkpoint lookup).
+		return runIndexEnrichWithHeadResume(ctx, cmd, args, resumeRun)
+	} else {
+		return fmt.Errorf("index-set-id is required")
+	}
+
+	db, indexSet, err := openIndexDBByID(ctx, indexSetArg)
 	if err != nil {
 		return err
 	}

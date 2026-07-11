@@ -16,6 +16,9 @@ import (
 var (
 	ErrInvalidCoverage      = errors.New("invalid coverage evidence")
 	ErrSnapshotNotPublished = errors.New("snapshot not published")
+	// ErrStaleParent is returned when ExpectedParent no longer matches the
+	// authoritative latest pointer at advance time (lost CAS race).
+	ErrStaleParent = errors.New("stale parent: latest advanced since capture")
 )
 
 type PublishStep string
@@ -29,6 +32,18 @@ const (
 	PublishStepCompleteWritten   PublishStep = "complete_written"
 	PublishStepLatestAdvanced    PublishStep = "latest_advanced"
 )
+
+// ExpectedParentToken is the CAS token for latest advance. When set, Publish
+// re-reads the authoritative latest immediately before advance and refuses if
+// run_id or manifest digest disagree with this capture.
+type ExpectedParentToken struct {
+	IndexSetID     string
+	RunID          string
+	ManifestSHA256 string
+	// CoverageSHA256 is the digest of the parent's coverage attestation bytes
+	// (canonical JSON). Required for enrich-only; child coverage must match.
+	CoverageSHA256 string
+}
 
 type PublishConfig struct {
 	IndexSetID           string
@@ -44,7 +59,15 @@ type PublishConfig struct {
 	CompletePath         string
 	LatestPath           string
 	TargetRowsPerSegment int
-	AfterStep            func(PublishStep) error
+	// Mode selects compaction/publication policy (default crawl vs enrich-only).
+	Mode PublicationMode
+	// ExpectedParent, when non-nil, enforces latest-pointer CAS at advance.
+	// First publication of a set may leave this nil. Required for enrich-only.
+	ExpectedParent *ExpectedParentToken
+	// WriteLease is required for any latest advance. Must be a held package-owned
+	// *WriteLease (not an external interface). Nil or released leases fail closed.
+	WriteLease *WriteLease
+	AfterStep  func(PublishStep) error
 	// OnSegmentProgress is optional observational segment-write progress
 	// (counts only). Outside persisted artifacts; never a publish failure vector.
 	OnSegmentProgress OnSegmentProgressFunc
@@ -57,6 +80,9 @@ type PublishResult struct {
 	// ManifestSHA256 is the digest of the committed manifest bytes (same value
 	// written into complete.json). Prefer this over re-hashing after publish.
 	ManifestSHA256 string
+	// LatestAdvanced is true after latest.json was successfully written.
+	// Callers must treat this as committed even if a later post-advance hook fails.
+	LatestAdvanced bool
 }
 
 type publishedCompleteDoc struct {
@@ -93,7 +119,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		return result, err
 	}
 
-	if err := validatePublicationCoverage(config.Coverage); err != nil {
+	if err := validatePublicationCoverage(config.Coverage, config.Mode); err != nil {
 		return result, err
 	}
 	if err := runPublishHook(config, PublishStepCoverageValidated); err != nil {
@@ -106,6 +132,7 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		RunStartedAt: config.RunStartedAt,
 		PriorRows:    config.PriorRows,
 		Coverage:     config.Coverage,
+		Mode:         config.Mode,
 	}, config.JournalPaths)
 	if err != nil {
 		return result, err
@@ -163,6 +190,18 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		return result, err
 	}
 
+	if config.WriteLease == nil {
+		return result, fmt.Errorf("write lease is required before latest advance")
+	}
+	// Bind the concrete lease to this publish target: same index set and the
+	// segment-set root that owns latest.json. A held lease for another root/set
+	// must not authorize this advance.
+	if err := config.WriteLease.AssertHeldFor(config.IndexSetID, config.LatestPath); err != nil {
+		return result, fmt.Errorf("write lease at latest advance: %w", err)
+	}
+	if err := assertExpectedParentCAS(config); err != nil {
+		return result, err
+	}
 	latest := publishedLatestDoc{
 		Type:         "gonimbus.index.latest.v1",
 		IndexSetID:   config.IndexSetID,
@@ -173,8 +212,12 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 	if err := writeLatestPointerFile(config.LatestPath, latest); err != nil {
 		return result, fmt.Errorf("advance latest pointer: %w", err)
 	}
+	// Commit boundary: latest is authoritative after a successful write.
+	result.LatestAdvanced = true
 	if err := runPublishHook(config, PublishStepLatestAdvanced); err != nil {
-		return result, err
+		// Post-commit observation failure: return result with LatestAdvanced so
+		// callers do not report published=false after a successful advance.
+		return result, fmt.Errorf("post-latest advance hook: %w", err)
 	}
 	return result, nil
 }
@@ -371,6 +414,12 @@ func normalizePublishConfig(config PublishConfig) PublishConfig {
 }
 
 func validatePublishConfig(config PublishConfig) error {
+	switch config.Mode {
+	case PublicationModeDefault, PublicationModeEnrichOnly:
+		// known modes
+	default:
+		return fmt.Errorf("unknown publication mode %q", config.Mode)
+	}
 	switch {
 	case config.IndexSetID == "":
 		return fmt.Errorf("index_set_id is required")
@@ -388,9 +437,36 @@ func validatePublishConfig(config PublishConfig) error {
 		return fmt.Errorf("complete path is required")
 	case config.LatestPath == "":
 		return fmt.Errorf("latest path is required")
-	default:
-		return nil
 	}
+	if config.Mode == PublicationModeEnrichOnly {
+		if config.ExpectedParent == nil {
+			return fmt.Errorf("enrich-only mode requires ExpectedParent")
+		}
+		if len(config.ParentManifests) != 1 {
+			return fmt.Errorf("enrich-only mode requires exactly one parent manifest reference")
+		}
+		parent := config.ParentManifests[0]
+		exp := config.ExpectedParent
+		if strings.TrimSpace(parent.IndexSetID) != strings.TrimSpace(exp.IndexSetID) ||
+			strings.TrimSpace(parent.RunID) != strings.TrimSpace(exp.RunID) ||
+			strings.TrimSpace(parent.ManifestSHA256) != strings.TrimSpace(exp.ManifestSHA256) {
+			return fmt.Errorf("enrich-only parent manifest reference must equal ExpectedParent token")
+		}
+		if strings.TrimSpace(exp.IndexSetID) != strings.TrimSpace(config.IndexSetID) {
+			return fmt.Errorf("enrich-only ExpectedParent index_set_id must match publish index_set_id")
+		}
+		if strings.TrimSpace(exp.CoverageSHA256) == "" {
+			return fmt.Errorf("enrich-only mode requires ExpectedParent.CoverageSHA256")
+		}
+		got, err := coverageSHA256(config.Coverage)
+		if err != nil {
+			return fmt.Errorf("hash enrich coverage: %w", err)
+		}
+		if got != strings.TrimSpace(exp.CoverageSHA256) {
+			return fmt.Errorf("enrich-only coverage must equal captured parent coverage (digest mismatch)")
+		}
+	}
+	return nil
 }
 
 func validateSealedJournalFiles(config PublishConfig) ([]JournalSummary, error) {
@@ -411,7 +487,16 @@ func validateSealedJournalFiles(config PublishConfig) ([]JournalSummary, error) 
 	return summaries, nil
 }
 
-func validatePublicationCoverage(coverage []CoverageAttestation) error {
+func validatePublicationCoverage(coverage []CoverageAttestation, mode PublicationMode) error {
+	if mode == PublicationModeEnrichOnly {
+		// Enrich-only inherits parent coverage as-is and must not invent
+		// observation evidence. Empty inherited coverage is fail-closed:
+		// enrichment cannot claim a crawl that never attested coverage.
+		if len(coverage) == 0 {
+			return fmt.Errorf("%w: enrich-only publish requires inherited parent coverage (refusing empty coverage fabrication)", ErrInvalidCoverage)
+		}
+		return nil
+	}
 	if len(coverage) == 0 {
 		return fmt.Errorf("%w: at least one confirmed complete scope is required", ErrInvalidCoverage)
 	}
@@ -427,6 +512,82 @@ func validatePublicationCoverage(coverage []CoverageAttestation) error {
 		}
 	}
 	return nil
+}
+
+// assertExpectedParentCAS re-reads authoritative latest and refuses advance when
+// the captured parent token is stale. When ExpectedParent is nil (first
+// publication), latest must still be absent at advance time.
+func assertExpectedParentCAS(config PublishConfig) error {
+	if config.ExpectedParent == nil {
+		// Expected-absent CAS: a concurrent first publisher must not overwrite.
+		_, err := OpenLatestPublishedSnapshotBounded(config.LatestPath, DefaultMaxPublishedMarkerBytes, DefaultMaxPublishedManifestBytes)
+		if err == nil {
+			return fmt.Errorf("%w: latest appeared before first-publish advance", ErrStaleParent)
+		}
+		if errors.Is(err, ErrSnapshotNotPublished) {
+			return nil
+		}
+		return fmt.Errorf("re-read latest for absent-parent CAS: %w", err)
+	}
+	expected := *config.ExpectedParent
+	expected.IndexSetID = strings.TrimSpace(expected.IndexSetID)
+	expected.RunID = strings.TrimSpace(expected.RunID)
+	expected.ManifestSHA256 = strings.TrimSpace(expected.ManifestSHA256)
+	expected.CoverageSHA256 = strings.TrimSpace(expected.CoverageSHA256)
+	if expected.IndexSetID == "" || expected.RunID == "" || expected.ManifestSHA256 == "" {
+		return fmt.Errorf("%w: expected parent token is incomplete", ErrStaleParent)
+	}
+	current, err := OpenLatestPublishedSnapshotBounded(config.LatestPath, DefaultMaxPublishedMarkerBytes, DefaultMaxPublishedManifestBytes)
+	if err != nil {
+		if errors.Is(err, ErrSnapshotNotPublished) {
+			return fmt.Errorf("%w: latest missing at advance (expected parent %s)", ErrStaleParent, expected.RunID)
+		}
+		return fmt.Errorf("re-read latest for parent CAS: %w", err)
+	}
+	if current.Complete.IndexSetID != expected.IndexSetID ||
+		current.Complete.RunID != expected.RunID ||
+		current.Complete.ManifestSHA256 != expected.ManifestSHA256 {
+		return fmt.Errorf("%w: expected %s/%s@%s, found %s/%s@%s",
+			ErrStaleParent,
+			expected.IndexSetID, expected.RunID, shortDigest(expected.ManifestSHA256),
+			current.Complete.IndexSetID, current.Complete.RunID, shortDigest(current.Complete.ManifestSHA256),
+		)
+	}
+	// Bind coverage to the live verified parent, not a caller-supplied digest alone.
+	// Required when token carries CoverageSHA256 (enrich-only always does).
+	if expected.CoverageSHA256 != "" {
+		liveCov, covErr := coverageSHA256(current.Manifest.Coverage)
+		if covErr != nil {
+			return fmt.Errorf("hash live parent coverage for CAS: %w", covErr)
+		}
+		if liveCov != expected.CoverageSHA256 {
+			return fmt.Errorf("%w: parent coverage digest mismatch (token does not match live parent)", ErrStaleParent)
+		}
+	}
+	return nil
+}
+
+func shortDigest(d string) string {
+	d = strings.TrimSpace(d)
+	if len(d) <= 12 {
+		return d
+	}
+	return d[:12]
+}
+
+// CoverageSHA256 digests coverage attestations with stable JSON encoding.
+func CoverageSHA256(coverage []CoverageAttestation) (string, error) {
+	return coverageSHA256(coverage)
+}
+
+func coverageSHA256(coverage []CoverageAttestation) (string, error) {
+	// Canonical: marshaled JSON of the slice (field order from struct tags).
+	data, err := json.Marshal(coverage)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func publishableCoverageScope(scope *Scope) bool {
@@ -516,9 +677,37 @@ func validatePublishedManifest(complete publishedCompleteDoc, manifest InternalM
 		return fmt.Errorf("manifest schema version mismatch")
 	case len(manifest.Segments) != complete.Segments:
 		return fmt.Errorf("manifest segment count mismatch")
-	default:
-		return nil
 	}
+	if err := validateManifestCountBudget(manifest, -1); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateManifestCountBudget ensures nonnegative counts, checked segment sum
+// equals manifest.Counts.Rows, and optional maxRows cap. maxRows < 0 means no cap.
+func validateManifestCountBudget(manifest InternalManifest, maxRows int) error {
+	if manifest.Counts.Rows < 0 || manifest.Counts.ActiveRows < 0 || manifest.Counts.Tombstones < 0 {
+		return fmt.Errorf("manifest counts must be non-negative")
+	}
+	var sum int64
+	for i, seg := range manifest.Segments {
+		if seg.Rows < 0 {
+			return fmt.Errorf("segment %d rows must be non-negative", i)
+		}
+		next := sum + int64(seg.Rows)
+		if next < sum {
+			return fmt.Errorf("segment row sum overflow")
+		}
+		sum = next
+	}
+	if sum != int64(manifest.Counts.Rows) {
+		return fmt.Errorf("manifest counts.rows %d does not equal segment descriptor sum %d", manifest.Counts.Rows, sum)
+	}
+	if maxRows >= 0 && manifest.Counts.Rows > maxRows {
+		return fmt.Errorf("manifest counts.rows %d exceeds limit %d", manifest.Counts.Rows, maxRows)
+	}
+	return nil
 }
 
 func writeJSONImmutableOrEqual(path string, value any) error {

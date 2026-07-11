@@ -147,8 +147,10 @@ Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
 **Durable is now the default index format** (`index build` publishes durable-v2
-segments + manifest unless you pass `--format sqlite` or `--format both`). Local
-query/enrich-head/stats/list/gc still need SQLite (`index.db`) today. See
+segments + manifest unless you pass `--format sqlite` or `--format both`).
+Format-aware local consumers include `query`, `list`, `stats`, `doctor`, and
+`enrich-with-head`. SQLite remains required for `gc`, `query --since-run`,
+`stats --prefixes`, and full `--resume-run` checkpoint recovery. See
 [Durable Index Format](docs/user-guide/durable-index.md) and
 [docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the operator map and
 release notes.
@@ -191,13 +193,13 @@ gonimbus index build --job <path> --format sqlite  # SQLite compatibility path
 gonimbus index build --job <path> --format both    # Dual-format + LIST parity report
 gonimbus index build --since auto --job <path>  # Incremental top-up (narrows date-partitioned re-listing)
 gonimbus index build --background --job <path>  # Background build with job tracking
-gonimbus index query <uri>     # Query indexed objects by pattern/storage class (SQLite-bound today)
-gonimbus index query <uri> --since-run <run_id>  # Emit current objects added/changed since a run
-gonimbus index enrich-with-head <index-set-id>  # Cache HEAD-derived archive/restore metadata
+gonimbus index query <uri>     # Query indexed objects (format-aware: durable or SQLite)
+gonimbus index query <uri> --since-run <run_id>  # Since-run delta (SQLite-only today)
+gonimbus index enrich-with-head <index-set-id>  # HEAD enrich (format-aware: durable or SQLite)
 gonimbus index compare durable-delta  # Temporal delta between two durable snapshots
-gonimbus index list            # List local indexes (SQLite-bound: needs index.db)
-gonimbus index stats           # Show index statistics and resumable run state
-gonimbus index doctor          # Validate index integrity
+gonimbus index list            # List local indexes (format-aware)
+gonimbus index stats           # Show index statistics (format-aware; some flags SQLite-only)
+gonimbus index doctor          # Validate index integrity (format-aware)
 gonimbus index gc              # Clean up old indexes (SQLite-bound: needs index.db)
 gonimbus index export          # Export an index run to a hub (auto prefers durable)
 gonimbus index hydrate         # Download an index run from a hub (format-aware)

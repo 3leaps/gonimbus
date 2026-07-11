@@ -39,8 +39,10 @@ scopes over the same `base_uri` produce distinct full `index_set_id` values.
 Automation that chains `index build` into `index export` or `index query` must
 pass the **exact** full `index_set_id` and `run_id` from the just-built
 artifact—do not rediscover the set from `index list` ordering or base-URI
-heuristics. Today `index list` enumerates SQLite `index.db` entries only; a
-durable-only sibling can be invisible next to a prior `both` set.
+heuristics. `index list` is format-aware (durable and SQLite), but multiple
+scopes or runs over the same base URI can still make rediscovery ambiguous;
+receipt-pinned `--index-set` / `--run-id` selection remains required for
+automation handoff.
 
 Use `index build --json` for a machine-stable `gonimbus.index.build_result.v1`
 receipt (success status, requested/committed formats, full set/run/scope
