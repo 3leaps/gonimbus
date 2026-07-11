@@ -109,7 +109,7 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 }
 
 func renameJobDirectoryForWindowsTest(root, jobID, target string) error {
-	rootHandle, err := openDirectoryHandleNoFollow(root, false)
+	rootHandle, err := openDirectoryHandleNoFollow(root, true)
 	if err != nil {
 		return err
 	}

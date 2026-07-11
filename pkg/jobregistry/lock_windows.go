@@ -139,7 +139,9 @@ func openRelativeHandleNoFollow(parent windows.Handle, name string, flags int, d
 			access |= fileAddFileAccess | fileAddSubdirectoryAccess | fileDeleteChildAccess | windows.FILE_WRITE_ATTRIBUTES
 		}
 	} else if writable {
-		access = windows.FILE_GENERIC_WRITE | windows.SYNCHRONIZE
+		// FILE_READ_ATTRIBUTES is required by the mandatory handle inspection
+		// after a write-only open; FILE_GENERIC_WRITE does not include it.
+		access = windows.FILE_GENERIC_WRITE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
 		if flags&os.O_RDWR != 0 {
 			access |= windows.FILE_GENERIC_READ
 		}
