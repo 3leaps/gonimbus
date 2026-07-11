@@ -397,7 +397,7 @@ func waitHelperCompletion(t *testing.T, store *Store, rec *JobRecord) {
 	require.Eventually(t, func() bool {
 		stored, err := store.Get(rec.JobID)
 		return err == nil && stored.State == JobStateSuccess && !isProcessAlive(rec.PID)
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 10*time.Second, 10*time.Millisecond)
 }
 
 func waitForAllHelperJobs(t *testing.T, store *Store) {

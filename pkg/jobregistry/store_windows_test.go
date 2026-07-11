@@ -51,11 +51,12 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 	})
 
 	boundaries := []struct {
-		name    string
-		install func(func())
+		name                  string
+		install               func(func())
+		expectOpenChildDenial bool
 	}{
 		{name: "swap before temp create", install: func(hook func()) { afterJobDirBoundBeforeTempCreate = hook }},
-		{name: "swap before atomic replace", install: func(hook func()) { afterRecordTempCreateBeforeReplace = hook }},
+		{name: "swap before atomic replace", install: func(hook func()) { afterRecordTempCreateBeforeReplace = hook }, expectOpenChildDenial: true},
 	}
 	for _, boundary := range boundaries {
 		t.Run(boundary.name, func(t *testing.T) {
@@ -73,10 +74,12 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 			}
 			var swapErr error
 			var junctionOutput []byte
+			renamed := false
 			hook := func() {
 				if swapErr = renameJobDirectoryForWindowsTest(store.RootDir(), testJobID1, filepath.Base(parked)); swapErr != nil {
 					return
 				}
+				renamed = true
 				junctionOutput, swapErr = exec.Command("cmd.exe", "/c", "mklink", "/J", jobDir, outside).CombinedOutput()
 			}
 			oldTempHook := afterJobDirBoundBeforeTempCreate
@@ -85,16 +88,32 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 			defer func() {
 				afterJobDirBoundBeforeTempCreate = oldTempHook
 				afterRecordTempCreateBeforeReplace = oldReplaceHook
-				_ = os.Remove(jobDir)
-				_ = os.Rename(parked, jobDir)
+				if renamed {
+					_ = os.Remove(jobDir)
+					_ = os.Rename(parked, jobDir)
+				}
 			}()
 			rec.Name = "after"
 			err := store.Write(rec)
-			if swapErr != nil {
-				t.Fatalf("create forced junction swap: %v (%s)", swapErr, junctionOutput)
-			}
-			if err == nil {
-				t.Fatal("expected changed UUID directory binding rejection")
+			if boundary.expectOpenChildDenial {
+				status, ok := swapErr.(windows.NTStatus)
+				if !ok || status != windows.STATUS_ACCESS_DENIED {
+					t.Fatalf("rename with open temp child error = %v, want STATUS_ACCESS_DENIED", swapErr)
+				}
+				if err != nil {
+					t.Fatalf("safe write after denied directory swap: %v", err)
+				}
+				got, getErr := store.Get(testJobID1)
+				if getErr != nil || got.Name != "after" {
+					t.Fatalf("record after denied swap = %#v, err=%v", got, getErr)
+				}
+			} else {
+				if swapErr != nil {
+					t.Fatalf("create forced junction swap: %v (%s)", swapErr, junctionOutput)
+				}
+				if err == nil {
+					t.Fatal("expected changed UUID directory binding rejection")
+				}
 			}
 			outsideBytes, readErr := os.ReadFile(outsideRecord)
 			if readErr != nil || string(outsideBytes) != "outside-marker" {
