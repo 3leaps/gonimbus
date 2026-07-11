@@ -545,11 +545,17 @@ gonimbus index build --background --job index-manifest.yaml
 # With a human-friendly name
 gonimbus index build --background --job index-manifest.yaml --name nightly-sweep
 
-# Prevent duplicate running jobs for the same manifest
+# Prevent duplicate running jobs for the same effective invocation
 gonimbus index build --background --job index-manifest.yaml --dedupe
 ```
 
-The `--background` flag spawns a managed child process and returns immediately with a job ID.
+The `--background` flag supports `--format sqlite`, `--format durable`, and
+`--format both`. It spawns a managed child process and returns immediately with
+a job ID. The child verifies a versioned effective invocation and the exact
+manifest content accepted by the parent before building. `--dedupe` collapses
+only active jobs with the same effective format, manifest digest, incremental
+input, identity overrides, and other behavior-affecting options; changing any
+of those inputs starts a distinct job.
 
 ### Local Control Plane API
 

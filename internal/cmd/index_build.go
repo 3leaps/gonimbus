@@ -32,6 +32,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/scope"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -82,7 +83,37 @@ Machine handoff: --json emits a post-commit gonimbus.index.build_result.v1
 receipt on stdout (exact index_set_id + run_id + scope_hash + formats). Do not
 rediscover the just-built set from index list. --json is rejected with
 --background (the immediate job id is not a committed receipt).`,
-	RunE: runIndexBuild,
+	RunE: runIndexBuildCommand,
+}
+
+func runIndexBuildCommand(cmd *cobra.Command, args []string) error {
+	err := runIndexBuild(cmd, args)
+	if err == nil || strings.TrimSpace(indexBuildManagedJobID) == "" {
+		return err
+	}
+	persistManagedIndexBuildFailure(strings.TrimSpace(indexBuildManagedJobID))
+	return sanitizeManagedIndexBuildError(err)
+}
+
+func persistManagedIndexBuildFailure(jobID string) {
+	jobsRoot, err := indexJobsRootDir()
+	if err != nil {
+		return
+	}
+	store := jobregistry.NewStore(jobsRoot)
+	rec, err := store.Get(jobID)
+	if err != nil || (rec.State != jobregistry.JobStateQueued && rec.State != jobregistry.JobStateRunning) {
+		return
+	}
+	now := time.Now().UTC()
+	rec.State = jobregistry.JobStateFailed
+	rec.EndedAt = &now
+	rec.LastHeartbeat = &now
+	_ = store.Write(rec)
+}
+
+func sanitizeManagedIndexBuildError(err error) error {
+	return fmt.Errorf("managed index build failed: %s", reflow.SanitizeOperationCauseMessage(err))
 }
 
 // Index build flags.
@@ -210,7 +241,15 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		exec := jobregistry.NewExecutor(execRoot)
-		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName), jobregistry.BackgroundOptions{Dedupe: indexBuildDedupe, Since: strings.TrimSpace(indexBuildSince)})
+		invocation, err := resolvedCurrentIndexBuildInvocation()
+		if err != nil {
+			return err
+		}
+		job, err := exec.StartIndexBuildBackground(indexBuildJobPath, strings.TrimSpace(indexBuildName), jobregistry.BackgroundOptions{
+			Dedupe:     indexBuildDedupe,
+			Since:      strings.TrimSpace(indexBuildSince),
+			Invocation: &invocation,
+		})
 		if err != nil {
 			return err
 		}
@@ -220,6 +259,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 
 	var store *jobregistry.Store
 	var job *jobregistry.JobRecord
+	var loadedManagedManifest *manifest.IndexManifest
 
 	if !indexBuildDryRun {
 		jobsRoot, err := indexJobsRootDir()
@@ -233,51 +273,62 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("resolve manifest path: %w", err)
 		}
 
-		now := time.Now().UTC()
-		jobID := uuid.New().String()
-		if strings.TrimSpace(indexBuildManagedJobID) != "" {
-			jobID = strings.TrimSpace(indexBuildManagedJobID)
-		}
-		job = &jobregistry.JobRecord{
-			JobID:        jobID,
-			Type:         jobregistry.JobTypeIndexBuild,
-			Name:         strings.TrimSpace(indexBuildName),
-			State:        jobregistry.JobStateRunning,
-			ManifestPath: absManifestPath,
-			StdoutPath:   filepath.Join(store.JobDir(jobID), "stdout.log"),
-			StderrPath:   filepath.Join(store.JobDir(jobID), "stderr.log"),
-			CreatedAt:    now,
-			StartedAt:    &now,
+		managedJobID := strings.TrimSpace(indexBuildManagedJobID)
+		if managedJobID != "" {
+			job, loadedManagedManifest, err = claimManagedIndexBuildJob(store, managedJobID)
+			if err != nil {
+				return err
+			}
+		} else {
+			now := time.Now().UTC()
+			jobID := uuid.New().String()
+			job = &jobregistry.JobRecord{
+				JobID:        jobID,
+				Type:         jobregistry.JobTypeIndexBuild,
+				Name:         strings.TrimSpace(indexBuildName),
+				State:        jobregistry.JobStateRunning,
+				ManifestPath: absManifestPath,
+				StdoutPath:   filepath.Join(store.JobDir(jobID), "stdout.log"),
+				StderrPath:   filepath.Join(store.JobDir(jobID), "stderr.log"),
+				CreatedAt:    now,
+				StartedAt:    &now,
+			}
 		}
 
 		// In managed mode, stdout/stderr are redirected by the parent.
 		// In foreground mode, we don't capture logs yet, but we still expose
 		// the expected paths for consistency.
-		if strings.TrimSpace(indexBuildManagedJobID) == "" {
-			_ = mkdirAppDataDir(store.JobDir(jobID))
-			if f, err := os.OpenFile(job.StdoutPath, os.O_CREATE, 0o600); err == nil {
+		if managedJobID == "" {
+			_ = mkdirAppDataDir(store.JobDir(job.JobID))
+			if f, err := store.OpenLog(job.JobID, "stdout.log", false); err == nil {
 				_ = f.Close()
 			}
-			if f, err := os.OpenFile(job.StderrPath, os.O_CREATE, 0o600); err == nil {
+			if f, err := store.OpenLog(job.JobID, "stderr.log", false); err == nil {
 				_ = f.Close()
 			}
 		}
 
-		if err := store.Write(job); err != nil {
-			return fmt.Errorf("write job record: %w", err)
+		if managedJobID == "" {
+			if err := store.Write(job); err != nil {
+				return fmt.Errorf("write job record: %w", err)
+			}
 		}
 	}
 
 	// Load and validate manifest
-	m, err := manifest.LoadIndexManifest(indexBuildJobPath)
-	if err != nil {
+	m := loadedManagedManifest
+	var manifestLoadErr error
+	if m == nil {
+		m, manifestLoadErr = manifest.LoadIndexManifest(indexBuildJobPath)
+	}
+	if manifestLoadErr != nil {
 		if store != nil && job != nil {
 			job.State = jobregistry.JobStateFailed
 			ended := time.Now().UTC()
 			job.EndedAt = &ended
 			_ = store.Write(job)
 		}
-		return fmt.Errorf("load index manifest: %w", err)
+		return fmt.Errorf("load index manifest: %w", manifestLoadErr)
 
 	}
 
@@ -355,15 +406,19 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			}
 			return err
 		}
+		receipt := newDurableBuildResultRecord(summary, scopeHash, "durable", []string{"durable-v2"})
 		if store != nil && job != nil {
 			job.IndexDir = identityDir
 			job.IndexSetID = summary.IndexSetID
 			job.RunID = summary.RunID
+			job.Receipt = jobBuildReceiptIdentity(receipt)
 			job.PID = os.Getpid()
 			job.State = jobregistry.JobStateSuccess
 			ended := time.Now().UTC()
 			job.EndedAt = &ended
-			_ = store.Write(job)
+			if err := persistCommittedIndexBuildJob(store, job); err != nil {
+				return err
+			}
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "\nIndex build completed\n")
 		_, _ = fmt.Fprintf(os.Stderr, "  format: durable\n")
@@ -372,8 +427,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_observed: %d\n", summary.ObjectsObserved)
 		_, _ = fmt.Fprintf(os.Stderr, "  segments: %d\n", len(summary.Manifest.Segments))
 		if indexBuildJSON {
-			rec := newDurableBuildResultRecord(summary, scopeHash, "durable", []string{"durable-v2"})
-			if err := emitIndexBuildResultJSON(cmd.OutOrStdout(), rec); err != nil {
+			if err := emitIndexBuildResultJSON(cmd.OutOrStdout(), receipt); err != nil {
 				return err
 			}
 		}
@@ -583,6 +637,21 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stderr, "  objects_ingested: %d\n", result.ObjectsIngested)
 	_, _ = fmt.Fprintf(os.Stderr, "  prefixes_ingested: %d\n", result.PrefixesIngested)
 
+	if compareReport != nil && !compareReport.ParityPassed {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
+		return fmt.Errorf("index format parity failed")
+	}
+
+	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested)
+	if receiptErr != nil {
+		return receiptErr
+	}
+
 	// Persist job completion.
 	if store != nil && job != nil {
 		switch result.FinalStatus {
@@ -595,7 +664,16 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		}
 		ended := time.Now().UTC()
 		job.EndedAt = &ended
-		_ = store.Write(job)
+		if receiptOK {
+			job.Receipt = jobBuildReceiptIdentity(terminalReceipt)
+		}
+		if receiptOK {
+			if err := persistCommittedIndexBuildJob(store, job); err != nil {
+				return err
+			}
+		} else {
+			_ = store.Write(job)
+		}
 	}
 	if result.ObjectsDeleted > 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "  objects_soft_deleted: %d\n", result.ObjectsDeleted)
@@ -616,17 +694,15 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if compareReport != nil && !compareReport.ParityPassed {
-		return fmt.Errorf("index format parity failed")
-	}
-
 	// Terminal receipt after commit. Success is authoritative for consumers that
 	// require status=success. SQLite partial also emits an explicit non-authoritative
 	// terminal record so automation never sees exit 0 with empty stdout under --json.
 	// Fatal failure returns nonzero and emits no receipt.
 	if indexBuildJSON {
-		if err := emitCommittedIndexBuildJSON(cmd.OutOrStdout(), selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested); err != nil {
-			return err
+		if receiptOK {
+			if err := emitIndexBuildResultJSON(cmd.OutOrStdout(), terminalReceipt); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -645,15 +721,30 @@ func emitCommittedIndexBuildJSON(
 	indexSetID, runID, scopeHash string,
 	objectsIngested int64,
 ) error {
+	rec, ok, err := committedIndexBuildResultRecord(format, finalStatus, bothSummary, bothSummaryOK, indexSetID, runID, scopeHash, objectsIngested)
+	if err != nil || !ok {
+		return err
+	}
+	return emitIndexBuildResultJSON(w, rec)
+}
+
+func committedIndexBuildResultRecord(
+	format string,
+	finalStatus indexstore.RunStatus,
+	bothSummary indexbuild.Summary,
+	bothSummaryOK bool,
+	indexSetID, runID, scopeHash string,
+	objectsIngested int64,
+) (indexBuildResultRecord, bool, error) {
 	switch format {
 	case "both":
 		if finalStatus != indexstore.RunStatusSuccess {
-			return nil
+			return indexBuildResultRecord{}, false, nil
 		}
 		if !bothSummaryOK {
-			return fmt.Errorf("build result: both-format summary missing after success")
+			return indexBuildResultRecord{}, false, fmt.Errorf("build result: both-format summary missing after success")
 		}
-		return emitIndexBuildResultJSON(w, newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested))
+		return newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested), true, nil
 	case "sqlite":
 		switch finalStatus {
 		case indexstore.RunStatusSuccess, indexstore.RunStatusPartial:
@@ -661,12 +752,12 @@ func emitCommittedIndexBuildJSON(
 			if finalStatus == indexstore.RunStatusPartial {
 				status = "partial"
 			}
-			return emitIndexBuildResultJSON(w, newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status, objectsIngested))
+			return newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status, objectsIngested), true, nil
 		default:
-			return nil
+			return indexBuildResultRecord{}, false, nil
 		}
 	default:
-		return nil
+		return indexBuildResultRecord{}, false, nil
 	}
 }
 

@@ -133,9 +133,10 @@ prefix must be attested, with no silent roll-up. That is what makes a
 date-partitioned cohort safe to dual-build at scale.
 
 Some dual-format combinations remain intentionally closed in this cut (for
-example `--format both` with `--since`, `--background`, or non-default match
-filters). Prefer a representative scoped dual-format job for parity, then
-return to your production cadence flags on single-format builds.
+example `--format both` with `--since` or non-default match filters).
+Background execution is supported for `sqlite`, `durable`, and `both`; the
+managed child verifies the exact effective invocation and manifest content
+selected by its parent before building.
 
 ## Temporal durable compare
 

@@ -242,7 +242,11 @@ func serveServerOptions(ctx context.Context, host string) (server.Options, error
 	if err != nil {
 		return server.Options{}, errwrap.WrapInternal(ctx, err, "resolve jobs root")
 	}
-	return server.Options{JobsRoot: jobsRoot}, nil
+	invocation, err := resolvedCurrentIndexBuildInvocation()
+	if err != nil {
+		return server.Options{}, errwrap.WrapInternal(ctx, err, "resolve job runner invocation")
+	}
+	return server.Options{JobsRoot: jobsRoot, JobsInvocation: &invocation}, nil
 }
 
 func isLoopbackServeHost(host string) bool {

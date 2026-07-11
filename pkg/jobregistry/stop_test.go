@@ -12,7 +12,7 @@ import (
 func TestStoreStopRejectsNonRunningJob(t *testing.T) {
 	store := NewStore(t.TempDir())
 	rec := &JobRecord{
-		JobID:     "job-1",
+		JobID:     testJobID1,
 		Type:      JobTypeIndexBuild,
 		State:     JobStateSuccess,
 		PID:       12345,
@@ -20,7 +20,7 @@ func TestStoreStopRejectsNonRunningJob(t *testing.T) {
 	}
 	require.NoError(t, store.Write(rec))
 
-	_, err := store.Stop("job-1", StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
+	_, err := store.Stop(testJobID1, StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
 
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrJobNotRunning))
@@ -29,7 +29,7 @@ func TestStoreStopRejectsNonRunningJob(t *testing.T) {
 func TestStoreStopRejectsStoppingJob(t *testing.T) {
 	store := NewStore(t.TempDir())
 	rec := &JobRecord{
-		JobID:     "job-1",
+		JobID:     testJobID1,
 		Type:      JobTypeIndexBuild,
 		State:     JobStateStopping,
 		PID:       12345,
@@ -37,7 +37,7 @@ func TestStoreStopRejectsStoppingJob(t *testing.T) {
 	}
 	require.NoError(t, store.Write(rec))
 
-	_, err := store.Stop("job-1", StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
+	_, err := store.Stop(testJobID1, StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
 
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrJobNotRunning))
@@ -46,14 +46,14 @@ func TestStoreStopRejectsStoppingJob(t *testing.T) {
 func TestStoreStopRejectsMissingPID(t *testing.T) {
 	store := NewStore(t.TempDir())
 	rec := &JobRecord{
-		JobID:     "job-1",
+		JobID:     testJobID1,
 		Type:      JobTypeIndexBuild,
 		State:     JobStateRunning,
 		CreatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.Write(rec))
 
-	_, err := store.Stop("job-1", StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
+	_, err := store.Stop(testJobID1, StopOptions{Signal: "term", WaitTimeout: time.Millisecond})
 
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrJobNoPID))
@@ -75,7 +75,7 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 
 	store := NewStore(t.TempDir())
 	rec := &JobRecord{
-		JobID:     "job-1",
+		JobID:     testJobID1,
 		Type:      JobTypeIndexBuild,
 		State:     JobStateRunning,
 		PID:       cmd.Process.Pid,
@@ -83,10 +83,10 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 	}
 	require.NoError(t, store.Write(rec))
 
-	result, err := store.Stop("job-1", StopOptions{Signal: "kill", WaitTimeout: time.Millisecond})
+	result, err := store.Stop(testJobID1, StopOptions{Signal: "kill", WaitTimeout: time.Millisecond})
 
 	require.NoError(t, err)
-	require.Equal(t, "job-1", result.JobID)
+	require.Equal(t, testJobID1, result.JobID)
 	require.Equal(t, "kill", result.Signal)
 	require.True(t, result.ForcedKill)
 	require.Equal(t, string(JobStateStopped), result.State)
@@ -97,7 +97,7 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 		t.Fatal("process did not exit after kill")
 	}
 
-	stored, err := store.Get("job-1")
+	stored, err := store.Get(testJobID1)
 	require.NoError(t, err)
 	require.Equal(t, JobStateStopped, stored.State)
 	require.NotNil(t, stored.EndedAt)
@@ -106,7 +106,7 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 func TestStoreStopRejectsInvalidSignal(t *testing.T) {
 	store := NewStore(t.TempDir())
 	rec := &JobRecord{
-		JobID:     "job-1",
+		JobID:     testJobID1,
 		Type:      JobTypeIndexBuild,
 		State:     JobStateRunning,
 		PID:       12345,
@@ -114,7 +114,7 @@ func TestStoreStopRejectsInvalidSignal(t *testing.T) {
 	}
 	require.NoError(t, store.Write(rec))
 
-	_, err := store.Stop("job-1", StopOptions{Signal: "hup", WaitTimeout: time.Millisecond})
+	_, err := store.Stop(testJobID1, StopOptions{Signal: "hup", WaitTimeout: time.Millisecond})
 
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrInvalidSignal))

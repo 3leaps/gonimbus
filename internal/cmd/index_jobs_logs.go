@@ -57,61 +57,46 @@ func runIndexJobsLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	stdoutPath := rec.StdoutPath
-	stderrPath := rec.StderrPath
-	if stdoutPath == "" {
-		stdoutPath = filepath.Join(store.JobDir(rec.JobID), "stdout.log")
-	}
-	if stderrPath == "" {
-		stderrPath = filepath.Join(store.JobDir(rec.JobID), "stderr.log")
-	}
-
 	switch stream {
 	case "stdout":
-		if jsonOutput {
-			return printLogJSONL(rec.JobID, "stdout", stdoutPath, tailN, follow)
-		}
-		if follow {
-			return followLog(stdoutPath)
-		}
-		return printLogTail(stdoutPath, tailN)
+		return renderJobLog(store, rec, "stdout", tailN, follow, jsonOutput)
 	case "stderr":
-		if jsonOutput {
-			return printLogJSONL(rec.JobID, "stderr", stderrPath, tailN, follow)
-		}
-		if follow {
-			return followLog(stderrPath)
-		}
-		return printLogTail(stderrPath, tailN)
+		return renderJobLog(store, rec, "stderr", tailN, follow, jsonOutput)
 	case "both":
-		if jsonOutput {
-			if err := printLogJSONL(rec.JobID, "stdout", stdoutPath, tailN, follow); err != nil {
-				return err
-			}
-			return printLogJSONL(rec.JobID, "stderr", stderrPath, tailN, follow)
-		}
-		if follow {
-			if err := followLog(stdoutPath); err != nil {
-				return err
-			}
-			return followLog(stderrPath)
-		}
-		if err := printLogTail(stdoutPath, tailN); err != nil {
+		if err := renderJobLog(store, rec, "stdout", tailN, follow, jsonOutput); err != nil {
 			return err
 		}
-		return printLogTail(stderrPath, tailN)
+		return renderJobLog(store, rec, "stderr", tailN, follow, jsonOutput)
 	default:
 		return fmt.Errorf("invalid --stream %q (expected stdout, stderr, or both)", stream)
 	}
 }
 
-func printLogTail(path string, tailN int) error {
-	f, err := os.Open(path)
+func renderJobLog(store *jobregistry.Store, rec *jobregistry.JobRecord, stream string, tailN int, follow, jsonOutput bool) error {
+	name := stream + ".log"
+	expected := filepath.Join(store.JobDir(rec.JobID), name)
+	persisted := rec.StdoutPath
+	if stream == "stderr" {
+		persisted = rec.StderrPath
+	}
+	if persisted != "" && filepath.Clean(persisted) != filepath.Clean(expected) {
+		return fmt.Errorf("job record %s log path does not match registry path", stream)
+	}
+	f, err := store.OpenLogRead(rec.JobID, name)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+	if jsonOutput {
+		return printLogJSONL(rec.JobID, stream, f, tailN, follow)
+	}
+	if follow {
+		return followLog(f)
+	}
+	return printLogTail(f, tailN)
+}
 
+func printLogTail(f *os.File, tailN int) error {
 	if tailN <= 0 {
 		_, err := io.Copy(os.Stdout, f)
 		return err
@@ -150,13 +135,7 @@ func tailLines(r io.Reader, n int) ([]string, error) {
 	return buf, nil
 }
 
-func printLogJSONL(jobID, stream, path string, tailN int, follow bool) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
+func printLogJSONL(jobID, stream string, f *os.File, tailN int, follow bool) error {
 	enc := json.NewEncoder(os.Stdout)
 
 	if tailN > 0 {
@@ -208,13 +187,7 @@ func printLogJSONL(jobID, stream, path string, tailN int, follow bool) error {
 	}
 }
 
-func followLog(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
+func followLog(f *os.File) error {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		_, _ = fmt.Fprintln(os.Stdout, scanner.Text())
