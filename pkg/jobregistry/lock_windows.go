@@ -13,6 +13,7 @@ import (
 
 const (
 	// Directory-specific aliases from WinNT.h are not exported by x/sys.
+	fileAddFileAccess         = 0x00000002
 	fileAddSubdirectoryAccess = 0x00000004
 	fileDeleteChildAccess     = 0x00000040
 )
@@ -127,8 +128,17 @@ func openRelativeHandleNoFollow(parent windows.Handle, name string, flags int, d
 		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
 	}
 	attrs.Length = uint32(unsafe.Sizeof(*attrs))
+	writable := flags&(os.O_WRONLY|os.O_RDWR) != 0
 	access := uint32(windows.FILE_GENERIC_READ | windows.SYNCHRONIZE)
-	if flags&(os.O_WRONLY|os.O_RDWR) != 0 {
+	if directory {
+		// Directory handles require directory-specific rights. FILE_GENERIC_WRITE
+		// includes data-file rights that are invalid for directories and can make
+		// subsequent handle-relative child creation fail with access denied.
+		access = windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+		if writable {
+			access |= fileAddFileAccess | fileAddSubdirectoryAccess | fileDeleteChildAccess | windows.FILE_WRITE_ATTRIBUTES
+		}
+	} else if writable {
 		access = windows.FILE_GENERIC_WRITE | windows.SYNCHRONIZE
 		if flags&os.O_RDWR != 0 {
 			access |= windows.FILE_GENERIC_READ
@@ -136,9 +146,6 @@ func openRelativeHandleNoFollow(parent windows.Handle, name string, flags int, d
 	}
 	if deleteAccess {
 		access |= windows.DELETE
-	}
-	if directory && flags&(os.O_WRONLY|os.O_RDWR) != 0 {
-		access |= fileDeleteChildAccess
 	}
 	disposition := uint32(windows.FILE_OPEN)
 	switch {

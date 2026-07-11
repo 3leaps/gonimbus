@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsNativeRegistryMutation(t *testing.T) {
@@ -72,7 +74,7 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 			var swapErr error
 			var junctionOutput []byte
 			hook := func() {
-				if swapErr = os.Rename(jobDir, parked); swapErr != nil {
+				if swapErr = renameJobDirectoryForWindowsTest(store.RootDir(), testJobID1, filepath.Base(parked)); swapErr != nil {
 					return
 				}
 				junctionOutput, swapErr = exec.Command("cmd.exe", "/c", "mklink", "/J", jobDir, outside).CombinedOutput()
@@ -104,4 +106,18 @@ func TestWindowsNativeRegistryMutation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func renameJobDirectoryForWindowsTest(root, jobID, target string) error {
+	rootHandle, err := openDirectoryHandleNoFollow(root, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(rootHandle) }()
+	jobHandle, err := openRelativeHandleNoFollow(rootHandle, jobID, os.O_RDONLY, true, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(jobHandle) }()
+	return renameRelativeFileWindows(jobHandle, rootHandle, target)
 }

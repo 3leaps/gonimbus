@@ -2,6 +2,7 @@ package jobregistry
 
 import (
 	"crypto/sha256"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,7 @@ func TestInvocationRejectsSignedMaterialInEveryForwardedString(t *testing.T) {
 func TestInvocationValidatesSinceAndNameBeforePersistence(t *testing.T) {
 	base := IndexBuildInvocation{
 		SchemaVersion:     IndexBuildInvocationVersion,
-		ManifestPath:      "/tmp/index.yaml",
+		ManifestPath:      filepath.Join(t.TempDir(), "index.yaml"),
 		ManifestSHA256:    strings.Repeat("a", sha256.Size*2),
 		RequestedFormat:   "durable",
 		EffectiveFormat:   "durable",

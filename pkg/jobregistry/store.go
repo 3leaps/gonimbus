@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -321,19 +320,4 @@ func jobSortTime(r JobRecord) time.Time {
 		return r.StartedAt.UTC()
 	}
 	return r.CreatedAt.UTC()
-}
-
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// signal 0 is supported on unix; it checks for existence without sending a signal.
-	if err := p.Signal(os.Signal(syscall.Signal(0))); err != nil {
-		return false
-	}
-	return true
 }
