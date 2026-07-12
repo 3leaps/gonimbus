@@ -75,7 +75,7 @@ func openLocalReadOnly(ctx context.Context, path string, afterBind func() error)
 	query.Set("immutable", "1")
 	dsnURL.RawQuery = query.Encode()
 
-	db, err := sql.Open(driverLibsql, dsnURL.String())
+	db, err := sql.Open(snapshotSQLiteDriver, dsnURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("open read-only index store: %w", err)
 	}

@@ -168,12 +168,12 @@ jobs:
             throw "Expected native GOARCH=${{ matrix.goarch }}, got $actual"
           }
           go version
-      - name: Run native registry security suite
-        shell: pwsh
-        run: go test ./pkg/jobregistry -count=1 -v
       - name: Run native SQLite snapshot authority suite
         shell: pwsh
         run: go test ./pkg/indexstore -run '^TestOpenLocalReadOnlyWindows' -count=1 -v
+      - name: Run native registry security suite
+        shell: pwsh
+        run: go test ./pkg/jobregistry -count=1 -v
       - name: Build native Windows CLI
         shell: pwsh
         run: go build ./cmd/gonimbus
