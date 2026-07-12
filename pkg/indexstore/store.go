@@ -63,7 +63,13 @@ func openLocalReadOnly(ctx context.Context, path string, afterBind func() error)
 		}
 	}
 
-	dsnURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(driverPath)}
+	uriPath := filepath.ToSlash(driverPath)
+	if filepath.VolumeName(driverPath) != "" && !strings.HasPrefix(uriPath, "/") {
+		// SQLite requires a rooted URI path for Windows drive-letter names;
+		// file:C:/... is parsed as an invalid URI authority.
+		uriPath = "/" + uriPath
+	}
+	dsnURL := &url.URL{Scheme: "file", Path: uriPath}
 	query := dsnURL.Query()
 	query.Set("mode", "ro")
 	query.Set("immutable", "1")

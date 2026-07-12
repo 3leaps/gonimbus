@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 )
 
 func TestOpenLocalReadOnlyWindowsDeniesReplacementWhileBinding(t *testing.T) {
@@ -56,9 +57,11 @@ func TestOpenLocalReadOnlyWindowsRejectsReparsePoint(t *testing.T) {
 	junction := filepath.Join(dir, "index.db")
 	output, err := exec.Command("cmd", "/c", "mklink", "/J", junction, target).CombinedOutput()
 	require.NoErrorf(t, err, "create native directory junction: %s", output)
-	info, err := os.Lstat(junction)
+	junctionPtr, err := windows.UTF16PtrFromString(junction)
 	require.NoError(t, err)
-	require.True(t, info.Mode()&os.ModeSymlink != 0, "junction must surface as a reparse point")
+	attributes, err := windows.GetFileAttributes(junctionPtr)
+	require.NoError(t, err)
+	require.NotZero(t, attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT, "junction must be a native reparse point")
 
 	db, err := OpenLocalReadOnly(context.Background(), junction)
 	require.Error(t, err)
