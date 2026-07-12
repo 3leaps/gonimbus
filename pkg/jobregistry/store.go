@@ -33,6 +33,8 @@ type Store struct {
 	root string
 }
 
+const maxStrictJobRecordBytes = 4 << 20
+
 func NewStore(root string) *Store {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -167,6 +169,110 @@ func (s *Store) Get(jobID string) (*JobRecord, error) {
 	}
 
 	return &record, nil
+}
+
+// ListReadOnlyStrict returns a byte-preserving snapshot of every registry job.
+// Unlike List, it never promotes zombie state or creates registry directories,
+// and it rejects every unrecognized or unreadable entry instead of skipping it.
+// Destructive planners use this surface so damaged registry state cannot make
+// an active job disappear from safety checks.
+func (s *Store) ListReadOnlyStrict() ([]JobRecord, error) {
+	root := strings.TrimSpace(s.root)
+	if root == "" {
+		return nil, fmt.Errorf("job registry root dir is empty")
+	}
+	rootInfo, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect jobs root: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, fmt.Errorf("job registry root must be a real directory")
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read jobs root: %w", err)
+	}
+	out := make([]JobRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == ".start.lock" {
+			info, infoErr := os.Lstat(filepath.Join(root, entry.Name()))
+			if infoErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("invalid job registry start lock")
+			}
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+			return nil, fmt.Errorf("unrecognized job registry entry %q", entry.Name())
+		}
+		if err := validateJobID(entry.Name()); err != nil {
+			return nil, fmt.Errorf("unrecognized job registry entry %q: %w", entry.Name(), err)
+		}
+		record, err := s.getReadOnlyStrict(entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read job %s: %w", entry.Name(), err)
+		}
+		out = append(out, *record)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return jobSortTime(out[i]).After(jobSortTime(out[j]))
+	})
+	return out, nil
+}
+
+func (s *Store) getReadOnlyStrict(jobID string) (*JobRecord, error) {
+	if err := validateJobID(jobID); err != nil {
+		return nil, err
+	}
+	f, err := openJobFileNoFollow(s.root, jobID, "job.json", os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	b, readErr := io.ReadAll(io.LimitReader(f, maxStrictJobRecordBytes+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(b) > maxStrictJobRecordBytes {
+		return nil, fmt.Errorf("job.json exceeds %d bytes", maxStrictJobRecordBytes)
+	}
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return nil, fmt.Errorf("job.json is empty")
+	}
+	var record JobRecord
+	if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
+		return nil, fmt.Errorf("parse job.json: %w", err)
+	}
+	if record.JobID != jobID {
+		return nil, fmt.Errorf("job record id %q does not match directory id %q", record.JobID, jobID)
+	}
+	if err := validatePersistedJobState(record.State); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func validatePersistedJobState(state JobState) error {
+	switch state {
+	case JobStateQueued,
+		JobStateRunning,
+		JobStateStopping,
+		JobStateStopped,
+		JobStateSuccess,
+		JobStatePartial,
+		JobStateFailed,
+		JobStateUnknown:
+		return nil
+	default:
+		return fmt.Errorf("unrecognized persisted job state %q", state)
+	}
 }
 
 func (s *Store) List() ([]JobRecord, error) {

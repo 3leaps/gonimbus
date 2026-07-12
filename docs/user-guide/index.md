@@ -488,14 +488,18 @@ gonimbus index show idx_1234abcd
 
 ### `index gc`
 
-Clean up old indexes.
+Audit old local index sets across SQLite and durable storage. This command is
+currently plan-only: `--dry-run` is required, and deletion execution fails
+closed until the lease-held recovery executor is available. The JSON plan
+includes a stable plan digest and exact identity, segment-set, and journal
+targets. Unproven or active artifacts are retained with warnings.
 
 ```bash
-# Keep only the last 3 runs per index
-gonimbus index gc --keep-last 3
+# Plan all but the last 3 sets for each base URI
+gonimbus index gc --keep-last 3 --dry-run
 
-# Remove indexes older than 30 days
-gonimbus index gc --max-age 30d
+# Plan sets older than 30 days
+gonimbus index gc --max-age 30d --dry-run --json
 
 # Preview what would be removed
 gonimbus index gc --keep-last 1 --dry-run

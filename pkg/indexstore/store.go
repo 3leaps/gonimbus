@@ -24,6 +24,88 @@ type Config struct {
 	AuthToken string
 }
 
+// OpenLocalReadOnly opens an existing local SQLite database without creating
+// parent directories, changing journal mode, running migrations, or creating
+// SQLite sidecars. The connection is bound to a no-follow file handle before
+// SQLite sees it, so a pathname swap cannot substitute unverified metadata.
+// Callers must reject transaction sidecars before and after this inspection.
+func OpenLocalReadOnly(ctx context.Context, path string) (*sql.DB, error) {
+	return openLocalReadOnly(ctx, path, nil)
+}
+
+func openLocalReadOnly(ctx context.Context, path string, afterBind func() error) (*sql.DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	path = strings.TrimSpace(path)
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil, errors.New("existing local index store path is required")
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("resolve index store path: %w", err)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("inspect index store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("index store must be an existing regular file")
+	}
+	bound, driverPath, err := openBoundSQLiteSnapshotFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("bind read-only index store: %w", err)
+	}
+	defer func() { _ = bound.Close() }()
+	if afterBind != nil {
+		if err := afterBind(); err != nil {
+			return nil, fmt.Errorf("after binding read-only index store: %w", err)
+		}
+	}
+
+	dsnURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(driverPath)}
+	query := dsnURL.Query()
+	query.Set("mode", "ro")
+	query.Set("immutable", "1")
+	dsnURL.RawQuery = query.Encode()
+
+	db, err := sql.Open(driverLibsql, dsnURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("open read-only index store: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping read-only index store: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enforce read-only index store: %w", err)
+	}
+	return db, nil
+}
+
+// ValidateCurrentSchemaReadOnly verifies that db has exactly the schema this
+// binary understands. It never upgrades older schemas; callers must retain
+// those artifacts until an explicit migration operation is authorized.
+func ValidateCurrentSchemaReadOnly(ctx context.Context, db *sql.DB) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if db == nil {
+		return errors.New("db is nil")
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id=1`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema_version without migration: %w", err)
+	}
+	if version != SchemaVersion {
+		return fmt.Errorf("index schema version %d is not current version %d", version, SchemaVersion)
+	}
+	return nil
+}
+
 func buildDSN(cfg Config) (string, error) {
 	if u := strings.TrimSpace(cfg.URL); u != "" {
 		return addAuthToken(u, cfg.AuthToken)
@@ -132,7 +214,7 @@ func ensureStoreDir(path string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create store directory: %w", err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directories require owner execute permission
 		return fmt.Errorf("chmod store directory: %w", err)
 	}
 	return nil
