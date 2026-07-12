@@ -28,6 +28,20 @@ func TestWriteLeaseFlockIsExclusive(t *testing.T) {
 	require.NoError(t, second.Release())
 }
 
+func TestCheckWriteLeaseAvailableIsReadOnlyAndDetectsHolder(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, CheckWriteLeaseAvailable(root))
+	_, err := os.Stat(filepath.Join(root, writeLeaseFileName))
+	require.ErrorIs(t, err, os.ErrNotExist, "availability probe must not create a lock file")
+
+	lease, err := AcquireWriteLease(root, "idx_test", "holder", 0)
+	require.NoError(t, err)
+	err = CheckWriteLeaseAvailable(root)
+	require.ErrorIs(t, err, ErrWriteLeaseHeld)
+	require.NoError(t, lease.Release())
+	require.NoError(t, CheckWriteLeaseAvailable(root))
+}
+
 func TestWriteLeaseCorruptMetadataDoesNotGrantAccess(t *testing.T) {
 	dir := t.TempDir()
 	// Pre-create a lock file with garbage; flock still serializes writers.

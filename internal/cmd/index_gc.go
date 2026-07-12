@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
 
 var indexGCCmd = &cobra.Command{
@@ -29,11 +27,14 @@ Examples:
   # Preview what would be deleted (dry run)
   gonimbus index gc --max-age 30d --dry-run
 
-  # Delete indexes older than 30 days, keeping at least 3 per base URI
-  gonimbus index gc --max-age 30d --keep-last 3
+  # Plan indexes older than 30 days, keeping at least 3 per base URI
+  gonimbus index gc --max-age 30d --keep-last 3 --dry-run
 
-  # Delete all but the 2 most recent indexes per base URI
-  gonimbus index gc --keep-last 2`,
+  # Plan all but the 2 most recent indexes per base URI
+  gonimbus index gc --keep-last 2 --dry-run
+
+Deletion execution is intentionally disabled while the separately gated,
+lease-held recovery executor is under development.`,
 	RunE: runIndexGC,
 }
 
@@ -56,6 +57,9 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 	if maxAgeStr == "" && keepLast == 0 {
 		return fmt.Errorf("at least one of --max-age or --keep-last must be specified")
 	}
+	if keepLast < 0 {
+		return fmt.Errorf("--keep-last must be greater than or equal to zero")
+	}
 
 	// Parse max age
 	var maxAge time.Duration
@@ -65,68 +69,64 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid --max-age: %w", err)
 		}
+		if maxAge <= 0 {
+			return fmt.Errorf("invalid --max-age: duration must be greater than zero")
+		}
 	}
 
-	entries, err := loadIndexEntriesWithPaths(ctx)
-	if err != nil {
-		return fmt.Errorf("list indexes: %w", err)
+	if !dryRun {
+		return fmt.Errorf("format-aware index GC execution is not enabled yet; rerun with --dry-run to produce an immutable deletion plan")
 	}
-	if len(entries) == 0 {
+
+	plan, err := buildIndexGCPlan(ctx, maxAge, maxAgeStr, keepLast, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("build index GC plan: %w", err)
+	}
+	if len(plan.Candidates) == 0 && len(plan.Warnings) == 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
 		return nil
 	}
-
-	// Build GC params
-	params := indexstore.GCParams{
-		MaxAge:   maxAge,
-		KeepLast: keepLast,
-		DryRun:   dryRun,
-	}
-
-	result, candidates := buildGCCandidates(entries, params)
-	if !dryRun {
-		for _, candidate := range candidates {
-			if err := os.RemoveAll(candidate.Dir); err != nil {
-				return fmt.Errorf("remove index directory %s: %w", candidate.Dir, err)
-			}
+	for _, warning := range plan.Warnings {
+		if warning.IndexSetID != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: retain %s (%s): %s\n", warning.IndexSetID, warning.Path, warning.Reason)
+		} else {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: %s: %s\n", warning.Path, warning.Reason)
 		}
 	}
 
 	if jsonOutput {
-		return printGCResultJSON(result, dryRun)
+		return printGCPlanJSON(plan)
 	}
 
-	return printGCResultTable(result, dryRun)
+	return printGCPlanTable(plan)
 }
 
-func printGCResultTable(result *indexstore.GCResult, dryRun bool) error {
-	if len(result.Candidates) == 0 {
+func printGCPlanTable(plan *indexGCPlan) error {
+	if len(plan.Candidates) == 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "No indexes to remove")
 		return nil
 	}
 
-	action := "Removed"
-	if dryRun {
-		action = "Would remove"
-		_, _ = fmt.Fprintln(os.Stderr, "DRY RUN - no changes made")
-		_, _ = fmt.Fprintln(os.Stderr)
-	}
+	_, _ = fmt.Fprintln(os.Stderr, "DRY RUN - immutable plan only; no changes made")
+	_, _ = fmt.Fprintf(os.Stderr, "Plan: %s\n", plan.PlanSHA256)
+	_, _ = fmt.Fprintln(os.Stderr)
 
 	// Summary to stderr (status), table to stdout (data)
-	_, _ = fmt.Fprintf(os.Stderr, "%s %d index(es)\n", action, result.IndexSetsRemoved)
-	_, _ = fmt.Fprintf(os.Stderr, "Objects: %d\n", result.ObjectsRemoved)
-	_, _ = fmt.Fprintf(os.Stderr, "Space freed: %s\n", formatBytes(result.BytesFreed))
+	_, _ = fmt.Fprintf(os.Stderr, "Would remove %d index(es)\n", plan.IndexSetsRemoved)
+	_, _ = fmt.Fprintf(os.Stderr, "Objects: %d\n", plan.ObjectsRemoved)
+	_, _ = fmt.Fprintf(os.Stderr, "Planned artifact bytes: %s\n", formatBytes(plan.PlannedSizeBytes))
 	_, _ = fmt.Fprintln(os.Stderr)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "BASE URI\tPROVIDER\tOBJECTS\tSIZE\tCREATED")
-	for _, c := range result.Candidates {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
-			c.BaseURI,
-			c.Provider,
-			c.ObjectCount,
-			formatBytes(c.TotalSizeBytes),
-			c.CreatedAt.Format("2006-01-02"),
+	_, _ = fmt.Fprintln(w, "INDEX SET\tFORMATS\tBASE URI\tOBJECTS\tARTIFACT BYTES\tCREATED")
+	for _, c := range plan.Candidates {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
+			c.Info.IndexSetID,
+			strings.Join(c.Formats, ","),
+			c.Info.BaseURI,
+			c.Info.ObjectCount,
+			formatBytes(c.PlanSize),
+			c.Info.CreatedAt.Format("2006-01-02"),
 		)
 	}
 	_ = w.Flush()
@@ -134,91 +134,60 @@ func printGCResultTable(result *indexstore.GCResult, dryRun bool) error {
 	return nil
 }
 
-func printGCResultJSON(result *indexstore.GCResult, dryRun bool) error {
+func printGCPlanJSON(plan *indexGCPlan) error {
 	type jsonCandidate struct {
-		IndexSetID     string `json:"index_set_id"`
-		BaseURI        string `json:"base_uri"`
-		Provider       string `json:"provider"`
-		CreatedAt      string `json:"created_at"`
-		ObjectCount    int64  `json:"object_count"`
-		TotalSizeBytes int64  `json:"total_size_bytes"`
+		IndexSetID      string          `json:"index_set_id"`
+		BaseURI         string          `json:"base_uri"`
+		Provider        string          `json:"provider"`
+		CreatedAt       string          `json:"created_at"`
+		ObjectCount     int64           `json:"object_count"`
+		PlannedSize     int64           `json:"planned_size_bytes"`
+		Formats         []string        `json:"formats"`
+		DeletionTargets []indexGCTarget `json:"deletion_targets"`
 	}
 
 	type jsonOutput struct {
-		DryRun           bool            `json:"dry_run"`
-		IndexSetsRemoved int             `json:"index_sets_removed"`
-		ObjectsRemoved   int64           `json:"objects_removed"`
-		BytesFreed       int64           `json:"bytes_freed"`
-		Candidates       []jsonCandidate `json:"candidates"`
+		Type             string           `json:"type"`
+		DryRun           bool             `json:"dry_run"`
+		PlanSHA256       string           `json:"plan_sha256"`
+		MaxAge           string           `json:"max_age,omitempty"`
+		KeepLast         int              `json:"keep_last,omitempty"`
+		IndexSetsRemoved int              `json:"index_sets_removed"`
+		ObjectsRemoved   int64            `json:"objects_removed"`
+		PlannedSizeBytes int64            `json:"planned_size_bytes"`
+		Candidates       []jsonCandidate  `json:"candidates"`
+		Warnings         []indexGCWarning `json:"warnings,omitempty"`
 	}
 
 	out := jsonOutput{
-		DryRun:           dryRun,
-		IndexSetsRemoved: result.IndexSetsRemoved,
-		ObjectsRemoved:   result.ObjectsRemoved,
-		BytesFreed:       result.BytesFreed,
-		Candidates:       make([]jsonCandidate, len(result.Candidates)),
+		Type:             plan.Type,
+		DryRun:           true,
+		PlanSHA256:       plan.PlanSHA256,
+		MaxAge:           plan.MaxAge,
+		KeepLast:         plan.KeepLast,
+		IndexSetsRemoved: plan.IndexSetsRemoved,
+		ObjectsRemoved:   plan.ObjectsRemoved,
+		PlannedSizeBytes: plan.PlannedSizeBytes,
+		Candidates:       make([]jsonCandidate, len(plan.Candidates)),
+		Warnings:         plan.Warnings,
 	}
 
-	for i, c := range result.Candidates {
+	for i, c := range plan.Candidates {
 		out.Candidates[i] = jsonCandidate{
-			IndexSetID:     c.IndexSetID,
-			BaseURI:        c.BaseURI,
-			Provider:       c.Provider,
-			CreatedAt:      c.CreatedAt.Format(time.RFC3339),
-			ObjectCount:    c.ObjectCount,
-			TotalSizeBytes: c.TotalSizeBytes,
+			IndexSetID:      c.Info.IndexSetID,
+			BaseURI:         c.Info.BaseURI,
+			Provider:        c.Info.Provider,
+			CreatedAt:       c.Info.CreatedAt.Format(time.RFC3339),
+			ObjectCount:     c.Info.ObjectCount,
+			PlannedSize:     c.PlanSize,
+			Formats:         c.Formats,
+			DeletionTargets: c.Targets,
 		}
 	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
-}
-
-func buildGCCandidates(entries []indexDBEntry, params indexstore.GCParams) (*indexstore.GCResult, []indexDBEntry) {
-	result := &indexstore.GCResult{}
-	if len(entries) == 0 {
-		return result, nil
-	}
-
-	byBaseURI := make(map[string][]indexDBEntry)
-	for _, entry := range entries {
-		byBaseURI[entry.Info.BaseURI] = append(byBaseURI[entry.Info.BaseURI], entry)
-	}
-
-	now := time.Now().UTC()
-	cutoff := time.Time{}
-	if params.MaxAge > 0 {
-		cutoff = now.Add(-params.MaxAge)
-	}
-
-	var candidates []indexDBEntry
-	for _, grouped := range byBaseURI {
-		sort.Slice(grouped, func(i, j int) bool {
-			return grouped[i].Info.CreatedAt.After(grouped[j].Info.CreatedAt)
-		})
-
-		toCheck := grouped
-		if params.KeepLast > 0 && len(grouped) > params.KeepLast {
-			toCheck = grouped[params.KeepLast:]
-		} else if params.KeepLast > 0 {
-			continue
-		}
-
-		for _, entry := range toCheck {
-			if params.MaxAge > 0 && entry.Info.CreatedAt.After(cutoff) {
-				continue
-			}
-			candidates = append(candidates, entry)
-			result.Candidates = append(result.Candidates, entry.Info)
-			result.BytesFreed += entry.Info.TotalSizeBytes
-			result.ObjectsRemoved += entry.Info.ObjectCount
-		}
-	}
-
-	result.IndexSetsRemoved = len(candidates)
-	return result, candidates
 }
 
 // parseDuration parses a duration string that may include day suffix (e.g., "30d").

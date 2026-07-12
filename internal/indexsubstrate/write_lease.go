@@ -125,6 +125,32 @@ func AcquireWriteLease(segmentSetRoot, indexSetID, holder string, _ time.Duratio
 	}, nil
 }
 
+// CheckWriteLeaseAvailable probes an existing durable writer lock without
+// creating or rewriting operator state. It is suitable for read-only planning;
+// callers that mutate must still acquire and hold a WriteLease.
+func CheckWriteLeaseAvailable(segmentSetRoot string) error {
+	root, err := canonicalizeSegmentSetRoot(segmentSetRoot)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(root, writeLeaseFileName)
+	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- package-owned lock under the bound segment root
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open write lease for availability probe: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := lockFileExclusive(f); err != nil {
+		if errors.Is(err, errLockWouldBlock) {
+			return fmt.Errorf("%w by concurrent durable writer", ErrWriteLeaseHeld)
+		}
+		return fmt.Errorf("probe write lease: %w", err)
+	}
+	return unlockFile(f)
+}
+
 // AssertHeld verifies the package-owned write lease is still held (FD live).
 func (l *WriteLease) AssertHeld() error {
 	if l == nil || l.released || l.f == nil {

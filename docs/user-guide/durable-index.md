@@ -43,13 +43,13 @@ gonimbus index build --job index.yaml --format sqlite
 gonimbus index build --job index.yaml --format both
 ```
 
-| Need                                                            | Format choice                                        |
-| --------------------------------------------------------------- | ---------------------------------------------------- |
-| Hub-scale export/hydrate, default new builds                    | `durable` (default)                                  |
-| Local `index query` / `list` / `stats` / `doctor`               | `durable`, `sqlite`, or `both` (format-aware seam)   |
-| Local `enrich-with-head`                                        | `durable`, `sqlite`, or `both` (format-aware)        |
-| Local inventory GC (`index gc`)                                 | `sqlite` or `both` (dirs with `index.db` only today) |
-| Migration confidence (one crawl, two artifacts + parity report) | `both`                                               |
+| Need                                                            | Format choice                                      |
+| --------------------------------------------------------------- | -------------------------------------------------- |
+| Hub-scale export/hydrate, default new builds                    | `durable` (default)                                |
+| Local `index query` / `list` / `stats` / `doctor`               | `durable`, `sqlite`, or `both` (format-aware seam) |
+| Local `enrich-with-head`                                        | `durable`, `sqlite`, or `both` (format-aware)      |
+| Local inventory GC (`index gc --dry-run`)                       | Format-aware immutable plan; execution gated       |
+| Migration confidence (one crawl, two artifacts + parity report) | `both`                                             |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
 first-class compatibility path. Resume printed as
@@ -206,7 +206,11 @@ Durable-v2 limitations (fail closed or narrowed):
   (not the full SQLite run lifecycle / failed-resumable).
 - Durable size in stats/list is the sum of published **segment file sizes**,
   not `SUM(objects_current.size_bytes)`.
-- **`index gc`** still enumerates directories that contain `index.db`.
+- **`index gc --dry-run`** inventories SQLite and durable sets by authoritative
+  markers and emits one immutable plan for identity, segment-set, and journal
+  roots. It retains corrupt, aliased, symlinked, leased, or active artifacts
+  with warnings. Execution without `--dry-run` remains fail-closed until the
+  separately gated lease-held recovery executor lands.
 - **Full run/checkpoint lifecycle** (`--resume-run` for build/enrich
   operation recovery) remains SQLite/opcheckpoint-oriented; durable enrich
   rejects `--resume-run` (row-level `--resume` is supported).
@@ -253,7 +257,7 @@ work (column suppression, opaque tokens, coverage/statistics redaction) and is
    traffic.
 4. Default durable builds support format-aware `query`, `list`, `stats`,
    `doctor`, and `enrich-with-head`. Keep `--format sqlite` or `both` only for
-   **SQLite-only** surfaces: `index gc`, `query --since-run`,
+   **SQLite-only** surfaces: `query --since-run`,
    `stats --prefixes`, and full `--resume-run` checkpoint recovery.
 5. Treat durable hub artifacts as internal pipeline inputs only until a later
    boundary-render release lands.

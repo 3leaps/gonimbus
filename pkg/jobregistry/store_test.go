@@ -3,6 +3,7 @@ package jobregistry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,81 @@ func TestStore_ListSortsNewestFirst(t *testing.T) {
 	}
 	if got[0].JobID != testJobID2 {
 		t.Fatalf("expected newest first, got[0]=%q", got[0].JobID)
+	}
+}
+
+func TestListReadOnlyStrictDoesNotPromoteDeadPID(t *testing.T) {
+	store := NewStore(t.TempDir())
+	rec := &JobRecord{JobID: testJobID1, State: JobStateRunning, PID: 1 << 30, CreatedAt: time.Now().UTC()}
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	before, err := os.ReadFile(store.JobPath(testJobID1))
+	if err != nil {
+		t.Fatalf("read before snapshot: %v", err)
+	}
+	jobs, err := store.ListReadOnlyStrict()
+	if err != nil {
+		t.Fatalf("ListReadOnlyStrict() error: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].State != JobStateRunning {
+		t.Fatalf("unexpected strict snapshot: %#v", jobs)
+	}
+	after, err := os.ReadFile(store.JobPath(testJobID1))
+	if err != nil {
+		t.Fatalf("read after snapshot: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("strict snapshot rewrote zombie job state")
+	}
+}
+
+func TestListReadOnlyStrictRejectsMalformedAndSymlinkEntries(t *testing.T) {
+	t.Run("malformed record", func(t *testing.T) {
+		root := t.TempDir()
+		jobDir := filepath.Join(root, testJobID1)
+		if err := os.MkdirAll(jobDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte("{broken\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewStore(root).ListReadOnlyStrict(); err == nil || !strings.Contains(err.Error(), "parse job.json") {
+			t.Fatalf("expected strict malformed-record error, got %v", err)
+		}
+	})
+
+	t.Run("symlinked canonical job directory", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, testJobID1)); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if _, err := NewStore(root).ListReadOnlyStrict(); err == nil || !strings.Contains(err.Error(), "unrecognized job registry entry") {
+			t.Fatalf("expected strict symlink-entry error, got %v", err)
+		}
+	})
+}
+
+func TestValidatePersistedJobStateCompleteEnum(t *testing.T) {
+	known := []JobState{
+		JobStateQueued,
+		JobStateRunning,
+		JobStateStopping,
+		JobStateStopped,
+		JobStateSuccess,
+		JobStatePartial,
+		JobStateFailed,
+		JobStateUnknown,
+	}
+	for _, state := range known {
+		if err := validatePersistedJobState(state); err != nil {
+			t.Fatalf("known state %q rejected: %v", state, err)
+		}
+	}
+	for _, state := range []JobState{"", "runnnig", "future-state"} {
+		if err := validatePersistedJobState(state); err == nil {
+			t.Fatalf("unrecognized state %q accepted", state)
+		}
 	}
 }
 

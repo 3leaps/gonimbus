@@ -134,9 +134,10 @@ jobs:
         run: |
           set -euo pipefail
           GOOS=linux GOARCH=arm64 go build ./...
-  # Native Windows coverage for handle-relative job registry mutation. This
-  # cannot be certified by cross-compilation because access masks and reparse
-  # behavior are enforced only by the Windows kernel.
+  # Native Windows coverage for handle-relative job registry mutation and the
+  # SQLite snapshot binding contract. These cannot be certified by
+  # cross-compilation because share masks, access masks, replacement denial,
+  # and reparse behavior are enforced only by the Windows kernel.
   windows-jobregistry:
     needs: [format-check]
     name: windows-jobregistry (${{ matrix.goarch }})
@@ -167,6 +168,9 @@ jobs:
             throw "Expected native GOARCH=${{ matrix.goarch }}, got $actual"
           }
           go version
+      - name: Run native SQLite snapshot authority suite
+        shell: pwsh
+        run: go test ./pkg/indexstore -run '^TestOpenLocalReadOnlyWindows' -count=1 -v
       - name: Run native registry security suite
         shell: pwsh
         run: go test ./pkg/jobregistry -count=1 -v
