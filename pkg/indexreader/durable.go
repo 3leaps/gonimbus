@@ -2,6 +2,7 @@ package indexreader
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -148,6 +149,8 @@ func validatePinnedRunID(runID string) error {
 }
 
 func (r *durableReader) Meta() Meta { return r.meta }
+
+func (r *durableReader) SQLiteDB() *sql.DB { return nil }
 
 func (r *durableReader) Close() error { return nil }
 

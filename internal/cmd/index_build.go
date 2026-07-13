@@ -26,6 +26,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/manifest"
@@ -38,6 +39,10 @@ import (
 )
 
 const operationIndexBuild = "index-build"
+
+// indexBuildAfterIdentityGuard is a test-only interposition point at the
+// durable validation-to-publication boundary. Production leaves it nil.
+var indexBuildAfterIdentityGuard func(path string) error
 
 var indexBuildCmd = &cobra.Command{
 	Use:   "build",
@@ -60,8 +65,8 @@ SQLite compatibility builds still use:
 
 Local consumer note: query, list, stats, doctor, and enrich-with-head are
 format-aware (durable or SQLite). Use --format sqlite or --format both when you
-still need SQLite-only surfaces: index gc, query --since-run, stats --prefixes,
-or full --resume-run checkpoint recovery. Durable hydrate restores
+still need SQLite-only surfaces: query --since-run, stats --prefixes, or full
+--resume-run checkpoint recovery. Durable hydrate restores
 manifest+segments, not index.db.
 
 The index build process:
@@ -188,7 +193,7 @@ func validateIndexBuildResumeInvocation(cmd *cobra.Command) error {
 	return nil
 }
 
-func runIndexBuild(cmd *cobra.Command, args []string) error {
+func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -394,9 +399,71 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan, identityResult, scopeHash)
 	}
 
+	maintenanceHolder := "index-build-" + uuid.NewString()
+	if job != nil && strings.TrimSpace(job.JobID) != "" {
+		maintenanceHolder = "index-build-" + strings.TrimSpace(job.JobID)
+	}
+	maintenance, err := acquireIndexSetMaintenance(ctx, identityResult.IndexSetID, maintenanceHolder)
+	if err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
+		return fmt.Errorf("acquire index-set maintenance lease: %w", err)
+	}
+	defer func() { _ = maintenance.Release() }()
+	ctx = maintenance.Context()
+
+	// Resolve the local compatibility target before format dispatch. Durable
+	// builds do not open index.db, but they do publish identity.json and must not
+	// bless a markerless canonical SQLite artifact as a side effect.
+	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
+	if err != nil {
+		if store != nil && job != nil {
+			job.State = jobregistry.JobStateFailed
+			ended := time.Now().UTC()
+			job.EndedAt = &ended
+			_ = store.Write(job)
+		}
+		return err
+	}
+	segmentSetRoot, err := indexSubstrateSegmentCacheDir(identityResult.IndexSetID)
+	if err != nil {
+		return err
+	}
+
 	if selectedIndexBuildFormat() == "durable" {
+		if resolvedDB.Canonical {
+			guard, err := indexreader.OpenSQLiteIdentityPublicationGuard(ctx, indexreader.SQLiteWriteTargetOptions{
+				Path:           resolvedDB.Path,
+				IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
+				SegmentSetRoot: segmentSetRoot,
+				IndexSetID:     identityResult.IndexSetID,
+				Authority:      maintenance.Authority(),
+				MaxMarkerBytes: int64(maxHubMarkerBytes),
+			})
+			if err != nil {
+				return err
+			}
+			if indexBuildAfterIdentityGuard != nil {
+				if err := indexBuildAfterIdentityGuard(resolvedDB.Path); err != nil {
+					return errors.Join(err, guard.Close())
+				}
+			}
+			if err := guard.PublishIdentity(identityResult); err != nil {
+				return errors.Join(err, guard.Close())
+			}
+			if err := guard.PublishManifest(m); err != nil {
+				return errors.Join(err, guard.Close())
+			}
+			if err := guard.Close(); err != nil {
+				return err
+			}
+		}
 		cmd.SilenceUsage = true
-		summary, identityDir, err := runIndexBuildDurable(ctx, m, identityResult, buildFilters)
+		summary, identityDir, err := runIndexBuildDurable(ctx, m, identityResult, buildFilters, resolvedDB, maintenance.Authority())
 		if err != nil {
 			if store != nil && job != nil {
 				job.State = jobregistry.JobStateFailed
@@ -434,17 +501,29 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Open index database
-	resolvedDB, err := resolveIndexDBPath(indexBuildDBPath, identityResult)
-	if err != nil {
-		if store != nil && job != nil {
-			job.State = jobregistry.JobStateFailed
-			ended := time.Now().UTC()
-			job.EndedAt = &ended
-			_ = store.Write(job)
+	// Canonical SQLite builds use one library-owned validation/binding/open
+	// operation. Explicit external paths retain the caller-owned indexstore
+	// behavior and are never given canonical trust by this adapter.
+	var db *sql.DB
+	var canonicalTarget *indexreader.SQLiteWriteTarget
+	if resolvedDB.Canonical {
+		canonicalTarget, err = indexreader.OpenSQLiteWriteTarget(ctx, indexreader.SQLiteWriteTargetOptions{
+			Path:           resolvedDB.Path,
+			IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
+			SegmentSetRoot: segmentSetRoot,
+			IndexSetID:     identityResult.IndexSetID,
+			Authority:      maintenance.Authority(),
+			MaxMarkerBytes: int64(maxHubMarkerBytes),
+		})
+		if err != nil {
+			return err
 		}
-		return err
-
+		db = canonicalTarget.DB()
+		defer func() {
+			if canonicalTarget != nil {
+				runErr = errors.Join(runErr, canonicalTarget.Close())
+			}
+		}()
 	}
 
 	if store != nil && job != nil {
@@ -461,19 +540,24 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	if resolvedDB.WriteIdentity {
-		if err := writeIndexIdentityFile(resolvedDB.IdentityDir, identityResult); err != nil {
+		if canonicalTarget == nil {
+			return fmt.Errorf("canonical metadata publication requires the library-owned SQLite write target")
+		}
+		if err := canonicalTarget.PublishIdentity(identityResult); err != nil {
 			return err
 		}
-		if err := writeIndexManifestFile(resolvedDB.IdentityDir, m); err != nil {
+		if err := canonicalTarget.PublishManifest(m); err != nil {
 			return err
 		}
 	}
 
-	db, err := indexstore.Open(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("open index database: %w", err)
+	if db == nil {
+		db, err = indexstore.Open(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("open index database: %w", err)
+		}
+		defer func() { _ = db.Close() }()
 	}
-	defer func() { _ = db.Close() }()
 
 	// Ensure schema is migrated
 	if err := indexstore.Migrate(ctx, db); err != nil {
@@ -546,7 +630,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	var bothSummary indexbuild.Summary
 	var bothSummaryOK bool
 	if selectedIndexBuildFormat() == "both" {
-		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters)
+		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters, maintenance.Authority())
 		result = bothResult.Result
 		crawlErr = err
 		if err == nil {
@@ -646,6 +730,27 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("index format parity failed")
 	}
+	if indexBuildSummary {
+		if err := printIndexBuildSummary(ctx, db, indexSet.IndexSetID, run.RunID, os.Stderr); err != nil {
+			return err
+		}
+	}
+	// The bound target close is part of the canonical commit boundary. Do not
+	// persist job success or emit a terminal receipt until the canonical name,
+	// authority, and bound file have been revalidated and sidecars are closed.
+	if canonicalTarget != nil {
+		if err := canonicalTarget.Close(); err != nil {
+			canonicalTarget = nil
+			if store != nil && job != nil {
+				job.State = jobregistry.JobStateFailed
+				ended := time.Now().UTC()
+				job.EndedAt = &ended
+				_ = store.Write(job)
+			}
+			return fmt.Errorf("close canonical SQLite write target: %w", err)
+		}
+		canonicalTarget = nil
+	}
 
 	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested)
 	if receiptErr != nil {
@@ -688,11 +793,6 @@ func runIndexBuild(cmd *cobra.Command, args []string) error {
 	writeIndexBuildDeltaReport(os.Stderr, result, sincePlan)
 	if result.FinalStatus == indexstore.RunStatusPartial {
 		_, _ = fmt.Fprintf(os.Stderr, "  note: partial run (some errors encountered)\n")
-	}
-	if indexBuildSummary {
-		if err := printIndexBuildSummary(ctx, db, indexSet.IndexSetID, run.RunID, os.Stderr); err != nil {
-			return err
-		}
 	}
 	// Terminal receipt after commit. Success is authoritative for consumers that
 	// require status=success. SQLite partial also emits an explicit non-authoritative
@@ -793,11 +893,20 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return fmt.Errorf("parse index build checkpoint payload: %w", err)
 	}
+	if !validFullIndexSetID(payload.Config.IndexSetID) {
+		return fmt.Errorf("resume checkpoint does not carry a valid full index_set_id")
+	}
 	if !payload.Config.UsesDefaultIndexDB {
 		return fmt.Errorf("--resume-run %s is not supported for non-default index database paths in this slice", runID)
 	}
+	maintenance, err := acquireIndexSetMaintenance(ctx, payload.Config.IndexSetID, "index-build-resume-"+uuid.NewString())
+	if err != nil {
+		return fmt.Errorf("acquire index-set maintenance lease: %w", err)
+	}
+	defer func() { _ = maintenance.Release() }()
+	ctx = maintenance.Context()
 
-	resolved, err := findIndexRunInDefaultIndexes(ctx, runID)
+	resolved, err := findIndexRunInDefaultIndexes(ctx, runID, payload.Config.IndexSetID, maintenance)
 	if err != nil {
 		return err
 	}
@@ -1726,14 +1835,11 @@ type resolvedIndexDB struct {
 	Path          string
 	IdentityDir   string
 	WriteIdentity bool
+	Canonical     bool
 }
 
 // resolveIndexDBPath resolves the index database path.
 func resolveIndexDBPath(explicit string, identityResult *indexstore.IndexSetIdentityResult) (resolvedIndexDB, error) {
-	if explicit != "" {
-		return resolvedIndexDB{Path: explicit}, nil
-	}
-
 	identity := GetAppIdentity()
 	if identity == nil || strings.TrimSpace(identity.ConfigName) == "" {
 		return resolvedIndexDB{}, fmt.Errorf("app identity is not available to derive default index path")
@@ -1747,48 +1853,88 @@ func resolveIndexDBPath(explicit string, identityResult *indexstore.IndexSetIden
 		return resolvedIndexDB{}, err
 	}
 	indexDir := filepath.Join(dataDir, "indexes", identityResult.DirName)
+	expectedPath := filepath.Join(indexDir, "index.db")
+	if strings.TrimSpace(explicit) != "" {
+		localPath, local, err := explicitLocalIndexDBPath(explicit)
+		if err != nil {
+			return resolvedIndexDB{}, err
+		}
+		if !local {
+			return resolvedIndexDB{Path: explicit}, nil
+		}
+		explicitAbs, err := filepath.Abs(filepath.Clean(localPath))
+		if err != nil {
+			return resolvedIndexDB{}, fmt.Errorf("resolve explicit index database path: %w", err)
+		}
+		indexesRoot := filepath.Join(dataDir, "indexes")
+		rootAbs, err := filepath.Abs(filepath.Clean(indexesRoot))
+		if err != nil {
+			return resolvedIndexDB{}, err
+		}
+		resolvedExplicit, err := resolvePathForPolicy(explicitAbs)
+		if err != nil {
+			return resolvedIndexDB{}, fmt.Errorf("resolve explicit index database path for policy: %w", err)
+		}
+		resolvedRoot, err := resolvePathForPolicy(rootAbs)
+		if err != nil {
+			return resolvedIndexDB{}, fmt.Errorf("resolve canonical indexes root for policy: %w", err)
+		}
+		insideCanonicalRoot := indexDBPathWithinRoot(explicitAbs, rootAbs) || indexDBPathWithinRoot(resolvedExplicit, resolvedRoot)
+		if !insideCanonicalRoot {
+			return resolvedIndexDB{Path: explicit}, nil
+		}
+		expectedAbs, err := filepath.Abs(filepath.Clean(expectedPath))
+		if err != nil {
+			return resolvedIndexDB{}, err
+		}
+		resolvedExpected, err := resolvePathForPolicy(expectedAbs)
+		if err != nil {
+			return resolvedIndexDB{}, fmt.Errorf("resolve canonical index database path for policy: %w", err)
+		}
+		if resolvedExplicit != resolvedExpected {
+			return resolvedIndexDB{}, fmt.Errorf("explicit --db inside the canonical indexes root must be the requested set target %s", expectedPath)
+		}
+		return resolvedIndexDB{Path: expectedPath, IdentityDir: indexDir, WriteIdentity: true, Canonical: true}, nil
+	}
 	return resolvedIndexDB{
-		Path:          filepath.Join(indexDir, "index.db"),
+		Path:          expectedPath,
 		IdentityDir:   indexDir,
 		WriteIdentity: true,
+		Canonical:     true,
 	}, nil
 }
 
-func writeIndexIdentityFile(indexDir string, identityResult *indexstore.IndexSetIdentityResult) error {
-	if indexDir == "" || identityResult == nil {
-		return nil
+func explicitLocalIndexDBPath(explicit string) (string, bool, error) {
+	explicit = strings.TrimSpace(explicit)
+	if strings.HasPrefix(explicit, "libsql://") || strings.HasPrefix(explicit, "https://") {
+		return "", false, nil
 	}
-
-	if err := mkdirAppDataDir(indexDir); err != nil {
-		return fmt.Errorf("create index directory: %w", err)
+	if !strings.HasPrefix(explicit, "file:") {
+		return explicit, true, nil
 	}
-
-	identityPath := filepath.Join(indexDir, "identity.json")
-	if err := os.WriteFile(identityPath, []byte(identityResult.CanonicalJSON+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write identity.json: %w", err)
+	parsed, err := url.Parse(explicit)
+	if err != nil {
+		return "", false, fmt.Errorf("parse explicit index database DSN: %w", err)
 	}
-	return nil
+	if parsed.Host != "" && parsed.Host != "localhost" {
+		return "", false, fmt.Errorf("file index database DSN must not name a remote host")
+	}
+	path := parsed.Path
+	if path == "" {
+		path = parsed.Opaque
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", false, fmt.Errorf("file index database DSN path is empty")
+	}
+	return filepath.FromSlash(path), true, nil
 }
 
-func writeIndexManifestFile(indexDir string, m *manifest.IndexManifest) error {
-	if indexDir == "" || m == nil {
-		return nil
-	}
-
-	if err := mkdirAppDataDir(indexDir); err != nil {
-		return fmt.Errorf("create index directory: %w", err)
-	}
-
-	b, err := json.MarshalIndent(m, "", "  ")
+func indexDBPathWithinRoot(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
+		return false
 	}
-
-	manifestPath := filepath.Join(indexDir, "manifest.json")
-	if err := os.WriteFile(manifestPath, append(b, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write manifest.json: %w", err)
-	}
-	return nil
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // valueOrDefault returns the value or a default if empty.

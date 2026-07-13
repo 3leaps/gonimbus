@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "github.com/tursodatabase/go-libsql"
 )
@@ -29,7 +30,14 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open(driverLibsql, dsn)
+	driver := driverLibsql
+	if dsn == ":memory:" || strings.HasPrefix(dsn, "file:") {
+		// Keep canonical local behavior identical across build tags. The libsql
+		// driver is selected only for remote URLs; local WAL lifecycle and strict
+		// snapshot compatibility remain on the pure-Go SQLite driver.
+		driver = snapshotSQLiteDriver
+	}
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open index store: %w", err)
 	}

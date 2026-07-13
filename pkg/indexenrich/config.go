@@ -3,6 +3,7 @@ package indexenrich
 import (
 	"time"
 
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -47,6 +48,10 @@ type Config struct {
 
 	// JournalRoot is required (…/journals/crawl/<index_set_id>/). No inferred default.
 	JournalRoot string
+	// Authority optionally supplies caller-held whole-set exclusion. When nil,
+	// Run acquires the stable authority shared by CLI and GC. A supplied lease
+	// remains caller-owned and is never released by Run.
+	Authority *indexcoord.Lease
 
 	Query    QueryOptions
 	Parallel int

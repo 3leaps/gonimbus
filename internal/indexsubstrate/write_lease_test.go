@@ -42,6 +42,44 @@ func TestCheckWriteLeaseAvailableIsReadOnlyAndDetectsHolder(t *testing.T) {
 	require.NoError(t, CheckWriteLeaseAvailable(root))
 }
 
+func TestAcquireWriteLeaseForMaintenancePreservesArtifactAndExcludesWriter(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	seed, err := AcquireWriteLease(root, "idx_test", "seed", 0)
+	require.NoError(t, err)
+	require.NoError(t, seed.Release())
+	path := filepath.Join(root, writeLeaseFileName)
+	beforeBytes, err := os.ReadFile(path)
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(path)
+	require.NoError(t, err)
+
+	lease, err := AcquireWriteLeaseForMaintenance(root, "idx_test", "gc")
+	require.NoError(t, err)
+	require.NoError(t, lease.AssertHeldFor("idx_test", filepath.Join(root, "latest.json")))
+	_, err = AcquireWriteLease(root, "idx_test", "writer", 0)
+	require.ErrorIs(t, err, ErrWriteLeaseHeld)
+	require.NoError(t, lease.Release())
+
+	afterBytes, err := os.ReadFile(path)
+	require.NoError(t, err)
+	afterInfo, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, beforeBytes, afterBytes)
+	require.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+	require.Equal(t, beforeInfo.Size(), afterInfo.Size())
+	require.Equal(t, beforeInfo.ModTime(), afterInfo.ModTime())
+}
+
+func TestAcquireWriteLeaseForMaintenanceDoesNotCreateMissingArtifact(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	_, err = AcquireWriteLeaseForMaintenance(root, "idx_test", "gc")
+	require.ErrorContains(t, err, "existing write lease")
+	require.NoFileExists(t, filepath.Join(root, writeLeaseFileName))
+	require.Error(t, CheckWriteLeaseAvailableForMaintenance(root))
+}
+
 func TestWriteLeaseCorruptMetadataDoesNotGrantAccess(t *testing.T) {
 	dir := t.TempDir()
 	// Pre-create a lock file with garbage; flock still serializes writers.

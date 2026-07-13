@@ -6,6 +6,11 @@ Core workflow architecture follows
 `docs/architecture/adr/ADR-0006-cli-as-adapter-over-library-engines.md`: the
 CLI is an adapter over embeddable engines for provider-general operations.
 
+Canonical index readers, writers, recovery, and maintenance also follow
+`docs/architecture/adr/ADR-0007-canonical-index-set-authority-and-recoverable-artifact-transactions.md`:
+all public-library and CLI paths share stable whole-set authority, exact
+artifact identity binding, and lifetime-complete crash recovery.
+
 ## High-Level Components
 
 ## Indexing (Crawl-Backed)

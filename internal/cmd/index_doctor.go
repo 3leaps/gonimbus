@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -935,7 +936,7 @@ func fillDoctorJobManifest(entry *indexDoctorEntry, manifestPath string, opts in
 	}
 }
 
-func inspectIndexDBForDoctor(ctx context.Context, dbPath string, opts indexDoctorOptions) (*indexDoctorEntry, error) {
+func inspectIndexDBForDoctor(ctx context.Context, dbPath string, opts indexDoctorOptions) (result *indexDoctorEntry, err error) {
 	dbPath = strings.TrimSpace(dbPath)
 	if dbPath == "" {
 		return nil, fmt.Errorf("empty db path")
@@ -959,12 +960,18 @@ func inspectIndexDBForDoctor(ctx context.Context, dbPath string, opts indexDocto
 	fillDoctorIdentityFields(entry, identityPath, opts)
 	fillDoctorJobManifest(entry, filepath.Join(dir, "manifest.json"), opts)
 
-	// Open DB and inspect index sets.
-	db, err := openIndexDB(ctx, dbPath)
+	// Open a strict snapshot. Marker-authoritative canonical databases hold the
+	// same stable authority as writers and GC for the full inspection.
+	snapshotOpts, err := sqliteSnapshotOptionsForPath(dbPath, "")
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := indexreader.OpenSQLiteSnapshot(ctx, snapshotOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { err = errors.Join(err, snapshot.Close()) }()
+	db := snapshot.DB()
 
 	sets, err := indexstore.ListIndexSets(ctx, db, "")
 	if err != nil {

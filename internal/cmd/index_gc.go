@@ -33,8 +33,8 @@ Examples:
   # Plan all but the 2 most recent indexes per base URI
   gonimbus index gc --keep-last 2 --dry-run
 
-Deletion execution is intentionally disabled while the separately gated,
-lease-held recovery executor is under development.`,
+Execution reacquires set authority, revalidates the immutable plan immediately
+before mutation, and records an outside-target recovery receipt.`,
 	RunE: runIndexGC,
 }
 
@@ -74,14 +74,55 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if !dryRun {
-		return fmt.Errorf("format-aware index GC execution is not enabled yet; rerun with --dry-run to produce an immutable deletion plan")
+	now := time.Now().UTC()
+	if dryRun {
+		plan, err := buildIndexGCPlan(ctx, maxAge, maxAgeStr, keepLast, now)
+		if err != nil {
+			return fmt.Errorf("build index GC plan: %w", err)
+		}
+		return printIndexGCPlan(plan, jsonOutput)
 	}
 
-	plan, err := buildIndexGCPlan(ctx, maxAge, maxAgeStr, keepLast, time.Now().UTC())
+	control, err := acquireIndexOperationLease(ctx, operationIndexGCControl, "global", "index-gc-control")
+	if err != nil {
+		return fmt.Errorf("acquire global index GC lease: %w", err)
+	}
+	defer func() { _ = control.Release() }()
+	ctx = control.Context()
+	store, err := openDefaultOperationCheckpointStore(ctx)
+	if err != nil {
+		return err
+	}
+	recovered, err := recoverIndexGCDeletes(ctx, store, indexGCTestExecutionHooks)
+	if err != nil {
+		return fmt.Errorf("recover interrupted index GC: %w", err)
+	}
+	for _, result := range recovered {
+		_, _ = fmt.Fprintf(os.Stderr, "Recovered index GC transaction %s (%d set(s), %s)\n", result.TransactionID, result.IndexSetsRemoved, formatBytes(result.RemovedBytes))
+	}
+
+	now = time.Now().UTC()
+	plan, err := buildIndexGCPlan(ctx, maxAge, maxAgeStr, keepLast, now)
 	if err != nil {
 		return fmt.Errorf("build index GC plan: %w", err)
 	}
+	if len(plan.Candidates) == 0 {
+		if len(recovered) > 0 && jsonOutput {
+			return printGCResultJSON(recovered[len(recovered)-1])
+		}
+		return printIndexGCPlan(plan, jsonOutput)
+	}
+	result, err := executeIndexGCPlan(ctx, store, plan, maxAge, maxAgeStr, keepLast, now, indexGCTestExecutionHooks)
+	if err != nil {
+		return fmt.Errorf("execute index GC plan: %w", err)
+	}
+	if jsonOutput {
+		return printGCResultJSON(result)
+	}
+	return printGCResultTable(result)
+}
+
+func printIndexGCPlan(plan *indexGCPlan, jsonOutput bool) error {
 	if len(plan.Candidates) == 0 && len(plan.Warnings) == 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "No indexes found")
 		return nil
@@ -99,6 +140,25 @@ func runIndexGC(cmd *cobra.Command, _ []string) error {
 	}
 
 	return printGCPlanTable(plan)
+}
+
+func printGCResultTable(result indexGCExecutionResult) error {
+	if result.IndexSetsRemoved == 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "No indexes to remove")
+		return nil
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "Removed %d index(es)\n", result.IndexSetsRemoved)
+	_, _ = fmt.Fprintf(os.Stderr, "Objects: %d\n", result.ObjectsRemoved)
+	_, _ = fmt.Fprintf(os.Stderr, "Verified artifact bytes: %s\n", formatBytes(result.RemovedBytes))
+	_, _ = fmt.Fprintf(os.Stderr, "Plan: %s\n", result.PlanSHA256)
+	_, _ = fmt.Fprintf(os.Stdout, "%s\n", result.TransactionID)
+	return nil
+}
+
+func printGCResultJSON(result indexGCExecutionResult) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
 
 func printGCPlanTable(plan *indexGCPlan) error {

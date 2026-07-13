@@ -801,6 +801,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 	oldFormat := indexBuildFormat
 	oldExperimentalEngine := indexBuildExperimentalEngine
 	oldJSON := indexBuildJSON
+	oldIdentityGuardHook := indexBuildAfterIdentityGuard
 	t.Cleanup(func() {
 		indexBuildJobPath = oldJobPath
 		indexBuildDBPath = oldDBPath
@@ -822,6 +823,7 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildFormat = oldFormat
 		indexBuildExperimentalEngine = oldExperimentalEngine
 		indexBuildJSON = oldJSON
+		indexBuildAfterIdentityGuard = oldIdentityGuardHook
 	})
 	return func() {
 		indexBuildJobPath = ""
@@ -844,5 +846,6 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildFormat = "durable"
 		indexBuildExperimentalEngine = false
 		indexBuildJSON = false
+		indexBuildAfterIdentityGuard = nil
 	}
 }

@@ -11,13 +11,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/indexenrich"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
 
 // runIndexEnrichWithHeadDurable is a thin Cobra adapter over pkg/indexenrich.
-func runIndexEnrichWithHeadDurable(ctx context.Context, cmd *cobra.Command, meta indexreader.Meta) error {
+func runIndexEnrichWithHeadDurable(ctx context.Context, cmd *cobra.Command, meta indexreader.Meta, authority *indexcoord.Lease) error {
 	if strings.TrimSpace(meta.SourcePath) == "" {
 		return fmt.Errorf("durable enrich requires a latest.json source path")
 	}
@@ -85,6 +86,7 @@ func runIndexEnrichWithHeadDurable(ctx context.Context, cmd *cobra.Command, meta
 		IndexSetID:     meta.IndexSetID,
 		BaseURI:        indexSet.BaseURI,
 		Provider:       prov,
+		Authority:      authority,
 		SegmentSetRoot: segmentSetRoot,
 		JournalRoot:    journalRoot,
 		Query: indexenrich.QueryOptions{

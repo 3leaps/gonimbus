@@ -68,6 +68,18 @@ type indexGCIdentity struct {
 }
 
 func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText string, keepLast int, now time.Time) (*indexGCPlan, error) {
+	return buildIndexGCPlanWithLeases(ctx, maxAge, maxAgeText, keepLast, now, nil, "")
+}
+
+func buildIndexGCPlanWithLeases(
+	ctx context.Context,
+	maxAge time.Duration,
+	maxAgeText string,
+	keepLast int,
+	now time.Time,
+	heldDurableWriteLeases map[string]*indexsubstrate.WriteLease,
+	skipCheckpointRunID string,
+) (*indexGCPlan, error) {
 	opts, err := indexReaderResolveOptions()
 	if err != nil {
 		return nil, err
@@ -160,7 +172,13 @@ func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText stri
 				warnings = append(warnings, indexGCWarning{Path: segmentSetRoot, IndexSetID: id, Reason: fmt.Sprintf("unsafe segment-set root; retained: %v", targetErr)})
 			} else {
 				entry.TargetMap[target.Path] = target
-				if leaseErr := indexsubstrate.CheckWriteLeaseAvailable(segmentSetRoot); leaseErr != nil {
+				leaseErr := error(nil)
+				if held := heldDurableWriteLeases[filepath.Clean(segmentSetRoot)]; held != nil {
+					leaseErr = held.AssertHeldFor(id, filepath.Join(segmentSetRoot, "latest.json"))
+				} else {
+					leaseErr = indexsubstrate.CheckWriteLeaseAvailableForMaintenance(segmentSetRoot)
+				}
+				if leaseErr != nil {
 					entry.Blocked = true
 					warnings = append(warnings, indexGCWarning{Path: segmentSetRoot, IndexSetID: id, Reason: fmt.Sprintf("durable writer lease is not available; retained: %v", leaseErr)})
 				}
@@ -182,7 +200,7 @@ func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText stri
 	}
 
 	warnings = append(warnings, blockUnprovenGCRoots(opts, journalRoot, inventory)...)
-	activeWarnings, err := blockActiveGCState(inventory)
+	activeWarnings, err := blockActiveGCStateExcept(inventory, skipCheckpointRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +285,7 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 			continue
 		}
 		if hasSQLite {
-			sidecars, sidecarErr := sqliteTransactionSidecars(dbPath)
+			sidecars, sidecarErr := indexstore.SQLiteTransactionSidecars(dbPath)
 			if sidecarErr != nil || len(sidecars) > 0 {
 				entry.Blocked = true
 				reason := fmt.Sprintf("cannot inspect SQLite transaction sidecars; retained: %v", sidecarErr)
@@ -326,7 +344,7 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 			warnings = append(warnings, indexGCWarning{Path: dir, IndexSetID: id, Reason: "SQLite identity tree changed during read-only inspection; retained"})
 			continue
 		}
-		sidecars, sidecarErr := sqliteTransactionSidecars(dbPath)
+		sidecars, sidecarErr := indexstore.SQLiteTransactionSidecars(dbPath)
 		if sidecarErr != nil || len(sidecars) > 0 {
 			entry.Blocked = true
 			reason := fmt.Sprintf("cannot revalidate SQLite transaction sidecars; retained: %v", sidecarErr)
@@ -344,30 +362,6 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 		delete(identities, id)
 	}
 	return identities, warnings, nil
-}
-
-func sqliteTransactionSidecars(dbPath string) ([]string, error) {
-	dir := filepath.Dir(dbPath)
-	base := filepath.Base(dbPath)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var found []string
-	for _, entry := range entries {
-		name := entry.Name()
-		suffix := strings.TrimPrefix(name, base)
-		if suffix == name {
-			continue
-		}
-		switch {
-		case suffix == "-wal", suffix == "-shm", suffix == "-journal",
-			strings.HasPrefix(suffix, "-mj "), strings.HasPrefix(suffix, "-stmtjrnl"):
-			found = append(found, name)
-		}
-	}
-	sort.Strings(found)
-	return found, nil
 }
 
 func validateIndexGCArtifactRoot(root string) error {
@@ -574,6 +568,9 @@ func blockUnprovenGCRoots(opts indexreader.ResolveOptions, journalRoot string, i
 				warnings = append(warnings, indexGCWarning{Path: path, Reason: "unproven artifact-root entry retained"})
 				continue
 			}
+			if root == opts.SegmentCacheRoot && dir.Name() == indexsubstrate.SetAuthorityDirectoryName {
+				continue
+			}
 			if root == opts.IndexesRoot {
 				identity, identityErr := indexreader.ReadLocalIdentityFile(filepath.Join(path, "identity.json"), opts.MaxMarkerBytes)
 				if identityErr != nil || !validFullIndexSetID(identity.IndexSetID) {
@@ -607,7 +604,7 @@ func blockUnprovenGCRoots(opts indexreader.ResolveOptions, journalRoot string, i
 	return warnings
 }
 
-func blockActiveGCState(inventory map[string]*indexGCInventoryEntry) ([]indexGCWarning, error) {
+func blockActiveGCStateExcept(inventory map[string]*indexGCInventoryEntry, skipCheckpointRunID string) ([]indexGCWarning, error) {
 	var warnings []indexGCWarning
 	jobsRoot, err := indexJobsRootDir()
 	if err != nil {
@@ -702,6 +699,12 @@ func blockActiveGCState(inventory map[string]*indexGCInventoryEntry) ([]indexGCW
 		var env opcheckpoint.Envelope
 		if err := json.Unmarshal(data, &env); err != nil {
 			return fmt.Errorf("inspect operation checkpoint %s: %w", path, err)
+		}
+		// A non-empty skip id is only supplied by the globally serialized GC
+		// recovery/execution path after it has strictly loaded every GC intent.
+		// Those records are the transaction being recovered, not competing work.
+		if env.Operation == operationIndexGCDelete && skipCheckpointRunID != "" {
+			return nil
 		}
 		if env.Status == opcheckpoint.StatusSuccess {
 			return nil

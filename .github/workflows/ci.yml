@@ -134,10 +134,11 @@ jobs:
         run: |
           set -euo pipefail
           GOOS=linux GOARCH=arm64 go build ./...
-  # Native Windows coverage for handle-relative job registry mutation and the
-  # SQLite snapshot binding contract. These cannot be certified by
-  # cross-compilation because share masks, access masks, replacement denial,
-  # and reparse behavior are enforced only by the Windows kernel.
+  # Native Windows coverage for handle-relative job registry mutation, SQLite
+  # snapshot binding, and leased GC quarantine/recovery. These cannot be
+  # certified by cross-compilation because share masks, access masks,
+  # replacement denial, reparse behavior, and open-lock deletion semantics are
+  # enforced only by the Windows kernel.
   windows-jobregistry:
     needs: [format-check]
     name: windows-jobregistry (${{ matrix.goarch }})
@@ -168,9 +169,15 @@ jobs:
             throw "Expected native GOARCH=${{ matrix.goarch }}, got $actual"
           }
           go version
-      - name: Run native SQLite snapshot authority suite
+      - name: Run native SQLite snapshot and driver-handle authority suite
         shell: pwsh
-        run: go test ./pkg/indexstore -run '^TestOpenLocalReadOnlyWindows' -count=1 -v
+        run: go test ./pkg/indexstore -run '^(TestOpenLocalReadOnlyWindows|TestCanonicalSQLiteVFSRejectsHandleReuseAndUnrelatedMatchingOpen|TestOpenLocalMutableCanonicalRejectsSidecarsAppearingBeforeVFSCapture)$' -count=1 -v
+      - name: Run native canonical SQLite writer and crash-recovery suite
+        shell: pwsh
+        run: go test ./pkg/indexreader -run '^(TestSQLiteIdentityPublicationGuardRetainsProofUntilMarkerBoundary|TestCanonicalMetadataPublicationRejectsSymlinksAndSwaps|TestOpenSQLiteWriteTarget.*|TestSQLiteWriteTargetCrashLeavesCanonicalRecoveryState)$' -count=1 -v
+      - name: Run native leased index GC recovery suite
+        shell: pwsh
+        run: go test ./internal/cmd ./internal/indexsubstrate -run '^(TestRunIndexGC|TestAcquireWriteLeaseForMaintenance)' -count=1 -v
       - name: Run native registry security suite
         shell: pwsh
         run: go test ./pkg/jobregistry -count=1 -v

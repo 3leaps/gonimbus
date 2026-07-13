@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -195,7 +196,7 @@ type indexCanonicalAlternateData struct {
 	DeletedAt        *string `json:"deleted_at"`
 }
 
-func runIndexQuery(cmd *cobra.Command, args []string) error {
+func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	ctx := cmd.Context()
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
@@ -246,7 +247,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = reader.Close() }()
+	defer func() { err = errors.Join(err, reader.Close()) }()
 	meta := reader.Meta()
 
 	// When --index-set is provided, use the reader's authoritative base_uri.
@@ -671,12 +672,10 @@ func warnIfReaderLatestRunFailedResumable(ctx context.Context, reader indexreade
 	if meta.Format != indexreader.FormatSQLiteV1 || meta.SourcePath == "" {
 		return nil
 	}
-	db, err := openMigratedIndexDB(ctx, meta.SourcePath)
-	if err != nil {
-		// Reader already opened successfully; skip advisory warning on reopen failure.
+	db := reader.SQLiteDB()
+	if db == nil {
 		return nil
 	}
-	defer func() { _ = db.Close() }()
 	sets, err := indexstore.ListIndexSets(ctx, db, "")
 	if err != nil || len(sets) == 0 {
 		return nil
@@ -694,8 +693,9 @@ func warnIfReaderLatestRunFailedResumable(ctx context.Context, reader indexreade
 	return warnIfLatestIndexRunFailedResumable(ctx, db, indexSet)
 }
 
-// openIndexDB opens a local index database for reading.
-func openIndexDB(ctx context.Context, path string) (*sql.DB, error) {
+// openIndexDBMutable opens a database that may be migrated or written. Local
+// canonical callers must already hold whole-set authority.
+func openIndexDBMutable(ctx context.Context, path string) (*sql.DB, error) {
 	cfg := indexstore.Config{Path: path}
 	if strings.HasPrefix(path, "libsql://") || strings.HasPrefix(path, "https://") {
 		cfg = indexstore.Config{URL: path}
@@ -706,7 +706,7 @@ func openIndexDB(ctx context.Context, path string) (*sql.DB, error) {
 // openMigratedIndexDB opens the selected query database and upgrades its schema
 // before callers issue current-version SELECT statements.
 func openMigratedIndexDB(ctx context.Context, path string) (*sql.DB, error) {
-	db, err := openIndexDB(ctx, path)
+	db, err := openIndexDBMutable(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -715,6 +715,59 @@ func openMigratedIndexDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate index schema: %w", err)
 	}
 	return db, nil
+}
+
+func sqliteSnapshotOptionsForPath(path, indexSetID string) (indexreader.SQLiteSnapshotOptions, error) {
+	opts := indexreader.SQLiteSnapshotOptions{Path: path}
+	canonical, err := isCanonicalIndexDBPath(path)
+	if err != nil || !canonical {
+		return opts, err
+	}
+	identity, err := indexreader.ReadLocalIdentityFile(filepath.Join(filepath.Dir(path), "identity.json"), int64(maxHubMarkerBytes))
+	if err != nil {
+		return opts, fmt.Errorf("canonical SQLite identity is required before read: %w", err)
+	}
+	if !validFullIndexSetID(identity.IndexSetID) {
+		return opts, fmt.Errorf("canonical SQLite identity requires a valid full index_set_id")
+	}
+	indexSetID = strings.TrimSpace(indexSetID)
+	if indexSetID != "" && indexSetID != identity.IndexSetID {
+		return opts, fmt.Errorf("canonical SQLite identity/scope mismatch: requested index_set_id %q does not match identity %q", indexSetID, identity.IndexSetID)
+	}
+	segmentRoot, err := indexSubstrateSegmentCacheDir(identity.IndexSetID)
+	if err != nil {
+		return opts, err
+	}
+	opts.SegmentSetRoot = segmentRoot
+	opts.IndexSetID = identity.IndexSetID
+	return opts, nil
+}
+
+func isCanonicalIndexDBPath(path string) (bool, error) {
+	if filepath.Base(filepath.Clean(path)) != "index.db" {
+		return false, nil
+	}
+	root, err := indexRootDir()
+	if err != nil {
+		// Callers may inspect an explicit external DB without initialized app
+		// identity; it is not part of the canonical local-GC namespace.
+		return false, nil
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	parentInfo, err := os.Stat(filepath.Dir(filepath.Dir(filepath.Clean(path))))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return os.SameFile(rootInfo, parentInfo), nil
 }
 
 func indexDataDir() (string, error) {
@@ -766,16 +819,26 @@ func loadIndexEntriesWithPaths(ctx context.Context) ([]indexDBEntry, error) {
 
 	entries := make([]indexDBEntry, 0, len(paths))
 	for _, path := range paths {
-		db, err := openIndexDB(ctx, path)
+		snapshotOpts, err := sqliteSnapshotOptionsForPath(path, "")
 		if err != nil {
 			warnIndexDB("skip index db %s: %v", path, err)
 			continue
 		}
-
-		info, err := indexstore.ListIndexSetsWithStats(ctx, db)
-		_ = db.Close()
+		snapshot, err := indexreader.OpenSQLiteSnapshot(ctx, snapshotOpts)
 		if err != nil {
 			warnIndexDB("skip index db %s: %v", path, err)
+			continue
+		}
+		db := snapshot.DB()
+
+		info, err := indexstore.ListIndexSetsWithStats(ctx, db)
+		closeErr := snapshot.Close()
+		if err != nil {
+			warnIndexDB("skip index db %s: %v", path, err)
+			continue
+		}
+		if closeErr != nil {
+			warnIndexDB("skip index db %s: %v", path, closeErr)
 			continue
 		}
 		if len(info) == 0 {
@@ -798,12 +861,31 @@ func loadIndexEntriesWithPaths(ctx context.Context) ([]indexDBEntry, error) {
 
 // openIndexDBByID opens a local index database by its index set ID or directory name.
 // Accepts either a full index_set_id (idx_<64hex>) or directory name (idx_<16hex>).
-func openIndexDBByID(ctx context.Context, id string) (*sql.DB, *indexstore.IndexSet, error) {
+func openIndexDBByID(ctx context.Context, id string, authority *indexSetMaintenanceGuard) (*sql.DB, *indexstore.IndexSet, error) {
+	if authority == nil {
+		return nil, nil, fmt.Errorf("index set maintenance authority is required before mutable database open")
+	}
+	if err := authority.AssertHeldFor(id); err != nil {
+		return nil, nil, err
+	}
 	rootDir, err := indexRootDir()
 	if err != nil {
 		return nil, nil, err
 	}
-	return openIndexDBByIDInRoot(ctx, rootDir, id)
+	match, err := resolveIndexDirInRoot(rootDir, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := openMigratedIndexDB(ctx, match.DBPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open index database: %w", err)
+	}
+	set, err := selectOpenedIndexSet(ctx, db, id, match.DBPath)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return db, set, nil
 }
 
 // validHexPattern matches lowercase hex strings (1-64 chars).
@@ -865,39 +947,46 @@ func resolveIndexDirInRoot(rootDir, id string) (*indexDirMatch, error) {
 	return &matches[0], nil
 }
 
-// openIndexDBByIDInRoot is the testable core of openIndexDBByID.
-func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*sql.DB, *indexstore.IndexSet, error) {
+// openIndexDBByIDInRoot is the testable strict snapshot resolver for an
+// externally quiesced root. Production canonical readers use indexreader with
+// stable whole-set authority.
+func openIndexDBByIDInRoot(ctx context.Context, rootDir, id string) (*indexreader.SQLiteSnapshot, *indexstore.IndexSet, error) {
 	match, err := resolveIndexDirInRoot(rootDir, id)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	db, err := openMigratedIndexDB(ctx, match.DBPath)
+	snapshot, err := indexreader.OpenSQLiteSnapshot(ctx, indexreader.SQLiteSnapshotOptions{Path: match.DBPath})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open index database: %w", err)
 	}
+	set, err := selectOpenedIndexSet(ctx, snapshot.DB(), id, match.DBPath)
+	if err != nil {
+		_ = snapshot.Close()
+		return nil, nil, err
+	}
+	return snapshot, set, nil
+}
 
+func selectOpenedIndexSet(ctx context.Context, db *sql.DB, id, dbPath string) (*indexstore.IndexSet, error) {
 	cleanID := strings.TrimPrefix(id, "idx_")
 	sets, err := indexstore.ListIndexSets(ctx, db, "")
 	if err != nil {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("list index sets: %w", err)
+		return nil, fmt.Errorf("list index sets: %w", err)
 	}
 	if len(sets) == 0 {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("no index sets in database: %s", match.DBPath)
+		return nil, fmt.Errorf("no index sets in database: %s", dbPath)
 	}
 
 	// Match the user-provided prefix against the full index_set_id in the DB.
 	for i := range sets {
 		setHex := strings.TrimPrefix(sets[i].IndexSetID, "idx_")
 		if strings.HasPrefix(setHex, cleanID) {
-			return db, &sets[i], nil
+			return &sets[i], nil
 		}
 	}
 
 	// Fallback: single-set-per-DB convention.
-	return db, &sets[0], nil
+	return &sets[0], nil
 }
 
 func warnIfLatestIndexRunFailedResumable(ctx context.Context, db *sql.DB, indexSet *indexstore.IndexSet) error {

@@ -284,6 +284,9 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 		"updated_at":    createdAt.Format(time.RFC3339Nano),
 		"complete_path": completePath,
 	})
+	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, identity.IndexSetID, "fixture-publish", 0)
+	require.NoError(t, err)
+	require.NoError(t, lease.Release())
 	return durableCLIEnv{
 		baseURI:     baseURI,
 		indexSetID:  identity.IndexSetID,

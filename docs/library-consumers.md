@@ -287,6 +287,20 @@ Embedding contract highlights:
   locations resolved by the adapter. The engine rejects journal/segment paths
   under a supplied `IndexDBDir` so v2 working state is not silently nested
   under a legacy SQLite directory.
+- **Whole-set mutation authority is shared.** `pkg/indexbuild` and
+  `pkg/indexenrich` acquire an OS-backed `pkg/indexcoord` lease before opening
+  or creating set state. Its lock lives in the stable sibling
+  `.gonimbus-set-authority`, outside the renameable segment-set root, so a GC
+  quarantine cannot let a new library writer re-create the canonical root.
+  The inner durable publish lock remains a second, narrower commit guard.
+- **Caller-owned SQLite sinks join the same authority.** An embedder that opens
+  or migrates the canonical `index.db`, including an observation sink used
+  beside a durable build, must first call `indexcoord.Acquire` and pass that
+  same lease in `indexbuild.Config.Authority` or
+  `indexenrich.Config.Authority`. The engine validates its set/root binding and
+  leaves caller-supplied leases open. Direct canonical mutations through
+  `pkg/indexstore` carry the same requirement; `indexstore.Open` alone is not a
+  whole-set concurrency guard.
 - **Observation fanout is library-owned.** `ObservationSinks` receive the same
   crawl stream as the durable journal materializer — this is how dual-format
   CLI builds share one crawl without forking providers.
@@ -306,6 +320,82 @@ Hub and parity consumers outside the build engine should:
    readiness or HEAD-enrichment parity.
 4. Stop assuming every successful build produces `index.db`. Open SQLite only
    when the embedding path requested sqlite or dual-format materialization.
+5. Use `indexreader.OpenSQLiteSnapshot` for canonical SQLite reads, supplying
+   the full index-set ID and its segment-set root. The snapshot holds stable
+   whole-set authority for its lifetime, rejects WAL/SHM, rollback, master, and
+   statement journals before and after inspection, binds the base file without
+   following links, and requires the current schema without migration. For an
+   authority-held read, the database must contain exactly one index set and its
+   ID must equal the authority ID. Canonical CLI resolution also requires a
+   valid `identity.json`; a missing or corrupt marker fails closed rather than
+   probing SQLite without authority. `ListIndexReaders` preserves such a
+   canonical `index.db` as a report-only `ListedIndex` with typed
+   `IdentityStatusMissing`, `IdentityStatusInvalid`, or
+   `IdentityStatusMismatch`; consumers must not treat those entries as live
+   readers or infer zero counts from their absent metadata. The CLI marks these
+   rows with `metadata_trusted: false` and omits object/byte/run counts. Always
+   check the snapshot `Close` error before beginning a later mutation. Raw
+   `indexstore.OpenLocalReadOnly` is an
+   immutable base-file primitive, not a concurrency contract; use it directly
+   only when the caller has independently excluded writers/GC and performs the
+   documented pre/post sidecar checks. Older schemas require a guarded writer
+   migration.
+6. Use `indexreader.OpenSQLiteWriteTarget` for canonical SQLite mutation under
+   a caller-held `indexcoord.Lease`. The operation validates a valid matching
+   marker and the single database index-set ID before reusing an existing
+   target, atomically reserves an absent target, and retains a no-follow file
+   binding while SQLite opens the canonical `index.db` name. A dedicated
+   per-connection VFS attests the exact driver `sqlite3_file` OS handle against
+   that retained file; it does not infer the connection from process-wide
+   descriptor or handle deltas. The ordinary writer passes an explicit
+   sidecar-absence expectation from validation into VFS registration; a WAL,
+   SHM, rollback, master, or statement journal that appears in that handoff
+   interval is refused rather than adopted. For every absent-to-present
+   transition, the VFS retains a no-follow canonical-directory handle and
+   exclusively creates the sidecar relative to that handle from the retained
+   main path plus a known suffix: WAL and main rollback journals are selected
+   from SQLite open-type flags (not opportunistic zName string matching alone),
+   and SHM is reserved before delegated shared-memory mapping. The VFS requires
+   the eventual SQLite fd/handle to match the reserved object and keeps the
+   reservation handle through SQLite close (or SHM unmap). Classified sidecar
+   cleanup captures the live name into a transaction-owned quarantine entry,
+   opens and attests that capture, and truncates reserved content only through
+   that open descriptor. Ordinary mutation and close do not pathname-unlink
+   quarantine names after attestation. Transaction inventory is read-only and
+   reports every quarantine-prefix name as blocking residue without deleting
+   unproven entries. Whole-set authority alone does not authorize prefix-wide or
+   emptiness-based quarantine deletion; no production library API deletes by
+   prefix possession. Directory-entry removal requires an explicit receipt- or
+   exact-binding-backed recovery transaction. Ordinary open of later canonical
+   readers and writers refuses while unreclaimed residue exists, including empty
+   fd-truncated captures. Restore of a mismatched capture uses an atomic
+   no-replace rename and never overwrites a newly live canonical name.
+   The VFS then reasserts authority, the main-file binding, and each opened
+   sidecar binding at SQLite access, open, read, write, lock, sync, and
+   shared-memory boundaries through connection close. The concrete canonical name
+   is important: guarded and uncoordinated SQLite writers share one lock/WAL
+   namespace instead of creating alias-named transaction state. Use the returned
+   `DB`; do not reopen `Path`,
+   publish `identity.json` and `manifest.json` with the target's
+   `PublishIdentity` and `PublishManifest` methods, and check `Close`. Those
+   publishers bind the canonical directory, reject link/non-regular
+   destinations, and fsync an atomic same-directory replacement. Close never
+   deletes transaction sidecars after a close/checkpoint error. A durable-only
+   workflow that publishes canonical metadata but intentionally does not create
+   SQLite must retain validation through both metadata boundaries with
+   `indexreader.OpenSQLiteIdentityPublicationGuard`, then call
+   `PublishIdentity`, `PublishManifest`, and `Close`.
+   `ValidateSQLiteWriteTarget` remains the check-only compatibility helper; it
+   refuses an untrusted existing database while leaving an absent target
+   absent, but does not retain proof for a later write. The CLI delegates these
+   boundaries to the same library operations.
+
+An explicit SQLite path outside the configured canonical indexes root remains
+caller-owned and externally quiesced. It does not receive a canonical identity
+marker or whole-set authority automatically. An explicit path lexically inside
+that root, or resolving into it through links, cannot downgrade to this weaker
+contract: it must be the requested set's canonical target and uses the guarded
+workflow above.
 
 `pkg/indexbuild` and `pkg/indexstore` remain **Experimental**. Pin an exact
 release. `pkg/reflow` is unchanged in stability tier in v0.4.0 (still
@@ -348,6 +438,7 @@ or `modernc.org/sqlite`.
 
 Storageful public packages are:
 
+- `pkg/indexcoord`
 - `pkg/indexstore`
 - `pkg/opcheckpoint`
 - `pkg/reflowstate`

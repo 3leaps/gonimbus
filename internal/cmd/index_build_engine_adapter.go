@@ -14,6 +14,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -36,7 +37,7 @@ type indexBuildBothFormatsResult struct {
 	Report  *indexcompare.Report
 }
 
-func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db *sql.DB, indexSet *indexstore.IndexSet, run *indexstore.IndexRun, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexBuildBothFormatsResult, error) {
+func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db *sql.DB, indexSet *indexstore.IndexSet, run *indexstore.IndexRun, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters, authority *indexcoord.Lease) (indexBuildBothFormatsResult, error) {
 	out := indexBuildBothFormatsResult{Result: &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}}
 	if m == nil {
 		return out, fmt.Errorf("index manifest is required")
@@ -116,6 +117,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		ObservationSinks:     []output.Writer{sqliteWriter},
 		Paths:                paths,
 		Coverage:             coverage,
+		Authority:            authority,
 		RunStartedAt:         run.StartedAt,
 		CreatedAt:            time.Now().UTC(),
 		TargetRowsPerSegment: 0,
@@ -159,7 +161,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	return out, nil
 }
 
-func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters) (indexbuild.Summary, string, error) {
+func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters, resolvedDB resolvedIndexDB, authority *indexcoord.Lease) (indexbuild.Summary, string, error) {
 	if m == nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("index manifest is required")
 	}
@@ -203,24 +205,12 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 	if err != nil {
 		return indexbuild.Summary{}, "", err
 	}
-	// Write lease + parent CAS are acquired inside indexbuild.Retry (shared by
-	// durable-only, both-format, and library callers).
+	// Stable whole-set authority, inner publish lease, and parent CAS are
+	// enforced inside indexbuild (shared by CLI and library callers).
 
 	runSegmentDir := filepath.Join(segmentRoot, "runs", runID)
-	// Durable-only builds never take --db; identity lands under the default
-	// per-index directory so operators can still locate the set.
-	resolvedDB, err := resolveIndexDBPath("", identityResult)
-	if err != nil {
-		return indexbuild.Summary{}, "", err
-	}
-	if resolvedDB.WriteIdentity {
-		if err := writeIndexIdentityFile(resolvedDB.IdentityDir, identityResult); err != nil {
-			return indexbuild.Summary{}, "", err
-		}
-		if err := writeIndexManifestFile(resolvedDB.IdentityDir, m); err != nil {
-			return indexbuild.Summary{}, "", err
-		}
-	}
+	// Durable-only canonical metadata was already committed through the
+	// library-owned retained guard before provider construction.
 
 	crawlPrefixes, err := indexBuildEngineCrawlPrefixes(ctx, m, basePrefix, prov)
 	if err != nil {
@@ -249,6 +239,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		ObservationSinks:     []output.Writer{newStderrProgressWriter(os.Stderr)},
 		Paths:                indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, resolvedDB.IdentityDir),
 		Coverage:             coverage,
+		Authority:            authority,
 		RunStartedAt:         now,
 		CreatedAt:            now,
 		TargetRowsPerSegment: 0,

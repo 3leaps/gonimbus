@@ -208,15 +208,25 @@ Durable-v2 limitations (fail closed or narrowed):
   not `SUM(objects_current.size_bytes)`.
 - **`index gc --dry-run`** inventories SQLite and durable sets by authoritative
   markers and emits one immutable plan for identity, segment-set, and journal
-  roots. It retains corrupt, aliased, symlinked, leased, or active artifacts
-  with warnings. Execution without `--dry-run` remains fail-closed until the
-  separately gated lease-held recovery executor lands.
+  roots. Rerun the same retention policy without `--dry-run` to execute it.
+  Execution takes the same stable whole-set authority used by public build and
+  enrich libraries, plus the narrower durable publish lock, recomputes the plan
+  under exclusion, and requires the exact plan digest to match. The authority
+  lock lives outside the renameable set root and remains held through recovery,
+  so quarantine cannot detach it from the path used by a new writer. Each target
+  is re-hashed immediately before it is moved to a transaction quarantine. An
+  owner-only operation record outside the deletion roots makes every move/delete
+  boundary idempotently recoverable; the next GC invocation finishes an
+  interrupted transaction before planning new work.
+  Corrupt, aliased, symlinked, active, or legacy durable sets without a proven
+  writer-lock artifact remain retained with warnings.
 - **Full run/checkpoint lifecycle** (`--resume-run` for build/enrich
   operation recovery) remains SQLite/opcheckpoint-oriented; durable enrich
   rejects `--resume-run` (row-level `--resume` is supported).
 - **`index enrich-with-head`** is format-aware via library workhorse
-  `pkg/indexenrich`: durable-only sets take an **OS-level exclusive write
-  lease** (Unix flock / Windows LockFileEx; shared with durable build/publish),
+  `pkg/indexenrich`: durable-only sets take the stable **OS-level whole-set
+  authority** (Unix flock / Windows LockFileEx; shared with build and GC) and
+  the inner durable publish lease,
   open **one** verified parent snapshot, HEAD-filter candidates from that
   parent, seal an enrich-only journal, and publish a **new** internal-render
   snapshot that advances `latest.json` only if the held lease is still valid

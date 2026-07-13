@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -84,6 +85,52 @@ func TestPublicRetryRejectsWhenWriteLeaseHeld(t *testing.T) {
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 	})
 	require.ErrorIs(t, err, indexsubstrate.ErrWriteLeaseHeld)
+}
+
+func TestPublicBuildAndRetryRejectStableAuthorityAfterRootQuarantine(t *testing.T) {
+	cfg := testConfig(t, "stable-authority-quarantine")
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	quarantine := segmentRoot + ".quarantine"
+	require.NoError(t, os.MkdirAll(segmentRoot, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(segmentRoot, "sentinel"), []byte("keep\n"), 0o600))
+	held, err := indexcoord.Acquire(context.Background(), segmentRoot, cfg.IndexSetID, "gc")
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+	require.NoError(t, os.Rename(segmentRoot, quarantine))
+
+	_, err = NewRunner(cfg).Build(context.Background())
+	require.ErrorIs(t, err, indexcoord.ErrHeld)
+	require.NoDirExists(t, segmentRoot)
+	require.FileExists(t, filepath.Join(quarantine, "sentinel"))
+
+	_, err = Retry(context.Background(), RetryConfig{
+		IndexSetID:   cfg.IndexSetID,
+		RunID:        cfg.RunID,
+		BaseURI:      cfg.BaseURI,
+		Paths:        cfg.Paths,
+		JournalPaths: []string{filepath.Join(quarantine, "journal.jsonl")},
+		Coverage:     cfg.Coverage,
+		RunStartedAt: cfg.RunStartedAt,
+		CreatedAt:    cfg.CreatedAt,
+	})
+	require.ErrorIs(t, err, indexcoord.ErrHeld)
+	require.NoDirExists(t, segmentRoot)
+}
+
+func TestBuildUsesAndPreservesCallerOwnedAuthority(t *testing.T) {
+	cfg := testConfig(t, "caller-authority")
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	held, err := indexcoord.Acquire(context.Background(), segmentRoot, cfg.IndexSetID, "embedder")
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+	cfg.Authority = held
+
+	_, err = NewRunner(cfg).Build(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, held.AssertHeldFor(cfg.IndexSetID, segmentRoot))
+	contender, err := indexcoord.Acquire(context.Background(), segmentRoot, cfg.IndexSetID, "peer")
+	require.ErrorIs(t, err, indexcoord.ErrHeld)
+	require.Nil(t, contender)
 }
 
 func TestRunnerNormalizesProviderCoverageToRelKeyTombstones(t *testing.T) {

@@ -125,6 +125,81 @@ func AcquireWriteLease(segmentSetRoot, indexSetID, holder string, _ time.Duratio
 	}, nil
 }
 
+// AcquireWriteLeaseForMaintenance takes the existing durable writer lock
+// without creating or rewriting the diagnostic lock file. It is used by
+// maintenance operations whose immutable plan already includes the complete
+// segment-set tree: changing the diagnostic bytes after planning would destroy
+// the plan's authority. A missing or unsafe lock file fails closed.
+func AcquireWriteLeaseForMaintenance(segmentSetRoot, indexSetID, holder string) (*WriteLease, error) {
+	root, err := canonicalizeSegmentSetRoot(segmentSetRoot)
+	if err != nil {
+		return nil, err
+	}
+	indexSetID = strings.TrimSpace(indexSetID)
+	holder = strings.TrimSpace(holder)
+	if indexSetID == "" {
+		return nil, fmt.Errorf("index_set_id is required")
+	}
+	if holder == "" {
+		return nil, fmt.Errorf("lease holder is required")
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return nil, fmt.Errorf("inspect segment set root: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, fmt.Errorf("segment set root must be a real directory")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || filepath.Clean(resolved) != root {
+		return nil, fmt.Errorf("segment set root is a symlink or path alias")
+	}
+
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("open segment set root: %w", err)
+	}
+	defer func() { _ = rootHandle.Close() }()
+	named, err := rootHandle.Lstat(writeLeaseFileName)
+	if err != nil {
+		return nil, fmt.Errorf("inspect existing write lease: %w", err)
+	}
+	if named.Mode()&os.ModeSymlink != 0 || !named.Mode().IsRegular() {
+		return nil, fmt.Errorf("existing write lease must be a regular non-symlink file")
+	}
+	f, err := rootHandle.OpenFile(writeLeaseFileName, os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open existing write lease: %w", err)
+	}
+	bound, err := f.Stat()
+	if err != nil || !bound.Mode().IsRegular() || !os.SameFile(named, bound) {
+		_ = f.Close()
+		return nil, fmt.Errorf("existing write lease binding changed during open")
+	}
+	if err := lockFileExclusive(f); err != nil {
+		_ = f.Close()
+		if errors.Is(err, errLockWouldBlock) {
+			return nil, fmt.Errorf("%w by concurrent durable writer", ErrWriteLeaseHeld)
+		}
+		return nil, fmt.Errorf("lock existing write lease: %w", err)
+	}
+	after, err := rootHandle.Lstat(writeLeaseFileName)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() || !os.SameFile(bound, after) {
+		_ = unlockFile(f)
+		_ = f.Close()
+		return nil, fmt.Errorf("existing write lease binding changed after lock")
+	}
+
+	return &WriteLease{
+		f:              f,
+		path:           filepath.Join(root, writeLeaseFileName),
+		segmentSetRoot: root,
+		indexSetID:     indexSetID,
+		holder:         holder,
+		token:          fmt.Sprintf("maintenance-%d", time.Now().UTC().UnixNano()),
+	}, nil
+}
+
 // CheckWriteLeaseAvailable probes an existing durable writer lock without
 // creating or rewriting operator state. It is suitable for read-only planning;
 // callers that mutate must still acquire and hold a WriteLease.
@@ -147,6 +222,61 @@ func CheckWriteLeaseAvailable(segmentSetRoot string) error {
 			return fmt.Errorf("%w by concurrent durable writer", ErrWriteLeaseHeld)
 		}
 		return fmt.Errorf("probe write lease: %w", err)
+	}
+	return unlockFile(f)
+}
+
+// CheckWriteLeaseAvailableForMaintenance is the read-only planning probe for
+// destructive maintenance. Unlike the general writer probe, it requires the
+// package-owned lock artifact to exist so execution can later take the same
+// lock without changing the immutable target tree.
+func CheckWriteLeaseAvailableForMaintenance(segmentSetRoot string) error {
+	root, err := canonicalizeSegmentSetRoot(segmentSetRoot)
+	if err != nil {
+		return err
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return fmt.Errorf("segment set root must be a real directory")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || filepath.Clean(resolved) != root {
+		return fmt.Errorf("segment set root is a symlink or path alias")
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rootHandle.Close() }()
+	named, err := rootHandle.Lstat(writeLeaseFileName)
+	if err != nil {
+		return fmt.Errorf("inspect existing write lease: %w", err)
+	}
+	if named.Mode()&os.ModeSymlink != 0 || !named.Mode().IsRegular() {
+		return fmt.Errorf("existing write lease must be a regular non-symlink file")
+	}
+	f, err := rootHandle.OpenFile(writeLeaseFileName, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open existing write lease: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	bound, err := f.Stat()
+	if err != nil || !bound.Mode().IsRegular() || !os.SameFile(named, bound) {
+		return fmt.Errorf("existing write lease binding changed during open")
+	}
+	if err := lockFileExclusive(f); err != nil {
+		if errors.Is(err, errLockWouldBlock) {
+			return fmt.Errorf("%w by concurrent durable writer", ErrWriteLeaseHeld)
+		}
+		return fmt.Errorf("probe existing write lease: %w", err)
+	}
+	after, err := rootHandle.Lstat(writeLeaseFileName)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() || !os.SameFile(bound, after) {
+		_ = unlockFile(f)
+		return fmt.Errorf("existing write lease binding changed after probe")
 	}
 	return unlockFile(f)
 }
