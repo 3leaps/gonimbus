@@ -499,14 +499,14 @@ func verifiedIndexGCTarget(kind, parentRoot, targetPath string) (indexGCTarget, 
 	if filepath.Dir(targetResolved) != parentResolved {
 		return indexGCTarget{}, fmt.Errorf("target resolves outside its canonical root")
 	}
-	size, digest, err := hashIndexGCTree(targetAbs)
+	size, digest, err := hashIndexGCTree(targetAbs, kind)
 	if err != nil {
 		return indexGCTarget{}, err
 	}
 	return indexGCTarget{Kind: kind, Path: targetAbs, SizeBytes: size, TreeSHA256: digest}, nil
 }
 
-func hashIndexGCTree(root string) (int64, string, error) {
+func hashIndexGCTree(root, targetKind string) (int64, string, error) {
 	h := sha256.New()
 	var size int64
 	treeRoot, err := os.OpenRoot(root)
@@ -533,12 +533,11 @@ func hashIndexGCTree(root string) (int64, string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("non-regular artifact is not allowed in deletion target: %s", path)
 		}
-		// Durable write-lease lock is diagnostic-only and is often held open with
-		// an exclusive LockFileEx during plan revalidation. Opening/reading it
-		// for content hashing is unreliable on Windows and is not part of
-		// published index authority. Contribute stable name+mode+size metadata
-		// only so held-lease revalidation matches the pre-acquire plan.
-		if isIndexGCWriteLeaseRel(rel) {
+		// Only the package-owned root-level lock under a segment-set target is
+		// diagnostic metadata (often held open with exclusive LockFileEx during
+		// plan revalidation). Nested same-basename files and any same-named
+		// file in identity/journals targets remain exact-content bound.
+		if isIndexGCPackageWriteLeaseRel(targetKind, rel) {
 			_, _ = fmt.Fprintf(h, "%s\x00%o\x00%d\x00lease-meta\x00", rel, info.Mode().Perm(), info.Size())
 			size += info.Size()
 			return nil
@@ -569,9 +568,16 @@ func hashIndexGCTree(root string) (int64, string, error) {
 	return size, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func isIndexGCWriteLeaseRel(rel string) bool {
-	base := filepath.Base(filepath.FromSlash(rel))
-	return base == indexsubstrate.WriteLeaseFileName
+// isIndexGCPackageWriteLeaseRel reports whether rel is the package-owned
+// durable write-lease lock at the root of a segment-set deletion target.
+// Basename-only matches (nested paths or other target kinds) are intentionally
+// excluded so same-size content substitution remains plan-visible.
+func isIndexGCPackageWriteLeaseRel(targetKind, rel string) bool {
+	if targetKind != "segment-set" {
+		return false
+	}
+	clean := strings.TrimPrefix(filepath.ToSlash(rel), "./")
+	return clean == indexsubstrate.WriteLeaseFileName
 }
 
 func openBoundIndexGCRootFile(root *os.Root, name string, expected fs.FileInfo) (*os.File, fs.FileInfo, error) {

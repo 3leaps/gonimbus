@@ -917,3 +917,58 @@ func TestBuildIndexGCPlanUnderHeldMaintenanceLeaseMatchesPreAcquirePlan(t *testi
 	require.Len(t, after.Candidates, 1)
 	require.Equal(t, before.Candidates[0].Targets, after.Candidates[0].Targets)
 }
+
+func TestHashIndexGCTreePackageWriteLeaseExceptionIsSegmentRootOnly(t *testing.T) {
+	// Nested same-basename files and non-segment targets must remain content-bound.
+	// Only segment-set root .durable-write.lock uses lease-meta.
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "published"), 0o755))
+	nested := filepath.Join(dir, "published", indexsubstrate.WriteLeaseFileName)
+	require.NoError(t, os.WriteFile(nested, []byte("AAAA"), 0o600))
+	rootLock := filepath.Join(dir, indexsubstrate.WriteLeaseFileName)
+	require.NoError(t, os.WriteFile(rootLock, []byte("LOCK"), 0o600))
+	other := filepath.Join(dir, "payload.bin")
+	require.NoError(t, os.WriteFile(other, []byte("data"), 0o600))
+
+	// Nested same-basename: same-size rewrite must change digest even for segment-set.
+	size1, dig1, err := hashIndexGCTree(dir, "segment-set")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(nested, []byte("BBBB"), 0o600))
+	size2, dig2, err := hashIndexGCTree(dir, "segment-set")
+	require.NoError(t, err)
+	require.Equal(t, size1, size2)
+	require.NotEqual(t, dig1, dig2, "nested .durable-write.lock must be content-bound")
+
+	// Root package lock on segment-set: same-size rewrite of diagnostic bytes must NOT change digest.
+	require.NoError(t, os.WriteFile(rootLock, []byte("L0CK"), 0o600)) // same length as LOCK
+	size3, dig3, err := hashIndexGCTree(dir, "segment-set")
+	require.NoError(t, err)
+	require.Equal(t, size2, size3)
+	require.Equal(t, dig2, dig3, "segment-set root package lock is metadata-only")
+
+	// Journals target kind: root same-basename must be content-bound.
+	journalRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(journalRoot, indexsubstrate.WriteLeaseFileName), []byte("AAAA"), 0o600))
+	_, j1, err := hashIndexGCTree(journalRoot, "journals")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(journalRoot, indexsubstrate.WriteLeaseFileName), []byte("BBBB"), 0o600))
+	_, j2, err := hashIndexGCTree(journalRoot, "journals")
+	require.NoError(t, err)
+	require.NotEqual(t, j1, j2, "journals root same-basename must be content-bound")
+
+	// Identity target kind likewise content-bound.
+	idRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(idRoot, indexsubstrate.WriteLeaseFileName), []byte("AAAA"), 0o600))
+	_, i1, err := hashIndexGCTree(idRoot, "identity")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(idRoot, indexsubstrate.WriteLeaseFileName), []byte("BBBB"), 0o600))
+	_, i2, err := hashIndexGCTree(idRoot, "identity")
+	require.NoError(t, err)
+	require.NotEqual(t, i1, i2, "identity root same-basename must be content-bound")
+
+	require.True(t, isIndexGCPackageWriteLeaseRel("segment-set", indexsubstrate.WriteLeaseFileName))
+	require.True(t, isIndexGCPackageWriteLeaseRel("segment-set", "./"+indexsubstrate.WriteLeaseFileName))
+	require.False(t, isIndexGCPackageWriteLeaseRel("segment-set", "published/"+indexsubstrate.WriteLeaseFileName))
+	require.False(t, isIndexGCPackageWriteLeaseRel("journals", indexsubstrate.WriteLeaseFileName))
+	require.False(t, isIndexGCPackageWriteLeaseRel("identity", indexsubstrate.WriteLeaseFileName))
+}
