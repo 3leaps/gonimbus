@@ -882,3 +882,38 @@ func TestLookupHeldDurableWriteLeaseMatchesAbsAndIndexSet(t *testing.T) {
 	// Wrong index set must not match when the path misses.
 	require.Nil(t, lookupHeldDurableWriteLease(held, filepath.Join(t.TempDir(), "other"), "idx_"+strings.Repeat("cd", 32)))
 }
+
+func TestBuildIndexGCPlanUnderHeldMaintenanceLeaseMatchesPreAcquirePlan(t *testing.T) {
+	// Execution revalidates the immutable plan after AcquireWriteLeaseForMaintenance.
+	// Held exclusive lock must not change PlanSHA256 (Windows historically diverged
+	// when the lock file was content-hashed while LockFileEx-held).
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	env := seedDurableOnlyAppData(t, dataRoot, nil)
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+
+	before, err := buildIndexGCPlan(context.Background(), 24*time.Hour, "24h", 0, now)
+	require.NoError(t, err)
+	require.Len(t, before.Candidates, 1)
+	require.NotEmpty(t, before.PlanSHA256)
+
+	var segmentRoot string
+	for _, target := range before.Candidates[0].Targets {
+		if target.Kind == "segment-set" {
+			segmentRoot = target.Path
+			break
+		}
+	}
+	require.NotEmpty(t, segmentRoot, "durable plan must include segment-set target")
+	lease, err := indexsubstrate.AcquireWriteLeaseForMaintenance(segmentRoot, env.indexSetID, "gc-revalidate")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+
+	held := map[string]*indexsubstrate.WriteLease{lease.SegmentSetRoot(): lease}
+	after, err := buildIndexGCPlanWithLeases(context.Background(), 24*time.Hour, "24h", 0, now, held, "gc_test")
+	require.NoError(t, err)
+	require.Equal(t, before.PlanSHA256, after.PlanSHA256, "held maintenance lease must not rewrite plan digest")
+	require.Len(t, after.Candidates, 1)
+	require.Equal(t, before.Candidates[0].Targets, after.Candidates[0].Targets)
+}

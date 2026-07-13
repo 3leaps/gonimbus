@@ -146,7 +146,13 @@ func executeIndexGCPlan(
 		return indexGCExecutionResult{}, fmt.Errorf("revalidate immutable GC plan under leases: %w", err)
 	}
 	if revalidated.PlanSHA256 != plan.PlanSHA256 {
-		return indexGCExecutionResult{}, fmt.Errorf("GC plan changed before execution: planned %s revalidated %s", plan.PlanSHA256, revalidated.PlanSHA256)
+		return indexGCExecutionResult{}, fmt.Errorf(
+			"GC plan changed before execution: planned %s revalidated %s (planned sets=%d warnings=%d; revalidated sets=%d warnings=%d; revalidated_warnings=%v)",
+			plan.PlanSHA256, revalidated.PlanSHA256,
+			len(plan.Candidates), len(plan.Warnings),
+			len(revalidated.Candidates), len(revalidated.Warnings),
+			revalidated.Warnings,
+		)
 	}
 
 	payload, err := newIndexGCDeletePayload(runID, revalidated)
@@ -653,6 +659,18 @@ func snapshotIndexGCDeletionManifest(expected indexGCTarget, actualPath string) 
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("non-regular artifact is not allowed in GC quarantine: %s", rel)
 		}
+		// Match hashIndexGCTree: lease lock is diagnostic-only metadata in the
+		// immutable plan digest and must not require a content open while held.
+		if isIndexGCWriteLeaseRel(rel) {
+			fileHash := sha256.Sum256([]byte("lease-meta"))
+			_, _ = fmt.Fprintf(h, "%s\x00%o\x00%d\x00lease-meta\x00", rel, info.Mode().Perm(), info.Size())
+			size += info.Size()
+			entries = append(entries, indexGCDeleteEntry{
+				Path: filepath.ToSlash(rel), Kind: "file", Mode: info.Mode().Perm(), Size: info.Size(),
+				SHA256: hex.EncodeToString(fileHash[:]),
+			})
+			return nil
+		}
 		f, boundInfo, err := openBoundIndexGCRootFile(root, rel, info)
 		if err != nil {
 			return err
@@ -725,6 +743,15 @@ func validateIndexGCDeletionRemainder(target indexGCDeleteTarget) error {
 		}
 		if want.Kind != "file" || !info.Mode().IsRegular() || info.Mode().Perm() != want.Mode.Perm() || info.Size() != want.Size {
 			return fmt.Errorf("file authority changed in deleting GC quarantine: %s", key)
+		}
+		// Match plan/snapshot hashing: lease lock contributes diagnostic metadata
+		// only (no content open). Size/mode already checked above.
+		if isIndexGCWriteLeaseRel(rel) {
+			meta := sha256.Sum256([]byte("lease-meta"))
+			if hex.EncodeToString(meta[:]) != want.SHA256 {
+				return fmt.Errorf("file content changed in deleting GC quarantine: %s", key)
+			}
+			return nil
 		}
 		f, boundInfo, err := openBoundIndexGCRootFile(root, rel, info)
 		if err != nil {

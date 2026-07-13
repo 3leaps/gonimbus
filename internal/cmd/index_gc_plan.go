@@ -533,6 +533,16 @@ func hashIndexGCTree(root string) (int64, string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("non-regular artifact is not allowed in deletion target: %s", path)
 		}
+		// Durable write-lease lock is diagnostic-only and is often held open with
+		// an exclusive LockFileEx during plan revalidation. Opening/reading it
+		// for content hashing is unreliable on Windows and is not part of
+		// published index authority. Contribute stable name+mode+size metadata
+		// only so held-lease revalidation matches the pre-acquire plan.
+		if isIndexGCWriteLeaseRel(rel) {
+			_, _ = fmt.Fprintf(h, "%s\x00%o\x00%d\x00lease-meta\x00", rel, info.Mode().Perm(), info.Size())
+			size += info.Size()
+			return nil
+		}
 		f, boundInfo, err := openBoundIndexGCRootFile(treeRoot, rel, info)
 		if err != nil {
 			return err
@@ -557,6 +567,11 @@ func hashIndexGCTree(root string) (int64, string, error) {
 		return 0, "", err
 	}
 	return size, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func isIndexGCWriteLeaseRel(rel string) bool {
+	base := filepath.Base(filepath.FromSlash(rel))
+	return base == indexsubstrate.WriteLeaseFileName
 }
 
 func openBoundIndexGCRootFile(root *os.Root, name string, expected fs.FileInfo) (*os.File, fs.FileInfo, error) {

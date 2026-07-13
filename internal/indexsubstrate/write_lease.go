@@ -21,7 +21,12 @@ var ErrWriteLeaseLost = errors.New("durable write lease not held")
 // publish target (index set ID or segment-set root mismatch).
 var ErrWriteLeaseScope = errors.New("durable write lease does not authorize target")
 
-const writeLeaseFileName = ".durable-write.lock"
+// WriteLeaseFileName is the package-owned durable writer lock artifact under a
+// segment-set root. Metadata in the file is diagnostic only.
+const WriteLeaseFileName = ".durable-write.lock"
+
+// writeLeaseFileName is the historical unexported alias used inside this package.
+const writeLeaseFileName = WriteLeaseFileName
 
 // WriteLease is an index-set-scoped exclusive lock for durable latest writers.
 // Mutual exclusion is provided by an OS advisory lock held on an open FD for
