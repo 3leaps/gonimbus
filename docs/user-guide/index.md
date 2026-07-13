@@ -162,6 +162,11 @@ Notes:
 - `build.scope` is included in the index identity; changing scope produces a new index.
 - Scoped builds skip soft-delete by default because the prefix plan is not full coverage.
 - `gonimbus index build --dry-run` prints the scope plan so you can audit prefix counts.
+- Prefix-shaped SQLite-era `match.includes` (literal prefix + terminal `/**`) can be
+  audited/converted with `gonimbus index migrate-match-scope` into
+  `build.scope` `prefix_list` for durable builds. See
+  [Durable Index — match→scope migration](durable-index.md#prefix-shaped-match--scope-migration-g11-subset).
+  Remaining match controls (excludes, non-prefix globs, filters) stay open.
 
 ### Incremental builds with `--since`
 
