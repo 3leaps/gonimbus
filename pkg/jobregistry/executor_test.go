@@ -396,8 +396,20 @@ func waitHelperCompletion(t *testing.T, store *Store, rec *JobRecord) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		stored, err := store.Get(rec.JobID)
-		return err == nil && stored.State == JobStateSuccess && !isProcessAlive(rec.PID)
-	}, 10*time.Second, 10*time.Millisecond)
+		if err != nil || stored.State != JobStateSuccess {
+			return false
+		}
+		// Terminal store state is authoritative. Requiring process death races
+		// Windows PID reuse on busy runners (helper already persisted EndedAt).
+		if stored.EndedAt != nil {
+			return true
+		}
+		pid := stored.PID
+		if pid <= 0 {
+			pid = rec.PID
+		}
+		return !isProcessAlive(pid)
+	}, 15*time.Second, 20*time.Millisecond)
 }
 
 func waitForAllHelperJobs(t *testing.T, store *Store) {
@@ -408,12 +420,18 @@ func waitForAllHelperJobs(t *testing.T, store *Store) {
 			return false
 		}
 		for i := range jobs {
-			if jobs[i].State != JobStateSuccess || isProcessAlive(jobs[i].PID) {
+			if jobs[i].State != JobStateSuccess {
+				return false
+			}
+			if jobs[i].EndedAt != nil {
+				continue
+			}
+			if isProcessAlive(jobs[i].PID) {
 				return false
 			}
 		}
 		return true
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 10*time.Second, 20*time.Millisecond)
 }
 
 func requireFlagValue(t *testing.T, args []string, flag, want string) {
