@@ -170,6 +170,56 @@ func TestWriteProposedManifestSafe_NoForceNeverReplacesExisting(t *testing.T) {
 	}
 }
 
+func TestWriteProposedManifestSafe_ExclusivePublishIsCompleteOrAbsent(t *testing.T) {
+	dir := t.TempDir()
+	job := filepath.Join(dir, "job.yaml")
+	emit := filepath.Join(dir, "out.yaml")
+	if err := os.WriteFile(job, []byte(sampleConvertibleManifest()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := "complete-manifest-bytes\nline-two\n"
+	if err := writeProposedManifestSafe(job, emit, content, false); err != nil {
+		t.Fatal(err)
+	}
+	// Final path must be complete (hard-linked from fully written temp), not empty/partial.
+	data, err := os.ReadFile(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != content {
+		t.Fatalf("final path incomplete or wrong: got %q want %q", data, content)
+	}
+	info, err := os.Lstat(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("final path not regular: %v", info.Mode())
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("final mode=%o want 0600 (inherited from temp inode)", info.Mode().Perm())
+	}
+	// No temp leftovers in the emit directory.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".gonimbus-migrate-") {
+			t.Fatalf("temp name left after exclusive publish: %s", e.Name())
+		}
+	}
+	// Second exclusive attempt: dest remains complete and unchanged.
+	before := data
+	if err := writeProposedManifestSafe(job, emit, "other\n", false); err == nil {
+		t.Fatal("expected second exclusive publish to fail")
+	}
+	after, _ := os.ReadFile(emit)
+	if string(after) != string(before) {
+		t.Fatalf("existing complete dest changed: %q", after)
+	}
+}
+
 func TestWriteProposedManifestSafe_RefuseSourceAlias(t *testing.T) {
 	dir := t.TempDir()
 	job := filepath.Join(dir, "job.yaml")

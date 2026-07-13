@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,7 +235,8 @@ func writeProposedManifestSafe(sourcePath, destPath, content string, force bool)
 		return fmt.Errorf("create emit directory: %w", err)
 	}
 
-	// Always write via a same-directory temp, then exclusive-create or rename.
+	// Write a complete, synced, owner-only same-directory temp first, then publish
+	// the inode: exclusive no-replace via hard-link, or force via rename.
 	tmp, err := createOwnerOnlyTemp(dir, ".gonimbus-migrate-")
 	if err != nil {
 		return err
@@ -258,46 +259,23 @@ func writeProposedManifestSafe(sourcePath, destPath, content string, force bool)
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp emit: %w", err)
 	}
-	// Re-assert owner-only mode in case umask widened create mode.
+	// Re-assert owner-only mode in case umask widened create mode. Final pathname
+	// inherits this mode from the published inode; no post-publish chmod.
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return fmt.Errorf("chmod temp emit: %w", err)
 	}
 
 	if !force {
-		// Exclusive publish: O_EXCL create at the destination. Never fall back to
-		// rename/link replacement — those can overwrite a destination that appears
-		// after preflight (or while a link-unsupported fallback runs).
-		// #nosec G304 -- operator --emit-manifest path
-		out, err := os.OpenFile(absDst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			if os.IsExist(err) {
+		// Atomic exclusive publish: link a fully-written 0600 temp to the final
+		// path. os.Link is no-replace (fails if dest exists). Do not fall back to
+		// rename or O_EXCL+copy — those either replace or expose partial content.
+		if err := os.Link(tmpPath, absDst); err != nil {
+			if errors.Is(err, os.ErrExist) || os.IsExist(err) {
 				return fmt.Errorf("emit path exists (use --force to overwrite): %s", destPath)
 			}
-			return fmt.Errorf("exclusive create emit path: %w", err)
+			return fmt.Errorf("exclusive atomic publish failed (hard-link required; no replace fallback): %w", err)
 		}
-		// Copy prepared bytes from the temp file so partial writes leave only the
-		// exclusive-created dest (caller can delete) rather than a replace.
-		tmpRead, err := os.Open(tmpPath) // #nosec G304 -- same-dir temp we created
-		if err != nil {
-			_ = out.Close()
-			_ = os.Remove(absDst)
-			return fmt.Errorf("reopen temp emit: %w", err)
-		}
-		_, copyErr := copyAndSync(tmpRead, out)
-		_ = tmpRead.Close()
-		if copyErr != nil {
-			_ = out.Close()
-			_ = os.Remove(absDst)
-			return fmt.Errorf("write exclusive emit path: %w", copyErr)
-		}
-		if err := out.Close(); err != nil {
-			_ = os.Remove(absDst)
-			return fmt.Errorf("close exclusive emit path: %w", err)
-		}
-		if err := os.Chmod(absDst, 0o600); err != nil {
-			return fmt.Errorf("chmod emit path: %w", err)
-		}
-		// temp cleaned by defer
+		// Dest and temp share the complete inode; drop the temp name only.
 		return nil
 	}
 
@@ -306,9 +284,6 @@ func writeProposedManifestSafe(sourcePath, destPath, content string, force bool)
 		return fmt.Errorf("atomic replace emit path: %w", err)
 	}
 	cleanup = false
-	if err := os.Chmod(absDst, 0o600); err != nil {
-		return fmt.Errorf("chmod emit path: %w", err)
-	}
 	return nil
 }
 
@@ -324,17 +299,6 @@ func createOwnerOnlyTemp(dir, prefix string) (*os.File, error) {
 		return nil, fmt.Errorf("create temp emit: %w", err)
 	}
 	return f, nil
-}
-
-func copyAndSync(src io.Reader, dst *os.File) (int64, error) {
-	n, err := io.Copy(dst, src)
-	if err != nil {
-		return n, err
-	}
-	if err := dst.Sync(); err != nil {
-		return n, err
-	}
-	return n, nil
 }
 
 func printMatchScopeMigrationPlan(plan *scope.MigrationPlan, jobPath, emitPath string) error {
