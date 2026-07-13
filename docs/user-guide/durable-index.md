@@ -138,7 +138,7 @@ Background execution is supported for `sqlite`, `durable`, and `both`; the
 managed child verifies the exact effective invocation and manifest content
 selected by its parent before building.
 
-## Prefix-shaped match → scope migration (G11 subset)
+## Prefix-shaped match → scope migration
 
 Durable builds still reject non-default `build.match.includes` at the faithful
 coverage gate. Some SQLite-era manifests use **prefix-shaped** includes only
@@ -179,12 +179,12 @@ lineage**. Operator sequence:
    treat `--format both` as legacy-vs-migrated proof (it fans one new crawl)
 4. Pin / select the **new** receipt for consumers
 5. Keep the old set through a validation window (rollback = switch pin back)
-6. Reclaim the old set with existing whole-set `index gc` (G5a) when ready
+6. Reclaim the old set with existing whole-set `index gc` when ready
 
 Migration never rewrites identity on the old set, never adopts old DB/segments
 under a new scope hash, and never synthesizes parent linkage.
 
-### Still open (remaining G11)
+### Still open (non-prefix match controls)
 
 Excludes, suffix/non-prefix globs, metadata filters, and non-default
 `include_hidden` are **not** retired by this migration. They remain rejected

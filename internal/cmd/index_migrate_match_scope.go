@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,11 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/scope"
 )
 
 // index migrate-match-scope audits and converts prefix-shaped match.includes
-// into an explicit build.scope prefix_list (GON-057 Slot 1.3 / G11 subset).
+// into an explicit build.scope prefix_list.
 // Pure audit: no provider construction, authority, markers, or publication.
 
 var (
@@ -42,9 +46,9 @@ classifies as already_migrated.
 
 Cutover after a successful conversion is an operator workflow:
   emit proposed → build new set → compare projections → pin new receipt →
-  move consumers → validation window → reclaim old set via index gc (G5a).
+  move consumers → validation window → reclaim old set via whole-set index gc.
 
-Remaining G11 controls (excludes, non-prefix globs, metadata filters) stay open.`,
+Non-prefix match controls (excludes, non-prefix globs, metadata filters) stay open.`,
 	RunE: runIndexMigrateMatchScope,
 }
 
@@ -53,7 +57,7 @@ func init() {
 	indexMigrateMatchScopeCmd.Flags().StringVar(&indexMigrateMatchScopeJob, "job", "", "Index manifest path to audit/convert (required)")
 	indexMigrateMatchScopeCmd.Flags().StringVar(&indexMigrateMatchScopeEmit, "emit-manifest", "", "Write proposed manifest to this new path (exclusive create unless --force)")
 	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeJSON, "json", false, "Emit MigrationPlan JSON on stdout")
-	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeForce, "force", false, "Allow overwriting --emit-manifest destination")
+	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeForce, "force", false, "Allow overwriting --emit-manifest destination via atomic replacement")
 	_ = indexMigrateMatchScopeCmd.MarkFlagRequired("job")
 }
 
@@ -76,6 +80,7 @@ func runIndexMigrateMatchScope(cmd *cobra.Command, args []string) error {
 	// Refuse before any FS mutation beyond the read above.
 	plan, err := scope.PlanMatchPrefixMigration(raw, scope.PlanOptions{
 		GonimbusVersion: versionInfo.Version,
+		ComputeIdentity: computeMigrationIdentityEvidence,
 	})
 	if err != nil {
 		return err
@@ -87,17 +92,12 @@ func runIndexMigrateMatchScope(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("cannot --emit-manifest: classification=%s reason=%s (%s)",
 				plan.Classification, plan.ReasonCode, plan.Detail)
 		}
-		if err := writeProposedManifestExclusive(emitPath, plan.ProposedManifestYAML, indexMigrateMatchScopeForce); err != nil {
+		if err := writeProposedManifestSafe(jobPath, emitPath, plan.ProposedManifestYAML, indexMigrateMatchScopeForce); err != nil {
 			return err
 		}
-		// Do not leave full YAML in JSON when written to disk (keep digest).
-		// Human text still notes the path.
 	}
 
 	if indexMigrateMatchScopeJSON {
-		// Avoid dumping full client keyspaces; proposed YAML is the operator
-		// artifact. For JSON, keep digest + path note, strip full YAML body
-		// when emit path was used (or always strip and rely on --emit-manifest).
 		out := *plan
 		if emitPath != "" {
 			out.ProposedManifestYAML = ""
@@ -113,37 +113,204 @@ func runIndexMigrateMatchScope(cmd *cobra.Command, args []string) error {
 	return printMatchScopeMigrationPlan(plan, jobPath, emitPath)
 }
 
-func writeProposedManifestExclusive(path, content string, force bool) error {
+// computeMigrationIdentityEvidence uses the storageful identity helper from the
+// CLI adapter so pkg/scope stays storage-free (ADR-0006).
+func computeMigrationIdentityEvidence(m *manifest.IndexManifest, gonimbusVersion string) (*scope.ComputedIdentityEvidence, error) {
+	if m == nil {
+		return nil, fmt.Errorf("manifest is nil")
+	}
+	var scopeHash string
+	var includes []string
+	includeHidden := false
+	var excludes []string
+	sourceType := manifest.DefaultIndexSource
+	if m.Build != nil {
+		if m.Build.Source != "" {
+			sourceType = m.Build.Source
+		}
+		if m.Build.Scope != nil {
+			h, err := scope.HashConfig(m.Build.Scope)
+			if err != nil {
+				return nil, err
+			}
+			scopeHash = h
+		}
+		if m.Build.Match != nil {
+			includes = append([]string(nil), m.Build.Match.Includes...)
+			excludes = append([]string(nil), m.Build.Match.Excludes...)
+			includeHidden = m.Build.Match.IncludeHidden
+		}
+	}
+	if len(includes) == 0 {
+		includes = []string{manifest.DefaultIndexIncludes}
+	}
+
+	params := indexstore.IndexSetParams{
+		BaseURI:  m.Connection.BaseURI,
+		Provider: m.Connection.Provider,
+		Endpoint: m.Connection.Endpoint,
+		BuildParams: indexstore.BuildParams{
+			SourceType:      sourceType,
+			SchemaVersion:   indexstore.SchemaVersion,
+			GonimbusVersion: gonimbusVersion,
+			Includes:        includes,
+			Excludes:        excludes,
+			IncludeHidden:   includeHidden,
+			ScopeHash:       scopeHash,
+		},
+	}
+	if m.Identity != nil {
+		params.StorageProvider = m.Identity.StorageProvider
+		params.CloudProvider = m.Identity.CloudProvider
+		params.RegionKind = m.Identity.RegionKind
+		params.Region = m.Identity.Region
+		params.EndpointHost = m.Identity.EndpointHost
+	}
+	if m.PathDate != nil {
+		params.BuildParams.PathDateExtraction = &indexstore.PathDateExtraction{
+			Method:       m.PathDate.Method,
+			Regex:        m.PathDate.Regex,
+			SegmentIndex: m.PathDate.SegmentIndex,
+		}
+	}
+
+	result, err := indexstore.ComputeIndexSetID(params)
+	if err != nil {
+		return nil, err
+	}
+	return &scope.ComputedIdentityEvidence{
+		Kind:            "computed",
+		IndexSetID:      result.IndexSetID,
+		CanonicalSHA256: result.CanonicalSHA256,
+		ScopeHash:       scopeHash,
+		Includes:        includes,
+		GonimbusVersion: gonimbusVersion,
+	}, nil
+}
+
+// writeProposedManifestSafe writes the proposed manifest with:
+//   - refusal when source and destination are the same path or hard-link alias
+//   - refusal of symlink destinations
+//   - exclusive create when force is false
+//   - same-directory temp + atomic rename when force is true
+//   - final owner-only mode (0600)
+//   - cleanup of partial temp files on failure
+func writeProposedManifestSafe(sourcePath, destPath, content string, force bool) error {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("proposed manifest is empty")
 	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o750); err != nil && !os.IsExist(err) {
-			return fmt.Errorf("create emit directory: %w", err)
-		}
-	}
-
-	flag := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if force {
-		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	}
-	// Operator-supplied destination path; mode is owner-writable only.
-	f, err := os.OpenFile(path, flag, 0o600) // #nosec G304 -- CLI --emit-manifest path
+	absSrc, err := filepath.Abs(sourcePath)
 	if err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("emit path exists (use --force to overwrite): %s", path)
+		return fmt.Errorf("resolve source path: %w", err)
+	}
+	absDst, err := filepath.Abs(destPath)
+	if err != nil {
+		return fmt.Errorf("resolve emit path: %w", err)
+	}
+	if absSrc == absDst {
+		return fmt.Errorf("refuse to overwrite source manifest: --emit-manifest must differ from --job")
+	}
+	srcInfo, srcErr := os.Lstat(absSrc)
+	dstInfo, dstErr := os.Lstat(absDst)
+	if srcErr == nil && dstErr == nil && os.SameFile(srcInfo, dstInfo) {
+		return fmt.Errorf("refuse to overwrite source manifest alias: --emit-manifest resolves to the same file as --job")
+	}
+	if dstErr == nil {
+		if dstInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("emit path is a symlink (no-follow policy): %s", destPath)
 		}
-		return fmt.Errorf("open emit path: %w", err)
+		if !dstInfo.Mode().IsRegular() {
+			return fmt.Errorf("emit path is not a regular file: %s", destPath)
+		}
+		if !force {
+			return fmt.Errorf("emit path exists (use --force to overwrite): %s", destPath)
+		}
+	} else if !os.IsNotExist(dstErr) {
+		return fmt.Errorf("stat emit path: %w", dstErr)
 	}
-	defer func() { _ = f.Close() }()
 
-	if _, err := f.WriteString(content); err != nil {
-		return fmt.Errorf("write emit path: %w", err)
+	dir := filepath.Dir(absDst)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create emit directory: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync emit path: %w", err)
+
+	// Always write via a same-directory temp, then exclusive-create or rename.
+	tmp, err := createOwnerOnlyTemp(dir, ".gonimbus-migrate-")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.WriteString(content); err != nil {
+		return fmt.Errorf("write temp emit: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp emit: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp emit: %w", err)
+	}
+	// Re-assert owner-only mode in case umask widened create mode.
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return fmt.Errorf("chmod temp emit: %w", err)
+	}
+
+	if !force {
+		// Atomic exclusive publish: link/rename only if dest absent.
+		if err := os.Link(tmpPath, absDst); err != nil {
+			if os.IsExist(err) {
+				return fmt.Errorf("emit path exists (use --force to overwrite): %s", destPath)
+			}
+			// Fall back to rename if Link is unsupported (e.g. some filesystems).
+			if err2 := os.Rename(tmpPath, absDst); err2 != nil {
+				if os.IsExist(err2) {
+					return fmt.Errorf("emit path exists (use --force to overwrite): %s", destPath)
+				}
+				return fmt.Errorf("publish emit path: %w", err2)
+			}
+			cleanup = false
+			if err := os.Chmod(absDst, 0o600); err != nil {
+				return fmt.Errorf("chmod emit path: %w", err)
+			}
+			return nil
+		}
+		cleanup = true // remove temp after successful hard-link publish
+		if err := os.Chmod(absDst, 0o600); err != nil {
+			return fmt.Errorf("chmod emit path: %w", err)
+		}
+		return nil
+	}
+
+	// Force: atomic replace destination (rename replaces symlink/file at path without following).
+	if err := os.Rename(tmpPath, absDst); err != nil {
+		return fmt.Errorf("atomic replace emit path: %w", err)
+	}
+	cleanup = false
+	if err := os.Chmod(absDst, 0o600); err != nil {
+		return fmt.Errorf("chmod emit path: %w", err)
 	}
 	return nil
+}
+
+func createOwnerOnlyTemp(dir, prefix string) (*os.File, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, fmt.Errorf("temp id: %w", err)
+	}
+	name := filepath.Join(dir, prefix+hex.EncodeToString(b[:])+".tmp")
+	// #nosec G304 -- temp path under operator emit directory
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create temp emit: %w", err)
+	}
+	return f, nil
 }
 
 func printMatchScopeMigrationPlan(plan *scope.MigrationPlan, jobPath, emitPath string) error {
@@ -222,7 +389,7 @@ func printMatchScopeMigrationPlan(plan *scope.MigrationPlan, jobPath, emitPath s
 
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "cutover: build new set with proposed manifest → compare projections → pin new receipt →")
-	_, _ = fmt.Fprintln(w, "         move consumers → validation window → reclaim old set via index gc (G5a).")
-	_, _ = fmt.Fprintln(w, "remaining G11 (excludes / non-prefix globs / filters) is still open.")
+	_, _ = fmt.Fprintln(w, "         move consumers → validation window → reclaim old set via whole-set index gc.")
+	_, _ = fmt.Fprintln(w, "non-prefix match controls (excludes / non-prefix globs / filters) remain open.")
 	return nil
 }

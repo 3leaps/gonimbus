@@ -165,7 +165,7 @@ Notes:
 - Prefix-shaped SQLite-era `match.includes` (literal prefix + terminal `/**`) can be
   audited/converted with `gonimbus index migrate-match-scope` into
   `build.scope` `prefix_list` for durable builds. See
-  [Durable Index — match→scope migration](durable-index.md#prefix-shaped-match--scope-migration-g11-subset).
+  [Durable Index — match→scope migration](durable-index.md#prefix-shaped-match--scope-migration).
   Remaining match controls (excludes, non-prefix globs, filters) stay open.
 
 ### Incremental builds with `--since`

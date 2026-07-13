@@ -12,13 +12,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
-// Migration plan schema identity for Slot 1.3 prefix-equivalent match→scope conversion.
+// Migration plan schema identity for prefix-equivalent match→scope conversion.
 const (
 	MatchPrefixMigrationSchema  = "gonimbus.scope.match_prefix_migration.v1"
 	MatchPrefixMigrationVersion = 1
@@ -57,7 +56,7 @@ const (
 
 // MigrationPlan is the immutable audit record for one match→scope classification.
 //
-// Experimental: Slot 1.3 G11 prefix-equivalent migration. Pure classification and
+// Experimental prefix-equivalent match→scope migration. Pure classification and
 // conversion; no provider calls, authority, or filesystem side effects.
 type MigrationPlan struct {
 	Schema  string `json:"schema"`
@@ -97,11 +96,19 @@ type ComputedIdentityEvidence struct {
 	GonimbusVersion string   `json:"gonimbus_version,omitempty"`
 }
 
+// IdentityComputer optionally computes index-set identity evidence from a
+// fully defaulted/reparsed manifest. Callers that need identity evidence must
+// inject an implementation; pkg/scope remains storage-free (ADR-0006).
+type IdentityComputer func(m *manifest.IndexManifest, gonimbusVersion string) (*ComputedIdentityEvidence, error)
+
 // PlanOptions configures PlanMatchPrefixMigration.
 type PlanOptions struct {
 	// GonimbusVersion is injected into identity evidence so tests can hold version constant.
-	// When empty, identity evidence fields are omitted (plan/list equality still runs).
+	// When empty and ComputeIdentity is nil, identity evidence fields are omitted.
 	GonimbusVersion string
+	// ComputeIdentity is optional. When set (and GonimbusVersion is non-empty), identity
+	// evidence is attached. Implementations may live in storageful packages (CLI adapter).
+	ComputeIdentity IdentityComputer
 }
 
 // PlanMatchPrefixMigration classifies and, when convertible, converts prefix-shaped
@@ -143,7 +150,7 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 			if hash, err := HashConfig(m.Build.Scope); err == nil {
 				plan.ProposedScopeHash = hash
 			}
-			if err := attachIdentityEvidence(plan, m, m, opts.GonimbusVersion); err != nil {
+			if err := attachIdentityEvidence(plan, m, m, opts); err != nil {
 				plan.Classification = ClassificationRefused
 				plan.ReasonCode = ReasonIdentityComputeFailed
 				plan.Detail = err.Error()
@@ -176,7 +183,7 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 		plan.Classification = ClassificationAlreadyCompatible
 		plan.ReasonCode = ReasonAlreadyCompatible
 		plan.Detail = "default match includes are already durable-compatible; no scope migration required"
-		if err := attachIdentityEvidence(plan, m, m, opts.GonimbusVersion); err != nil {
+		if err := attachIdentityEvidence(plan, m, m, opts); err != nil {
 			plan.Classification = ClassificationRefused
 			plan.ReasonCode = ReasonIdentityComputeFailed
 			plan.Detail = err.Error()
@@ -315,7 +322,7 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 	plan.ProposedPlanCount = len(proposedPlan)
 	plan.ProposedScopeHash = scopeHash
 
-	if err := attachIdentityEvidence(plan, m, reparsed, opts.GonimbusVersion); err != nil {
+	if err := attachIdentityEvidence(plan, m, reparsed, opts); err != nil {
 		plan.Classification = ClassificationRefused
 		plan.ReasonCode = ReasonIdentityComputeFailed
 		plan.Detail = err.Error()
@@ -338,80 +345,6 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 	return plan, nil
 }
 
-// ProjectKeys applies match configuration as an ingest predicate against full
-// provider keys (anchored includes, same as index build). Used by independent
-// equivalence oracles — not by the converter's LIST-plan proof.
-func ProjectKeys(baseKey string, matchCfg *manifest.IndexMatchConfig, providerKeys []string) ([]string, error) {
-	if matchCfg == nil {
-		matchCfg = &manifest.IndexMatchConfig{Includes: []string{manifest.DefaultIndexIncludes}}
-	}
-	includes := matchCfg.Includes
-	if len(includes) == 0 {
-		includes = []string{manifest.DefaultIndexIncludes}
-	}
-	cfg := match.Config{
-		Includes:      anchorIncludePatterns(baseKey, includes),
-		Excludes:      anchorIncludePatterns(baseKey, matchCfg.Excludes),
-		IncludeHidden: matchCfg.IncludeHidden,
-	}
-	matcher, err := match.New(cfg)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, key := range providerKeys {
-		if matcher.Match(key) {
-			out = append(out, key)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-// ProjectKeysUnderScope models post-migration durable ingest: LIST is bounded by
-// compiled scope prefixes and default match (base-anchored ** , include_hidden=false)
-// is applied to full provider keys.
-func ProjectKeysUnderScope(baseKey string, scopeCfg *manifest.IndexScopeConfig, providerKeys []string) ([]string, error) {
-	plan, err := Compile(context.TODO(), scopeCfg, baseKey, nil)
-	if err != nil {
-		return nil, err
-	}
-	var prefixes []string
-	if plan != nil {
-		prefixes = plan.Prefixes
-	}
-	defaultMatch, err := match.New(match.Config{
-		Includes:      anchorIncludePatterns(baseKey, []string{manifest.DefaultIndexIncludes}),
-		IncludeHidden: false,
-	})
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, key := range providerKeys {
-		if !keyUnderAnyPrefix(key, prefixes) {
-			continue
-		}
-		if defaultMatch.Match(key) {
-			out = append(out, key)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func keyUnderAnyPrefix(key string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if p == "" {
-			return true
-		}
-		if strings.HasPrefix(key, p) {
-			return true
-		}
-	}
-	return false
-}
-
 func refusedPlan(sourceDigest, code, detail string) *MigrationPlan {
 	return &MigrationPlan{
 		Schema:               MatchPrefixMigrationSchema,
@@ -429,13 +362,13 @@ func refuseResidualPredicates(build *manifest.IndexBuildConfig) (bool, string, s
 	}
 	mc := build.Match
 	if len(mc.Excludes) > 0 {
-		return true, ReasonHasExcludes, "build.match.excludes is not convertible in Slot 1.3"
+		return true, ReasonHasExcludes, "build.match.excludes is not convertible in this migration"
 	}
 	if mc.Filters != nil {
-		return true, ReasonHasFilters, "build.match.filters is not convertible in Slot 1.3 (including empty filter objects)"
+		return true, ReasonHasFilters, "build.match.filters is not convertible in this migration (including empty filter objects)"
 	}
 	if mc.IncludeHidden {
-		return true, ReasonIncludeHidden, "build.match.include_hidden=true is not convertible in Slot 1.3"
+		return true, ReasonIncludeHidden, "build.match.include_hidden=true is not convertible in this migration"
 	}
 	return false, "", ""
 }
@@ -463,29 +396,32 @@ func isDefaultIncludesOnly(includes []string) bool {
 
 // parseConvertibleInclude accepts only literal non-root prefix + terminal /**.
 // Returns the literal relative prefix without trailing slash and without leading slash.
+// Forbidden syntax is checked on the raw trimmed input before normalization so that
+// backslash separators/escapes cannot be accepted by path-separator rewriting.
 func parseConvertibleInclude(raw string) (literal string, ok bool) {
-	normalized := match.NormalizePattern(strings.TrimSpace(raw))
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	// Reject backslash separators and escape syntax on the raw input (frozen grammar).
+	if strings.Contains(trimmed, `\`) {
+		return "", false
+	}
+	normalized := match.NormalizePattern(trimmed)
 	if normalized == "" {
 		return "", false
 	}
 	if !strings.HasSuffix(normalized, "/**") {
 		return "", false
 	}
-	body := strings.TrimSuffix(normalized, "/**")
-	body = strings.TrimPrefix(body, "/")
+	bodyRaw := strings.TrimSuffix(normalized, "/**")
+	if match.IsGlobPattern(bodyRaw) || strings.ContainsAny(bodyRaw, `*?[{}\`) {
+		return "", false
+	}
+	body := strings.TrimPrefix(bodyRaw, "/")
 	if body == "" {
 		return "", false
 	}
-	// Refuse any glob / escape metacharacters in the literal body.
-	if match.IsGlobPattern(body) {
-		return "", false
-	}
-	if strings.ContainsAny(body, `*?[{}\`) {
-		return "", false
-	}
-	// No path cleanup: cloud keys are opaque; only reject empty segments that are
-	// clearly not a usable prefix marker? Guidance: no filepath.Clean. Allow // as
-	// opaque — but empty segment-only bodies already rejected.
 	return body, true
 }
 
@@ -656,92 +592,19 @@ func cloneManifestForEmit(m *manifest.IndexManifest) *manifest.IndexManifest {
 	return &out
 }
 
-func attachIdentityEvidence(plan *MigrationPlan, legacy, proposed *manifest.IndexManifest, gonimbusVersion string) error {
-	if strings.TrimSpace(gonimbusVersion) == "" {
+func attachIdentityEvidence(plan *MigrationPlan, legacy, proposed *manifest.IndexManifest, opts PlanOptions) error {
+	if opts.ComputeIdentity == nil || strings.TrimSpace(opts.GonimbusVersion) == "" {
 		return nil
 	}
-	legacyID, err := computeConfigIdentity(legacy, gonimbusVersion)
+	legacyID, err := opts.ComputeIdentity(legacy, opts.GonimbusVersion)
 	if err != nil {
 		return fmt.Errorf("legacy identity: %w", err)
 	}
-	proposedID, err := computeConfigIdentity(proposed, gonimbusVersion)
+	proposedID, err := opts.ComputeIdentity(proposed, opts.GonimbusVersion)
 	if err != nil {
 		return fmt.Errorf("proposed identity: %w", err)
 	}
 	plan.LegacyConfigIdentity = legacyID
 	plan.ProposedConfigIdentity = proposedID
 	return nil
-}
-
-func computeConfigIdentity(m *manifest.IndexManifest, gonimbusVersion string) (*ComputedIdentityEvidence, error) {
-	if m == nil {
-		return nil, errors.New("manifest is nil")
-	}
-	var scopeHash string
-	var includes []string
-	includeHidden := false
-	var excludes []string
-	sourceType := manifest.DefaultIndexSource
-	if m.Build != nil {
-		if m.Build.Source != "" {
-			sourceType = m.Build.Source
-		}
-		if m.Build.Scope != nil {
-			h, err := HashConfig(m.Build.Scope)
-			if err != nil {
-				return nil, err
-			}
-			scopeHash = h
-		}
-		if m.Build.Match != nil {
-			includes = append([]string(nil), m.Build.Match.Includes...)
-			excludes = append([]string(nil), m.Build.Match.Excludes...)
-			includeHidden = m.Build.Match.IncludeHidden
-		}
-	}
-	if len(includes) == 0 {
-		includes = []string{manifest.DefaultIndexIncludes}
-	}
-
-	params := indexstore.IndexSetParams{
-		BaseURI:  m.Connection.BaseURI,
-		Provider: m.Connection.Provider,
-		Endpoint: m.Connection.Endpoint,
-		BuildParams: indexstore.BuildParams{
-			SourceType:      sourceType,
-			SchemaVersion:   indexstore.SchemaVersion,
-			GonimbusVersion: gonimbusVersion,
-			Includes:        includes,
-			Excludes:        excludes,
-			IncludeHidden:   includeHidden,
-			ScopeHash:       scopeHash,
-		},
-	}
-	if m.Identity != nil {
-		params.StorageProvider = m.Identity.StorageProvider
-		params.CloudProvider = m.Identity.CloudProvider
-		params.RegionKind = m.Identity.RegionKind
-		params.Region = m.Identity.Region
-		params.EndpointHost = m.Identity.EndpointHost
-	}
-	if m.PathDate != nil {
-		params.BuildParams.PathDateExtraction = &indexstore.PathDateExtraction{
-			Method:       m.PathDate.Method,
-			Regex:        m.PathDate.Regex,
-			SegmentIndex: m.PathDate.SegmentIndex,
-		}
-	}
-
-	result, err := indexstore.ComputeIndexSetID(params)
-	if err != nil {
-		return nil, err
-	}
-	return &ComputedIdentityEvidence{
-		Kind:            "computed",
-		IndexSetID:      result.IndexSetID,
-		CanonicalSHA256: result.CanonicalSHA256,
-		ScopeHash:       scopeHash,
-		Includes:        includes,
-		GonimbusVersion: gonimbusVersion,
-	}, nil
 }

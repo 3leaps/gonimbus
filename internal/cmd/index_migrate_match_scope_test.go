@@ -15,27 +15,11 @@ import (
 func TestRunIndexMigrateMatchScope_ConvertibleJSON(t *testing.T) {
 	dir := t.TempDir()
 	job := filepath.Join(dir, "job.yaml")
-	content := `version: "1.0"
-connection:
-  provider: s3
-  bucket: example-bucket
-  base_uri: "s3://example-bucket/data/"
-identity:
-  storage_provider: aws_s3
-  cloud_provider: aws
-  region_kind: aws
-  region: us-east-1
-build:
-  source: crawl
-  match:
-    includes:
-      - "cohort-a/**"
-`
-	if err := os.WriteFile(job, []byte(content), 0o644); err != nil {
+	content := sampleConvertibleManifest()
+	if err := os.WriteFile(job, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Reset package-level flags for isolation.
 	indexMigrateMatchScopeJob = job
 	indexMigrateMatchScopeEmit = ""
 	indexMigrateMatchScopeJSON = true
@@ -90,7 +74,7 @@ build:
     includes:
       - "**/*.parquet"
 `
-	if err := os.WriteFile(job, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(job, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,27 +96,93 @@ build:
 	}
 }
 
+func TestWriteProposedManifestSafe_ExclusiveAndForce(t *testing.T) {
+	dir := t.TempDir()
+	job := filepath.Join(dir, "job.yaml")
+	emit := filepath.Join(dir, "out.yaml")
+	if err := os.WriteFile(job, []byte(sampleConvertibleManifest()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeProposedManifestSafe(job, emit, "proposed: one\n", false); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o want 0600", info.Mode().Perm())
+	}
+
+	// Exclusive without force fails and leaves content intact.
+	if err := writeProposedManifestSafe(job, emit, "proposed: two\n", false); err == nil {
+		t.Fatal("expected exclusive failure")
+	}
+	data, _ := os.ReadFile(emit)
+	if string(data) != "proposed: one\n" {
+		t.Fatalf("content changed on exclusive fail: %q", data)
+	}
+
+	// Force replaces with 0600 even if prior mode was wider.
+	if err := os.Chmod(emit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProposedManifestSafe(job, emit, "proposed: three\n", true); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(emit)
+	if string(data) != "proposed: three\n" {
+		t.Fatalf("force content=%q", data)
+	}
+	info, _ = os.Lstat(emit)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("force mode=%o want 0600", info.Mode().Perm())
+	}
+}
+
+func TestWriteProposedManifestSafe_RefuseSourceAlias(t *testing.T) {
+	dir := t.TempDir()
+	job := filepath.Join(dir, "job.yaml")
+	if err := os.WriteFile(job, []byte(sampleConvertibleManifest()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Same path
+	if err := writeProposedManifestSafe(job, job, "x\n", true); err == nil {
+		t.Fatal("expected same-path refusal")
+	}
+	// Hard-link alias
+	alias := filepath.Join(dir, "alias.yaml")
+	if err := os.Link(job, alias); err != nil {
+		t.Skipf("hard link not supported: %v", err)
+	}
+	if err := writeProposedManifestSafe(job, alias, "x\n", true); err == nil {
+		t.Fatal("expected hard-link alias refusal")
+	}
+	// Symlink destination refused
+	link := filepath.Join(dir, "link.yaml")
+	target := filepath.Join(dir, "target.yaml")
+	if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProposedManifestSafe(job, link, "new\n", true); err == nil {
+		t.Fatal("expected symlink refusal")
+	}
+	// Target must be untouched (no-follow).
+	data, _ := os.ReadFile(target)
+	if string(data) != "old\n" {
+		t.Fatalf("symlink target mutated: %q", data)
+	}
+}
+
 func TestRunIndexMigrateMatchScope_EmitExclusive(t *testing.T) {
 	dir := t.TempDir()
 	job := filepath.Join(dir, "job.yaml")
 	emit := filepath.Join(dir, "out.yaml")
-	content := `version: "1.0"
-connection:
-  provider: s3
-  bucket: example-bucket
-  base_uri: "s3://example-bucket/data/"
-identity:
-  storage_provider: aws_s3
-  cloud_provider: aws
-  region_kind: aws
-  region: us-east-1
-build:
-  source: crawl
-  match:
-    includes:
-      - "cohort-a/**"
-`
-	if err := os.WriteFile(job, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(job, []byte(sampleConvertibleManifest()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -152,14 +202,10 @@ build:
 	if !bytes.Contains(data, []byte("prefix_list")) {
 		t.Fatalf("emit missing scope: %s", data)
 	}
-	if !bytes.Contains(data, []byte(`"**"`)) && !bytes.Contains(data, []byte("- '**'")) && !bytes.Contains(data, []byte("- **")) {
-		// YAML may render as - '**' or - "**"
-		if !bytes.Contains(data, []byte("**")) {
-			t.Fatalf("emit missing default includes: %s", data)
-		}
+	if !bytes.Contains(data, []byte("**")) {
+		t.Fatalf("emit missing default includes: %s", data)
 	}
 
-	// Second exclusive write without force must fail and leave original intact.
 	indexMigrateMatchScopeForce = false
 	err = runIndexMigrateMatchScope(&cobra.Command{}, nil)
 	if err == nil {
@@ -169,6 +215,25 @@ build:
 	if !bytes.Equal(data, data2) {
 		t.Fatal("emit path mutated after exclusive failure")
 	}
+}
+
+func sampleConvertibleManifest() string {
+	return `version: "1.0"
+connection:
+  provider: s3
+  bucket: example-bucket
+  base_uri: "s3://example-bucket/data/"
+identity:
+  storage_provider: aws_s3
+  cloud_provider: aws
+  region_kind: aws
+  region: us-east-1
+build:
+  source: crawl
+  match:
+    includes:
+      - "cohort-a/**"
+`
 }
 
 func captureStdoutStderr(fn func() error) (string, string, error) {
