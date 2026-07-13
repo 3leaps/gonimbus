@@ -172,18 +172,16 @@ func TestOpenLocalMutableCanonicalRefusesExactEpochRemovalSubstitution(t *testin
 			return nil
 		}
 		// Replace the live name after the bound epoch is known but before the
-		// atomic capture/rename. The substitute must be preserved, not deleted.
-		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		// atomic capture/rename. Create the substitute while the live epoch
+		// still exists so it cannot recycle that inode number (Linux tmpfs
+		// reuse would otherwise make the plant look exact-bound). The
+		// substitute must be preserved, not deleted.
+		plant := target + ".plant-mismatch"
+		if err := writeReservationPayload(plant, payload, 0o640, time.Unix(1_700_000_100, 456_000_000)); err != nil {
 			return err
 		}
-		if err := os.WriteFile(target, payload, 0o640); err != nil {
-			return err
-		}
-		if err := os.Chmod(target, 0o640); err != nil {
-			return err
-		}
-		fixedTime := time.Unix(1_700_000_100, 456_000_000)
-		if err := os.Chtimes(target, fixedTime, fixedTime); err != nil {
+		if err := os.Rename(plant, target); err != nil {
+			_ = os.Remove(plant)
 			return err
 		}
 		injected = captureReservationFileState(t, target)
@@ -226,10 +224,17 @@ func TestOpenLocalMutableCanonicalRefusesExactEpochRestoreOverLiveName(t *testin
 			if filepath.Clean(path) != filepath.Clean(target) {
 				return nil
 			}
-			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			// Create the substitute while the live epoch still occupies the
+			// name so the plant must receive a distinct inode. Remove+recreate
+			// can recycle the just-freed inode number on Linux (especially
+			// tmpfs), which would falsely take the exact-epoch match path and
+			// truncate the plant — defeating this mismatch fixture.
+			plant := target + ".plant-mismatch"
+			if err := writeReservationPayload(plant, capturePayload, 0o640, time.Unix(1_700_000_200, 0)); err != nil {
 				return err
 			}
-			if err := writeReservationPayload(target, capturePayload, 0o640, time.Unix(1_700_000_200, 0)); err != nil {
+			if err := os.Rename(plant, target); err != nil {
+				_ = os.Remove(plant)
 				return err
 			}
 			captureInjected = captureReservationFileState(t, target)

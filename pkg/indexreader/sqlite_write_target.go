@@ -504,16 +504,20 @@ func (t *SQLiteWriteTarget) abandon() error {
 		}
 		t.db = nil
 	}
+	// Release the exclusive binding before pathname removal. On Windows the
+	// CREATE_NEW open omits FILE_SHARE_DELETE, so Rename/Remove fail while the
+	// handle is still open and a denied interposition would leave the empty
+	// reservation behind. SameFile still gates removal to the reserved epoch.
+	if t.bound != nil {
+		errs = append(errs, t.bound.Close())
+		t.bound = nil
+	}
 	if t.created && !t.opened && t.boundInfo != nil {
 		if info, err := os.Lstat(t.opts.Path); err == nil && info.Mode().IsRegular() && os.SameFile(t.boundInfo, info) {
 			if err := os.Remove(t.opts.Path); err != nil && !os.IsNotExist(err) {
 				errs = append(errs, err)
 			}
 		}
-	}
-	if t.bound != nil {
-		errs = append(errs, t.bound.Close())
-		t.bound = nil
 	}
 	t.closed = true
 	return errors.Join(errs...)
