@@ -138,6 +138,58 @@ Background execution is supported for `sqlite`, `durable`, and `both`; the
 managed child verifies the exact effective invocation and manifest content
 selected by its parent before building.
 
+## Prefix-shaped match → scope migration
+
+Durable builds still reject non-default `build.match.includes` at the faithful
+coverage gate. Some SQLite-era manifests use **prefix-shaped** includes only
+(literal non-root prefix + terminal `/**`, no excludes/filters/hidden deviation).
+Those are expressible as an explicit `build.scope` `prefix_list`.
+
+### Audit / convert
+
+```bash
+# Machine plan (no provider, no authority, no marker writes)
+gonimbus index migrate-match-scope --job legacy.yaml --json
+
+# Emit a proposed durable-compatible manifest (exclusive create)
+gonimbus index migrate-match-scope --job legacy.yaml \
+  --emit-manifest proposed.yaml
+```
+
+Accepted includes are converted to `build.scope.type: prefix_list` with default
+match (`includes: ["**"]`). Ambiguous globs, residual predicates, and an
+existing `build.scope` combined with residual includes **fail closed**.
+
+Default sole `**` is already durable-compatible (`already_compatible`).
+Re-running against an emitted proposed form returns `already_migrated`.
+
+Post-date entity shapes such as `date/day/entity=<id>/**` are emitted as
+**exact** `prefix_list` entries. Do not assume
+`scope.date_partitions.discover.segments` proves equivalence for segments
+after the date index.
+
+### Parallel cutover (new identity)
+
+Changing match/scope changes index-set identity. There is **no in-place
+lineage**. Operator sequence:
+
+1. `migrate-match-scope` audit + emit proposed manifest
+2. `index build --job proposed.yaml` (new independent set via existing library path)
+3. Compare projections (LIST plan digests + row/byte projection); do **not**
+   treat `--format both` as legacy-vs-migrated proof (it fans one new crawl)
+4. Pin / select the **new** receipt for consumers
+5. Keep the old set through a validation window (rollback = switch pin back)
+6. Reclaim the old set with existing whole-set `index gc` when ready
+
+Migration never rewrites identity on the old set, never adopts old DB/segments
+under a new scope hash, and never synthesizes parent linkage.
+
+### Still open (non-prefix match controls)
+
+Excludes, suffix/non-prefix globs, metadata filters, and non-default
+`include_hidden` are **not** retired by this migration. They remain rejected
+on durable builds until later control-by-control work.
+
 ## Temporal durable compare
 
 After you have two durable snapshots for the same index set, compare them
