@@ -173,8 +173,10 @@ func buildIndexGCPlanWithLeases(
 			} else {
 				entry.TargetMap[target.Path] = target
 				leaseErr := error(nil)
-				if held := heldDurableWriteLeases[filepath.Clean(segmentSetRoot)]; held != nil {
-					leaseErr = held.AssertHeldFor(id, filepath.Join(segmentSetRoot, "latest.json"))
+				if held := lookupHeldDurableWriteLease(heldDurableWriteLeases, segmentSetRoot, id); held != nil {
+					// Assert against the lease's canonical root so Windows short
+					// vs long path forms cannot spuriously fail scope checks.
+					leaseErr = held.AssertHeldFor(id, filepath.Join(held.SegmentSetRoot(), "latest.json"))
 				} else {
 					leaseErr = indexsubstrate.CheckWriteLeaseAvailableForMaintenance(segmentSetRoot)
 				}
@@ -407,6 +409,61 @@ func validFullIndexSetID(id string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(id, "idx_"))
 	return err == nil
+}
+
+// lookupHeldDurableWriteLease finds an already-acquired maintenance write lease
+// for a segment-set root. Keys are stored as Abs+Clean lease roots; revalidation
+// may observe Dir(latest.json) in a different path form on Windows (short names
+// vs Abs expansion). Prefer exact key hits, then Abs+Clean, then unique
+// index-set identity among held leases.
+func lookupHeldDurableWriteLease(held map[string]*indexsubstrate.WriteLease, segmentSetRoot, indexSetID string) *indexsubstrate.WriteLease {
+	if len(held) == 0 {
+		return nil
+	}
+	indexSetID = strings.TrimSpace(indexSetID)
+	candidates := make([]string, 0, 2)
+	clean := filepath.Clean(strings.TrimSpace(segmentSetRoot))
+	if clean != "" && clean != "." {
+		candidates = append(candidates, clean)
+	}
+	if abs, err := filepath.Abs(clean); err == nil {
+		abs = filepath.Clean(abs)
+		if abs != "" && abs != clean {
+			candidates = append(candidates, abs)
+		} else if abs != "" && len(candidates) == 0 {
+			candidates = append(candidates, abs)
+		}
+	}
+	for _, key := range candidates {
+		if lease := held[key]; lease != nil {
+			return lease
+		}
+	}
+	for _, lease := range held {
+		if lease == nil {
+			continue
+		}
+		root := lease.SegmentSetRoot()
+		for _, key := range candidates {
+			if root == key {
+				return lease
+			}
+		}
+	}
+	if indexSetID == "" {
+		return nil
+	}
+	var match *indexsubstrate.WriteLease
+	for _, lease := range held {
+		if lease == nil || lease.IndexSetID() != indexSetID {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = lease
+	}
+	return match
 }
 
 func verifiedIndexGCTarget(kind, parentRoot, targetPath string) (indexGCTarget, error) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -525,10 +526,18 @@ func TestRunIndexGCDryRunPlanEqualsExecutionReceipt(t *testing.T) {
 	require.NoError(t, err)
 	info, err := os.Stat(checkpointPath)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	// Unix mode bits are not preserved on Windows; still require a regular file
+	// under an existing parent directory.
+	require.True(t, info.Mode().IsRegular())
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
 	info, err = os.Stat(filepath.Dir(checkpointPath))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	require.True(t, info.IsDir())
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	}
 }
 
 func TestRunIndexGCRestartConvergesAfterEveryDeletionBoundary(t *testing.T) {
@@ -845,4 +854,31 @@ func TestSelectIndexGCPlanCandidatesRejectsInvalidRetention(t *testing.T) {
 	require.ErrorContains(t, err, "max-age")
 	_, err = selectIndexGCPlanCandidates(nil, -time.Hour, true, 0, now)
 	require.ErrorContains(t, err, "max-age")
+}
+
+func TestLookupHeldDurableWriteLeaseMatchesAbsAndIndexSet(t *testing.T) {
+	raw := t.TempDir()
+	dir, err := filepath.EvalSymlinks(raw)
+	require.NoError(t, err)
+	dir, err = filepath.Abs(dir)
+	require.NoError(t, err)
+	id := "idx_" + strings.Repeat("ab", 32)
+
+	seed, err := indexsubstrate.AcquireWriteLease(dir, id, "seed", 0)
+	require.NoError(t, err)
+	require.NoError(t, seed.Release())
+
+	lease, err := indexsubstrate.AcquireWriteLeaseForMaintenance(dir, id, "lookup-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+
+	held := map[string]*indexsubstrate.WriteLease{lease.SegmentSetRoot(): lease}
+	// Exact canonical key.
+	require.Same(t, lease, lookupHeldDurableWriteLease(held, lease.SegmentSetRoot(), id))
+	// Raw temp path that Abs-resolves equivalently after symlink expansion.
+	require.Same(t, lease, lookupHeldDurableWriteLease(held, dir, id))
+	// Unique index-set fallback when the path form is unrelated.
+	require.Same(t, lease, lookupHeldDurableWriteLease(held, filepath.Join(t.TempDir(), "other"), id))
+	// Wrong index set must not match when the path misses.
+	require.Nil(t, lookupHeldDurableWriteLease(held, filepath.Join(t.TempDir(), "other"), "idx_"+strings.Repeat("cd", 32)))
 }

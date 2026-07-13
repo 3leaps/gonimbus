@@ -489,7 +489,11 @@ func acquireIndexGCAuthority(ctx context.Context, candidates []indexGCPlanCandid
 			return nil, err
 		}
 		h.durable = append(h.durable, lease)
-		h.durableByRoot[item.root] = lease
+		// Key by the lease's canonical Abs+Clean root. Plan revalidation may
+		// observe Dir(SourcePath) in a different Windows path form (short vs
+		// long names); lookup must still find this held lease so it does not
+		// fall through to an exclusive availability probe against our own lock.
+		h.durableByRoot[lease.SegmentSetRoot()] = lease
 	}
 	return h, nil
 }
