@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -111,11 +112,50 @@ func (h *indexGCHeldAuthority) assertHeld() error {
 		}
 	}
 	for _, lease := range h.durable {
+		if lease == nil {
+			continue
+		}
 		if err := lease.AssertHeld(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// releaseDurableForRoot closes the durable write lease whose FD pins a
+// segment-set root. Windows cannot rename a directory while an exclusive
+// LockFileEx handle remains open inside it; set maintenance authority stays
+// held and continues to exclude concurrent set-scoped writers.
+func (h *indexGCHeldAuthority) releaseDurableForRoot(root string) error {
+	if h == nil {
+		return nil
+	}
+	candidates := make(map[string]struct{}, 2)
+	clean := filepath.Clean(strings.TrimSpace(root))
+	if clean != "" && clean != "." {
+		candidates[clean] = struct{}{}
+	}
+	if abs, err := filepath.Abs(clean); err == nil {
+		candidates[filepath.Clean(abs)] = struct{}{}
+	}
+	var errs []error
+	for i := len(h.durable) - 1; i >= 0; i-- {
+		lease := h.durable[i]
+		if lease == nil {
+			h.durable = append(h.durable[:i], h.durable[i+1:]...)
+			continue
+		}
+		leaseRoot := lease.SegmentSetRoot()
+		if _, ok := candidates[leaseRoot]; !ok {
+			continue
+		}
+		if err := lease.Release(); err != nil {
+			errs = append(errs, err)
+		}
+		delete(h.durableByRoot, leaseRoot)
+		h.durable = append(h.durable[:i], h.durable[i+1:]...)
+	}
+	return errors.Join(errs...)
 }
 
 func executeIndexGCPlan(
@@ -331,6 +371,14 @@ func applyIndexGCDeletePayload(
 				}
 				if err := revalidateIndexGCDeleteTree(target.indexGCTarget, target.Path); err != nil {
 					return indexGCExecutionResult{}, fmt.Errorf("revalidate GC target immediately before mutation: %w", err)
+				}
+				// Segment-set roots may hold an exclusive durable write-lease FD.
+				// Release that FD before rename so Windows can quarantine the
+				// directory; set maintenance authority remains held.
+				if target.Kind == "segment-set" {
+					if err := authority.releaseDurableForRoot(target.Path); err != nil {
+						return indexGCExecutionResult{}, fmt.Errorf("release durable write lease before segment-set quarantine: %w", err)
+					}
 				}
 				if err := quarantineIndexGCTarget(*target); err != nil {
 					return indexGCExecutionResult{}, err
