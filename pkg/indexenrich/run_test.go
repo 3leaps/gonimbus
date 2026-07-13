@@ -14,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -263,7 +264,7 @@ func TestRunContentionSecondEnrichRejectsDeterministic(t *testing.T) {
 		IndexSetID: id, BaseURI: "s3://bucket/data/", Provider: provLoser,
 		SegmentSetRoot: seg, JournalRoot: filepath.Join(root, "journals", id, "second"), Parallel: 1,
 	})
-	require.ErrorIs(t, secondErr, indexsubstrate.ErrWriteLeaseHeld)
+	require.ErrorIs(t, secondErr, indexcoord.ErrHeld)
 	require.Equal(t, int64(0), provLoser.headCalls.Load(), "loser must not perform HEAD")
 
 	close(block)
@@ -600,6 +601,45 @@ func TestRunRequiresJournalRoot(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "journal root")
+}
+
+func TestPublicRunRejectsStableAuthorityAfterRootQuarantine(t *testing.T) {
+	root := t.TempDir()
+	id := "idx_7777777777777777777777777777777777777777777777777777777777777777"
+	segmentRoot, _ := seedDurableParent(t, root, id, nil)
+	quarantine := segmentRoot + ".quarantine"
+	held, err := indexcoord.Acquire(context.Background(), segmentRoot, id, "gc")
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+	require.NoError(t, os.Rename(segmentRoot, quarantine))
+
+	_, err = Run(context.Background(), Config{
+		IndexSetID: id, BaseURI: "s3://bucket/data/", Provider: &fakeHeadProvider{},
+		SegmentSetRoot: segmentRoot, JournalRoot: filepath.Join(root, "journals", id), Parallel: 1,
+	})
+	require.ErrorIs(t, err, indexcoord.ErrHeld)
+	require.NoDirExists(t, segmentRoot)
+	require.DirExists(t, quarantine)
+}
+
+func TestRunUsesAndPreservesCallerOwnedAuthority(t *testing.T) {
+	root := t.TempDir()
+	id := "idx_8888888888888888888888888888888888888888888888888888888888888888"
+	segmentRoot, _ := seedDurableParent(t, root, id, nil)
+	held, err := indexcoord.Acquire(context.Background(), segmentRoot, id, "embedder")
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+
+	_, err = Run(context.Background(), Config{
+		IndexSetID: id, BaseURI: "s3://bucket/data/", Provider: &fakeHeadProvider{},
+		SegmentSetRoot: segmentRoot, JournalRoot: filepath.Join(root, "journals", id), Parallel: 1,
+		Authority: held,
+	})
+	require.NoError(t, err)
+	require.NoError(t, held.AssertHeldFor(id, segmentRoot))
+	contender, err := indexcoord.Acquire(context.Background(), segmentRoot, id, "peer")
+	require.ErrorIs(t, err, indexcoord.ErrHeld)
+	require.Nil(t, contender)
 }
 
 func TestBuildRejectsWhileEnrichHoldsLease(t *testing.T) {

@@ -408,6 +408,58 @@ still allows inspection of the local partial index but prints a stderr warning
 with the resumable run ID. Treat those query results as checkpoint-state
 inspection, not as a validated completed snapshot.
 
+Canonical local SQLite reads are strict and non-mutating: query, stats, list,
+atlas, export, doctor, and GC do not enable WAL or migrate a legacy schema as a
+side effect. General readers hold the same stable whole-set authority as GC for
+their full snapshot lifetime and reject existing or newly appearing WAL/SHM,
+rollback, master, and statement journals rather than ignoring transactionally
+current state. A live writer or GC therefore causes loud contention/refusal,
+never an immutable read of stale base bytes. Canonical reads require a valid
+`identity.json`, exactly one database index set, and equality between the
+marker, authority, and database IDs; missing, corrupt, mismatched, or ambiguous
+identity fails closed. A legacy database fails with an explicit schema error.
+There is no supported in-place command that reconstructs or adopts a missing
+canonical identity marker from `index.db`. `index init` migrates schema; it does
+not repair identity.
+
+The refusal applies to every build format that can publish canonical identity.
+That includes the default durable-only build: although it does not create
+`index.db`, it will not write `identity.json` beside an existing markerless
+database. SQLite and dual-format builds enforce the same boundary whether the
+canonical database is selected by default or supplied explicitly with `--db`.
+Typing the canonical path does not downgrade it to an external database.
+
+An explicit local `--db` proven outside the configured `indexes/` root remains
+an operator-owned compatibility target. Gonimbus does not publish canonical
+identity beside it; the caller must exclude other writers and maintenance for
+the full operation. A path inside the canonical root, or a path that resolves
+into it through a link, is never treated as external.
+
+The supported migration for a pre-marker canonical SQLite directory is a full
+source rebuild:
+
+1. Stop every Gonimbus process using that data root. Preserve the entire
+   affected `indexes/idx_*` directory by **moving the whole directory** to a
+   backup location outside the configured data root. A backup copy is not
+   sufficient: SQLite/both builds refuse an existing canonical `index.db`
+   whose valid matching marker is absent. Do not copy or open only `index.db`,
+   and do not discard transaction sidecars from an artifact that may have been
+   active.
+2. Rerun the original index manifest against the source with the required
+   format, for example
+   `gonimbus index build --job index-manifest.yaml --format sqlite` (or
+   `--format both`). The build path takes stable whole-set authority and
+   publishes a new database and `identity.json`; this is a rebuild, not an
+   adoption of the old database.
+3. Require `gonimbus index list --json` to report `"identity_status": "ok"`,
+   then run `gonimbus index doctor` before retiring the preserved backup under
+   the operator's retention policy.
+
+If the original manifest/scope cannot be recovered, keep the legacy artifact
+retained and fail closed; do not synthesize an identity marker. Upgrade old
+schemas separately through a guarded path such as
+`index init --db <canonical-index.db>` or a subsequent build.
+
 `--since-run <run_id>` emits the current active rows first seen or meaningfully
 changed after a successful run in the same IndexSet. **SQLite-only today**
 (durable query fails closed). It is a forward delta over latest index state,
@@ -488,11 +540,12 @@ gonimbus index show idx_1234abcd
 
 ### `index gc`
 
-Audit old local index sets across SQLite and durable storage. This command is
-currently plan-only: `--dry-run` is required, and deletion execution fails
-closed until the lease-held recovery executor is available. The JSON plan
-includes a stable plan digest and exact identity, segment-set, and journal
-targets. Unproven or active artifacts are retained with warnings.
+Audit or reclaim old local index sets across SQLite and durable storage. The
+JSON dry-run plan includes a stable plan digest and exact identity, segment-set,
+and journal targets. Rerunning the same policy without `--dry-run` takes
+per-set exclusion, recomputes and matches that plan under the held leases, and
+revalidates active state plus every target digest immediately before mutation.
+Unproven or active artifacts are retained with warnings.
 
 ```bash
 # Plan all but the last 3 sets for each base URI
@@ -503,12 +556,26 @@ gonimbus index gc --max-age 30d --dry-run --json
 
 # Preview what would be removed
 gonimbus index gc --keep-last 1 --dry-run
+
+# Execute the same retention policy
+gonimbus index gc --keep-last 1
 ```
 
-**SQLite-bound today:** `index gc` only sees index directories that contain an
-`index.db`. Durable-only default builds are not yet in scope for local GC. Use
-`--format sqlite` or `both` when you need local retention control during the
-transition; hub retention remains `index hub gc`.
+Execution first completes any interrupted GC transaction recorded beneath the
+operator data root. Targets are quarantined within their canonical artifact
+root before recursive removal, while the intent/receipt remains outside every
+deletion target. GC holds the same stable per-set authority used by public
+build and enrich libraries from pre-quarantine revalidation through recovery;
+the lock is outside the renameable set root, so a library call cannot re-create
+the canonical root while deletion is in flight. A crash after any target move
+or removal is safe to retry.
+`--json` emits `gonimbus.index.gc.result.v1` with the executed plan digest,
+transaction ID, verified removed bytes, and recovery status.
+
+This command removes whole proven index sets only. It does not prune individual
+durable runs, journals, or segments within a retained set. Unknown legacy
+layouts, symlinks/path aliases, changed target bytes, active jobs/checkpoints,
+and durable sets without a proven writer-lock artifact fail closed.
 
 ### `index compare`
 

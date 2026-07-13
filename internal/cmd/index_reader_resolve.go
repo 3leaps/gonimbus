@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 )
 
@@ -29,10 +30,15 @@ func indexReaderResolveOptions() (indexreader.ResolveOptions, error) {
 // openIndexReader resolves a format-aware local index reader (sqlite-v1 or durable-v2).
 // When runID is set, opens a pinned durable-v2 snapshot and never consults latest.json.
 func openIndexReader(ctx context.Context, baseURI, indexSetID, runID string) (indexreader.Reader, error) {
+	return openIndexReaderWithAuthority(ctx, baseURI, indexSetID, runID, nil)
+}
+
+func openIndexReaderWithAuthority(ctx context.Context, baseURI, indexSetID, runID string, authority *indexcoord.Lease) (indexreader.Reader, error) {
 	opts, err := indexReaderResolveOptions()
 	if err != nil {
 		return nil, err
 	}
+	opts.Authority = authority
 	return indexreader.ResolveIndexReader(ctx, opts, indexreader.ResolveTarget{
 		BaseURI:    baseURI,
 		IndexSetID: indexSetID,

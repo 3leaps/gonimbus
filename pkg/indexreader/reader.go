@@ -2,9 +2,11 @@ package indexreader
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
 
@@ -40,6 +42,9 @@ type VisitObject func(result indexstore.QueryResult) error
 // (and later stats/doctor/list consumers of the same seam).
 type Reader interface {
 	Meta() Meta
+	// SQLiteDB returns the query-only authority-held connection for sqlite-v1;
+	// durable-v2 readers return nil. It remains valid until Close.
+	SQLiteDB() *sql.DB
 	// WalkObjects streams matching object rows in rel_key order without
 	// accumulating them. On durable-v2, each segment digest is verified before
 	// that segment's rows are visited. A later-segment failure aborts with
@@ -73,6 +78,9 @@ type ResolveOptions struct {
 	IndexesRoot string
 	// SegmentCacheRoot is the cache/segments/ directory (contains full index_set_id dirs).
 	SegmentCacheRoot string
+	// Authority optionally supplies caller-held whole-set authority for a
+	// single-set resolution. It remains caller-owned.
+	Authority *indexcoord.Lease
 	// MaxMarkerBytes bounds latest/complete JSON reads (default: 1 MiB).
 	MaxMarkerBytes int64
 	// MaxManifestBytes bounds manifest JSON reads (default: 64 MiB).
@@ -90,9 +98,22 @@ type ResolveTarget struct {
 	RunID string
 }
 
+// IdentityStatus classifies whether canonical identity is trusted during
+// aggregate discovery. Untrusted entries are report-only and are never opened.
+type IdentityStatus string
+
+const (
+	IdentityStatusOK       IdentityStatus = "ok"
+	IdentityStatusMissing  IdentityStatus = "missing"
+	IdentityStatusInvalid  IdentityStatus = "invalid"
+	IdentityStatusMismatch IdentityStatus = "mismatch"
+)
+
 // ListedIndex is one discovered local index for ListIndexReaders.
 type ListedIndex struct {
-	Meta Meta
+	Meta               Meta
+	IdentityStatus     IdentityStatus
+	IdentityDiagnostic string
 }
 
 func normalizeResolveOptions(opts ResolveOptions) ResolveOptions {

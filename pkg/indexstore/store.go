@@ -92,6 +92,117 @@ func openLocalReadOnly(ctx context.Context, path string, afterBind func() error)
 	return db, nil
 }
 
+// OpenLocalMutableCanonical opens an existing local SQLite file through its
+// concrete canonical pathname. SQLite therefore uses that name for its lock,
+// WAL, and shared-memory namespace. A per-connection VFS attests SQLite's exact
+// main-file handle against bound and revalidates the callback and main path at
+// SQLite access and I/O boundaries. This ordinary writer path requires
+// transaction sidecars to have been absent at caller validation; VFS
+// registration reasserts that absence and will not adopt an intervening WAL,
+// SHM, rollback, master, or statement journal. The VFS exclusively reserves
+// each new sidecar from the retained main path plus known suffixes (WAL and
+// rollback journal from open-type flags; SHM before xShmMap) through a retained
+// no-follow directory binding, then requires SQLite's exact handle to match
+// that reservation. Exact-epoch cleanup captures the bound object before
+// unlinking it. The VFS remains installed until the connection closes.
+func OpenLocalMutableCanonical(ctx context.Context, path string, bound *os.File, beforeMutation func() error) (*sql.DB, error) {
+	return openLocalMutableCanonical(ctx, path, bound, beforeMutation, mutableCanonicalOpenHooks{})
+}
+
+type mutableCanonicalOpenHooks struct {
+	beforeDriverOpen                     func() error
+	afterVFSRegistrationBeforeDriverOpen func() error
+	afterDriverOpen                      func() error
+	afterConnectionAttestation           func() error
+	afterAuthorityCheckBeforeSQLite      func() error
+	beforeSidecarReservation             func(path string) error
+	// beforeExactEpochRemoval runs after directory revalidation and before the
+	// atomic capture/rename of a reserved transaction artifact. Tests use it to
+	// prove substituted epochs are refused and preserved.
+	beforeExactEpochRemoval func(path string) error
+	// afterExactEpochCapture runs after the live name has been rename-captured
+	// into the quarantine entry and before open/attestation. Tests use it to
+	// recreate the canonical name before mismatch restore.
+	afterExactEpochCapture func(path, quarantine string) error
+	// afterExactEpochAttest runs after the captured object has been opened and
+	// attested as the reserved epoch, and before exact-object destruction.
+	// Tests use it to replace the quarantine name after attestation.
+	afterExactEpochAttest func(path, quarantine string) error
+}
+
+// resolveCanonicalSQLitePath returns a concrete absolute pathname for an
+// existing index database. Intermediate directory symlinks are resolved so the
+// DSN and VFS authority path match the names modernc SQLite constructs for
+// WAL/journal sidecars (notably macOS /var vs /private/var).
+func resolveCanonicalSQLitePath(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(strings.TrimSpace(path)))
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func openLocalMutableCanonical(ctx context.Context, path string, bound *os.File, beforeMutation func() error, hooks mutableCanonicalOpenHooks) (*sql.DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	path = strings.TrimSpace(path)
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil, errors.New("existing canonical local index store path is required")
+	}
+	if beforeMutation == nil {
+		return nil, errors.New("canonical local index store revalidation callback is required")
+	}
+	if bound == nil {
+		return nil, errors.New("canonical local index store retained binding is required")
+	}
+	// Resolve intermediate directory symlinks (for example macOS /var ->
+	// /private/var) so the DSN, VFS authority path, and SQLite's sidecar names
+	// share one concrete pathname identity.
+	abs, err := resolveCanonicalSQLitePath(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve canonical index store path: %w", err)
+	}
+	uriPath := filepath.ToSlash(abs)
+	if filepath.VolumeName(abs) != "" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsnURL := &url.URL{Scheme: "file", Path: uriPath}
+	query := dsnURL.Query()
+	query.Set("mode", "rw")
+	dsnURL.RawQuery = query.Encode()
+	dsn := dsnURL.String()
+
+	connector := newMutableCanonicalConnector(dsn, abs, bound, beforeMutation, hooks)
+	db := sql.OpenDB(connector)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, errors.Join(fmt.Errorf("open and attest canonical index store: %w", err), connector.failure())
+	}
+	if err := conn.PingContext(ctx); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		return nil, errors.Join(fmt.Errorf("ping attested canonical index store: %w", err), connector.failure())
+	}
+	if err := configureLocalSQLiteConn(ctx, conn, dsn); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		return nil, errors.Join(err, connector.failure())
+	}
+	if err := conn.Close(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("release attested canonical index store connection: %w", err)
+	}
+	return db, nil
+}
+
 // ValidateCurrentSchemaReadOnly verifies that db has exactly the schema this
 // binary understands. It never upgrades older schemas; callers must retain
 // those artifacts until an explicit migration operation is authorized.
@@ -204,6 +315,26 @@ func configureLocalSQLite(ctx context.Context, db *sql.DB, dsn string) error {
 		return fmt.Errorf("enable WAL mode: %w", err)
 	}
 
+	return nil
+}
+
+func configureLocalSQLiteConn(ctx context.Context, conn *sql.Conn, dsn string) error {
+	if conn == nil {
+		return errors.New("store connection is nil")
+	}
+	if dsn == ":memory:" || !strings.HasPrefix(dsn, "file:") {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("set busy timeout: %w", err)
+	}
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		return fmt.Errorf("enable WAL mode: %w", err)
+	}
 	return nil
 }
 

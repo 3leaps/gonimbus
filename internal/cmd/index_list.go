@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,9 @@ IDENTITY status helps interpret hash-based directories:
   invalid   identity.json is unreadable or invalid JSON
   mismatch  identity.json hash disagrees with the set id or directory name
 
+Untrusted identity rows are report-only: text metrics render as "-" and JSON
+sets metadata_trusted=false while omitting object, byte, run, and time metrics.
+
 Examples:
   # List all indexes
   gonimbus index list
@@ -60,13 +64,15 @@ func init() {
 }
 
 type indexListDisplayEntry struct {
-	Format         string // sqlite-v1 | durable-v2
-	DBPath         string
-	Dir            string
-	DirName        string
-	IdentityPath   string
-	IdentityStatus string // ok, missing, invalid, mismatch, error
-	Info           indexstore.IndexListEntry
+	Format          string // sqlite-v1 | durable-v2
+	DBPath          string
+	Dir             string
+	DirName         string
+	IdentityPath    string
+	IdentityStatus  string // ok, missing, invalid, mismatch, error
+	IdentityDetail  string
+	MetadataTrusted bool
+	Info            indexstore.IndexListEntry
 }
 
 func runIndexList(cmd *cobra.Command, _ []string) error {
@@ -130,6 +136,18 @@ func loadIndexListDisplayEntry(ctx context.Context, opts indexreader.ResolveOpti
 		dirName = filepath.Base(meta.IdentityDir)
 		dir = meta.IdentityDir
 	}
+	if item.IdentityStatus != "" && item.IdentityStatus != indexreader.IdentityStatusOK {
+		return indexListDisplayEntry{
+			Format:          formatLabel(meta.Format),
+			DBPath:          meta.SourcePath,
+			Dir:             dir,
+			DirName:         dirName,
+			IdentityPath:    identityPath,
+			IdentityStatus:  string(item.IdentityStatus),
+			IdentityDetail:  item.IdentityDiagnostic,
+			MetadataTrusted: false,
+		}, nil
+	}
 
 	switch meta.Format {
 	case indexreader.FormatSQLiteV1:
@@ -141,12 +159,19 @@ func loadIndexListDisplayEntry(ctx context.Context, opts indexreader.ResolveOpti
 	}
 }
 
-func loadSQLiteListDisplayEntry(ctx context.Context, meta indexreader.Meta, dir, dirName, identityPath string) (indexListDisplayEntry, error) {
-	db, err := openIndexDB(ctx, meta.SourcePath)
+func loadSQLiteListDisplayEntry(ctx context.Context, meta indexreader.Meta, dir, dirName, identityPath string) (out indexListDisplayEntry, err error) {
+	segmentRoot, err := indexSubstrateSegmentCacheDir(meta.IndexSetID)
 	if err != nil {
-		return indexListDisplayEntry{}, err
+		return out, err
 	}
-	defer func() { _ = db.Close() }()
+	snapshot, err := indexreader.OpenSQLiteSnapshot(ctx, indexreader.SQLiteSnapshotOptions{
+		Path: meta.SourcePath, SegmentSetRoot: segmentRoot, IndexSetID: meta.IndexSetID,
+	})
+	if err != nil {
+		return out, err
+	}
+	defer func() { err = errors.Join(err, snapshot.Close()) }()
+	db := snapshot.DB()
 
 	info, err := indexstore.ListIndexSetsWithStats(ctx, db)
 	if err != nil {
@@ -169,13 +194,14 @@ func loadSQLiteListDisplayEntry(ctx context.Context, meta indexreader.Meta, dir,
 		entryInfo.Provider = meta.Provider
 	}
 	return indexListDisplayEntry{
-		Format:         formatLabel(meta.Format),
-		DBPath:         meta.SourcePath,
-		Dir:            dir,
-		DirName:        dirName,
-		IdentityPath:   identityPath,
-		IdentityStatus: computeIndexIdentityStatus(identityPath, dirName, entryInfo.IndexSetID),
-		Info:           entryInfo,
+		Format:          formatLabel(meta.Format),
+		DBPath:          meta.SourcePath,
+		Dir:             dir,
+		DirName:         dirName,
+		IdentityPath:    identityPath,
+		IdentityStatus:  computeIndexIdentityStatus(identityPath, dirName, entryInfo.IndexSetID),
+		MetadataTrusted: true,
+		Info:            entryInfo,
 	}, nil
 }
 
@@ -220,13 +246,14 @@ func loadDurableListDisplayEntry(opts indexreader.ResolveOptions, meta indexread
 		info.IndexSetID = meta.IndexSetID
 	}
 	return indexListDisplayEntry{
-		Format:         formatLabel(meta.Format),
-		DBPath:         "", // no index.db
-		Dir:            dir,
-		DirName:        dirName,
-		IdentityPath:   identityPath,
-		IdentityStatus: computeIndexIdentityStatus(identityPath, dirName, info.IndexSetID),
-		Info:           info,
+		Format:          formatLabel(meta.Format),
+		DBPath:          "", // no index.db
+		Dir:             dir,
+		DirName:         dirName,
+		IdentityPath:    identityPath,
+		IdentityStatus:  computeIndexIdentityStatus(identityPath, dirName, info.IndexSetID),
+		MetadataTrusted: true,
+		Info:            info,
 	}, nil
 }
 
@@ -329,11 +356,24 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer func() { _ = w.Flush() }()
 
-	_, _ = fmt.Fprintln(w, "DIR\tFORMAT\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tRUN ID\tRESUME\tIDENTITY")
+	_, _ = fmt.Fprintln(w, "DIR\tFORMAT\tBASE URI\tPROVIDER\tOBJECTS\tSIZE\tRUNS\tLATEST\tSTATUS\tRUN ID\tRESUME\tIDENTITY\tDETAIL")
 
 	for _, e := range entries {
 		info := e.Info
-		sizeStr := formatBytes(info.TotalSizeBytes)
+		baseURI := info.BaseURI
+		providerName := info.Provider
+		objectsStr, sizeStr, runsStr := "-", "-", "-"
+		if e.MetadataTrusted {
+			objectsStr = fmt.Sprintf("%d", info.ObjectCount)
+			sizeStr = formatBytes(info.TotalSizeBytes)
+			runsStr = fmt.Sprintf("%d", info.RunCount)
+		}
+		if baseURI == "" {
+			baseURI = "-"
+		}
+		if providerName == "" {
+			providerName = "-"
+		}
 
 		latestStr := "-"
 		if info.LatestRunAt != nil {
@@ -360,19 +400,20 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 			dirName = "-"
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			dirName,
 			e.Format,
-			info.BaseURI,
-			info.Provider,
-			info.ObjectCount,
+			baseURI,
+			providerName,
+			objectsStr,
 			sizeStr,
-			info.RunCount,
+			runsStr,
 			latestStr,
 			status,
 			runID,
 			resume,
 			e.IdentityStatus,
+			e.IdentityDetail,
 		)
 	}
 
@@ -381,44 +422,54 @@ func printIndexListTable(entries []indexListDisplayEntry) error {
 
 func printIndexListJSON(entries []indexListDisplayEntry) error {
 	type jsonEntry struct {
-		IndexSetID     string  `json:"index_set_id"`
+		IndexSetID     string  `json:"index_set_id,omitempty"`
 		Format         string  `json:"format"`
-		BaseURI        string  `json:"base_uri"`
-		Provider       string  `json:"provider"`
-		CreatedAt      string  `json:"created_at"`
-		ObjectCount    int64   `json:"object_count"`
-		TotalSizeBytes int64   `json:"total_size_bytes"`
-		RunCount       int     `json:"run_count"`
+		BaseURI        string  `json:"base_uri,omitempty"`
+		Provider       string  `json:"provider,omitempty"`
+		CreatedAt      string  `json:"created_at,omitempty"`
+		ObjectCount    *int64  `json:"object_count,omitempty"`
+		TotalSizeBytes *int64  `json:"total_size_bytes,omitempty"`
+		RunCount       *int    `json:"run_count,omitempty"`
 		LatestRunID    string  `json:"latest_run_id,omitempty"`
 		LatestRunAt    *string `json:"latest_run_at,omitempty"`
 		LatestStatus   string  `json:"latest_status,omitempty"`
 		ResumeCommand  string  `json:"resume_command,omitempty"`
 
-		DirName        string `json:"dir_name"`
-		DBPath         string `json:"db_path,omitempty"`
-		IdentityPath   string `json:"identity_path,omitempty"`
-		IdentityStatus string `json:"identity_status"`
+		DirName         string `json:"dir_name"`
+		DBPath          string `json:"db_path,omitempty"`
+		IdentityPath    string `json:"identity_path,omitempty"`
+		IdentityStatus  string `json:"identity_status"`
+		IdentityDetail  string `json:"identity_diagnostic,omitempty"`
+		MetadataTrusted bool   `json:"metadata_trusted"`
 	}
 
 	out := make([]jsonEntry, len(entries))
 	for i, e := range entries {
 		info := e.Info
+		createdAt := ""
+		if !info.CreatedAt.IsZero() {
+			createdAt = info.CreatedAt.Format(time.RFC3339)
+		}
 		out[i] = jsonEntry{
-			IndexSetID:     info.IndexSetID,
-			Format:         e.Format,
-			BaseURI:        info.BaseURI,
-			Provider:       info.Provider,
-			CreatedAt:      info.CreatedAt.Format(time.RFC3339),
-			ObjectCount:    info.ObjectCount,
-			TotalSizeBytes: info.TotalSizeBytes,
-			RunCount:       info.RunCount,
-			LatestRunID:    info.LatestRunID,
-			LatestStatus:   info.LatestStatus,
-			ResumeCommand:  resumeCommandForIndexRun(info.LatestStatus, info.LatestSourceType, info.LatestRunID),
-			DirName:        e.DirName,
-			DBPath:         e.DBPath,
-			IdentityPath:   e.IdentityPath,
-			IdentityStatus: e.IdentityStatus,
+			IndexSetID:      info.IndexSetID,
+			Format:          e.Format,
+			BaseURI:         info.BaseURI,
+			Provider:        info.Provider,
+			CreatedAt:       createdAt,
+			LatestRunID:     info.LatestRunID,
+			LatestStatus:    info.LatestStatus,
+			ResumeCommand:   resumeCommandForIndexRun(info.LatestStatus, info.LatestSourceType, info.LatestRunID),
+			DirName:         e.DirName,
+			DBPath:          e.DBPath,
+			IdentityPath:    e.IdentityPath,
+			IdentityStatus:  e.IdentityStatus,
+			IdentityDetail:  e.IdentityDetail,
+			MetadataTrusted: e.MetadataTrusted,
+		}
+		if e.MetadataTrusted {
+			out[i].ObjectCount = &info.ObjectCount
+			out[i].TotalSizeBytes = &info.TotalSizeBytes
+			out[i].RunCount = &info.RunCount
 		}
 		if info.LatestRunAt != nil {
 			ts := info.LatestRunAt.Format(time.RFC3339)

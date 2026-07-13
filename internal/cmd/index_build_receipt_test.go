@@ -110,6 +110,11 @@ func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	_, err = os.Stat(dbB)
 	require.True(t, os.IsNotExist(err), "durable-only B must not create index.db")
 
+	// Exact-epoch cleanup retains discoverable quarantine captures that block
+	// later readers until recovery. Multi-step fixtures clear temp-dir residue
+	// only (not a production API).
+	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
+
 	// Legacy SQLite-only discovery still sees only A (trap for list-based rediscovery).
 	legacy, err := loadIndexEntriesWithPaths(context.Background())
 	require.NoError(t, err)

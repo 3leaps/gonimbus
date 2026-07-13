@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +54,7 @@ func init() {
 	indexStatsCmd.Flags().Bool("runs", false, "Include run history")
 }
 
-func runIndexStats(cmd *cobra.Command, args []string) error {
+func runIndexStats(cmd *cobra.Command, args []string) (err error) {
 	ctx := cmd.Context()
 	baseURI := normalizeQueryBaseURI(args[0])
 	jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -63,12 +65,12 @@ func runIndexStats(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = reader.Close() }()
+	defer func() { err = errors.Join(err, reader.Close()) }()
 	meta := reader.Meta()
 
 	switch meta.Format {
 	case indexreader.FormatSQLiteV1:
-		return runIndexStatsSQLite(ctx, meta, jsonOutput, showPrefixes, showRuns)
+		return runIndexStatsSQLite(ctx, reader.SQLiteDB(), meta, jsonOutput, showPrefixes, showRuns)
 	case indexreader.FormatDurableV2:
 		if showPrefixes {
 			return errUnsupportedOnDurable("--prefixes")
@@ -79,13 +81,10 @@ func runIndexStats(cmd *cobra.Command, args []string) error {
 	}
 }
 
-func runIndexStatsSQLite(ctx context.Context, meta indexreader.Meta, jsonOutput, showPrefixes, showRuns bool) error {
-	db, err := openMigratedIndexDB(ctx, meta.SourcePath)
-	if err != nil {
-		return err
+func runIndexStatsSQLite(ctx context.Context, db *sql.DB, meta indexreader.Meta, jsonOutput, showPrefixes, showRuns bool) error {
+	if db == nil {
+		return fmt.Errorf("SQLite reader connection is unavailable")
 	}
-	defer func() { _ = db.Close() }()
-
 	sets, err := indexstore.ListIndexSets(ctx, db, "")
 	if err != nil {
 		return fmt.Errorf("list index sets: %w", err)

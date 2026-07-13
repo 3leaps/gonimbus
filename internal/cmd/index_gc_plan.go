@@ -68,6 +68,18 @@ type indexGCIdentity struct {
 }
 
 func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText string, keepLast int, now time.Time) (*indexGCPlan, error) {
+	return buildIndexGCPlanWithLeases(ctx, maxAge, maxAgeText, keepLast, now, nil, "")
+}
+
+func buildIndexGCPlanWithLeases(
+	ctx context.Context,
+	maxAge time.Duration,
+	maxAgeText string,
+	keepLast int,
+	now time.Time,
+	heldDurableWriteLeases map[string]*indexsubstrate.WriteLease,
+	skipCheckpointRunID string,
+) (*indexGCPlan, error) {
 	opts, err := indexReaderResolveOptions()
 	if err != nil {
 		return nil, err
@@ -160,7 +172,15 @@ func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText stri
 				warnings = append(warnings, indexGCWarning{Path: segmentSetRoot, IndexSetID: id, Reason: fmt.Sprintf("unsafe segment-set root; retained: %v", targetErr)})
 			} else {
 				entry.TargetMap[target.Path] = target
-				if leaseErr := indexsubstrate.CheckWriteLeaseAvailable(segmentSetRoot); leaseErr != nil {
+				leaseErr := error(nil)
+				if held := lookupHeldDurableWriteLease(heldDurableWriteLeases, segmentSetRoot, id); held != nil {
+					// Assert against the lease's canonical root so Windows short
+					// vs long path forms cannot spuriously fail scope checks.
+					leaseErr = held.AssertHeldFor(id, filepath.Join(held.SegmentSetRoot(), "latest.json"))
+				} else {
+					leaseErr = indexsubstrate.CheckWriteLeaseAvailableForMaintenance(segmentSetRoot)
+				}
+				if leaseErr != nil {
 					entry.Blocked = true
 					warnings = append(warnings, indexGCWarning{Path: segmentSetRoot, IndexSetID: id, Reason: fmt.Sprintf("durable writer lease is not available; retained: %v", leaseErr)})
 				}
@@ -182,7 +202,7 @@ func buildIndexGCPlan(ctx context.Context, maxAge time.Duration, maxAgeText stri
 	}
 
 	warnings = append(warnings, blockUnprovenGCRoots(opts, journalRoot, inventory)...)
-	activeWarnings, err := blockActiveGCState(inventory)
+	activeWarnings, err := blockActiveGCStateExcept(inventory, skipCheckpointRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +287,7 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 			continue
 		}
 		if hasSQLite {
-			sidecars, sidecarErr := sqliteTransactionSidecars(dbPath)
+			sidecars, sidecarErr := indexstore.SQLiteTransactionSidecars(dbPath)
 			if sidecarErr != nil || len(sidecars) > 0 {
 				entry.Blocked = true
 				reason := fmt.Sprintf("cannot inspect SQLite transaction sidecars; retained: %v", sidecarErr)
@@ -326,7 +346,7 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 			warnings = append(warnings, indexGCWarning{Path: dir, IndexSetID: id, Reason: "SQLite identity tree changed during read-only inspection; retained"})
 			continue
 		}
-		sidecars, sidecarErr := sqliteTransactionSidecars(dbPath)
+		sidecars, sidecarErr := indexstore.SQLiteTransactionSidecars(dbPath)
 		if sidecarErr != nil || len(sidecars) > 0 {
 			entry.Blocked = true
 			reason := fmt.Sprintf("cannot revalidate SQLite transaction sidecars; retained: %v", sidecarErr)
@@ -344,30 +364,6 @@ func inventoryIndexGCSQLiteReadOnly(ctx context.Context, opts indexreader.Resolv
 		delete(identities, id)
 	}
 	return identities, warnings, nil
-}
-
-func sqliteTransactionSidecars(dbPath string) ([]string, error) {
-	dir := filepath.Dir(dbPath)
-	base := filepath.Base(dbPath)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var found []string
-	for _, entry := range entries {
-		name := entry.Name()
-		suffix := strings.TrimPrefix(name, base)
-		if suffix == name {
-			continue
-		}
-		switch {
-		case suffix == "-wal", suffix == "-shm", suffix == "-journal",
-			strings.HasPrefix(suffix, "-mj "), strings.HasPrefix(suffix, "-stmtjrnl"):
-			found = append(found, name)
-		}
-	}
-	sort.Strings(found)
-	return found, nil
 }
 
 func validateIndexGCArtifactRoot(root string) error {
@@ -415,6 +411,61 @@ func validFullIndexSetID(id string) bool {
 	return err == nil
 }
 
+// lookupHeldDurableWriteLease finds an already-acquired maintenance write lease
+// for a segment-set root. Keys are stored as Abs+Clean lease roots; revalidation
+// may observe Dir(latest.json) in a different path form on Windows (short names
+// vs Abs expansion). Prefer exact key hits, then Abs+Clean, then unique
+// index-set identity among held leases.
+func lookupHeldDurableWriteLease(held map[string]*indexsubstrate.WriteLease, segmentSetRoot, indexSetID string) *indexsubstrate.WriteLease {
+	if len(held) == 0 {
+		return nil
+	}
+	indexSetID = strings.TrimSpace(indexSetID)
+	candidates := make([]string, 0, 2)
+	clean := filepath.Clean(strings.TrimSpace(segmentSetRoot))
+	if clean != "" && clean != "." {
+		candidates = append(candidates, clean)
+	}
+	if abs, err := filepath.Abs(clean); err == nil {
+		abs = filepath.Clean(abs)
+		if abs != "" && abs != clean {
+			candidates = append(candidates, abs)
+		} else if abs != "" && len(candidates) == 0 {
+			candidates = append(candidates, abs)
+		}
+	}
+	for _, key := range candidates {
+		if lease := held[key]; lease != nil {
+			return lease
+		}
+	}
+	for _, lease := range held {
+		if lease == nil {
+			continue
+		}
+		root := lease.SegmentSetRoot()
+		for _, key := range candidates {
+			if root == key {
+				return lease
+			}
+		}
+	}
+	if indexSetID == "" {
+		return nil
+	}
+	var match *indexsubstrate.WriteLease
+	for _, lease := range held {
+		if lease == nil || lease.IndexSetID() != indexSetID {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = lease
+	}
+	return match
+}
+
 func verifiedIndexGCTarget(kind, parentRoot, targetPath string) (indexGCTarget, error) {
 	parentAbs, err := filepath.Abs(filepath.Clean(parentRoot))
 	if err != nil {
@@ -448,14 +499,14 @@ func verifiedIndexGCTarget(kind, parentRoot, targetPath string) (indexGCTarget, 
 	if filepath.Dir(targetResolved) != parentResolved {
 		return indexGCTarget{}, fmt.Errorf("target resolves outside its canonical root")
 	}
-	size, digest, err := hashIndexGCTree(targetAbs)
+	size, digest, err := hashIndexGCTree(targetAbs, kind)
 	if err != nil {
 		return indexGCTarget{}, err
 	}
 	return indexGCTarget{Kind: kind, Path: targetAbs, SizeBytes: size, TreeSHA256: digest}, nil
 }
 
-func hashIndexGCTree(root string) (int64, string, error) {
+func hashIndexGCTree(root, targetKind string) (int64, string, error) {
 	h := sha256.New()
 	var size int64
 	treeRoot, err := os.OpenRoot(root)
@@ -482,6 +533,15 @@ func hashIndexGCTree(root string) (int64, string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("non-regular artifact is not allowed in deletion target: %s", path)
 		}
+		// Only the package-owned root-level lock under a segment-set target is
+		// diagnostic metadata (often held open with exclusive LockFileEx during
+		// plan revalidation). Nested same-basename files and any same-named
+		// file in identity/journals targets remain exact-content bound.
+		if isIndexGCPackageWriteLeaseRel(targetKind, rel) {
+			_, _ = fmt.Fprintf(h, "%s\x00%o\x00%d\x00lease-meta\x00", rel, info.Mode().Perm(), info.Size())
+			size += info.Size()
+			return nil
+		}
 		f, boundInfo, err := openBoundIndexGCRootFile(treeRoot, rel, info)
 		if err != nil {
 			return err
@@ -506,6 +566,18 @@ func hashIndexGCTree(root string) (int64, string, error) {
 		return 0, "", err
 	}
 	return size, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// isIndexGCPackageWriteLeaseRel reports whether rel is the package-owned
+// durable write-lease lock at the root of a segment-set deletion target.
+// Basename-only matches (nested paths or other target kinds) are intentionally
+// excluded so same-size content substitution remains plan-visible.
+func isIndexGCPackageWriteLeaseRel(targetKind, rel string) bool {
+	if targetKind != "segment-set" {
+		return false
+	}
+	clean := strings.TrimPrefix(filepath.ToSlash(rel), "./")
+	return clean == indexsubstrate.WriteLeaseFileName
 }
 
 func openBoundIndexGCRootFile(root *os.Root, name string, expected fs.FileInfo) (*os.File, fs.FileInfo, error) {
@@ -574,6 +646,9 @@ func blockUnprovenGCRoots(opts indexreader.ResolveOptions, journalRoot string, i
 				warnings = append(warnings, indexGCWarning{Path: path, Reason: "unproven artifact-root entry retained"})
 				continue
 			}
+			if root == opts.SegmentCacheRoot && dir.Name() == indexsubstrate.SetAuthorityDirectoryName {
+				continue
+			}
 			if root == opts.IndexesRoot {
 				identity, identityErr := indexreader.ReadLocalIdentityFile(filepath.Join(path, "identity.json"), opts.MaxMarkerBytes)
 				if identityErr != nil || !validFullIndexSetID(identity.IndexSetID) {
@@ -607,7 +682,7 @@ func blockUnprovenGCRoots(opts indexreader.ResolveOptions, journalRoot string, i
 	return warnings
 }
 
-func blockActiveGCState(inventory map[string]*indexGCInventoryEntry) ([]indexGCWarning, error) {
+func blockActiveGCStateExcept(inventory map[string]*indexGCInventoryEntry, skipCheckpointRunID string) ([]indexGCWarning, error) {
 	var warnings []indexGCWarning
 	jobsRoot, err := indexJobsRootDir()
 	if err != nil {
@@ -702,6 +777,12 @@ func blockActiveGCState(inventory map[string]*indexGCInventoryEntry) ([]indexGCW
 		var env opcheckpoint.Envelope
 		if err := json.Unmarshal(data, &env); err != nil {
 			return fmt.Errorf("inspect operation checkpoint %s: %w", path, err)
+		}
+		// A non-empty skip id is only supplied by the globally serialized GC
+		// recovery/execution path after it has strictly loaded every GC intent.
+		// Those records are the transaction being recovered, not competing work.
+		if env.Operation == operationIndexGCDelete && skipCheckpointRunID != "" {
+			return nil
 		}
 		if env.Status == opcheckpoint.StatusSuccess {
 			return nil

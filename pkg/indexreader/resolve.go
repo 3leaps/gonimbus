@@ -2,7 +2,9 @@ package indexreader
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -98,15 +100,21 @@ func ListIndexReaders(ctx context.Context, opts ResolveOptions) ([]ListedIndex, 
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, ListedIndex{Meta: c.meta})
+		out = append(out, ListedIndex{
+			Meta:               c.meta,
+			IdentityStatus:     c.identityStatus,
+			IdentityDiagnostic: c.identityDiagnostic,
+		})
 	}
 	return out, nil
 }
 
 type candidate struct {
-	meta   Meta
-	dbPath string
-	latest string
+	meta               Meta
+	dbPath             string
+	latest             string
+	identityStatus     IdentityStatus
+	identityDiagnostic string
 }
 
 func discoverCandidates(ctx context.Context, opts ResolveOptions, target ResolveTarget) ([]candidate, error) {
@@ -157,9 +165,10 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 		}
 
 		dirPath := filepath.Join(opts.IndexesRoot, dirName)
-		identity, err := readIdentityMeta(dirPath, opts.MaxMarkerBytes)
-		if err != nil {
-			// Identity optional for pure SQLite legacy; continue with DB probe.
+		identity, identityErr := readIdentityMeta(dirPath, opts.MaxMarkerBytes)
+		if identityErr != nil {
+			// Canonical SQLite must not downgrade to an uncoordinated immutable
+			// probe when its stable authority identity is unavailable.
 			identity = identityMeta{}
 		}
 		if target.BaseURI != "" && identity.BaseURI != "" && identity.BaseURI != target.BaseURI {
@@ -168,12 +177,35 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 
 		dbPath := filepath.Join(dirPath, "index.db")
 		if st, statErr := os.Stat(dbPath); statErr == nil && !st.IsDir() {
-			c, err := candidateFromSQLite(ctx, dbPath, dirPath, target)
-			if err != nil {
+			if identityErr != nil {
+				if target.IndexSetID != "" || target.BaseURI != "" {
+					return nil, fmt.Errorf("open canonical SQLite candidate %s: canonical SQLite identity requires a valid full index_set_id: %w", dirName, identityErr)
+				}
+				status := IdentityStatusInvalid
+				diagnostic := "identity.json is unreadable or invalid"
+				if os.IsNotExist(identityErr) {
+					status = IdentityStatusMissing
+					diagnostic = "identity.json is missing"
+				}
+				out = append(out, untrustedSQLiteCandidate(dbPath, dirPath, status, diagnostic))
 				continue
 			}
-			if identity.IndexSetID != "" {
-				c.meta.IndexSetID = identity.IndexSetID
+			if !identityMatchesCanonicalDir(identity.IndexSetID, dirName) {
+				if target.IndexSetID != "" || target.BaseURI != "" {
+					return nil, fmt.Errorf("open canonical SQLite candidate %s: identity.json does not match canonical directory", dirName)
+				}
+				out = append(out, untrustedSQLiteCandidate(dbPath, dirPath, IdentityStatusMismatch, "identity.json does not match canonical directory"))
+				continue
+			}
+			c, err := candidateFromSQLite(ctx, opts, dbPath, dirPath, target, identity)
+			if err != nil {
+				if target.IndexSetID != "" || target.BaseURI != "" {
+					return nil, fmt.Errorf("open canonical SQLite candidate %s: %w", dirName, err)
+				}
+				if errors.Is(err, ErrSQLiteIdentityScope) {
+					out = append(out, untrustedSQLiteCandidate(dbPath, dirPath, IdentityStatusMismatch, "identity.json does not match the database index set"))
+				}
+				continue
 			}
 			if identity.BaseURI != "" {
 				c.meta.BaseURI = identity.BaseURI
@@ -222,6 +254,28 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func untrustedSQLiteCandidate(dbPath, identityDir string, status IdentityStatus, diagnostic string) candidate {
+	return candidate{
+		meta: Meta{
+			Format:      FormatSQLiteV1,
+			IdentityDir: identityDir,
+			SourcePath:  dbPath,
+		},
+		dbPath:             dbPath,
+		identityStatus:     status,
+		identityDiagnostic: diagnostic,
+	}
+}
+
+func identityMatchesCanonicalDir(indexSetID, dirName string) bool {
+	if !isFullIndexSetID(indexSetID) || !strings.HasPrefix(dirName, "idx_") {
+		return false
+	}
+	fullHex := strings.TrimPrefix(indexSetID, "idx_")
+	dirHex := strings.TrimPrefix(dirName, "idx_")
+	return dirHex != "" && len(dirHex) <= len(fullHex) && strings.HasPrefix(fullHex, dirHex)
 }
 
 func discoverSegmentCacheCandidates(opts ResolveOptions, target ResolveTarget) ([]candidate, error) {
@@ -300,32 +354,64 @@ func matchSegmentCacheID(segmentRoot, wantHex string) (string, error) {
 	return matches[0], nil
 }
 
-func candidateFromSQLite(ctx context.Context, dbPath, identityDir string, target ResolveTarget) (candidate, error) {
-	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+func candidateFromSQLite(ctx context.Context, opts ResolveOptions, dbPath, identityDir string, target ResolveTarget, identity identityMeta) (candidate, error) {
+	indexSetID := strings.TrimSpace(identity.IndexSetID)
+	if !isFullIndexSetID(indexSetID) {
+		return candidate{}, fmt.Errorf("canonical SQLite identity requires a valid full index_set_id")
+	}
+	if opts.SegmentCacheRoot == "" {
+		return candidate{}, fmt.Errorf("segment cache root is required for canonical SQLite authority")
+	}
+	snapshot, err := OpenSQLiteSnapshot(ctx, SQLiteSnapshotOptions{
+		Path:           dbPath,
+		SegmentSetRoot: filepath.Join(opts.SegmentCacheRoot, indexSetID),
+		IndexSetID:     indexSetID,
+		Authority:      opts.Authority,
+	})
 	if err != nil {
 		return candidate{}, err
 	}
-	defer func() { _ = db.Close() }()
-	if err := indexstore.Migrate(ctx, db); err != nil {
+	db := snapshot.DB()
+	set, err := selectSQLiteSet(ctx, db, target)
+	closeErr := snapshot.Close()
+	if err != nil {
 		return candidate{}, err
 	}
+	if closeErr != nil {
+		return candidate{}, closeErr
+	}
+	return candidate{
+		meta: Meta{
+			Format:      FormatSQLiteV1,
+			IndexSetID:  set.IndexSetID,
+			BaseURI:     set.BaseURI,
+			Provider:    set.Provider,
+			IdentityDir: identityDir,
+			SourcePath:  dbPath,
+		},
+		dbPath:         dbPath,
+		identityStatus: IdentityStatusOK,
+	}, nil
+}
 
+func selectSQLiteSet(ctx context.Context, db *sql.DB, target ResolveTarget) (*indexstore.IndexSet, error) {
 	var set *indexstore.IndexSet
+	var err error
 	if target.BaseURI != "" {
 		set, err = indexstore.GetIndexSetByBaseURI(ctx, db, target.BaseURI)
 		if err != nil {
-			return candidate{}, err
+			return nil, err
 		}
 		if set == nil {
-			return candidate{}, fmt.Errorf("base_uri not in db")
+			return nil, fmt.Errorf("base_uri not in db")
 		}
 	} else {
 		sets, listErr := indexstore.ListIndexSets(ctx, db, "")
 		if listErr != nil {
-			return candidate{}, listErr
+			return nil, listErr
 		}
 		if len(sets) == 0 {
-			return candidate{}, fmt.Errorf("no index sets")
+			return nil, fmt.Errorf("no index sets")
 		}
 		if target.IndexSetID != "" {
 			want := strings.TrimPrefix(target.IndexSetID, "idx_")
@@ -344,17 +430,12 @@ func candidateFromSQLite(ctx context.Context, dbPath, identityDir string, target
 		}
 	}
 
-	return candidate{
-		meta: Meta{
-			Format:      FormatSQLiteV1,
-			IndexSetID:  set.IndexSetID,
-			BaseURI:     set.BaseURI,
-			Provider:    set.Provider,
-			IdentityDir: identityDir,
-			SourcePath:  dbPath,
-		},
-		dbPath: dbPath,
-	}, nil
+	return set, nil
+}
+
+func isFullIndexSetID(id string) bool {
+	hexID := strings.TrimPrefix(strings.TrimSpace(id), "idx_")
+	return strings.HasPrefix(strings.TrimSpace(id), "idx_") && len(hexID) == 64 && validHexPattern.MatchString(hexID)
 }
 
 func candidateFromDurable(opts ResolveOptions, latestPath, identityDir string, identity identityMeta) (candidate, error) {
@@ -412,7 +493,7 @@ func readIdentityMeta(dir string, maxBytes int64) (identityMeta, error) {
 func openCandidate(ctx context.Context, opts ResolveOptions, c candidate) (Reader, error) {
 	switch c.meta.Format {
 	case FormatSQLiteV1:
-		return openSQLiteReader(ctx, c)
+		return openSQLiteReader(ctx, opts, c)
 	case FormatDurableV2:
 		return openDurableReader(opts, c)
 	default:
@@ -448,7 +529,7 @@ func dedupeCandidates(in []candidate) []candidate {
 	seen := map[string]struct{}{}
 	out := make([]candidate, 0, len(in))
 	for _, c := range in {
-		key := string(c.meta.Format) + "|" + c.meta.SourcePath + "|" + c.meta.IndexSetID
+		key := string(c.meta.Format) + "|" + c.meta.SourcePath + "|" + c.meta.IndexSetID + "|" + string(c.identityStatus)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -468,12 +549,21 @@ func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 1 << 20
 	}
-	// Single open + LimitReader (no pre-Stat/read race that can exceed the cap).
-	f, err := os.Open(path)
+	// Bind without following the final path component, then verify the opened
+	// file is the same regular file still named at the read boundary.
+	f, err := openSQLiteIdentityBinding(path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	boundInfo, err := f.Stat()
+	if err != nil || !boundInfo.Mode().IsRegular() {
+		return nil, errors.Join(fmt.Errorf("bounded input is not a regular file"), err)
+	}
+	namedInfo, err := os.Lstat(path)
+	if err != nil || namedInfo.Mode()&os.ModeSymlink != 0 || !namedInfo.Mode().IsRegular() || !os.SameFile(boundInfo, namedInfo) {
+		return nil, errors.Join(fmt.Errorf("bounded input binding changed before read"), err)
+	}
 	limited := io.LimitReader(f, maxBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -70,6 +71,20 @@ func run(ctx context.Context, cfg Config, hooks runHooks) (Result, error) {
 		return base, err
 	}
 	base.IndexSetID = cfg.IndexSetID
+	authority := cfg.Authority
+	authorityOwned := false
+	if authority == nil {
+		authority, err = indexcoord.Acquire(ctx, cfg.SegmentSetRoot, cfg.IndexSetID, "enrich-"+uuid.NewString())
+		if err != nil {
+			return base, fmt.Errorf("acquire index set authority: %w", err)
+		}
+		authorityOwned = true
+	} else if err := authority.AssertHeldFor(cfg.IndexSetID, cfg.SegmentSetRoot); err != nil {
+		return base, fmt.Errorf("index set authority: %w", err)
+	}
+	if authorityOwned {
+		defer func() { _ = authority.Release() }()
+	}
 
 	lease, err := indexsubstrate.AcquireWriteLease(cfg.SegmentSetRoot, cfg.IndexSetID, "enrich-"+uuid.NewString(), 0)
 	if err != nil {
@@ -144,6 +159,9 @@ func run(ctx context.Context, cfg Config, hooks runHooks) (Result, error) {
 	if len(updates) == 0 {
 		// zero candidates or all resume-skipped: success, no publish
 		return res, nil
+	}
+	if err := authority.AssertHeldFor(cfg.IndexSetID, cfg.SegmentSetRoot); err != nil {
+		return res, fmt.Errorf("index set authority at publish: %w", err)
 	}
 
 	pub, pubErr := publishEnrich(cfg, snap, priorRows, parentToken, updates, runID, runStartedAt, lease, hooks)

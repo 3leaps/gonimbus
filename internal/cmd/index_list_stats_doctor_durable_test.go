@@ -66,6 +66,438 @@ func TestIndexListIncludesDurableOnly(t *testing.T) {
 	require.NotEmpty(t, entries[0]["latest_run_id"])
 }
 
+func TestDurableBuildRetainsCanonicalAbsenceProofThroughIdentityPublication(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+	providerCalls := 0
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		providerCalls++
+		return indexBuildEngineFakeProvider{}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	var interposedDB string
+	indexBuildAfterIdentityGuard = func(path string) error {
+		interposedDB = path
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("appeared after validation\n"), 0o640)
+	}
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&strings.Builder{})
+	err := runIndexBuild(cmd, nil)
+	require.ErrorIs(t, err, indexreader.ErrCanonicalSQLiteAdoption)
+	require.Zero(t, providerCalls, "identity interposition must fail before provider construction")
+	require.NotEmpty(t, interposedDB)
+	require.Equal(t, []byte("appeared after validation\n"), mustReadFile(t, interposedDB))
+	require.NoFileExists(t, filepath.Join(filepath.Dir(interposedDB), "identity.json"))
+	require.NoFileExists(t, filepath.Join(filepath.Dir(interposedDB), "manifest.json"))
+	require.NoFileExists(t, interposedDB+"-wal")
+	require.NoFileExists(t, interposedDB+"-shm")
+	aliases, globErr := filepath.Glob(filepath.Join(filepath.Dir(interposedDB), ".gonimbus-index-write-*.db*"))
+	require.NoError(t, globErr)
+	require.Empty(t, aliases)
+}
+
+func TestDurableBuildRetainsExistingCanonicalProofThroughIdentityPublication(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+	providerCalls := 0
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		providerCalls++
+		return indexBuildEngineFakeProvider{objects: []provider.ObjectSummary{{
+			Key: "data/hot/a.xml", Size: 1, ETag: `"a"`,
+			LastModified: time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC), StorageClass: "STANDARD",
+		}}}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+	runBuild := func() error {
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		cmd.SetOut(&strings.Builder{})
+		return runIndexBuild(cmd, nil)
+	}
+	require.NoError(t, runBuild())
+	dbs, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "index.db"))
+	require.NoError(t, err)
+	require.Len(t, dbs, 1)
+	dbPath := dbs[0]
+	identityPath := filepath.Join(filepath.Dir(dbPath), "identity.json")
+	markerBefore, err := os.ReadFile(identityPath)
+	require.NoError(t, err)
+	markerInfoBefore, err := os.Stat(identityPath)
+	require.NoError(t, err)
+
+	providerCalls = 0
+	indexBuildFormat = "durable"
+	validatedPath := filepath.Join(t.TempDir(), "validated.db")
+	indexBuildAfterIdentityGuard = func(path string) error {
+		if err := os.Rename(path, validatedPath); err != nil {
+			// Native Windows denies replacement while the retained proof is open.
+			return err
+		}
+		return os.WriteFile(path, []byte("unvalidated replacement\n"), 0o640)
+	}
+	err = runBuild()
+	require.Error(t, err)
+	require.Zero(t, providerCalls, "replacement must fail before provider construction")
+	require.Equal(t, markerBefore, mustReadFile(t, identityPath))
+	markerInfoAfter, statErr := os.Stat(identityPath)
+	require.NoError(t, statErr)
+	require.Equal(t, markerInfoBefore.Mode(), markerInfoAfter.Mode())
+	require.Equal(t, markerInfoBefore.ModTime(), markerInfoAfter.ModTime())
+	require.NoFileExists(t, dbPath+"-wal")
+	require.NoFileExists(t, dbPath+"-shm")
+}
+
+func TestIndexListSurfacesUntrustedSQLiteIdentityWithoutDBMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		mutate func(t *testing.T, path string)
+	}{
+		{name: "missing", status: "missing", mutate: func(t *testing.T, path string) {
+			require.NoError(t, os.Remove(path))
+		}},
+		{name: "invalid", status: "invalid", mutate: func(t *testing.T, path string) {
+			require.NoError(t, os.WriteFile(path, []byte("{invalid\n"), 0o600))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAppDataRootTestState(t)
+			dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+			t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+			indexesRoot := filepath.Join(dataRoot, "indexes")
+			require.NoError(t, os.MkdirAll(indexesRoot, 0o700))
+			identity := createTestIndex(t, indexesRoot, "s3://test-bucket/legacy/")
+			identityDir := filepath.Join(indexesRoot, identity.DirName)
+			require.NoError(t, writeIndexIdentityFile(identityDir, identity))
+			dbPath := filepath.Join(identityDir, "index.db")
+			tc.mutate(t, filepath.Join(identityDir, "identity.json"))
+			before, err := os.ReadFile(dbPath)
+			require.NoError(t, err)
+			beforeInfo, err := os.Stat(dbPath)
+			require.NoError(t, err)
+
+			newListCommand := func(jsonOutput bool) *cobra.Command {
+				cmd := &cobra.Command{Use: "list"}
+				cmd.Flags().Bool("json", jsonOutput, "")
+				cmd.SetContext(context.Background())
+				return cmd
+			}
+			var textOut string
+			textErr := captureStderr(t, func() {
+				textOut = captureStdout(t, func() {
+					require.NoError(t, runIndexList(newListCommand(false), nil))
+				})
+			})
+			require.NotContains(t, textErr, "No indexes found")
+			require.Contains(t, textOut, "sqlite-v1")
+			require.Contains(t, textOut, tc.status)
+			lines := strings.Split(strings.TrimSpace(textOut), "\n")
+			require.Len(t, lines, 2)
+			fields := strings.Fields(lines[1])
+			require.GreaterOrEqual(t, len(fields), 12)
+			require.Equal(t, []string{"-", "-", "-"}, fields[4:7], "untrusted objects/size/runs must render as unknown")
+
+			var jsonOut string
+			jsonErr := captureStderr(t, func() {
+				jsonOut = captureStdout(t, func() {
+					require.NoError(t, runIndexList(newListCommand(true), nil))
+				})
+			})
+			require.NotContains(t, jsonErr, "No indexes found")
+			var entries []map[string]any
+			require.NoError(t, json.Unmarshal([]byte(jsonOut), &entries))
+			require.Len(t, entries, 1)
+			require.Equal(t, "sqlite-v1", entries[0]["format"])
+			require.Equal(t, tc.status, entries[0]["identity_status"])
+			require.NotEmpty(t, entries[0]["identity_diagnostic"])
+			require.Equal(t, false, entries[0]["metadata_trusted"])
+			for _, key := range []string{"created_at", "object_count", "total_size_bytes", "run_count"} {
+				_, present := entries[0][key]
+				require.False(t, present, "untrusted JSON must omit %s", key)
+			}
+
+			after, err := os.ReadFile(dbPath)
+			require.NoError(t, err)
+			afterInfo, err := os.Stat(dbPath)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+			require.Equal(t, beforeInfo.ModTime(), afterInfo.ModTime())
+			require.NoFileExists(t, dbPath+"-wal")
+			require.NoFileExists(t, dbPath+"-shm")
+			require.NoFileExists(t, dbPath+"-journal")
+		})
+	}
+}
+
+func TestIndexListSurfacesBothSQLiteIdentityMismatchClasses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, indexesRoot string) string
+	}{
+		{name: "marker versus directory", setup: func(t *testing.T, indexesRoot string) string {
+			identity := createTestIndex(t, indexesRoot, "s3://test-bucket/directory-mismatch/")
+			sourceDir := filepath.Join(indexesRoot, identity.DirName)
+			require.NoError(t, writeIndexIdentityFile(sourceDir, identity))
+			targetDir := filepath.Join(indexesRoot, "idx_0000000000000000")
+			require.NotEqual(t, sourceDir, targetDir)
+			require.NoError(t, os.Rename(sourceDir, targetDir))
+			return filepath.Join(targetDir, "index.db")
+		}},
+		{name: "marker versus database", setup: func(t *testing.T, indexesRoot string) string {
+			dbIdentity := createTestIndex(t, indexesRoot, "s3://test-bucket/database-a/")
+			markerIdentity := createTestIndex(t, t.TempDir(), "s3://test-bucket/database-b/")
+			sourceDir := filepath.Join(indexesRoot, dbIdentity.DirName)
+			targetDir := filepath.Join(indexesRoot, markerIdentity.DirName)
+			require.NoError(t, os.Rename(sourceDir, targetDir))
+			require.NoError(t, writeIndexIdentityFile(targetDir, markerIdentity))
+			return filepath.Join(targetDir, "index.db")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAppDataRootTestState(t)
+			dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+			t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+			indexesRoot := filepath.Join(dataRoot, "indexes")
+			require.NoError(t, os.MkdirAll(indexesRoot, 0o700))
+			dbPath := tc.setup(t, indexesRoot)
+			assertReportOnlySQLiteList(t, dbPath, "mismatch")
+		})
+	}
+}
+
+func assertReportOnlySQLiteList(t *testing.T, dbPath, wantStatus string) {
+	t.Helper()
+	before, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(dbPath)
+	require.NoError(t, err)
+	newListCommand := func(jsonOutput bool) *cobra.Command {
+		cmd := &cobra.Command{Use: "list"}
+		cmd.Flags().Bool("json", jsonOutput, "")
+		cmd.SetContext(context.Background())
+		return cmd
+	}
+	textOut := captureStdout(t, func() {
+		require.NoError(t, runIndexList(newListCommand(false), nil))
+	})
+	lines := strings.Split(strings.TrimSpace(textOut), "\n")
+	require.Len(t, lines, 2)
+	fields := strings.Fields(lines[1])
+	require.GreaterOrEqual(t, len(fields), 12)
+	require.Equal(t, []string{"-", "-", "-"}, fields[4:7])
+	require.Equal(t, wantStatus, fields[11])
+
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, runIndexList(newListCommand(true), nil))
+	})
+	var entries []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &entries))
+	require.Len(t, entries, 1)
+	require.Equal(t, wantStatus, entries[0]["identity_status"])
+	require.Equal(t, false, entries[0]["metadata_trusted"])
+	for _, key := range []string{"index_set_id", "created_at", "object_count", "total_size_bytes", "run_count"} {
+		_, present := entries[0][key]
+		require.False(t, present, "report-only JSON must omit %s", key)
+	}
+	after, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	afterInfo, err := os.Stat(dbPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	require.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+	require.Equal(t, beforeInfo.ModTime(), afterInfo.ModTime())
+	require.NoFileExists(t, dbPath+"-wal")
+	require.NoFileExists(t, dbPath+"-shm")
+	require.NoFileExists(t, dbPath+"-journal")
+}
+
+func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+
+	providerCalls := 0
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		providerCalls++
+		return indexBuildEngineFakeProvider{objects: []provider.ObjectSummary{
+			{Key: "data/hot/rebuilt.xml", Size: 10, ETag: `"rebuilt"`, LastModified: base, StorageClass: "STANDARD"},
+		}}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	// The dual-format rebuild uses the injected engine source while still
+	// publishing the canonical SQLite compatibility artifact and identity.
+	indexBuildFormat = "both"
+	indexBuildJSON = true
+	runBuild := func() error {
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		cmd.SetOut(&strings.Builder{})
+		return runIndexBuild(cmd, nil)
+	}
+	require.NoError(t, runBuild())
+
+	identities, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "identity.json"))
+	require.NoError(t, err)
+	require.Len(t, identities, 1, "a rebuild must publish canonical identity.json")
+	dbs, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "index.db"))
+	require.NoError(t, err)
+	require.Len(t, dbs, 1)
+	identityDir := filepath.Dir(dbs[0])
+	identityDoc, err := indexreader.ReadLocalIdentityFile(identities[0], int64(maxHubMarkerBytes))
+	require.NoError(t, err)
+	setID := identityDoc.IndexSetID
+	require.NoError(t, os.Remove(identities[0]))
+	before, err := os.ReadFile(dbs[0])
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(dbs[0])
+	require.NoError(t, err)
+	segmentRoot := filepath.Join(dataRoot, "cache", "segments", setID)
+	journalRoot := filepath.Join(dataRoot, "journals", "crawl", setID)
+	require.NoError(t, os.MkdirAll(journalRoot, 0o700))
+	identityBefore := snapshotIndexGCTreeState(t, identityDir)
+	segmentBefore := snapshotIndexGCTreeState(t, segmentRoot)
+	journalBefore := snapshotIndexGCTreeState(t, journalRoot)
+
+	for _, refusal := range []struct {
+		name     string
+		format   string
+		explicit bool
+	}{
+		{name: "default durable", format: "durable"},
+		{name: "explicit canonical sqlite", format: "sqlite", explicit: true},
+		{name: "explicit canonical both", format: "both", explicit: true},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			indexBuildFormat = refusal.format
+			indexBuildDBPath = ""
+			if refusal.explicit {
+				indexBuildDBPath = dbs[0]
+			}
+			providerCalls = 0
+			err = runBuild()
+			require.ErrorIs(t, err, indexreader.ErrCanonicalSQLiteAdoption)
+			require.Zero(t, providerCalls, "refusal must happen before provider construction")
+			afterRefusal, readErr := os.ReadFile(dbs[0])
+			require.NoError(t, readErr)
+			afterRefusalInfo, statErr := os.Stat(dbs[0])
+			require.NoError(t, statErr)
+			require.Equal(t, before, afterRefusal)
+			require.Equal(t, beforeInfo.Mode(), afterRefusalInfo.Mode())
+			require.Equal(t, beforeInfo.ModTime(), afterRefusalInfo.ModTime())
+			require.Equal(t, identityBefore, snapshotIndexGCTreeState(t, identityDir))
+			require.Equal(t, segmentBefore, snapshotIndexGCTreeState(t, segmentRoot))
+			require.Equal(t, journalBefore, snapshotIndexGCTreeState(t, journalRoot))
+			require.NoFileExists(t, filepath.Join(identityDir, "identity.json"))
+			require.NoFileExists(t, dbs[0]+"-wal")
+			require.NoFileExists(t, dbs[0]+"-shm")
+			require.NoFileExists(t, dbs[0]+"-journal")
+			aliases, globErr := filepath.Glob(filepath.Join(identityDir, ".gonimbus-index-write-*.db*"))
+			require.NoError(t, globErr)
+			require.Empty(t, aliases)
+		})
+	}
+
+	backupDir := filepath.Join(t.TempDir(), filepath.Base(identityDir))
+	require.NoError(t, os.Rename(identityDir, backupDir))
+	require.FileExists(t, filepath.Join(backupDir, "index.db"))
+	backupBytes, err := os.ReadFile(filepath.Join(backupDir, "index.db"))
+	require.NoError(t, err)
+	require.Equal(t, before, backupBytes)
+	indexBuildFormat = "both"
+	indexBuildDBPath = ""
+	require.NoError(t, runBuild())
+	require.Greater(t, providerCalls, 0)
+	identities, err = filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "identity.json"))
+	require.NoError(t, err)
+	require.Len(t, identities, 1)
+	dbs, err = filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "index.db"))
+	require.NoError(t, err)
+	require.Len(t, dbs, 1)
+	require.Equal(t, before, backupBytes, "fresh rebuild must not mutate the preserved legacy backup")
+
+	// Exact-epoch cleanup retains discoverable quarantine captures that block
+	// later readers until recovery. Multi-step fixtures clear temp-dir residue
+	// only (not a production API).
+	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
+
+	listCmd := &cobra.Command{Use: "list"}
+	listCmd.Flags().Bool("json", true, "")
+	listCmd.SetContext(context.Background())
+	stdout := captureStdout(t, func() {
+		require.NoError(t, runIndexList(listCmd, nil))
+	})
+	var entries []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &entries))
+	require.Len(t, entries, 1)
+	require.Equal(t, "sqlite-v1", entries[0]["format"])
+	require.Equal(t, "ok", entries[0]["identity_status"])
+	require.Equal(t, true, entries[0]["metadata_trusted"])
+	require.NotEmpty(t, entries[0]["index_set_id"])
+}
+
+func TestIndexBuildExplicitExternalSQLiteRetainsCallerOwnedBehavior(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+	externalDir := t.TempDir()
+	externalDB := filepath.Join(externalDir, "caller-owned.db")
+
+	providerCalls := 0
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		providerCalls++
+		return indexBuildEngineFakeProvider{objects: []provider.ObjectSummary{
+			{Key: "data/hot/external.xml", Size: 10, ETag: `"external"`, LastModified: time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)},
+		}}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+	indexBuildDBPath = externalDB
+
+	runBuild := func() error {
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		return runIndexBuild(cmd, nil)
+	}
+	require.NoError(t, runBuild())
+	require.FileExists(t, externalDB)
+	require.NoFileExists(t, filepath.Join(externalDir, "identity.json"))
+	firstCalls := providerCalls
+	require.Positive(t, firstCalls)
+	require.NoError(t, runBuild(), "an existing external DB remains caller-owned and does not require canonical identity.json")
+	require.Greater(t, providerCalls, firstCalls)
+	require.NoFileExists(t, filepath.Join(externalDir, "identity.json"))
+}
+
 func TestIndexStatsDurableAndPrefixesRejected(t *testing.T) {
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
@@ -364,6 +796,7 @@ build:
 	root := filepath.Join(dataRoot, "indexes")
 	require.NoError(t, os.MkdirAll(root, 0o755))
 	identity := createTestIndex(t, root, "s3://bucket/sqlite-only/")
+	require.NoError(t, writeIndexIdentityFile(filepath.Join(root, identity.DirName), identity))
 	// Ensure no segment cache artifact for this set.
 	segRoot := filepath.Join(dataRoot, "cache", "segments")
 	require.NoError(t, os.MkdirAll(segRoot, 0o755))
@@ -503,6 +936,11 @@ build:
 	require.Equal(t, "durable-v2", detail["format"])
 	require.Equal(t, true, detail["identity_present"])
 	require.NotEmpty(t, detail["identity_path"])
+
+	// Exact-epoch cleanup retains discoverable quarantine captures that block
+	// later SQLite readers until recovery. Multi-step fixtures clear temp-dir
+	// residue only (not a production API).
+	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
 
 	stdout, stderr, err = executeIndexDoctorCommand(t, "--detail", "--format", "sqlite-v1", setID[:16])
 	require.NoError(t, err, stderr)

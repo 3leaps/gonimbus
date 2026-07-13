@@ -187,12 +187,12 @@ func TestInspectIndexDBForDoctor_IdentityOK(t *testing.T) {
 	dbPath := filepath.Join(idxDir, "index.db")
 	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	require.NoError(t, indexstore.Migrate(ctx, db))
 
 	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, params)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 
 	// Write identity.json alongside the DB.
 	require.NoError(t, writeIndexIdentityFile(idxDir, identity))
@@ -241,10 +241,10 @@ func TestInspectIndexDBForDoctor_IdentityHashMismatch(t *testing.T) {
 	dbPath := filepath.Join(idxDir, "index.db")
 	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, indexstore.Migrate(ctx, db))
 	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, params)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 
 	// Write an identity.json that doesn't match the DB identity.
 	other := params
@@ -289,10 +289,10 @@ func TestInspectIndexDBForDoctor_MissingIdentityFile(t *testing.T) {
 	dbPath := filepath.Join(idxDir, "index.db")
 	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, indexstore.Migrate(ctx, db))
 	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, params)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 
 	entry, err := inspectIndexDBForDoctor(ctx, dbPath, indexDoctorOptions{})
 	require.NoError(t, err)

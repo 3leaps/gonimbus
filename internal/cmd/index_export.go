@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/spf13/cobra"
@@ -174,7 +176,7 @@ func newHubProvider(ctx context.Context, hub *hubDestSpec) (provider.ObjectPutte
 	return newOutputProvider(ctx, spec)
 }
 
-func runIndexExport(cmd *cobra.Command, _ []string) error {
+func runIndexExport(cmd *cobra.Command, _ []string) (err error) {
 	ctx := cmd.Context()
 
 	hubURI, _ := cmd.Flags().GetString("hub")
@@ -251,34 +253,52 @@ func runIndexExport(cmd *cobra.Command, _ []string) error {
 	var db *sql.DB
 	var indexSet *indexstore.IndexSet
 	var localDBPath string
+	var snapshot *indexreader.SQLiteSnapshot
+	var reader indexreader.Reader
 	if dbFlag != "" {
 		// --db mode: derive all paths from the explicit DB location
 		localDBPath = dbFlag
-		db, err = openIndexDB(ctx, dbFlag)
-		if err != nil {
-			return fmt.Errorf("open index database: %w", err)
+		if strings.HasPrefix(dbFlag, "libsql://") || strings.HasPrefix(dbFlag, "https://") {
+			db, err = openIndexDBMutable(ctx, dbFlag)
+			if err != nil {
+				return fmt.Errorf("open remote index database: %w", err)
+			}
+			defer func() { err = errors.Join(err, db.Close()) }()
+		} else {
+			snapshotOpts, optsErr := sqliteSnapshotOptionsForPath(dbFlag, "")
+			if optsErr != nil {
+				return optsErr
+			}
+			snapshot, err = indexreader.OpenSQLiteSnapshot(ctx, snapshotOpts)
+			if err != nil {
+				return fmt.Errorf("open index database: %w", err)
+			}
+			defer func() { err = errors.Join(err, snapshot.Close()) }()
+			db = snapshot.DB()
 		}
 		indexSet, err = matchIndexSetInDB(ctx, db, cleanSetID)
 		if err != nil {
-			_ = db.Close()
 			return fmt.Errorf("index set %s not found in database %s: %w", indexSetFlag, dbFlag, err)
 		}
 	} else {
-		db, indexSet, err = openIndexDBByID(ctx, indexSetFlag)
+		reader, err = openIndexReader(ctx, "", indexSetFlag, "")
 		if err != nil {
 			if formatMode == "auto" {
 				return fmt.Errorf("auto export found neither a local durable snapshot nor a local sqlite index for %s: %w", indexSetFlag, err)
 			}
 			return err
 		}
-		// Resolve artifact path via shared resolver
-		localDBPath, err = resolveLocalDBPath(indexSetFlag)
+		defer func() { err = errors.Join(err, reader.Close()) }()
+		if reader.Meta().Format != indexreader.FormatSQLiteV1 || reader.SQLiteDB() == nil {
+			return fmt.Errorf("local index %s is not sqlite-v1", indexSetFlag)
+		}
+		db = reader.SQLiteDB()
+		indexSet, err = matchIndexSetInDB(ctx, db, cleanSetID)
 		if err != nil {
-			_ = db.Close()
 			return err
 		}
+		localDBPath = reader.Meta().SourcePath
 	}
-	defer func() { _ = db.Close() }()
 
 	// Resolve run from SQLite
 	run, err := resolveExportRun(ctx, db, indexSet.IndexSetID, runIDFlag)
@@ -581,21 +601,6 @@ func resolveExportRun(ctx context.Context, db *sql.DB, indexSetID, runID string)
 	}
 
 	return nil, fmt.Errorf("no exportable run found for index set %s", indexSetID)
-}
-
-// resolveLocalDBPath finds the local index.db path for an index set
-// using the shared directory resolver (same validation/ambiguity as index query).
-func resolveLocalDBPath(indexSetFlag string) (string, error) {
-	rootDir, err := indexRootDir()
-	if err != nil {
-		return "", err
-	}
-
-	match, err := resolveIndexDirInRoot(rootDir, indexSetFlag)
-	if err != nil {
-		return "", err
-	}
-	return match.DBPath, nil
 }
 
 // matchIndexSetInDB finds an index set in an already-opened DB by prefix match.

@@ -330,34 +330,60 @@ func TestOpenIndexDBByIDInRoot_BaseURIFromIndex(t *testing.T) {
 	require.Equal(t, "s3://my-bucket/data/", indexSet.BaseURI)
 }
 
-func TestOpenIndexDBByIDInRoot_MigratesLegacyV4ForQuery(t *testing.T) {
+func TestOpenIndexDBByIDInRootCurrentSchemaIsImmutable(t *testing.T) {
+	root := t.TempDir()
+	identity := createTestIndex(t, root, "s3://bucket/prefix/")
+	indexDir := filepath.Join(root, identity.DirName)
+	dbPath := filepath.Join(indexDir, "index.db")
+	require.NoError(t, os.Chmod(dbPath, 0o400))
+	require.NoError(t, os.Chmod(indexDir, 0o500))
+	t.Cleanup(func() {
+		_ = os.Chmod(indexDir, 0o700)
+		_ = os.Chmod(dbPath, 0o600)
+	})
+	before, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(dbPath)
+	require.NoError(t, err)
+
+	db, indexSet, err := openIndexDBByIDInRoot(context.Background(), root, identity.IndexSetID)
+	require.NoError(t, err)
+	require.Equal(t, identity.IndexSetID, indexSet.IndexSetID)
+	require.NoError(t, db.Close())
+
+	after, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	afterInfo, err := os.Stat(dbPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	require.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+	require.Equal(t, beforeInfo.ModTime(), afterInfo.ModTime())
+	require.NoFileExists(t, dbPath+"-wal")
+	require.NoFileExists(t, dbPath+"-shm")
+}
+
+func TestOpenIndexDBByIDInRootRejectsLegacyV4WithoutMutation(t *testing.T) {
 	root := t.TempDir()
 	identity := createLegacyV4TestIndex(t, root, "s3://bucket/prefix/")
+	dbPath := filepath.Join(root, identity.DirName, "index.db")
+	before, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(dbPath)
+	require.NoError(t, err)
 
 	db, indexSet, err := openIndexDBByIDInRoot(context.Background(), root, identity.DirName)
+	require.ErrorContains(t, err, "schema is not current")
+	require.Nil(t, db)
+	require.Nil(t, indexSet)
+	after, err := os.ReadFile(dbPath)
 	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	require.Equal(t, identity.IndexSetID, indexSet.IndexSetID)
-
-	var version int
-	err = db.QueryRowContext(context.Background(), `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version)
+	afterInfo, err := os.Stat(dbPath)
 	require.NoError(t, err)
-	require.Equal(t, indexstore.SchemaVersion, version)
-
-	var columnCount int
-	err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('objects_current') WHERE name = 'storage_class'`).Scan(&columnCount)
-	require.NoError(t, err)
-	require.Equal(t, 1, columnCount)
-
-	results, _, err := indexstore.QueryObjects(context.Background(), db, indexstore.QueryParams{
-		IndexSetID: indexSet.IndexSetID,
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	require.Equal(t, "legacy-object.xml", results[0].RelKey)
-	require.Nil(t, results[0].StorageClass)
+	require.Equal(t, before, after)
+	require.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+	require.Equal(t, beforeInfo.ModTime(), afterInfo.ModTime())
+	require.NoFileExists(t, dbPath+"-wal")
+	require.NoFileExists(t, dbPath+"-shm")
 }
 
 func TestIndexCanonicalQueryRecordShapeIncludesAlternateSizeBytes(t *testing.T) {

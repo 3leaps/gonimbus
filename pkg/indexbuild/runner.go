@@ -13,6 +13,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -51,6 +52,13 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	// Acquire the shared durable write transaction before crawl sinks mutate
 	// any substrate (SQLite observation fanout in --format both).
 	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	authority, authorityOwned, err := acquireIndexSetAuthority(ctx, cfg.Authority, segmentRoot, cfg.IndexSetID, "build-"+cfg.RunID)
+	if err != nil {
+		return Summary{}, fmt.Errorf("acquire index set authority: %w", err)
+	}
+	if authorityOwned {
+		defer func() { _ = authority.Release() }()
+	}
 	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-"+cfg.RunID, 0)
 	if err != nil {
 		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
@@ -155,9 +163,10 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 		Events:               cfg.Events,
 		OnSegmentProgress:    cfg.OnSegmentProgress,
+		Authority:            cfg.Authority,
 	}
 	// Private path: reuse the held Build lease (never a public forgeable guard).
-	result, err := retryWithLease(ctx, retryCfg, lease)
+	result, err := retryWithLease(ctx, retryCfg, authority, lease)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -178,16 +187,44 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		return Summary{}, err
 	}
 	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	authority, authorityOwned, err := acquireIndexSetAuthority(ctx, cfg.Authority, segmentRoot, cfg.IndexSetID, "build-publish-"+cfg.RunID)
+	if err != nil {
+		return Summary{}, fmt.Errorf("acquire index set authority: %w", err)
+	}
+	if authorityOwned {
+		defer func() { _ = authority.Release() }()
+	}
 	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-publish-"+cfg.RunID, 0)
 	if err != nil {
 		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
 	}
 	defer func() { _ = lease.Release() }()
-	return retryWithLease(ctx, cfg, lease)
+	return retryWithLease(ctx, cfg, authority, lease)
+}
+
+func acquireIndexSetAuthority(ctx context.Context, held *indexcoord.Lease, segmentRoot, indexSetID, holder string) (*indexcoord.Lease, bool, error) {
+	if held != nil {
+		if err := held.AssertHeldFor(indexSetID, segmentRoot); err != nil {
+			return nil, false, err
+		}
+		return held, false, nil
+	}
+	authority, err := indexcoord.Acquire(ctx, segmentRoot, indexSetID, holder)
+	if err != nil {
+		return nil, false, err
+	}
+	return authority, true, nil
 }
 
 // retryWithLease publishes under an already-held package-owned lease.
-func retryWithLease(ctx context.Context, cfg RetryConfig, lease *indexsubstrate.WriteLease) (Summary, error) {
+func retryWithLease(ctx context.Context, cfg RetryConfig, authority *indexcoord.Lease, lease *indexsubstrate.WriteLease) (Summary, error) {
+	if authority == nil {
+		return Summary{}, fmt.Errorf("index set authority is required")
+	}
+	segmentRoot := filepath.Dir(cfg.Paths.LatestPath)
+	if err := authority.AssertHeldFor(cfg.IndexSetID, segmentRoot); err != nil {
+		return Summary{}, fmt.Errorf("index set authority: %w", err)
+	}
 	if lease == nil {
 		return Summary{}, fmt.Errorf("write lease is required")
 	}
@@ -211,6 +248,11 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, lease *indexsubstrate.
 			ManifestSHA256: expectedParent.ManifestSHA256,
 			CoverageSHA256: expectedParent.CoverageSHA256,
 		}
+	}
+	// Revalidate the stable authority at the commit boundary. This is separate
+	// from the inner publish lease because GC can rename the whole segment root.
+	if err := authority.AssertHeldFor(cfg.IndexSetID, segmentRoot); err != nil {
+		return Summary{}, fmt.Errorf("index set authority: %w", err)
 	}
 
 	result, err := indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{

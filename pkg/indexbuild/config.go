@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -157,6 +158,10 @@ type Config struct {
 	// Stale provided tokens are validated immediately after lease acquisition
 	// and before any crawl/observation mutation.
 	ExpectedParent *ParentToken
+	// Authority optionally supplies caller-held whole-set exclusion. When nil,
+	// Build acquires the same stable authority used by CLI and GC. A supplied
+	// lease remains caller-owned and is never released by Build.
+	Authority *indexcoord.Lease
 
 	RunStartedAt         time.Time
 	CreatedAt            time.Time
@@ -182,9 +187,9 @@ type OnSegmentProgressFunc func(progress SegmentProgress)
 // String returns a redacted config summary. Provider handles, callbacks, and
 // local paths are rendered by presence only.
 func (c Config) String() string {
-	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, CrawlPrefixes:%d, ObservationSinks:%d, Paths:%s, Coverage:%d, PriorRows:%d, Events:%s, OnSegmentProgress:%s}",
+	return fmt.Sprintf("indexbuild.Config{IndexSetID:%q, RunID:%q, BaseURI:%q, Source:%s, Match:%+v, Filter:%s, Crawl:%+v, CrawlPrefixes:%d, ObservationSinks:%d, Paths:%s, Coverage:%d, PriorRows:%d, Authority:%s, Events:%s, OnSegmentProgress:%s}",
 		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Source, c.Match, ifacePresence(c.Filter == nil), c.Crawl,
-		len(c.CrawlPrefixes), len(c.ObservationSinks), c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil),
+		len(c.CrawlPrefixes), len(c.ObservationSinks), c.Paths, len(c.Coverage), len(c.PriorRows), ifacePresence(c.Authority == nil), ifacePresence(c.Events == nil),
 		ifacePresence(c.OnSegmentProgress == nil))
 }
 
@@ -202,6 +207,8 @@ type RetryConfig struct {
 	PriorRows    []ObjectState
 	// ExpectedParent enforces latest CAS when republishing over an existing set.
 	ExpectedParent *ParentToken
+	// Authority follows Config.Authority semantics for public Retry.
+	Authority *indexcoord.Lease
 
 	RunStartedAt         time.Time
 	CreatedAt            time.Time
@@ -213,8 +220,8 @@ type RetryConfig struct {
 
 // String returns a redacted retry config summary.
 func (c RetryConfig) String() string {
-	return fmt.Sprintf("indexbuild.RetryConfig{IndexSetID:%q, RunID:%q, BaseURI:%q, Paths:%s, JournalPaths:%d, Coverage:%d, PriorRows:%d, Events:%s, OnSegmentProgress:%s}",
-		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Paths, len(c.JournalPaths), len(c.Coverage), len(c.PriorRows), ifacePresence(c.Events == nil),
+	return fmt.Sprintf("indexbuild.RetryConfig{IndexSetID:%q, RunID:%q, BaseURI:%q, Paths:%s, JournalPaths:%d, Coverage:%d, PriorRows:%d, Authority:%s, Events:%s, OnSegmentProgress:%s}",
+		c.IndexSetID, c.RunID, sanitizeURI(c.BaseURI), c.Paths, len(c.JournalPaths), len(c.Coverage), len(c.PriorRows), ifacePresence(c.Authority == nil), ifacePresence(c.Events == nil),
 		ifacePresence(c.OnSegmentProgress == nil))
 }
 

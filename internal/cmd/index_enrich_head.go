@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +42,7 @@ var (
 	newEnrichHeadProvider = func(ctx context.Context, src *uri.ObjectURI, opts providerdispatch.SourceOptions) (provider.Provider, error) {
 		return providerdispatch.NewSource(ctx, src, opts)
 	}
+	indexEnrichWithHeadBeforeResolvedReaderClose func(indexreader.Meta)
 )
 
 var indexEnrichWithHeadCmd = &cobra.Command{
@@ -167,26 +170,45 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		indexSetArg = strings.TrimSpace(args[0])
 	}
 
+	var maintenance *indexSetMaintenanceGuard
+	if indexSetArg != "" {
+		indexSetID, err := resolveIndexEnrichMaintenanceID(indexSetArg)
+		if err != nil {
+			return err
+		}
+		maintenance, err = acquireIndexSetMaintenance(ctx, indexSetID, "index-enrich-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("acquire index-set maintenance lease: %w", err)
+		}
+		defer func() { _ = maintenance.Release() }()
+		ctx = maintenance.Context()
+	}
+
 	// Resolve substrate before --resume-run so durable gets a truthful rejection
 	// instead of silently entering the SQLite checkpoint path.
 	if indexSetArg != "" {
-		reader, resolveErr := openIndexReader(ctx, "", indexSetArg, "")
+		reader, resolveErr := openIndexReaderWithAuthority(ctx, "", indexSetArg, "", maintenance.Authority())
 		if resolveErr != nil {
 			// Resolver is authoritative for named targets: surface trust/resolution
 			// failures (do not translate durable marker failures into SQLite-not-found).
 			return resolveErr
 		}
 		meta := reader.Meta()
-		_ = reader.Close()
+		if indexEnrichWithHeadBeforeResolvedReaderClose != nil {
+			indexEnrichWithHeadBeforeResolvedReaderClose(meta)
+		}
+		if err := reader.Close(); err != nil {
+			return fmt.Errorf("validate resolved index snapshot before enrich mutation: %w", err)
+		}
 		switch meta.Format {
 		case indexreader.FormatDurableV2:
 			if resumeRun != "" {
 				return fmt.Errorf("durable enrich-with-head does not support --resume-run yet; use --resume to skip already-enriched keys")
 			}
-			return runIndexEnrichWithHeadDurable(ctx, cmd, meta)
+			return runIndexEnrichWithHeadDurable(ctx, cmd, meta, maintenance.Authority())
 		case indexreader.FormatSQLiteV1:
 			if resumeRun != "" {
-				return runIndexEnrichWithHeadResume(ctx, cmd, args, resumeRun)
+				return runIndexEnrichWithHeadResumeHeld(ctx, cmd, args, resumeRun, maintenance)
 			}
 			indexSetArg = meta.IndexSetID
 		default:
@@ -199,7 +221,7 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("index-set-id is required")
 	}
 
-	db, indexSet, err := openIndexDBByID(ctx, indexSetArg)
+	db, indexSet, err := openIndexDBByID(ctx, indexSetArg, maintenance)
 	if err != nil {
 		return err
 	}
@@ -290,6 +312,10 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 }
 
 func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args []string, runID string) error {
+	return runIndexEnrichWithHeadResumeHeld(ctx, cmd, args, runID, nil)
+}
+
+func runIndexEnrichWithHeadResumeHeld(ctx context.Context, cmd *cobra.Command, args []string, runID string, maintenance *indexSetMaintenanceGuard) error {
 	opStore, err := openDefaultOperationCheckpointStore(ctx)
 	if err != nil {
 		return err
@@ -302,7 +328,20 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return fmt.Errorf("parse enrich-with-head checkpoint payload: %w", err)
 	}
-	resolved, err := findIndexRunInDefaultIndexes(ctx, runID)
+	if !validFullIndexSetID(payload.Config.IndexSetID) {
+		return fmt.Errorf("enrich-with-head checkpoint has invalid index_set_id")
+	}
+	if maintenance == nil {
+		maintenance, err = acquireIndexSetMaintenance(ctx, payload.Config.IndexSetID, "index-enrich-resume-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("acquire index-set maintenance lease: %w", err)
+		}
+		defer func() { _ = maintenance.Release() }()
+	} else if err := maintenance.AssertHeldFor(payload.Config.IndexSetID); err != nil {
+		return err
+	}
+	ctx = maintenance.Context()
+	resolved, err := findIndexRunInDefaultIndexes(ctx, runID, payload.Config.IndexSetID, maintenance)
 	if err != nil {
 		return err
 	}
@@ -446,6 +485,77 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 		return fmt.Errorf("write completed checkpoint: %w", err)
 	}
 	return nil
+}
+
+// resolveIndexEnrichMaintenanceID resolves short IDs exclusively from trusted
+// local markers and directory identities. It deliberately does not open SQLite:
+// the maintenance lease must be held before any resolver may migrate index.db.
+func resolveIndexEnrichMaintenanceID(raw string) (string, error) {
+	want := strings.TrimPrefix(strings.TrimSpace(raw), "idx_")
+	if want == "" || len(want) > 64 {
+		return "", fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", raw)
+	}
+	for _, ch := range want {
+		if ch < '0' || (ch > '9' && ch < 'a') || ch > 'f' {
+			return "", fmt.Errorf("invalid index set ID: %s (must be hex characters, max 64)", raw)
+		}
+	}
+	if len(want) == 64 {
+		return "idx_" + strings.ToLower(want), nil
+	}
+
+	opts, err := indexReaderResolveOptions()
+	if err != nil {
+		return "", err
+	}
+	matches := make(map[string]struct{})
+	entries, err := os.ReadDir(opts.IndexesRoot)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("read indexes root: %w", err)
+	}
+	for _, entry := range entries {
+		dir := filepath.Join(opts.IndexesRoot, entry.Name())
+		info, statErr := os.Lstat(dir)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		identity, identityErr := indexreader.ReadLocalIdentityFile(filepath.Join(dir, "identity.json"), opts.MaxMarkerBytes)
+		if identityErr == nil && validFullIndexSetID(identity.IndexSetID) && strings.HasPrefix(strings.TrimPrefix(identity.IndexSetID, "idx_"), strings.ToLower(want)) {
+			matches[identity.IndexSetID] = struct{}{}
+		}
+	}
+	entries, err = os.ReadDir(opts.SegmentCacheRoot)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("read segment cache root: %w", err)
+	}
+	for _, entry := range entries {
+		id := entry.Name()
+		dir := filepath.Join(opts.SegmentCacheRoot, id)
+		info, statErr := os.Lstat(dir)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !validFullIndexSetID(id) {
+			continue
+		}
+		latestInfo, latestErr := os.Lstat(filepath.Join(dir, "latest.json"))
+		if latestErr != nil || latestInfo.Mode()&os.ModeSymlink != 0 || !latestInfo.Mode().IsRegular() {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimPrefix(id, "idx_"), strings.ToLower(want)) {
+			matches[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(matches))
+	for id := range matches {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("no index found matching ID: %s", raw)
+	case 1:
+		return ids[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous index target matches %d candidates: %s", len(ids), strings.Join(ids, ", "))
+	}
 }
 
 func validateEnrichHeadArgs(cmd *cobra.Command, args []string) error {

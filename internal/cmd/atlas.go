@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/atlas"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -82,7 +84,7 @@ func init() {
 	atlasStatsCmd.Flags().Bool("json", false, "Output as JSON")
 }
 
-func runAtlasBuild(cmd *cobra.Command, args []string) error {
+func runAtlasBuild(cmd *cobra.Command, args []string) (err error) {
 	ctx := cmd.Context()
 	indexID, _ := cmd.Flags().GetString("from-index")
 	runID, _ := cmd.Flags().GetString("run")
@@ -94,11 +96,29 @@ func runAtlasBuild(cmd *cobra.Command, args []string) error {
 	gcpProject, _ := cmd.Flags().GetString("gcp-project")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
-	db, indexSet, err := openIndexDBByID(ctx, strings.TrimSpace(indexID))
+	reader, err := openIndexReader(ctx, "", strings.TrimSpace(indexID), "")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { err = errors.Join(err, reader.Close()) }()
+	if reader.Meta().Format != indexreader.FormatSQLiteV1 || reader.SQLiteDB() == nil {
+		return fmt.Errorf("atlas build requires a sqlite-v1 index")
+	}
+	db := reader.SQLiteDB()
+	sets, err := indexstore.ListIndexSets(ctx, db, "")
+	if err != nil {
+		return fmt.Errorf("list index sets: %w", err)
+	}
+	var indexSet *indexstore.IndexSet
+	for i := range sets {
+		if sets[i].IndexSetID == reader.Meta().IndexSetID {
+			indexSet = &sets[i]
+			break
+		}
+	}
+	if indexSet == nil {
+		return fmt.Errorf("resolved SQLite index set is missing")
+	}
 
 	run, err := indexstore.GetIndexRun(ctx, db, strings.TrimSpace(runID))
 	if err != nil {

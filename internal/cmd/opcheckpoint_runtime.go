@@ -36,7 +36,6 @@ type resolvedIndexRun struct {
 	db       *sql.DB
 	indexSet *indexstore.IndexSet
 	run      *indexstore.IndexRun
-	path     string
 }
 
 type resumeLeaseHeartbeatContextKey struct{}
@@ -305,39 +304,21 @@ func recoverIndexRunResumeCrash(ctx context.Context, db *sql.DB, run *indexstore
 	return nil
 }
 
-func findIndexRunInDefaultIndexes(ctx context.Context, runID string) (*resolvedIndexRun, error) {
-	paths, err := listIndexDBPaths()
+func findIndexRunInDefaultIndexes(ctx context.Context, runID, indexSetID string, authority *indexSetMaintenanceGuard) (*resolvedIndexRun, error) {
+	db, indexSet, err := openIndexDBByID(ctx, indexSetID, authority)
 	if err != nil {
 		return nil, err
 	}
-	var firstErr error
-	for _, path := range paths {
-		db, err := openMigratedIndexDB(ctx, path)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		run, err := indexstore.GetIndexRun(ctx, db, runID)
-		if err != nil {
-			_ = db.Close()
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		indexSet, err := indexstore.GetIndexSet(ctx, db, run.IndexSetID)
-		if err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		return &resolvedIndexRun{db: db, indexSet: indexSet, run: run, path: path}, nil
+	run, err := indexstore.GetIndexRun(ctx, db, runID)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("find index_run %s: %w", runID, err)
 	}
-	if firstErr != nil {
-		return nil, fmt.Errorf("find index_run %s: %w", runID, firstErr)
+	if run.IndexSetID != indexSet.IndexSetID {
+		_ = db.Close()
+		return nil, opcheckpoint.ErrIdentityMismatch
 	}
-	return nil, fmt.Errorf("index_run not found: %s", runID)
+	return &resolvedIndexRun{db: db, indexSet: indexSet, run: run}, nil
 }
 
 func closeResolvedIndexRun(resolved *resolvedIndexRun) {

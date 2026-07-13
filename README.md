@@ -200,7 +200,7 @@ gonimbus index compare durable-delta  # Temporal delta between two durable snaps
 gonimbus index list            # List local indexes (format-aware)
 gonimbus index stats           # Show index statistics (format-aware; some flags SQLite-only)
 gonimbus index doctor          # Validate index integrity (format-aware)
-gonimbus index gc              # Audit a format-aware local set-GC plan (--dry-run required)
+gonimbus index gc              # Reclaim old local sets from an audited format-aware plan
 gonimbus index export          # Export an index run to a hub (auto prefers durable)
 gonimbus index hydrate         # Download an index run from a hub (format-aware)
 gonimbus index hub             # Manage index hubs
