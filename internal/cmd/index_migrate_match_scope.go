@@ -64,7 +64,8 @@ func runIndexMigrateMatchScope(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--job is required")
 	}
 
-	raw, err := os.ReadFile(jobPath)
+	// Operator-supplied path; path is not derived from untrusted network input.
+	raw, err := os.ReadFile(jobPath) // #nosec G304 -- CLI --job path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("manifest not found: %s", jobPath)
@@ -116,9 +117,8 @@ func writeProposedManifestExclusive(path, content string, force bool) error {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("proposed manifest is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && !os.IsExist(err) {
-		// Dir may be "." — MkdirAll(".") is fine.
-		if filepath.Dir(path) != "." {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil && !os.IsExist(err) {
 			return fmt.Errorf("create emit directory: %w", err)
 		}
 	}
@@ -127,7 +127,8 @@ func writeProposedManifestExclusive(path, content string, force bool) error {
 	if force {
 		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	}
-	f, err := os.OpenFile(path, flag, 0o644)
+	// Operator-supplied destination path; mode is owner-writable only.
+	f, err := os.OpenFile(path, flag, 0o600) // #nosec G304 -- CLI --emit-manifest path
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("emit path exists (use --force to overwrite): %s", path)
