@@ -17,7 +17,11 @@ func openRegularNoFollow(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), path)
+	f, err := newFileFromUnixFD(fd, path)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
 	st, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
@@ -36,7 +40,20 @@ func openDirNoFollow(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), path), nil
+	f, err := newFileFromUnixFD(fd, path)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return f, nil
+}
+
+func newFileFromUnixFD(fd int, name string) (*os.File, error) {
+	if fd < 0 {
+		return nil, fmt.Errorf("invalid file descriptor")
+	}
+	// unix.Open returns a non-negative int FD; conversion to uintptr is safe.
+	return os.NewFile(uintptr(fd), name), nil // #nosec G115 -- fd non-negative from unix.Open
 }
 
 // unlinkChildrenAt removes all directory entries via the bound directory FD.
@@ -48,10 +65,8 @@ func unlinkChildrenAt(dir *os.File) error {
 	if err != nil {
 		return err
 	}
-	// Rewind and read names through the FD (not the path).
-	if _, err := dir.Seek(0, 0); err != nil {
-		// directories may not support Seek; ignore and use Readdirnames
-	}
+	// Read names through the directory handle (not a re-resolved path).
+	// Directory FDs may not support Seek; Readdirnames is sufficient.
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return err
