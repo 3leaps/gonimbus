@@ -719,6 +719,56 @@ func TestResolveAncestry_BaselineRejectsContinuousParent(t *testing.T) {
 	require.True(t, IsLineageCode(err, LineageCodeBaselineConflict), "got %v", err)
 }
 
+func TestResolveAncestry_ChildBaselineBackEdgeCycleZeroLookup(t *testing.T) {
+	t.Parallel()
+	// child → baseline continuous hop; baseline.state_parent.run_id points back at
+	// the already-visited child. Refuse lineage_cycle before the back-edge Lookup
+	// (identity match only — digests need not agree because I/O must not run).
+	rootDir := t.TempDir()
+	baseline := publishLineageFixtureAt(t, rootDir, lineageFixtureSpec{
+		RunID:   "run_base",
+		Lineage: &LineageRecord{Version: LineageVersionV1, Generation: 1, Baseline: true},
+	})
+	child := publishLineageFixtureAt(t, rootDir, lineageFixtureSpec{
+		RunID:   "run_child",
+		Lineage: &LineageRecord{Version: LineageVersionV1, Generation: 2, Baseline: false},
+		StateParent: &StateParent{
+			IndexSetID: "idx_test", RunID: "run_base", ManifestSHA256: baseline.manifestSHA,
+		},
+	})
+	// Point baseline at child (changes baseline digest). Cycle check uses set/run only.
+	rewriteStateParent(t, baseline, StateParent{
+		IndexSetID: "idx_test", RunID: "run_child", ManifestSHA256: child.manifestSHA,
+	}, &LineageRecord{Version: LineageVersionV1, Generation: 1, Baseline: true})
+	baseAfter, err := OpenPublishedRunSnapshot(baseline.completePath, "idx_test", "run_base")
+	require.NoError(t, err)
+	// Keep continuous child→baseline hop valid under the new baseline digest.
+	rewriteStateParent(t, child, StateParent{
+		IndexSetID: "idx_test", RunID: "run_base", ManifestSHA256: baseAfter.Complete.ManifestSHA256,
+	}, &LineageRecord{Version: LineageVersionV1, Generation: 2, Baseline: false})
+	childFinal, err := OpenPublishedRunSnapshot(child.completePath, "idx_test", "run_child")
+	require.NoError(t, err)
+
+	lookups := map[string]int{}
+	_, err = ResolveAncestry(childFinal, AncestryResolveConfig{
+		Budget: AncestryBudget{MaxDepth: 4, MaxNodes: 8, MaxAggregateBytes: DefaultAncestryMaxAggregateBytes},
+		Lookup: func(indexSetID, runID string) (string, error) {
+			lookups[runID]++
+			switch runID {
+			case "run_base":
+				return baseline.completePath, nil
+			case "run_child":
+				return child.completePath, nil
+			default:
+				return "", os.ErrNotExist
+			}
+		},
+	})
+	require.True(t, IsLineageCode(err, LineageCodeCycle), "got %v code=%s", err, LineageCodeOf(err))
+	require.Equal(t, 1, lookups["run_base"], "only continuous hop to baseline should lookup")
+	require.Equal(t, 0, lookups["run_child"], "baseline back-edge must not lookup already-visited child")
+}
+
 func TestResolveAncestry_BaselineWithLegacyParentDigestMismatch(t *testing.T) {
 	t.Parallel()
 	rootDir := t.TempDir()

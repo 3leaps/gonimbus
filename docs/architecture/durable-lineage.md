@@ -1,6 +1,7 @@
 # Durable lineage schema (dark)
 
-**Status**: additive schema + dark ancestry readers only  
+**Status**: additive schema + dark ancestry readers only
+
 **Does not**: activate continuous-state publication, prior-run load for ordinary
 builds, durable `--since` / `--since-run`, spill/merge, or streaming writers
 

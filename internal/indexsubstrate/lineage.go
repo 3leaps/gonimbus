@@ -444,6 +444,15 @@ func ResolveAncestry(root PublishedSnapshot, cfg AncestryResolveConfig) (Ancestr
 			// Optional pre-continuity state source: still a graph node/edge for
 			// budgets, but not a trusted delta boundary and not on Chain.
 			if current.Manifest.StateParent != nil {
+				// Same contract as continuous parents: refuse identity already in
+				// the walk as lineage_cycle before Lookup/FS I/O.
+				preParentKey := manifestKey(
+					strings.TrimSpace(current.Manifest.StateParent.IndexSetID),
+					strings.TrimSpace(current.Manifest.StateParent.RunID),
+				)
+				if _, seen := visited[preParentKey]; seen {
+					return AncestryResult{}, lineageError(LineageCodeCycle, "lineage cycle detected")
+				}
 				// Prospectively charge one node + one edge before Lookup/FS I/O.
 				if len(visited)+1 > cfg.Budget.MaxNodes {
 					return AncestryResult{}, lineageErrorf(LineageCodeBudgetNodes, "ancestry exceeds max nodes %d", cfg.Budget.MaxNodes)
