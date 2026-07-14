@@ -52,24 +52,44 @@ type SegmentWriterConfig struct {
 	AllowExistingIdentical bool
 	ParentManifests        []ManifestReference
 	Coverage               []CoverageAttestation
+	// Optional dark lineage plumbing for tests and future continuity activation.
+	// Ordinary production builds leave these zero/nil.
+	RunStartedAt *time.Time
+	StateParent  *StateParent
+	Lineage      *LineageRecord
 	// OnSegmentProgress is optional. Invoked after each segment file is written;
 	// outside persisted artifact bytes and ignored for failure control.
 	OnSegmentProgress OnSegmentProgressFunc
 }
 
 type InternalManifest struct {
-	Type               string                `json:"type"`
-	Render             string                `json:"render"`
-	IndexSetID         string                `json:"index_set_id"`
-	RunID              string                `json:"run_id"`
-	IndexSchemaVersion int                   `json:"index_schema_version"`
-	CreatedAt          time.Time             `json:"created_at"`
-	ParentManifests    []ManifestReference   `json:"parent_manifests"`
-	Reachability       ManifestReachability  `json:"reachability"`
-	SegmentSizing      SegmentSizing         `json:"segment_sizing"`
-	Coverage           []CoverageAttestation `json:"coverage"`
-	Counts             ManifestCounts        `json:"counts"`
-	Segments           []SegmentDescriptor   `json:"segments"`
+	Type               string    `json:"type"`
+	Render             string    `json:"render"`
+	IndexSetID         string    `json:"index_set_id"`
+	RunID              string    `json:"run_id"`
+	IndexSchemaVersion int       `json:"index_schema_version"`
+	CreatedAt          time.Time `json:"created_at"`
+	// RunStartedAt is the optional authoritative run start.
+	// Not an alias of CreatedAt, journal start, or complete-marker time.
+	// Omitted on pre-continuity / legacy manifests; never invent from other
+	// timestamps. Pointer so JSON omitempty works (time.Time zero is not omitted).
+	// When Lineage is present, a non-zero UTC value is required.
+	RunStartedAt *time.Time `json:"run_started_at,omitempty"`
+	// StateParent is the optional exact single continuous-state parent binding
+	// (set/run/digest). Distinct from ParentManifests (reachability/enrich
+	// heritage; digest optional there). Requires Lineage when present.
+	StateParent *StateParent `json:"state_parent,omitempty"`
+	// Lineage is the optional all-or-nothing continuous-lineage record.
+	// Absence means pre-continuity (verified state source only — not a delta boundary).
+	Lineage *LineageRecord `json:"lineage,omitempty"`
+	// ParentManifests remain segment-reachability / enrich heritage references.
+	// Digests stay optional. Do not auto-translate into StateParent.
+	ParentManifests []ManifestReference   `json:"parent_manifests"`
+	Reachability    ManifestReachability  `json:"reachability"`
+	SegmentSizing   SegmentSizing         `json:"segment_sizing"`
+	Coverage        []CoverageAttestation `json:"coverage"`
+	Counts          ManifestCounts        `json:"counts"`
+	Segments        []SegmentDescriptor   `json:"segments"`
 }
 
 type ManifestReference struct {
@@ -145,6 +165,24 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 	if err := validateManifestReferences(config.ParentManifests); err != nil {
 		return InternalManifest{}, err
 	}
+	// Structural lineage validation before creating any segment artifacts.
+	// Validate the caller's original RunStartedAt (including zone/offset) before
+	// any UTC normalization — cloning first would silently accept non-UTC input.
+	probe := InternalManifest{
+		IndexSetID:   config.IndexSetID,
+		RunID:        config.RunID,
+		RunStartedAt: config.RunStartedAt,
+		StateParent:  NormalizeStateParent(config.StateParent),
+		Lineage:      NormalizeLineage(config.Lineage),
+	}
+	if err := ValidateManifestLineageStructure(probe); err != nil {
+		return InternalManifest{}, err
+	}
+	// Second check at emission: never rewrite a non-UTC offset into UTC.
+	runStartedAt, err := cloneAcceptedRunStartedAt(config.RunStartedAt)
+	if err != nil {
+		return InternalManifest{}, err
+	}
 	if err := os.MkdirAll(config.Dir, 0o700); err != nil {
 		return InternalManifest{}, fmt.Errorf("create segment directory: %w", err)
 	}
@@ -160,6 +198,9 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		RunID:              config.RunID,
 		IndexSchemaVersion: IndexSchemaVersion,
 		CreatedAt:          config.CreatedAt,
+		RunStartedAt:       runStartedAt,
+		StateParent:        NormalizeStateParent(config.StateParent),
+		Lineage:            NormalizeLineage(config.Lineage),
 		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
 		Reachability:       DefaultManifestReachability(),
 		Coverage:           copyCoverageAttestations(config.Coverage),
