@@ -15,6 +15,17 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`transfer reflow` stdin live copies honor `--parallel` again:** for stdin
+  `gonimbus.reflow.input.v1` streams with a cloud destination and default
+  collision handling, live (non-dry-run) execution routes through the CLI
+  worker pool so object copies run concurrently. From v0.3.5 through v0.4.0
+  that shape used the library record-stream engine, which executed objects
+  serially while the run record still reported the requested `--parallel`
+  value (materially slower multi-object runs). Dry-run continues on the
+  library engine. Library engine concurrency is a follow-on.
+
 ## [0.4.0] - 2026-07-09
 
 **Durable index format is now the default.**

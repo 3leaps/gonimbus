@@ -407,6 +407,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return transferReflowEngineTerminalError(runErr)
 		}
 	}
+	// Emit only the live-copy CLI-pool fallback reason (static, product-safe).
+	// Do not log arbitrary plan.reason values — prepare errors may contain raw detail.
+	if enginePlan.reason == transferReflowLiveCopyCLIPoolReason && verbose {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "execution_path=cli-pool reason=%s\n", transferReflowLiveCopyCLIPoolReason)
+	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
 		return exitError(foundry.ExitFileWriteError, "Failed to write IfAbsent fallback warning", err)
