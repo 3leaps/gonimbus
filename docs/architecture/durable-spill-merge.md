@@ -69,16 +69,16 @@ normalized rows or counters.
 
 ### Budgets (defaults)
 
-| Knob              | Default |
-| ----------------- | ------- |
-| MaxBufferedRows   | 64_000  |
-| MaxBufferedBytes  | 64 MiB  |
-| MaxRecordBytes    | 1 MiB   |
-| MaxJournalSources | 256     |
-| MaxWorkspaceBytes | 512 MiB |
-| MaxSpillRuns      | 4096    |
+| Knob              | Default                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| MaxBufferedRows   | 64_000                                                                                  |
+| MaxBufferedBytes  | 64 MiB                                                                                  |
+| MaxRecordBytes    | 1 MiB                                                                                   |
+| MaxJournalSources | 256                                                                                     |
+| MaxWorkspaceBytes | 512 MiB                                                                                 |
+| MaxSpillRuns      | 4096                                                                                    |
 | MaxFanIn          | 16 (min **3**; concurrent **spill-run** FDs only — roots/lock/journal sources excluded) |
-| MaxMergePasses    | 64      |
+| MaxMergePasses    | 64                                                                                      |
 
 Invalid budgets fail before workspace creation. Exact limit succeeds; the next
 encoded byte/row/run/pass refuses with category `budget`. Workspace accounting
