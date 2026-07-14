@@ -83,13 +83,13 @@ byte hash, no depth budget).
 
 ## Darkness (current product behavior)
 
-| Path                                       | Behavior                                                    |
-| ------------------------------------------ | ----------------------------------------------------------- |
-| Production `PublishSnapshot`               | Does not emit `run_started_at` / `state_parent` / `lineage` |
-| Durable/`both` build adapter               | Does not load prior-run state for ordinary builds           |
-| Durable `--since-run`                      | Unsupported                                                 |
-| Canonical authority / whole-set GC execute | Untouched by this schema                                    |
-| Spill / streaming writer                   | Not part of this schema                                     |
+| Path                                       | Behavior                                                                                             |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Production `PublishSnapshot`               | Does not emit `run_started_at` / `state_parent` / `lineage`                                          |
+| Durable/`both` build adapter               | Does not load prior-run state for ordinary builds                                                    |
+| Durable `--since-run`                      | Unsupported                                                                                          |
+| Canonical authority / whole-set GC execute | Untouched by this schema                                                                             |
+| Spill / streaming writer                   | Spill/merge dark primitive is separate (see durable-spill-merge.md); not activated by lineage schema |
 
 `SegmentWriterConfig` accepts optional lineage fields for tests and future
 activation plumbing only. The writer validates the caller-supplied
@@ -114,4 +114,5 @@ not create segment artifacts).
 ## Related
 
 - Operator guide: `docs/user-guide/durable-index.md`
+- Dark spill/merge row source: `docs/architecture/durable-spill-merge.md`
 - ADR-0006 (CLI as adapter), ADR-0007 (canonical authority — not reopened here)
