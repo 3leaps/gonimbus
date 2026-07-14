@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -227,9 +228,21 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 // per-file when walked.
 type PublishedSnapshot struct {
 	LatestPath string
-	Complete   publishedCompleteDoc
-	Manifest   InternalManifest
-	SegmentDir string
+	// CompletePath is the complete marker path used for this open when known.
+	CompletePath string
+	Complete     publishedCompleteDoc
+	Manifest     InternalManifest
+	SegmentDir   string
+	// AccountedMarkerBytes / AccountedManifestBytes are the exact on-disk byte
+	// lengths of the complete marker and manifest slices that were digested and
+	// parsed for this open (same-bytes trust). Used by ancestry aggregate budgets.
+	AccountedMarkerBytes   int64
+	AccountedManifestBytes int64
+}
+
+// AccountedBytes returns marker+manifest bytes charged for this open.
+func (s PublishedSnapshot) AccountedBytes() int64 {
+	return s.AccountedMarkerBytes + s.AccountedManifestBytes
 }
 
 // DefaultMaxPublishedMarkerBytes is the default bound for latest/complete JSON.
@@ -322,15 +335,77 @@ func OpenPublishedRunSnapshotBounded(completePath, expectedIndexSetID, expectedR
 }
 
 // openPublishedCompleteBounded trust-checks complete → same-bytes manifest
-// without reading latest.json.
+// without reading latest.json. Marker and manifest are each read once; digest
+// and parse use those exact slices (TOCTOU-safe). Accounted byte sizes are set.
 func openPublishedCompleteBounded(completePath string, maxMarkerBytes, maxManifestBytes int64) (PublishedSnapshot, error) {
+	// Unbounded aggregate remainder for ordinary current-state opens.
+	const noAggregateCap int64 = 1 << 62
+	snap, err := openPublishedCompleteBudgeted(completePath, maxMarkerBytes, maxManifestBytes, noAggregateCap)
+	return snap, err
+}
+
+// afterFileReadForTest is an optional hook invoked after each bounded file read
+// in openPublishedCompleteBudgeted with the path and number of bytes returned.
+// Tests use it to prove aggregate-budget caps prevent full over-reads.
+// Guarded by afterFileReadForTestMu for -race safety across parallel tests.
+var (
+	afterFileReadForTestMu sync.Mutex
+	afterFileReadForTest   func(path string, bytesRead int)
+)
+
+// openPublishedCompleteBudgeted is the same-bytes open with an aggregate
+// remaining-byte budget. Marker is read under min(maxMarker, remaining); after
+// charging, manifest is read under min(maxManifest, remaining). Files larger
+// than the effective cap fail closed without reading the whole file.
+func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManifestBytes, remaining int64) (PublishedSnapshot, error) {
 	completePath = strings.TrimSpace(completePath)
 	if completePath == "" {
 		return PublishedSnapshot{}, fmt.Errorf("complete path is required")
 	}
-	complete, err := readCompleteDocFileBounded(completePath, maxMarkerBytes)
+	if remaining <= 0 {
+		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+	}
+	if maxMarkerBytes <= 0 {
+		maxMarkerBytes = DefaultMaxPublishedMarkerBytes
+	}
+	if maxManifestBytes <= 0 {
+		maxManifestBytes = DefaultMaxPublishedManifestBytes
+	}
+
+	markerCap := maxMarkerBytes
+	if remaining < markerCap {
+		markerCap = remaining
+	}
+	if markerCap <= 0 {
+		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+	}
+
+	// Same-bytes trust: read complete once, parse those bytes; read manifest once,
+	// digest+parse those bytes. Do not re-open paths for trust decisions.
+	completeData, err := readFileBounded(completePath, markerCap)
 	if err != nil {
-		return PublishedSnapshot{}, err
+		if os.IsNotExist(err) {
+			return PublishedSnapshot{}, ErrSnapshotNotPublished
+		}
+		if strings.Contains(err.Error(), "size exceeds limit") {
+			return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+		}
+		return PublishedSnapshot{}, fmt.Errorf("read complete marker: %w", err)
+	}
+	afterFileReadForTestMu.Lock()
+	hook := afterFileReadForTest
+	afterFileReadForTestMu.Unlock()
+	if hook != nil {
+		hook(completePath, len(completeData))
+	}
+	remaining -= int64(len(completeData))
+	if remaining < 0 {
+		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+	}
+
+	var complete publishedCompleteDoc
+	if err := json.Unmarshal(completeData, &complete); err != nil {
+		return PublishedSnapshot{}, fmt.Errorf("parse complete marker: %w", err)
 	}
 	if strings.TrimSpace(complete.Type) != "gonimbus.index.complete.v1" {
 		if strings.TrimSpace(complete.Type) == "" {
@@ -338,15 +413,35 @@ func openPublishedCompleteBounded(completePath string, maxMarkerBytes, maxManife
 		}
 		return PublishedSnapshot{}, fmt.Errorf("complete marker type %q is not supported", complete.Type)
 	}
-	// Same-bytes trust: read once, digest those exact bytes, then unmarshal them.
-	// Do not hash and parse through separate pathname opens (TOCTOU).
-	manifestData, err := readFileBounded(complete.ManifestPath, maxManifestBytes)
+
+	manifestCap := maxManifestBytes
+	if remaining < manifestCap {
+		manifestCap = remaining
+	}
+	if manifestCap <= 0 {
+		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+	}
+	manifestData, err := readFileBounded(complete.ManifestPath, manifestCap)
 	if err != nil {
+		if strings.Contains(err.Error(), "size exceeds limit") {
+			return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+		}
 		return PublishedSnapshot{}, fmt.Errorf("read manifest: %w", err)
+	}
+	afterFileReadForTestMu.Lock()
+	hook = afterFileReadForTest
+	afterFileReadForTestMu.Unlock()
+	if hook != nil {
+		hook(complete.ManifestPath, len(manifestData))
 	}
 	if afterManifestBytesReadForTest != nil {
 		afterManifestBytesReadForTest(complete.ManifestPath)
 	}
+	remaining -= int64(len(manifestData))
+	if remaining < 0 {
+		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
+	}
+
 	manifestDigest := sha256HexBytes(manifestData)
 	if manifestDigest != complete.ManifestSHA256 {
 		return PublishedSnapshot{}, fmt.Errorf("manifest digest mismatch")
@@ -358,10 +453,18 @@ func openPublishedCompleteBounded(completePath string, maxMarkerBytes, maxManife
 	if err := validatePublishedManifest(complete, manifest); err != nil {
 		return PublishedSnapshot{}, err
 	}
+	// Structural lineage checks when optional fields are present. Graph/digest
+	// walk is ResolveAncestry — not part of current-state open.
+	if err := ValidateManifestLineageStructure(manifest); err != nil {
+		return PublishedSnapshot{}, err
+	}
 	return PublishedSnapshot{
-		Complete:   complete,
-		Manifest:   manifest,
-		SegmentDir: complete.SegmentDir,
+		CompletePath:           completePath,
+		Complete:               complete,
+		Manifest:               manifest,
+		SegmentDir:             complete.SegmentDir,
+		AccountedMarkerBytes:   int64(len(completeData)),
+		AccountedManifestBytes: int64(len(manifestData)),
 	}, nil
 }
 
