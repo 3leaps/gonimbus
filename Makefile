@@ -1,7 +1,7 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
-.PHONY: test-cloud test-cloud-real moto-start moto-stop moto-status
+.PHONY: test-cloud test-cloud-real test-reflow-throughput moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
@@ -350,6 +350,33 @@ test-cov:  ## Run tests with coverage
 # Moto port 5555 avoids conflict with macOS AirTunes on 5000
 MOTO_PORT ?= 5555
 MOTO_ENDPOINT ?= http://localhost:$(MOTO_PORT)
+
+# On-demand reflow throughput harness (non-CI). PROFILE defaults to smoke.
+# Known: smoke, reflow-saturation, ceiling-lift, checkpoint, fullpipe-ab, probe-saturation.
+# Optional: GOMEMLIMIT (operator-supplied; required by ceiling-lift), KEEP=1, RUN_ROOT=<dir>
+PROFILE ?= smoke
+PROVIDER ?= file
+test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput harness (PROFILE=smoke by default)
+	@set -e; \
+	echo "→ Reflow throughput harness profile=$(PROFILE) provider=$(PROVIDER)"; \
+	mkdir -p bin; \
+	go build -ldflags "$(LDFLAGS)" -o bin/gonimbus-throughput ./cmd/gonimbus; \
+	BIN="$$(cd bin && pwd)/gonimbus-throughput"; \
+	SHA="$$(shasum -a 256 "$$BIN" | awk '{print $$1}')"; \
+	echo "→ binary $$BIN sha256=$$SHA"; \
+	RUN_ROOT="$(RUN_ROOT)"; \
+	if [ -z "$$RUN_ROOT" ]; then RUN_ROOT="$$(mktemp -d "$${TMPDIR:-/tmp}/gonimbus-reflow-throughput.XXXXXX")"; fi; \
+	echo "→ run root $$RUN_ROOT"; \
+	export GONIMBUS_THROUGHPUT_BINARY="$$BIN"; \
+	export GONIMBUS_THROUGHPUT_RUN_ROOT="$$RUN_ROOT"; \
+	export GONIMBUS_THROUGHPUT_PROFILE="$(PROFILE)"; \
+	export GONIMBUS_THROUGHPUT_GOMEMLIMIT="$(GOMEMLIMIT)"; \
+	export GONIMBUS_THROUGHPUT_KEEP="$(KEEP)"; \
+	export GONIMBUS_THROUGHPUT_PROVIDER="$(PROVIDER)"; \
+	export GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT="$(TMPFS_CHECKPOINT_ROOT)"; \
+	export GONIMBUS_THROUGHPUT_CEILING_LIFT_GOMEMLIMIT="$(CEILING_LIFT_GOMEMLIMIT)"; \
+	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestGenerate|TestTap|TestCheck|TestResolve|TestChild|TestReport|TestParse|TestEnsure|TestLoadBYO|TestCLIProvider' && \
+	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestSmokeProfileEndToEnd|TestHarnessMakeEntry|TestProfile' -v
 
 test-cloud: sync-embedded-identity ## Run tests including cloud integration (requires moto)
 	@if ! curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
