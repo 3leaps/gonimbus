@@ -388,6 +388,215 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	require.Len(t, rows, 2)
 }
 
+// TestRunIndexExportHydrate_StreamedDurableSegments proves export→hydrate
+// compatibility for segments produced by the dark streaming segment writer
+// (library path only; no production publish activation).
+func TestRunIndexExportHydrate_StreamedDurableSegments(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	ctx := context.Background()
+
+	idxDir := t.TempDir()
+	dbPath := filepath.Join(idxDir, "index.db")
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(ctx, db))
+
+	params := testIndexSetParams("s3://bucket/prefix/")
+	indexSet, _, err := indexstore.FindOrCreateIndexSet(ctx, db, params)
+	require.NoError(t, err)
+
+	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.UpdateIndexRunStatus(ctx, db, run.RunID, indexstore.RunStatusSuccess, nil))
+	_, _ = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, db.Close())
+
+	localManifest, sourceRows := writeLocalDurableSnapshotStreamedForHubTest(t, indexSet.IndexSetID, run.RunID)
+	require.Len(t, sourceRows, 2)
+	hubDir := t.TempDir()
+	hubURI := "file://" + hubDir + "/"
+
+	exportCmd := &cobra.Command{Use: "export", RunE: runIndexExport}
+	exportCmd.Flags().String("hub", "", "")
+	exportCmd.Flags().String("index-set", "", "")
+	exportCmd.Flags().String("run-id", "", "")
+	exportCmd.Flags().String("db", "", "")
+	exportCmd.Flags().String("format", "", "")
+	exportCmd.Flags().String("hub-profile", "", "")
+	exportCmd.Flags().String("hub-region", "", "")
+	exportCmd.Flags().String("hub-endpoint", "", "")
+	exportCmd.Flags().String("hub-gcp-project", "", "")
+	addLatestPointerFlags(exportCmd)
+	exportCmd.SetArgs([]string{
+		"--hub", hubURI,
+		"--index-set", indexSet.IndexSetID,
+		"--run-id", run.RunID,
+		"--db", dbPath,
+		"--format", "durable",
+	})
+	exportCmd.SetContext(ctx)
+	require.NoError(t, exportCmd.Execute())
+
+	runDir := filepath.Join(hubDir, "index-sets", indexSet.IndexSetID, "runs", run.RunID)
+	require.FileExists(t, filepath.Join(runDir, "manifest.json"))
+	require.FileExists(t, filepath.Join(runDir, "segments", localManifest.Segments[0].Path))
+
+	hydrateDir := t.TempDir()
+	hydrateCmd := &cobra.Command{Use: "hydrate", RunE: runIndexHydrate}
+	hydrateCmd.Flags().String("hub", "", "")
+	hydrateCmd.Flags().String("index-set", "", "")
+	hydrateCmd.Flags().String("run-id", "", "")
+	hydrateCmd.Flags().String("dest", "", "")
+	hydrateCmd.Flags().String("hub-profile", "", "")
+	hydrateCmd.Flags().String("hub-region", "", "")
+	hydrateCmd.Flags().String("hub-endpoint", "", "")
+	hydrateCmd.Flags().String("hub-gcp-project", "", "")
+	hydrateCmd.SetArgs([]string{
+		"--hub", hubURI,
+		"--index-set", indexSet.IndexSetID,
+		"--run-id", run.RunID,
+		"--dest", hydrateDir,
+	})
+	hydrateCmd.SetContext(ctx)
+	require.NoError(t, hydrateCmd.Execute())
+
+	hydratedManifest, err := indexsubstrate.ReadInternalManifestFile(filepath.Join(hydrateDir, "manifest.json"))
+	require.NoError(t, err)
+	require.Equal(t, localManifest, hydratedManifest)
+	hydratedRows, err := indexsubstrate.ReadManifestRows(filepath.Join(hydrateDir, "segments"), hydratedManifest)
+	require.NoError(t, err)
+	// Full semantic row equality (not just count) vs the streamed source rows.
+	require.Equal(t, sourceRows, hydratedRows)
+
+	// Segment digests match source streamed artifacts.
+	for _, seg := range hydratedManifest.Segments {
+		srcDigest, err := sha256HexFile(filepath.Join(runDir, "segments", seg.Path))
+		require.NoError(t, err)
+		destDigest, err := sha256HexFile(filepath.Join(hydrateDir, "segments", seg.Path))
+		require.NoError(t, err)
+		require.Equal(t, seg.Digest.Hex, srcDigest)
+		require.Equal(t, seg.Digest.Hex, destDigest)
+	}
+
+	// Tamper one streamed segment on the hub and prove hydrate refuses.
+	tamperPath := filepath.Join(runDir, "segments", localManifest.Segments[0].Path)
+	require.NoError(t, os.WriteFile(tamperPath, []byte("not-valid-parquet-anymore"), 0o600))
+	badDest := t.TempDir()
+	hydrateCmd2 := &cobra.Command{Use: "hydrate", RunE: runIndexHydrate}
+	hydrateCmd2.Flags().String("hub", "", "")
+	hydrateCmd2.Flags().String("index-set", "", "")
+	hydrateCmd2.Flags().String("run-id", "", "")
+	hydrateCmd2.Flags().String("dest", "", "")
+	hydrateCmd2.Flags().String("hub-profile", "", "")
+	hydrateCmd2.Flags().String("hub-region", "", "")
+	hydrateCmd2.Flags().String("hub-endpoint", "", "")
+	hydrateCmd2.Flags().String("hub-gcp-project", "", "")
+	hydrateCmd2.SetArgs([]string{
+		"--hub", hubURI,
+		"--index-set", indexSet.IndexSetID,
+		"--run-id", run.RunID,
+		"--dest", badDest,
+	})
+	hydrateCmd2.SetContext(ctx)
+	require.Error(t, hydrateCmd2.Execute())
+}
+
+func writeLocalDurableSnapshotStreamedForHubTest(t *testing.T, indexSetID, runID string) (indexsubstrate.InternalManifest, []indexsubstrate.CurrentObjectRow) {
+	t.Helper()
+	segmentRoot, err := indexSubstrateSegmentCacheDir(indexSetID)
+	require.NoError(t, err)
+	runDir := filepath.Join(segmentRoot, "runs", runID)
+	base := time.Date(2026, 7, 8, 16, 0, 0, 0, time.UTC)
+	storageClass := "STANDARD"
+	rows := []indexsubstrate.CurrentObjectRow{
+		{
+			IndexSetID:       indexSetID,
+			RelKey:           "a.xml",
+			SizeBytes:        10,
+			LastModified:     &base,
+			ETag:             `"etag-a"`,
+			StorageClass:     &storageClass,
+			FirstSeenRunID:   runID,
+			FirstSeenAt:      base,
+			LastChangedRunID: runID,
+			LastChangedAt:    base,
+			LastSeenRunID:    runID,
+			LastSeenAt:       base,
+		},
+		{
+			IndexSetID:       indexSetID,
+			RelKey:           "b.xml",
+			SizeBytes:        20,
+			LastModified:     ptrTime(base.Add(time.Minute)),
+			ETag:             `"etag-b"`,
+			StorageClass:     &storageClass,
+			FirstSeenRunID:   runID,
+			FirstSeenAt:      base,
+			LastChangedRunID: runID,
+			LastChangedAt:    base,
+			LastSeenRunID:    runID,
+			LastSeenAt:       base.Add(time.Minute),
+		},
+	}
+	manifest, err := indexsubstrate.WriteStreamingSegmentSet(context.Background(), indexsubstrate.SegmentWriterConfig{
+		Dir:                  runDir,
+		IndexSetID:           indexSetID,
+		RunID:                runID,
+		CreatedAt:            base,
+		TargetRowsPerSegment: 1,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	}, indexsubstrate.NewSliceOrderedRows(rows))
+	require.NoError(t, err)
+	// Reconstruct from streamed parquet so hydrate comparison uses the same
+	// normalized projection the durable reader produces.
+	sourceRows, err := indexsubstrate.ReadManifestRows(runDir, manifest)
+	require.NoError(t, err)
+	require.Len(t, sourceRows, 2)
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
+	manifestSHA, _, err := hashFile(manifestPath)
+	require.NoError(t, err)
+	complete := durableLocalCompleteDoc{
+		Type:           "gonimbus.index.complete.v1",
+		IndexSetID:     indexSetID,
+		RunID:          runID,
+		CompletedAt:    base.Format(time.RFC3339),
+		ManifestPath:   manifestPath,
+		ManifestSHA256: manifestSHA,
+		SegmentDir:     runDir,
+		Segments:       len(manifest.Segments),
+	}
+	data, err := json.MarshalIndent(complete, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), append(data, '\n'), 0o600))
+	latest := map[string]any{
+		"type":          "gonimbus.index.latest.v1",
+		"index_set_id":  indexSetID,
+		"run_id":        runID,
+		"updated_at":    base.Format(time.RFC3339),
+		"complete_path": filepath.Join(runDir, "complete.json"),
+	}
+	latestData, err := json.MarshalIndent(latest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(segmentRoot, "latest.json"), append(latestData, '\n'), 0o600))
+	return manifest, sourceRows
+}
+
+func sha256HexFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // Test hydrate resolves latest.json correctly (no --run-id)
 func TestRunIndexHydrate_ResolvesLatest(t *testing.T) {
 	ctx := context.Background()

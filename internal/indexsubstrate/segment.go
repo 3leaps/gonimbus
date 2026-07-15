@@ -60,6 +60,10 @@ type SegmentWriterConfig struct {
 	// OnSegmentProgress is optional. Invoked after each segment file is written;
 	// outside persisted artifact bytes and ignored for failure control.
 	OnSegmentProgress OnSegmentProgressFunc
+	// segmentOps is an optional per-invocation filesystem seam for hermetic
+	// seal/cleanup tests. Nil selects production os operations. Unexported so
+	// it is not part of the public config surface.
+	segmentOps *segmentFileOps
 }
 
 type InternalManifest struct {
@@ -158,28 +162,7 @@ type segmentParquetRow struct {
 }
 
 func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (InternalManifest, error) {
-	config = normalizeSegmentWriterConfig(config)
-	if err := validateSegmentWriterConfig(config); err != nil {
-		return InternalManifest{}, err
-	}
-	if err := validateManifestReferences(config.ParentManifests); err != nil {
-		return InternalManifest{}, err
-	}
-	// Structural lineage validation before creating any segment artifacts.
-	// Validate the caller's original RunStartedAt (including zone/offset) before
-	// any UTC normalization — cloning first would silently accept non-UTC input.
-	probe := InternalManifest{
-		IndexSetID:   config.IndexSetID,
-		RunID:        config.RunID,
-		RunStartedAt: config.RunStartedAt,
-		StateParent:  NormalizeStateParent(config.StateParent),
-		Lineage:      NormalizeLineage(config.Lineage),
-	}
-	if err := ValidateManifestLineageStructure(probe); err != nil {
-		return InternalManifest{}, err
-	}
-	// Second check at emission: never rewrite a non-UTC offset into UTC.
-	runStartedAt, err := cloneAcceptedRunStartedAt(config.RunStartedAt)
+	config, runStartedAt, err := prepareSegmentWriter(config)
 	if err != nil {
 		return InternalManifest{}, err
 	}
@@ -191,25 +174,8 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 	if err != nil {
 		return InternalManifest{}, err
 	}
-	manifest := InternalManifest{
-		Type:               ManifestType,
-		Render:             ManifestRenderType,
-		IndexSetID:         config.IndexSetID,
-		RunID:              config.RunID,
-		IndexSchemaVersion: IndexSchemaVersion,
-		CreatedAt:          config.CreatedAt,
-		RunStartedAt:       runStartedAt,
-		StateParent:        NormalizeStateParent(config.StateParent),
-		Lineage:            NormalizeLineage(config.Lineage),
-		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
-		Reachability:       DefaultManifestReachability(),
-		Coverage:           copyCoverageAttestations(config.Coverage),
-		SegmentSizing: SegmentSizing{
-			TargetRowsPerSegment: config.TargetRowsPerSegment,
-			Rationale:            SegmentSizingRationale,
-		},
-		Counts: manifestCounts(sortedRows),
-	}
+	manifest := newSegmentManifestSkeleton(config, runStartedAt)
+	manifest.Counts = manifestCounts(sortedRows)
 
 	totalSegments := 0
 	if len(sortedRows) > 0 && config.TargetRowsPerSegment > 0 {
@@ -238,6 +204,58 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		}
 	}
 	return manifest, nil
+}
+
+// prepareSegmentWriter normalizes config and validates lineage structure using
+// the caller's raw RunStartedAt before any UTC clone. Does not create Dir.
+func prepareSegmentWriter(config SegmentWriterConfig) (SegmentWriterConfig, *time.Time, error) {
+	config = normalizeSegmentWriterConfig(config)
+	if err := validateSegmentWriterConfig(config); err != nil {
+		return SegmentWriterConfig{}, nil, err
+	}
+	if err := validateManifestReferences(config.ParentManifests); err != nil {
+		return SegmentWriterConfig{}, nil, err
+	}
+	// Structural lineage validation before creating any segment artifacts.
+	// Validate the caller's original RunStartedAt (including zone/offset) before
+	// any UTC normalization — cloning first would silently accept non-UTC input.
+	probe := InternalManifest{
+		IndexSetID:   config.IndexSetID,
+		RunID:        config.RunID,
+		RunStartedAt: config.RunStartedAt,
+		StateParent:  NormalizeStateParent(config.StateParent),
+		Lineage:      NormalizeLineage(config.Lineage),
+	}
+	if err := ValidateManifestLineageStructure(probe); err != nil {
+		return SegmentWriterConfig{}, nil, err
+	}
+	// Second check at emission: never rewrite a non-UTC offset into UTC.
+	runStartedAt, err := cloneAcceptedRunStartedAt(config.RunStartedAt)
+	if err != nil {
+		return SegmentWriterConfig{}, nil, err
+	}
+	return config, runStartedAt, nil
+}
+
+func newSegmentManifestSkeleton(config SegmentWriterConfig, runStartedAt *time.Time) InternalManifest {
+	return InternalManifest{
+		Type:               ManifestType,
+		Render:             ManifestRenderType,
+		IndexSetID:         config.IndexSetID,
+		RunID:              config.RunID,
+		IndexSchemaVersion: IndexSchemaVersion,
+		CreatedAt:          config.CreatedAt,
+		RunStartedAt:       runStartedAt,
+		StateParent:        NormalizeStateParent(config.StateParent),
+		Lineage:            NormalizeLineage(config.Lineage),
+		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
+		Reachability:       DefaultManifestReachability(),
+		Coverage:           copyCoverageAttestations(config.Coverage),
+		SegmentSizing: SegmentSizing{
+			TargetRowsPerSegment: config.TargetRowsPerSegment,
+			Rationale:            SegmentSizingRationale,
+		},
+	}
 }
 
 func WriteInternalManifestFile(path string, manifest InternalManifest) error {
@@ -511,59 +529,153 @@ func WalkManifestRows(segmentDir string, manifest InternalManifest, visit func(C
 }
 
 func writeSegmentFile(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, error) {
+	desc, _, err := writeSegmentFileTracked(config, ordinal, rows)
+	return desc, err
+}
+
+// writeSegmentFileTracked seals a segment from CurrentObjectRow values.
+// created is true only when this call successfully links a new final dentry.
+// AllowExistingIdentical reuse returns created=false.
+func writeSegmentFileTracked(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, bool, error) {
+	parquetRows := make([]segmentParquetRow, len(rows))
+	for i, row := range rows {
+		parquetRows[i] = segmentParquetFromCurrentRow(row)
+	}
+	return writeParquetSegmentFileTracked(config, ordinal, parquetRows)
+}
+
+// segmentFileOps are per-invocation filesystem seams for segment seal.
+// Production uses productionSegmentFileOps(); tests pass scoped fakes via
+// SegmentWriterConfig.segmentOps (unexported) so package-global hooks are not required.
+type segmentFileOps struct {
+	remove   func(path string) error
+	stat     func(path string) (os.FileInfo, error)
+	postLink func(tempPath, finalPath string) error // optional; nil in production
+}
+
+func productionSegmentFileOps() segmentFileOps {
+	return segmentFileOps{
+		remove: func(path string) error {
+			if path == "" {
+				return nil
+			}
+			err := os.Remove(path)
+			if err != nil && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		},
+		stat: os.Stat,
+	}
+}
+
+func resolveSegmentFileOps(config SegmentWriterConfig) segmentFileOps {
+	if config.segmentOps != nil {
+		ops := *config.segmentOps
+		if ops.remove == nil {
+			ops.remove = productionSegmentFileOps().remove
+		}
+		if ops.stat == nil {
+			ops.stat = productionSegmentFileOps().stat
+		}
+		return ops
+	}
+	return productionSegmentFileOps()
+}
+
+// retireTemp performs checked temp retirement and joins any failure into primary.
+// There is no silent deferred unlink: callers must use this (or ops.remove) on
+// every path that created a temp.
+func retireTemp(ops segmentFileOps, tempPath string, primary error) error {
+	if tempPath == "" {
+		return primary
+	}
+	if err := ops.remove(tempPath); err != nil {
+		cleanup := fmt.Errorf("remove temporary segment: %w", err)
+		if primary != nil {
+			return errors.Join(primary, cleanup)
+		}
+		return cleanup
+	}
+	return primary
+}
+
+// writeParquetSegmentFileTracked seals a segment from already-prepared parquet
+// rows. created is true only when this call successfully links a new final.
+// Once link succeeds, created stays true even if temp unlink or final stat fails
+// so callers can roll back the new dentry; those cleanup/stat failures are
+// returned rather than discarded. Pre-link temps are always retired via
+// checked retireTemp (never a silent deferred Remove).
+func writeParquetSegmentFileTracked(config SegmentWriterConfig, ordinal int, rows []segmentParquetRow) (SegmentDescriptor, bool, error) {
+	ops := resolveSegmentFileOps(config)
 	temp, err := os.CreateTemp(config.Dir, ".segment-*.parquet.tmp")
 	if err != nil {
-		return SegmentDescriptor{}, fmt.Errorf("create temporary segment: %w", err)
+		return SegmentDescriptor{}, false, fmt.Errorf("create temporary segment: %w", err)
 	}
 	tempPath := temp.Name()
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			_ = os.Remove(tempPath)
-		}
-	}()
 
 	digest := sha256.New()
-	if err := writeParquetRows(io.MultiWriter(temp, digest), config, rows); err != nil {
+	if err := writePreparedParquetRows(io.MultiWriter(temp, digest), config, rows); err != nil {
 		_ = temp.Close()
-		return SegmentDescriptor{}, err
+		return SegmentDescriptor{}, false, retireTemp(ops, tempPath, err)
 	}
 	if err := temp.Close(); err != nil {
-		return SegmentDescriptor{}, fmt.Errorf("close temporary segment: %w", err)
+		return SegmentDescriptor{}, false, retireTemp(ops, tempPath, fmt.Errorf("close temporary segment: %w", err))
 	}
 
 	digestHex := hex.EncodeToString(digest.Sum(nil))
-	descriptor := segmentDescriptor(config, ordinal, rows, digestHex)
+	descriptor := segmentDescriptorFromParquet(config, ordinal, rows, digestHex)
 	finalPath := filepath.Join(config.Dir, descriptor.Path)
 	if err := linkImmutable(tempPath, finalPath); err != nil {
 		if config.AllowExistingIdentical && errors.Is(err, os.ErrExist) {
 			existingDigest, digestErr := sha256HexFile(finalPath)
 			if digestErr != nil {
-				return SegmentDescriptor{}, fmt.Errorf("hash existing segment: %w", digestErr)
+				return SegmentDescriptor{}, false, retireTemp(ops, tempPath, fmt.Errorf("hash existing segment: %w", digestErr))
 			}
 			if existingDigest == digestHex {
-				info, statErr := os.Stat(finalPath)
+				info, statErr := ops.stat(finalPath)
 				if statErr != nil {
-					return SegmentDescriptor{}, fmt.Errorf("stat existing segment: %w", statErr)
+					return SegmentDescriptor{}, false, retireTemp(ops, tempPath, fmt.Errorf("stat existing segment: %w", statErr))
 				}
 				descriptor.SizeBytes = info.Size()
-				return descriptor, nil
+				// Reused pre-existing identical final — not owned by this call.
+				// Checked temp unlink; failure is returned with created=false.
+				if unlinkErr := ops.remove(tempPath); unlinkErr != nil {
+					return descriptor, false, fmt.Errorf("remove temporary segment: %w", unlinkErr)
+				}
+				return descriptor, false, nil
 			}
+			// Non-identical EEXIST (or AllowExisting with digest mismatch):
+			// own only the temp, never the conflicting final.
+			return SegmentDescriptor{}, false, retireTemp(ops, tempPath, err)
 		}
-		return SegmentDescriptor{}, err
+		return SegmentDescriptor{}, false, retireTemp(ops, tempPath, err)
 	}
-	cleanupTemp = false
-	_ = os.Remove(tempPath)
+	// Link succeeded: this invocation owns the final for rollback purposes.
 
-	info, err := os.Stat(finalPath)
+	if ops.postLink != nil {
+		if hookErr := ops.postLink(tempPath, finalPath); hookErr != nil {
+			// Still attempt temp unlink; surface hook/unlink failures with ownership.
+			return descriptor, true, retireTemp(ops, tempPath, hookErr)
+		}
+	}
+
+	if err := ops.remove(tempPath); err != nil {
+		// Owned final remains; outer rollback can remove it. Temp residue may
+		// still exist when unlink fails — that failure is visible, not silent.
+		return descriptor, true, fmt.Errorf("remove temporary segment: %w", err)
+	}
+
+	info, err := ops.stat(finalPath)
 	if err != nil {
-		return SegmentDescriptor{}, fmt.Errorf("stat segment: %w", err)
+		// Do not silently drop ownership or discard cleanup of the final.
+		return descriptor, true, fmt.Errorf("stat segment: %w", err)
 	}
 	descriptor.SizeBytes = info.Size()
-	return descriptor, nil
+	return descriptor, true, nil
 }
 
-func writeParquetRows(output io.Writer, config SegmentWriterConfig, rows []CurrentObjectRow) error {
+func writePreparedParquetRows(output io.Writer, config SegmentWriterConfig, parquetRows []segmentParquetRow) error {
 	writer := parquet.NewGenericWriter[segmentParquetRow](output,
 		parquet.Compression(&parquet.Snappy),
 		parquet.MaxRowsPerRowGroup(int64(config.TargetRowsPerSegment)),
@@ -572,10 +684,6 @@ func writeParquetRows(output io.Writer, config SegmentWriterConfig, rows []Curre
 		parquet.KeyValueMetadata("gonimbus.run_id", config.RunID),
 		parquet.KeyValueMetadata("gonimbus.segment_format", SegmentFormatParquet),
 	)
-	parquetRows := make([]segmentParquetRow, len(rows))
-	for i, row := range rows {
-		parquetRows[i] = segmentParquetFromCurrentRow(row)
-	}
 	if _, err := writer.Write(parquetRows); err != nil {
 		_ = writer.Close()
 		return fmt.Errorf("write segment rows: %w", err)
@@ -586,7 +694,7 @@ func writeParquetRows(output io.Writer, config SegmentWriterConfig, rows []Curre
 	return nil
 }
 
-func segmentDescriptor(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow, digestHex string) SegmentDescriptor {
+func segmentDescriptorFromParquet(config SegmentWriterConfig, ordinal int, rows []segmentParquetRow, digestHex string) SegmentDescriptor {
 	segmentID := fmt.Sprintf("seg_%06d_%s", ordinal, digestHex[:16])
 	descriptor := SegmentDescriptor{
 		SegmentID:     segmentID,
@@ -594,8 +702,8 @@ func segmentDescriptor(config SegmentWriterConfig, ordinal int, rows []CurrentOb
 		Format:        SegmentFormatParquet,
 		Compression:   "snappy",
 		Rows:          len(rows),
-		Tombstones:    tombstoneCount(rows),
-		DistinctETags: distinctETagCount(rows),
+		Tombstones:    parquetTombstoneCount(rows),
+		DistinctETags: parquetDistinctETagCount(rows),
 		Digest: SegmentDigest{
 			Algorithm: "sha256",
 			Hex:       digestHex,
@@ -606,6 +714,27 @@ func segmentDescriptor(config SegmentWriterConfig, ordinal int, rows []CurrentOb
 		descriptor.MaxRelKey = rows[len(rows)-1].RelKey
 	}
 	return descriptor
+}
+
+func parquetTombstoneCount(rows []segmentParquetRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.DeletedAt != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func parquetDistinctETagCount(rows []segmentParquetRow) int {
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		if row.ETag == "" {
+			continue
+		}
+		seen[row.ETag] = struct{}{}
+	}
+	return len(seen)
 }
 
 func linkImmutable(tempPath, finalPath string) error {

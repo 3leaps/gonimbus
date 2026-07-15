@@ -3,8 +3,9 @@
 **Status**: internal library primitive only
 
 **Does not**: activate continuous-state publication, rewrite `PublishSnapshot`,
-stream segment writers, load prior-run state for ordinary builds, or raise
-enrich scale ceilings
+load prior-run state for ordinary builds, or raise enrich scale ceilings.
+Streaming segment write is a separate dark primitive — see
+[durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
 
 ## Purpose
 
@@ -163,7 +164,7 @@ discipline as lineage write seams).
 | `PublishSnapshot`           | Still uses `Compact` / materialize path  |
 | CLI / durable build adapter | No PriorRows load for ordinary builds    |
 | Lineage emission            | Unchanged (schema-only from prior slice) |
-| Streaming segment writer    | Separate later slice                     |
+| Streaming segment writer    | Separate dark primitive (see linked doc) |
 | Enrich 2M ceiling           | Unchanged                                |
 
 ## Related
