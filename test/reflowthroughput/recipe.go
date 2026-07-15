@@ -89,7 +89,11 @@ func (r Recipe) RelativeKey(i int) string {
 // A probeable <Marker> field is near the head for full-pipe profiles.
 func (r Recipe) ObjectContent(i int) []byte {
 	// Seeded LCG for payload fill (deterministic, sterile).
-	state := uint64(r.Seed) ^ uint64(i+1)*0x9e3779b97f4a7c15
+	// i is always a non-negative object index from Generate.
+	const golden = uint64(0x9e3779b97f4a7c15)
+	seedU := uint64(r.Seed) // #nosec G115 -- seed bit pattern for deterministic LCG
+	idxU := uint64(i) + 1   // #nosec G115 -- non-negative object index
+	state := seedU ^ idxU*golden
 	marker := fmt.Sprintf("synthetic-marker-%08d", i)
 	head := fmt.Sprintf(
 		`<?xml version="1.0" encoding="UTF-8"?><doc><Marker>%s</Marker><seq>%d</seq><payload>`,

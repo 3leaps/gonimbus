@@ -17,35 +17,11 @@ type LandedObjectID struct {
 }
 
 // SnapshotDestTree walks destRoot and returns a sorted multiset of landed objects.
+// Uses ReadDir recursion (not filepath.Walk) so each open is of a directory entry
+// under the harness-owned dest root, avoiding Walk callback path races.
 func SnapshotDestTree(destRoot string) ([]LandedObjectID, error) {
 	var out []LandedObjectID
-	err := filepath.Walk(destRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(destRoot, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		body, err := os.ReadFile(path) // #nosec G304 -- harness-owned dest under inv root
-		if err != nil {
-			return err
-		}
-		out = append(out, LandedObjectID{
-			RelKey: rel,
-			Size:   info.Size(),
-			Digest: ContentDigest(body),
-		})
-		return nil
-	})
-	if err != nil {
+	if err := snapshotWalk(destRoot, "", &out); err != nil {
 		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -58,6 +34,44 @@ func SnapshotDestTree(destRoot string) ([]LandedObjectID, error) {
 		return out[i].Digest < out[j].Digest
 	})
 	return out, nil
+}
+
+func snapshotWalk(absDir, relDir string, out *[]LandedObjectID) error {
+	ents, err := os.ReadDir(absDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		name := e.Name()
+		childAbs := filepath.Join(absDir, name)
+		childRel := name
+		if relDir != "" {
+			childRel = filepath.ToSlash(filepath.Join(relDir, name))
+		}
+		if e.IsDir() {
+			if err := snapshotWalk(childAbs, childRel, out); err != nil {
+				return err
+			}
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		body, err := os.ReadFile(childAbs) // #nosec G304 -- harness-owned dest under inv root
+		if err != nil {
+			return err
+		}
+		*out = append(*out, LandedObjectID{
+			RelKey: childRel,
+			Size:   info.Size(),
+			Digest: ContentDigest(body),
+		})
+	}
+	return nil
 }
 
 // CompareLandedMultisets returns nil when the ordered identity sets are equal.
