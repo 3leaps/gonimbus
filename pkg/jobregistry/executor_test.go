@@ -3,6 +3,7 @@ package jobregistry
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,38 +15,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const helperCompletionTimeout = 30 * time.Second
+
 func TestManagedChildProcessHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_JOB_HELPER") != "1" {
 		return
 	}
-	args := os.Args
-	for i, arg := range args {
+	// Fail loudly: swallowed Get/Write errors left jobs queued and made
+	// waitHelperCompletion time out on busy Windows runners.
+	fail := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(os.Stderr, "job helper: "+format+"\n", args...)
+		os.Exit(1)
+	}
+	argv := os.Args
+	for i, arg := range argv {
 		if arg == "--" {
-			args = args[i+1:]
+			argv = argv[i+1:]
 			break
 		}
 	}
-	b, _ := json.Marshal(args)
-	_ = os.WriteFile(os.Getenv("JOB_HELPER_ARGS"), b, 0o600)
+	b, err := json.Marshal(argv)
+	if err != nil {
+		fail("marshal args: %v", err)
+	}
+	if capture := os.Getenv("JOB_HELPER_ARGS"); capture != "" {
+		if err := os.WriteFile(capture, b, 0o600); err != nil {
+			fail("write args capture: %v", err)
+		}
+	}
 	if delay, _ := time.ParseDuration(os.Getenv("JOB_HELPER_DELAY")); delay > 0 {
 		time.Sleep(delay)
 	}
 	jobID := ""
-	for i := range args {
-		if args[i] == "--_managed-job-id" && i+1 < len(args) {
-			jobID = args[i+1]
+	for i := range argv {
+		if argv[i] == "--_managed-job-id" && i+1 < len(argv) {
+			jobID = argv[i+1]
 		}
 	}
-	if jobID != "" {
-		store := NewStore(os.Getenv("JOB_HELPER_ROOT"))
-		if rec, err := store.Get(jobID); err == nil {
-			now := time.Now().UTC()
-			rec.State = JobStateSuccess
-			rec.StartedAt = &now
-			rec.EndedAt = &now
-			rec.PID = os.Getpid()
-			_ = store.Write(rec)
+	if jobID == "" {
+		fail("missing --_managed-job-id")
+	}
+	store := NewStore(os.Getenv("JOB_HELPER_ROOT"))
+	var rec *JobRecord
+	for attempt := 0; attempt < 20; attempt++ {
+		rec, err = store.Get(jobID)
+		if err == nil {
+			break
 		}
+		if attempt == 19 {
+			fail("get job %s: %v", jobID, err)
+		}
+		time.Sleep(time.Duration(5*(attempt+1)) * time.Millisecond)
+	}
+	now := time.Now().UTC()
+	rec.State = JobStateSuccess
+	rec.StartedAt = &now
+	rec.EndedAt = &now
+	rec.PID = os.Getpid()
+	if err := store.Write(rec); err != nil {
+		fail("write success for %s: %v", jobID, err)
 	}
 	os.Exit(0)
 }
@@ -119,16 +147,13 @@ func TestStartIndexBuildBackgroundFastChildCannotBeClobbered(t *testing.T) {
 	e.newCommand = helperCommand(t, root, filepath.Join(t.TempDir(), "args.json"), 0)
 	rec, err := e.StartIndexBuildBackground(manifestPath, "fast", BackgroundOptions{})
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		stored, getErr := e.Store().Get(rec.JobID)
-		return getErr == nil && stored.State == JobStateSuccess
-	}, 2*time.Second, 10*time.Millisecond)
+	waitHelperCompletion(t, e.Store(), rec)
 	stored, err := e.Store().Get(rec.JobID)
 	require.NoError(t, err)
+	require.Equal(t, JobStateSuccess, stored.State)
 	require.NotNil(t, stored.Invocation)
 	require.NotEmpty(t, stored.InvocationFingerprint)
 	require.NotZero(t, stored.PID)
-	waitHelperCompletion(t, e.Store(), rec)
 }
 
 func TestStartIndexBuildBackgroundDedupeIsAtomic(t *testing.T) {
@@ -136,7 +161,8 @@ func TestStartIndexBuildBackgroundDedupeIsAtomic(t *testing.T) {
 	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
 	require.NoError(t, os.WriteFile(manifestPath, []byte("version: 1\n"), 0o600))
 	e := NewExecutor(root)
-	e.newCommand = helperCommand(t, root, filepath.Join(t.TempDir(), "args.json"), 500*time.Millisecond)
+	// Empty capture path: concurrent helpers must not contend on one args file.
+	e.newCommand = helperCommand(t, root, "", 500*time.Millisecond)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
@@ -191,7 +217,9 @@ func TestStartIndexBuildBackgroundDedupeDistinguishesEffectiveInvocation(t *test
 			manifestPath := filepath.Join(t.TempDir(), "index.yaml")
 			require.NoError(t, os.WriteFile(manifestPath, []byte("version: 1\n"), 0o600))
 			e := NewExecutor(root)
-			e.newCommand = helperCommand(t, root, filepath.Join(t.TempDir(), "args.json"), 500*time.Millisecond)
+			// Unique capture path per start avoids concurrent helper arg races.
+			// Delay keeps the first job active long enough for the second start
+			// to exercise the running-job dedupe path.
 			prepareTestInvocation := func(inv *IndexBuildInvocation) {
 				inv.SchemaVersion = IndexBuildInvocationVersion
 				inv.RequestedFormat = inv.EffectiveFormat
@@ -200,10 +228,14 @@ func TestStartIndexBuildBackgroundDedupeDistinguishesEffectiveInvocation(t *test
 			}
 			prepareTestInvocation(&tc.first)
 			prepareTestInvocation(&tc.second)
+			e.newCommand = helperCommand(t, root, filepath.Join(t.TempDir(), "first-args.json"), 500*time.Millisecond)
 			first, err := e.StartIndexBuildBackground(manifestPath, "", BackgroundOptions{Dedupe: true, Invocation: &tc.first})
 			require.NoError(t, err)
+			require.Equal(t, JobStateQueued, first.State)
+			e.newCommand = helperCommand(t, root, filepath.Join(t.TempDir(), "second-args.json"), 500*time.Millisecond)
 			second, err := e.StartIndexBuildBackground(manifestPath, "", BackgroundOptions{Dedupe: true, Invocation: &tc.second})
 			require.NoError(t, err)
+			require.NotEqual(t, first.JobID, second.JobID)
 			waitHelperCompletion(t, e.Store(), first)
 			waitHelperCompletion(t, e.Store(), second)
 		})
@@ -388,28 +420,61 @@ func waitHelperArgs(t *testing.T, path string) []string {
 	require.Eventually(t, func() bool {
 		b, err := os.ReadFile(path)
 		return err == nil && json.Unmarshal(b, &args) == nil
-	}, 2*time.Second, 10*time.Millisecond)
+	}, helperCompletionTimeout, 20*time.Millisecond)
 	return args
 }
 
 func waitHelperCompletion(t *testing.T, store *Store, rec *JobRecord) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	deadline := time.Now().Add(helperCompletionTimeout)
+	var (
+		lastErr   error
+		lastState JobState
+		lastAlive bool
+		sawDead   bool
+		deadSince time.Time
+	)
+	for time.Now().Before(deadline) {
 		stored, err := store.Get(rec.JobID)
-		if err != nil || stored.State != JobStateSuccess {
-			return false
+		lastErr = err
+		pid := rec.PID
+		if err == nil {
+			lastState = stored.State
+			if stored.PID > 0 {
+				pid = stored.PID
+			}
+			if stored.State == JobStateSuccess {
+				// Terminal store state is authoritative. Requiring process death
+				// races Windows PID reuse on busy runners once EndedAt is set.
+				if stored.EndedAt != nil {
+					return
+				}
+				if pid <= 0 || !isProcessAlive(pid) {
+					return
+				}
+			}
 		}
-		// Terminal store state is authoritative. Requiring process death races
-		// Windows PID reuse on busy runners (helper already persisted EndedAt).
-		if stored.EndedAt != nil {
-			return true
+		lastAlive = pid > 0 && isProcessAlive(pid)
+		if !lastAlive {
+			if !sawDead {
+				sawDead = true
+				deadSince = time.Now()
+			}
+			// Helper has exited: Write either finished or failed. Allow a short
+			// settle window for filesystem visibility, then fail with context
+			// instead of waiting the full timeout on a stuck queued record.
+			if time.Since(deadSince) > 250*time.Millisecond && (err != nil || lastState != JobStateSuccess) {
+				require.Failf(t, "helper exited without success",
+					"job_id=%s state=%q get_err=%v pid=%d", rec.JobID, lastState, lastErr, pid)
+			}
+		} else {
+			sawDead = false
 		}
-		pid := stored.PID
-		if pid <= 0 {
-			pid = rec.PID
-		}
-		return !isProcessAlive(pid)
-	}, 15*time.Second, 20*time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.Failf(t, "helper completion timed out",
+		"job_id=%s state=%q get_err=%v process_alive=%v timeout=%s",
+		rec.JobID, lastState, lastErr, lastAlive, helperCompletionTimeout)
 }
 
 func waitForAllHelperJobs(t *testing.T, store *Store) {
@@ -431,7 +496,7 @@ func waitForAllHelperJobs(t *testing.T, store *Store) {
 			}
 		}
 		return true
-	}, 10*time.Second, 20*time.Millisecond)
+	}, helperCompletionTimeout, 20*time.Millisecond)
 }
 
 func requireFlagValue(t *testing.T, args []string, flag, want string) {
