@@ -137,6 +137,99 @@ The real GCS lane creates objects only under a generated test prefix inside
 your bucket and cleans up that prefix at test end. It does not create or delete
 the bucket.
 
+### Reflow throughput harness (on-demand, non-CI)
+
+`make test-reflow-throughput` runs a **measurement-only** harness under
+`test/reflowthroughput/`. It builds one gonimbus binary, materializes a
+deterministic synthetic hive-shaped corpus, and exercises named profiles by
+executing the CLI as a fresh child process per measured point. It does **not**
+change production packages, product record schemas, or provider runtime
+behavior.
+
+**Scope of this gate.** Reports set `measurement_scope=small_scale_relative` and
+`absolute_envelope_validation=not_evaluated`. The default profiles are a
+**small-scale honesty / relative-throughput** instrument (requested vs
+effective concurrency, serial-dispatch occupancy, two-regime per-stage rates,
+disk-vs-tmpfs and clamp discriminators). Configurable high-object-count /
+mixed-size runs and absolute field-scale envelope validation are **deferred to
+an opt-in BYO-cloud follow-on** — local/`file://` and moto results must not be
+read as a portable throughput oracle.
+
+```bash
+make test-reflow-throughput                 # PROFILE=smoke PROVIDER=file (default)
+make test-reflow-throughput PROFILE=smoke
+make test-reflow-throughput PROFILE=reflow-saturation
+make test-reflow-throughput PROFILE=ceiling-lift GOMEMLIMIT=8GiB
+make test-reflow-throughput PROFILE=fullpipe-ab
+make test-reflow-throughput PROFILE=probe-saturation
+make test-reflow-throughput PROFILE=checkpoint TMPFS_CHECKPOINT_ROOT=/path/to/tmpfs GOMEMLIMIT=2GiB
+# Optional BYO transport (same env lane as make test-cloud-real / test/cloudtest):
+make test-reflow-throughput PROFILE=smoke PROVIDER=s3-compatible   # needs GONIMBUS_S3_TEST_*
+make test-reflow-throughput PROFILE=smoke PROVIDER=moto            # needs make moto-start
+```
+
+| Profile             | Purpose                                                   |
+| ------------------- | --------------------------------------------------------- |
+| `smoke`             | Credential-free local correctness (default; cheap)        |
+| `reflow-saturation` | Fixed `--parallel` sweep + occupancy samples              |
+| `ceiling-lift`      | Same sweep with operator-supplied `GOMEMLIMIT` only       |
+| `checkpoint`        | Disk vs tmpfs checkpoint class discriminator              |
+| `fullpipe-ab`       | `content probe` → tap → `transfer reflow` per-stage rates |
+| `probe-saturation`  | Producer-only probe with draining sink (no reflow)        |
+
+**Provider classes** (`PROVIDER=`, default `file`)
+
+| Provider        | Lane              | Notes                                                                                         |
+| --------------- | ----------------- | --------------------------------------------------------------------------------------------- |
+| `file`          | always            | Default smoke; credential-free                                                                |
+| `moto`          | `make moto-start` | Same moto endpoint/credentials as `test-cloud` / `cloudtest`                                  |
+| `s3-compatible` | BYO opt-in        | Same `GONIMBUS_S3_TEST_*` vars as `make test-cloud-real` and `cloudtest.CreateS3ObjectPrefix` |
+| `gcs`           | BYO (deferred)    | Named class; returns a clear not-implemented error until a GCS transport follow-on lands      |
+
+BYO patterns reused from the existing non-CI lanes (not reinvented): opt-in when
+env is set, unique minted prefixes under an optional root prefix, ambient
+credential chain (or moto static test keys), scoped delete. Cleanup is
+**verified** (list-after-delete) for the measurement AC — stricter than the
+log-only `t.Cleanup` path in some cloudtest helpers. Bucket/endpoint/profile
+never appear in the sanitized report.
+
+**Rules of interpretation**
+
+- Local/`file://` and moto results are **not** real-provider throughput evidence
+  (`throughput_evidence_class=non_provider`).
+- Hard performance claims stay opt-in BYO cloud (`PROVIDER=s3-compatible` with
+  `GONIMBUS_S3_TEST_*`, labeled `provider_opt_in`).
+- Reports are envelope-bound (binary SHA, corpus digest, provider class,
+  concurrency, checkpoint class). Compare only within a matching envelope.
+- Throughput floors are reporting-only; structural honesty failures
+  (`max_active ≤ effective ≤ requested`, count/exit/cleanup) hard-fail.
+- The harness never auto-raises `GOMEMLIMIT`. Checkpoint class is `disk` or
+  `tmpfs` only (no fictitious checkpoint-off class).
+- Unknown `PROFILE` / `PROVIDER` values are rejected; empty profile does not
+  start a scale/cloud sweep.
+
+Optional env for operators:
+
+| Variable                                                              | Purpose                                                                                             |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `RUN_ROOT`                                                            | External operator root; each run mints `inv-<id>/` underneath                                       |
+| `KEEP=1`                                                              | Retain minted roots (report only sanitized invocation id)                                           |
+| `PROVIDER` / `GONIMBUS_THROUGHPUT_PROVIDER`                           | `file` (default), `moto`, `s3-compatible`                                                           |
+| `TMPFS_CHECKPOINT_ROOT` / `GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT` | Required for `PROFILE=checkpoint` tmpfs arms                                                        |
+| `GOMEMLIMIT`                                                          | Operator-supplied only; never auto-raised. Required for ceiling-lift and **raised** checkpoint arms |
+| `CEILING_LIFT_GOMEMLIMIT`                                             | Optional raised-envelope override when distinct from `GOMEMLIMIT`                                   |
+
+Checkpoint dual-envelope: **clamped** arms run with no child `GOMEMLIMIT`;
+**raised** arms use operator `GOMEMLIMIT` / `CEILING_LIFT_GOMEMLIMIT`. Reports
+label `memory_envelope=clamped|raised`. Probe_drain omits reflow concurrency
+fields. Fullpipe A/B asserts landed key+size+content-digest multiset equality.
+
+Full-pipe uses a 4-segment identity rewrite (`entity/device/date/object`) because
+`content probe --emit reflow-input` does not set `dest_rel_key`. Probe-saturation
+is a **producer-only drain** (no reflow). GCS BYO is named in the provider map
+but returns a clear not-implemented error (no silent skip) until a dedicated
+GCS transport follow-on lands.
+
 ### CLI Integration Tests
 
 CLI tests in `internal/cmd/inspect_cloudintegration_test.go` run the built binary via `exec.Command`. This approach:

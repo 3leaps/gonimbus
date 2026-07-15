@@ -1,0 +1,199 @@
+package reflowthroughput
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// ReportSchemaVersion is the test-tool report schema (not a gonimbus.* product type).
+const ReportSchemaVersion = "reflowthroughput.report.v1"
+
+// Measurement-scope labels (public, product-safe — no private planning IDs).
+const (
+	MeasurementScopeSmallScaleRelative = "small_scale_relative"
+	AbsoluteEnvelopeNotEvaluated       = "not_evaluated"
+)
+
+// Report is the sanitized, versioned measurement report.
+// It must never include endpoints, credentials, bucket names, signed URLs,
+// checkpoint paths, or local absolute paths.
+type Report struct {
+	SchemaVersion string `json:"schema_version"`
+
+	BinaryVersion string `json:"binary_version,omitempty"`
+	BinaryCommit  string `json:"binary_commit,omitempty"`
+	BinarySHA256  string `json:"binary_sha256"`
+
+	Corpus CompactManifest `json:"corpus"`
+
+	Profile                 string `json:"profile"`
+	ProviderClass           string `json:"provider_class"`
+	ThroughputEvidenceClass string `json:"throughput_evidence_class"`
+	// MeasurementScope declares this cut's intent (small-scale honesty/relative).
+	MeasurementScope string `json:"measurement_scope"`
+	// AbsoluteEnvelopeValidation is not_evaluated until an opt-in BYO-cloud
+	// scale lane is used; avoids presenting local/moto as a throughput oracle.
+	AbsoluteEnvelopeValidation string `json:"absolute_envelope_validation"`
+
+	OS   string `json:"os"`
+	Arch string `json:"arch"`
+
+	InvocationID string    `json:"invocation_id"`
+	StartedAt    time.Time `json:"started_at"`
+
+	Keep bool `json:"keep"`
+
+	Points []PointReport `json:"points"`
+}
+
+// PointReport is one measured arm with allowlisted aggregate fields only.
+// Reflow concurrency fields are pointers so probe_drain omits them (no product
+// reflow telemetry exists for that shape).
+type PointReport struct {
+	PointID          string `json:"point_id"`
+	ExecutionShape   string `json:"execution_shape"` // reflow_only|full_pipe|probe_drain
+	Parallel         int    `json:"reflow_parallel_requested,omitempty"`
+	ProbeConcurrency int    `json:"probe_concurrency,omitempty"`
+	// AdaptiveMode is reflow adaptive/fixed when reflow ran; empty for probe_drain.
+	AdaptiveMode    string `json:"adaptive_mode,omitempty"`
+	GOMEMLIMITSet   bool   `json:"gomemlimit_set"`
+	GOMEMLIMITValue string `json:"gomemlimit_value,omitempty"`
+	// MemoryLimitSource is product memory-limit provenance when reflow ran; omit for probe_drain.
+	MemoryLimitSource string `json:"memory_limit_source,omitempty"`
+	// MemoryEnvelope labels checkpoint dual-envelope arms: clamped|raised|"" .
+	MemoryEnvelope  string `json:"memory_envelope,omitempty"`
+	CheckpointClass string `json:"checkpoint_class,omitempty"`
+
+	// Product reflow concurrency telemetry (omit when not applicable).
+	ConcurrencyRequested *int    `json:"concurrency_ceiling_requested,omitempty"`
+	ConcurrencyEffective *int    `json:"concurrency_ceiling_effective,omitempty"`
+	ConcurrencyReason    *string `json:"concurrency_ceiling_reason,omitempty"`
+	ConcurrencyMaxActive *int    `json:"concurrency_max_active,omitempty"`
+	ConcurrencyFinal     *int    `json:"concurrency_final,omitempty"`
+	AdaptiveEnabled      *bool   `json:"adaptive_enabled,omitempty"`
+
+	ElapsedSeconds      float64 `json:"elapsed_seconds"`
+	CompletedObjects    int64   `json:"completed_objects"`
+	EndToEndRate        float64 `json:"end_to_end_rate_objects_per_s,omitempty"`
+	ProbeDeliveredRate  float64 `json:"probe_delivered_rate_objects_per_s,omitempty"`
+	ProbeSaturationRate float64 `json:"probe_saturation_rate_objects_per_s,omitempty"`
+	TapValidRows        int64   `json:"tap_valid_reflow_input_rows,omitempty"`
+	// TapCopyIntervalSeconds is the wall time of the tap Copy loop (includes
+	// producer pacing and downstream backpressure). Not calibrated overhead.
+	TapCopyIntervalSeconds float64 `json:"tap_copy_interval_seconds,omitempty"`
+
+	// HonestyOK is nil when honesty is not applicable (e.g. probe_drain).
+	HonestyOK      *bool  `json:"honesty_ok,omitempty"`
+	HonestyMessage string `json:"honesty_message,omitempty"`
+
+	OccupancySamples []int  `json:"occupancy_samples,omitempty"`
+	OccupancyOK      *bool  `json:"occupancy_ok,omitempty"`
+	OccupancyMessage string `json:"occupancy_message,omitempty"`
+
+	// ContentParityOK is true when landed key+size+content-digest multisets match.
+	ContentParityOK *bool `json:"content_parity_ok,omitempty"`
+
+	StageExitCodes map[string]int `json:"stage_exit_codes"`
+}
+
+// NewReport seeds a report shell.
+func NewReport(profile, providerClass, invocationID, binarySHA string, corpus CompactManifest, keep bool) Report {
+	evidence := "non_provider"
+	switch providerClass {
+	case "s3-compatible", "gcs":
+		evidence = "provider_opt_in"
+	}
+	return Report{
+		SchemaVersion:              ReportSchemaVersion,
+		BinarySHA256:               binarySHA,
+		Corpus:                     corpus,
+		Profile:                    profile,
+		ProviderClass:              providerClass,
+		ThroughputEvidenceClass:    evidence,
+		MeasurementScope:           MeasurementScopeSmallScaleRelative,
+		AbsoluteEnvelopeValidation: AbsoluteEnvelopeNotEvaluated,
+		InvocationID:               invocationID,
+		StartedAt:                  monoNow().UTC(),
+		Keep:                       keep,
+		Points:                     nil,
+	}
+}
+
+// MarshalJSONReport returns the report JSON.
+func MarshalJSONReport(r Report) ([]byte, error) {
+	return json.MarshalIndent(r, "", "  ")
+}
+
+// SterilityForbidden returns tokens that must never appear in a serialized report.
+func SterilityForbidden(extra ...string) []string {
+	base := []string{
+		"://",
+		"aws_access",
+		"aws_secret",
+		"begin private",
+		"authorization:",
+		"x-amz-security-token",
+		"signature=",
+		"x-amz-credential",
+	}
+	return append(base, extra...)
+}
+
+// ValidateReportEnvelope performs light structural checks on the report itself.
+func ValidateReportEnvelope(r Report) error {
+	if r.SchemaVersion != ReportSchemaVersion {
+		return fmt.Errorf("unexpected schema_version %q", r.SchemaVersion)
+	}
+	if r.BinarySHA256 == "" {
+		return fmt.Errorf("binary_sha256 required")
+	}
+	if r.Corpus.Digest == "" {
+		return fmt.Errorf("corpus digest required")
+	}
+	if r.Profile == "" {
+		return fmt.Errorf("profile required")
+	}
+	if r.ThroughputEvidenceClass == "" {
+		return fmt.Errorf("throughput_evidence_class required")
+	}
+	if r.MeasurementScope == "" {
+		return fmt.Errorf("measurement_scope required")
+	}
+	if r.AbsoluteEnvelopeValidation == "" {
+		return fmt.Errorf("absolute_envelope_validation required")
+	}
+	if r.ProviderClass == "file" || r.ProviderClass == "moto" {
+		if r.ThroughputEvidenceClass != "non_provider" {
+			return fmt.Errorf("local/moto must label throughput_evidence_class=non_provider")
+		}
+	}
+	for i, p := range r.Points {
+		if p.ExecutionShape == "probe_drain" {
+			if p.ConcurrencyRequested != nil || p.ConcurrencyEffective != nil || p.ConcurrencyReason != nil ||
+				p.ConcurrencyMaxActive != nil || p.ConcurrencyFinal != nil || p.AdaptiveEnabled != nil {
+				return fmt.Errorf("point %d: probe_drain must omit all reflow concurrency fields", i)
+			}
+			if p.AdaptiveMode != "" {
+				return fmt.Errorf("point %d: probe_drain must omit adaptive_mode", i)
+			}
+			if p.CheckpointClass != "" {
+				return fmt.Errorf("point %d: probe_drain must omit checkpoint_class", i)
+			}
+			if p.MemoryLimitSource != "" {
+				return fmt.Errorf("point %d: probe_drain must omit memory_limit_source", i)
+			}
+			if p.HonestyOK != nil {
+				return fmt.Errorf("point %d: probe_drain must omit honesty_ok (not applicable)", i)
+			}
+			if p.Parallel != 0 {
+				return fmt.Errorf("point %d: probe_drain must omit reflow_parallel_requested", i)
+			}
+		}
+	}
+	return nil
+}
+
+func intPtr(v int) *int       { return &v }
+func strPtr(v string) *string { return &v }
+func boolPtrVal(v bool) *bool { return &v }
