@@ -240,6 +240,12 @@ Moto runs on port 5555 locally (not 5000) to avoid conflicts with macOS AirTunes
 
 ## Adding New Tests
 
+When a deterministic test vector is bound to a credential-like name and trips
+gosec G101, triage and suppress finding-by-finding — see
+[gosec G101 suppressions](ci.md#gosec-g101-hardcoded-credentials).
+Do not pre-annotate schema fields or fixture constants that the scanner has not
+flagged.
+
 ### Unit Tests
 
 Add to `*_test.go` files alongside the code. No special tags needed.

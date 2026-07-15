@@ -193,6 +193,62 @@ requests, pushes to `main`, scheduled daily scans, and manual dispatch; keep the
 `dependencies` category out of the per-push hook because goneat does not scope
 that category with `--new-issues-only`.
 
+Local gate levels for the `security` category (gosec via goneat):
+
+| Gate                              | Scope         | Fail threshold       |
+| --------------------------------- | ------------- | -------------------- |
+| pre-commit (`.goneat/hooks.yaml`) | package mode  | `--fail-on critical` |
+| pre-push / `make prepush`         | changed files | `--fail-on high`     |
+
+G101 findings are typically HIGH, so they surface on pre-push even when pre-commit
+passes at the critical bar.
+
+#### gosec G101 hardcoded credentials
+
+gosec **G101** flags hardcoded string values bound to credential-like identifiers
+(names such as `password`, `token`, `secret`, and similar), using value and
+entropy heuristics. It does **not** mean every schema column, struct field, or
+JSON tag that contains words like `key` or `etag` needs a suppression. Ordinary
+identifiers such as `source_key`, `dest_key`, or `source_etag` — and digest
+constants with non-credential names — do not merit anticipatory `#nosec` comments.
+
+**Triage first.** When a G101 finding appears on a changed package (including
+tests), reproduce it with a focused scan, inspect the exact declaration, and
+confirm the value is a deterministic non-secret with no access authority. Never
+suppress a real or uncertain credential; escalate it.
+
+```bash
+gosec -include=G101 -tests -track-suppressions ./path/to/changed/package
+```
+
+**Satisfy a verified false positive** with an inline, rule-specific suppression
+on the flagged declaration, matching the repository's existing style used for
+other gosec rules (`// #nosec <RULE> -- <reason>`):
+
+```go
+const fixtureAPIToken = "d41d8cd98f00b204e9800998ecf8427e" // #nosec G101 -- fixed digest test vector; carries no access authority
+```
+
+Rules for suppressions:
+
+- Name only the rule you reproduced (`G101`), not a bare `#nosec` and not a
+  multi-rule blanket without matching findings.
+- Include a specific `-- <reason>` that states why the value cannot grant access.
+  A generic “test fixture” reason is not enough.
+- Do **not** add path-scoped or rule-scoped scanner allowlists (gosec config
+  excludes, gitleaks allowlists, and similar). Inline exceptions keep line-level
+  audit evidence; a config exclude removes that evidence and can hide a real
+  committed credential in an excluded path.
+
+**Close the loop.** Rerun the focused G101 scan with `-tests -track-suppressions`,
+then `make prepush`. Expect zero unsuppressed G101 findings and one auditable
+suppression for the verified line.
+
+Suppression tracking is **opt-in** today: neither the pre-commit nor pre-push
+gate enables `-track-suppressions` automatically. Pass it on the focused
+reproduce/rerun command when you need the audit listing. The standing hooks still
+enforce G101 via the `security` category at the fail levels in the table above.
+
 ### Cloud Integration Testing
 
 #### Infrastructure
