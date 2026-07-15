@@ -111,7 +111,21 @@ func (s *Store) Write(record *JobRecord) error {
 	}
 	b = append(b, '\n')
 
-	return writeJobRecordAtomic(s.root, jobID, b)
+	// Busy Windows runners can fail atomic replace when a concurrent Get holds
+	// job.json open. Retry transient sharing/lock errors so helper completion
+	// and production writers do not silently stall as queued forever.
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		lastErr = writeJobRecordAtomic(s.root, jobID, b)
+		if lastErr == nil {
+			return nil
+		}
+		if !isTransientRegistryIOError(lastErr) {
+			return lastErr
+		}
+		time.Sleep(time.Duration(5*(attempt+1)) * time.Millisecond)
+	}
+	return lastErr
 }
 
 func mkdirSecure(path string) error {
