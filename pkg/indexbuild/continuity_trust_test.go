@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,24 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
+
+// countingListProvider wraps fakeProvider and counts List calls so tests can
+// prove a refusal happened before any provider crawl started.
+type countingListProvider struct {
+	inner fakeProvider
+	lists atomic.Int32
+}
+
+func (p *countingListProvider) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	p.lists.Add(1)
+	return p.inner.List(ctx, opts)
+}
+
+func (p *countingListProvider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	return p.inner.Head(ctx, key)
+}
+
+func (p *countingListProvider) Close() error { return nil }
 
 // buildContinuousChain publishes run1 -> run2 -> run3 as a continuous lineage
 // chain under one set root and returns run3's build config and summary.
@@ -134,13 +153,13 @@ func TestRetryWithLeaseRefusesInconsistentParentPlan(t *testing.T) {
 	}
 }
 
-// TestBuildRefusesSameRunIDAtAlternateLocus proves an idempotent re-publish is
-// recovery only at the captured run's exact artifact locus: a Build reusing a
-// published run id with artifact paths under a different run directory (same
-// latest) is refused stale, never writing a second artifact identity for that
-// run id — no publish artifacts at the alternate locus and latest
-// byte-identical.
-func TestBuildRefusesSameRunIDAtAlternateLocus(t *testing.T) {
+// TestBuildRefusesSameRunRelocatedLocusBeforeSinks proves an idempotent
+// re-publish is recovery only at the captured run's exact immutable locus —
+// complete marker, manifest, and segment directory each individually bound —
+// and that a relocated locus is refused before any sink runs: no provider List
+// call, no journal creation, no artifact at the relocated path, and the
+// canonical latest/manifest/complete stay byte-identical.
+func TestBuildRefusesSameRunRelocatedLocusBeforeSinks(t *testing.T) {
 	ctx := context.Background()
 	setRoot := t.TempDir()
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -149,30 +168,109 @@ func TestBuildRefusesSameRunIDAtAlternateLocus(t *testing.T) {
 	objs := []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}
 	_, err := NewRunner(contConfig(setRoot, "run1", objs, base)).Build(ctx)
 	require.NoError(t, err)
+	canonical := contRunPaths(setRoot, "run1")
 	latestBefore, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
-	canonicalManifest, err := os.ReadFile(filepath.Join(setRoot, "runs", "run1", "manifest.json"))
+	manifestBefore, err := os.ReadFile(canonical.ManifestPath)
+	require.NoError(t, err)
+	completeBefore, err := os.ReadFile(canonical.CompletePath)
 	require.NoError(t, err)
 
-	// Same set/run id, artifact paths relocated under a shadow run directory.
-	cfg := contConfig(setRoot, "run1", objs, base.Add(time.Hour))
-	cfg.Paths = contRunPaths(setRoot, "run1-shadow")
-	_, err = NewRunner(cfg).Build(ctx)
+	cases := map[string]struct {
+		relocate func(p *PathConfig)
+		absent   func(p PathConfig) string
+	}{
+		"complete-relocated": {
+			relocate: func(p *PathConfig) {
+				p.CompletePath = filepath.Join(setRoot, "runs", "run1", "complete-shadow.json")
+			},
+			absent: func(p PathConfig) string { return p.CompletePath },
+		},
+		"manifest-relocated": {
+			relocate: func(p *PathConfig) {
+				p.ManifestPath = filepath.Join(setRoot, "runs", "run1", "manifest-shadow.json")
+			},
+			absent: func(p PathConfig) string { return p.ManifestPath },
+		},
+		"segments-relocated": {
+			relocate: func(p *PathConfig) {
+				p.SegmentDir = filepath.Join(setRoot, "runs", "run1", "segments-shadow")
+			},
+			absent: func(p PathConfig) string { return p.SegmentDir },
+		},
+		"whole-run-relocated": {
+			relocate: func(p *PathConfig) { *p = contRunPaths(setRoot, "run1-shadow") },
+			absent:   func(p PathConfig) string { return p.CompletePath },
+		},
+	}
+	for name, tc := range cases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			prov := &countingListProvider{inner: fakeProvider{objects: objs}}
+			cfg := contConfig(setRoot, "run1", objs, base.Add(time.Hour))
+			cfg.Source = Source{Provider: prov, ProviderName: "s3"}
+			tc.relocate(&cfg.Paths)
+			// Fresh journal directory per attempt so "no journal was created"
+			// is provable (journals are inputs, not part of the immutable locus).
+			cfg.Paths.JournalDir = filepath.Join(setRoot, "attempts", name, "journals")
+
+			_, err := NewRunner(cfg).Build(ctx)
+			require.Error(t, err)
+			require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+			require.Contains(t, err.Error(), "different artifact locus")
+
+			// Refused before sinks: the provider was never listed, no journal
+			// directory was created, and nothing reached the relocated path.
+			require.Zero(t, prov.lists.Load(), "provider crawl must not start")
+			require.NoDirExists(t, cfg.Paths.JournalDir)
+			absent := tc.absent(cfg.Paths)
+			require.NoFileExists(t, absent)
+			require.NoDirExists(t, absent)
+
+			// Canonical artifacts and latest are byte-identical.
+			latestAfter, err := os.ReadFile(latestPath)
+			require.NoError(t, err)
+			require.Equal(t, latestBefore, latestAfter)
+			manifestAfter, err := os.ReadFile(canonical.ManifestPath)
+			require.NoError(t, err)
+			require.Equal(t, manifestBefore, manifestAfter)
+			completeAfter, err := os.ReadFile(canonical.CompletePath)
+			require.NoError(t, err)
+			require.Equal(t, completeBefore, completeAfter)
+		})
+	}
+}
+
+// TestRetryRefusesSameRunRelocatedManifestLocus proves public Retry applies the
+// same pre-publication locus binding: a same-run Retry whose manifest path is
+// redirected (complete + segment canonical) is refused stale before any
+// publication work — no shadow manifest is written and the error is the early
+// stale-parent refusal, not a late immutable-file collision.
+func TestRetryRefusesSameRunRelocatedManifestLocus(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	cfg1 := contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+	}, base)
+	sum1, err := NewRunner(cfg1).Build(ctx)
+	require.NoError(t, err)
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	retryCfg := retryConfigFor(cfg1, sum1)
+	retryCfg.Paths.ManifestPath = filepath.Join(setRoot, "runs", "run1", "manifest-shadow.json")
+	_, err = Retry(ctx, retryCfg)
 	require.Error(t, err)
 	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 	require.Contains(t, err.Error(), "different artifact locus")
 
-	// No publication reached the alternate locus and nothing advanced.
-	shadowPaths := contRunPaths(setRoot, "run1-shadow")
-	require.NoFileExists(t, shadowPaths.CompletePath)
-	require.NoFileExists(t, shadowPaths.ManifestPath)
-	require.NoDirExists(t, shadowPaths.SegmentDir)
+	require.NoFileExists(t, retryCfg.Paths.ManifestPath)
 	latestAfter, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
 	require.Equal(t, latestBefore, latestAfter)
-	canonicalAfter, err := os.ReadFile(filepath.Join(setRoot, "runs", "run1", "manifest.json"))
-	require.NoError(t, err)
-	require.Equal(t, canonicalManifest, canonicalAfter)
 }
 
 // TestRetryRefusesContinuousRePublishOverCorruptDeepAncestor proves a same-run
@@ -304,6 +402,19 @@ func TestBuildRefusesOffLayoutCapturedParentPointer(t *testing.T) {
 		"renamed-run-dir": {
 			completePath: filepath.Join(setRoot, "runs", "run2-evil", "complete.json"),
 			wantMessage:  "canonical run directory",
+		},
+		// A renamed marker inside the canonical run directory: the exact
+		// complete.json leaf is part of the trust contract.
+		"renamed-marker": {
+			completePath: filepath.Join(setRoot, "runs", "run2", "marker.json"),
+			wantMessage:  "canonical complete.json",
+		},
+		// A genuine sibling tree that imitates the full runs/<run>/complete.json
+		// shape: the runs root must be the one owned by the configured latest,
+		// never derived from the pointer under validation.
+		"sibling-runs-tree": {
+			completePath: filepath.Join(setRoot, "other", "runs", "run2", "complete.json"),
+			wantMessage:  "owns latest",
 		},
 	}
 	for name, tc := range cases {

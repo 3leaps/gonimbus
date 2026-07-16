@@ -72,6 +72,11 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		return Summary{}, parentErr
 	}
 	cfg.ExpectedParent = plan.expectedToken()
+	// Refuse a same-run publication at a relocated artifact locus now — before
+	// the provider crawl, journal creation, or any observation-sink mutation.
+	if err := plan.preflightSameRunRecovery(cfg.RunID, cfg.Paths); err != nil {
+		return Summary{}, err
+	}
 
 	basePrefix, err := basePrefixFromURI(cfg.BaseURI)
 	if err != nil {
@@ -207,6 +212,11 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
+	// Refuse a same-run publication at a relocated artifact locus before any
+	// publication work (same boundary contract as Build's pre-crawl check).
+	if err := plan.preflightSameRunRecovery(cfg.RunID, cfg.Paths); err != nil {
+		return Summary{}, err
+	}
 	return retryWithLease(ctx, cfg, plan, authority, lease)
 }
 
@@ -267,7 +277,7 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	// Derive continuity inputs (parent rows, state parent, lineage, parent
 	// manifests) from the single verified capture under the three-way rule; this
 	// validates a continuous parent's ancestry before extension.
-	continuity, err := plan.continuityInputs(cfg.RunID, cfg.Paths.CompletePath, cfg.Paths.SegmentDir)
+	continuity, err := plan.continuityInputs(cfg.RunID, cfg.Paths)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -445,10 +455,16 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 	// If the captured parent carries a state parent, any continuation (extend or
 	// continuous re-publish) walks ancestry through the canonical runs layout;
 	// validate that layout now — before any sink — so an off-layout captured
-	// pointer fails closed early rather than mid-publish.
+	// pointer fails closed early rather than mid-publish. The runs root is bound
+	// to the directory that owns the configured latest, and the captured run's
+	// recorded manifest/segment loci must be contained in its run directory.
 	if snap.Manifest.StateParent != nil {
-		if _, err := canonicalRunsRoot(snap.CompletePath, snap.Complete.RunID); err != nil {
+		if _, err := canonicalRunsRoot(snap.CompletePath, snap.Complete.RunID, latestPath); err != nil {
 			return nil, err
+		}
+		runDir := filepath.Dir(filepath.Clean(snap.CompletePath))
+		if !pathWithinDir(snap.Complete.ManifestPath, runDir) || !pathWithinDir(snap.SegmentDir, runDir) {
+			return nil, fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
 		}
 	}
 	captured := snap
@@ -458,6 +474,29 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 // hasParent reports whether a verified parent snapshot was captured.
 func (p *verifiedParentPlan) hasParent() bool {
 	return p != nil && p.snapshot != nil
+}
+
+// preflightSameRunRecovery refuses a same-run publication whose requested
+// artifact paths differ from the captured run's recorded immutable locus —
+// complete marker, manifest, and segment directory. A same set/run id at any
+// other locus is not idempotent recovery: it would write a second artifact
+// identity for that run id. Build and public Retry call this immediately after
+// capture, before any provider crawl, journal creation, or observation-sink
+// mutation; the publish seam retains the same check as defense.
+func (p *verifiedParentPlan) preflightSameRunRecovery(runID string, paths PathConfig) error {
+	if !p.hasParent() {
+		return nil
+	}
+	snap := p.snapshot
+	if strings.TrimSpace(snap.Complete.RunID) != strings.TrimSpace(runID) {
+		return nil
+	}
+	if filepath.Clean(paths.CompletePath) != filepath.Clean(snap.CompletePath) ||
+		filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.Complete.ManifestPath) ||
+		filepath.Clean(paths.SegmentDir) != filepath.Clean(snap.SegmentDir) {
+		return fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
+	}
+	return nil
 }
 
 // continuityPublication is the same-set continuity metadata plus the streaming
@@ -484,10 +523,17 @@ func safeRunComponent(s string) bool {
 }
 
 // canonicalRunsRoot validates that a captured complete-marker path is exactly
-// <set-root>/runs/<capturedRunID>/complete.json and returns the runs root. It
-// rejects any off-layout path so a digest-valid but non-canonical latest pointer
-// cannot redirect ancestry/re-publish lookups to a sibling root.
-func canonicalRunsRoot(completePath, capturedRunID string) (string, error) {
+// <set-root>/runs/<capturedRunID>/complete.json, where <set-root> is the
+// directory that owns the configured latest pointer. The root is derived from
+// the trusted latest location — never from the pointer under validation — so a
+// digest-valid pointer cannot redirect ancestry/re-publish lookups to a
+// renamed marker, a sibling directory, or a foreign tree that merely imitates
+// the runs/<run>/complete.json shape.
+func canonicalRunsRoot(completePath, capturedRunID, latestPath string) (string, error) {
+	completePath = filepath.Clean(completePath)
+	if filepath.Base(completePath) != "complete.json" {
+		return "", fmt.Errorf("%w: captured parent marker is not a canonical complete.json", indexsubstrate.ErrStaleParent)
+	}
 	runDir := filepath.Dir(completePath)
 	if filepath.Base(runDir) != strings.TrimSpace(capturedRunID) {
 		return "", fmt.Errorf("%w: captured complete marker is not under its canonical run directory", indexsubstrate.ErrStaleParent)
@@ -496,22 +542,40 @@ func canonicalRunsRoot(completePath, capturedRunID string) (string, error) {
 	if filepath.Base(runsRoot) != "runs" {
 		return "", fmt.Errorf("%w: captured complete marker is not under a canonical runs/ root", indexsubstrate.ErrStaleParent)
 	}
+	owned := filepath.Join(filepath.Dir(filepath.Clean(strings.TrimSpace(latestPath))), "runs")
+	if runsRoot != owned {
+		return "", fmt.Errorf("%w: captured runs/ root is not the set root that owns latest", indexsubstrate.ErrStaleParent)
+	}
 	return runsRoot, nil
 }
 
+// pathWithinDir reports whether p is contained in dir (strictly below it).
+func pathWithinDir(p, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(strings.TrimSpace(p)))
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // runCompleteLookup returns a PublishedRunLookup rooted at the captured snapshot.
-// It validates the canonical runs/<run_id>/complete.json layout on every call
-// (so an off-layout captured pointer fails closed rather than redirecting to a
-// sibling root), reasserts the captured index set, rejects unsafe run
+// It validates the canonical runs/<run_id>/complete.json layout on every call —
+// with the runs root bound to the directory that owns the captured latest
+// pointer, so an off-layout or foreign-tree pointer fails closed rather than
+// redirecting the walk — reasserts the captured index set, rejects unsafe run
 // components, and keeps every resolved marker contained directly under the
 // canonical runs root. The validation is per-call so a baseline parent that
 // never triggers an ancestry walk does not require the canonical layout.
 func runCompleteLookup(snap *indexsubstrate.PublishedSnapshot) indexsubstrate.PublishedRunLookup {
 	setID := strings.TrimSpace(snap.Complete.IndexSetID)
 	completePath := snap.CompletePath
+	latestPath := snap.LatestPath
 	capturedRun := strings.TrimSpace(snap.Complete.RunID)
 	return func(reqSetID, runID string) (string, error) {
-		runsRoot, err := canonicalRunsRoot(completePath, capturedRun)
+		if strings.TrimSpace(latestPath) == "" {
+			return "", fmt.Errorf("%w: ancestry lookup requires a latest-owned capture", indexsubstrate.ErrStaleParent)
+		}
+		runsRoot, err := canonicalRunsRoot(completePath, capturedRun, latestPath)
 		if err != nil {
 			return "", err
 		}
@@ -543,7 +607,7 @@ func runCompleteLookup(snap *indexsubstrate.PublishedSnapshot) indexsubstrate.Pu
 // When latest already names the run being published (idempotent recovery
 // re-publish), the run's own recorded lineage/state_parent/parent_manifests are
 // reproduced verbatim — the run never extends itself into a self-cycle.
-func (p *verifiedParentPlan) continuityInputs(runID, publishCompletePath, publishSegmentDir string) (continuityPublication, error) {
+func (p *verifiedParentPlan) continuityInputs(runID string, publishPaths PathConfig) (continuityPublication, error) {
 	runID = strings.TrimSpace(runID)
 	if !p.hasParent() {
 		return continuityPublication{
@@ -556,13 +620,12 @@ func (p *verifiedParentPlan) continuityInputs(runID, publishCompletePath, publis
 	}
 	snap := p.snapshot
 	if strings.TrimSpace(snap.Complete.RunID) == runID {
-		// Idempotent re-publish is recovery only when the target publication is the
-		// captured run's exact artifact locus. A same set/run id at any other
-		// complete/segment locus is not recovery: it would write a second artifact
-		// identity for that run id, so it fails stale before any publish.
-		if filepath.Clean(publishCompletePath) != filepath.Clean(snap.CompletePath) ||
-			filepath.Clean(publishSegmentDir) != filepath.Clean(snap.SegmentDir) {
-			return continuityPublication{}, fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
+		// Idempotent re-publish is recovery only at the captured run's exact
+		// immutable locus (complete + manifest + segment paths). Build/Retry
+		// already refused a relocated locus before any sink ran; this is the
+		// publish-seam defense re-check.
+		if err := p.preflightSameRunRecovery(runID, publishPaths); err != nil {
+			return continuityPublication{}, err
 		}
 		return reproduceRunInputs(snap)
 	}
