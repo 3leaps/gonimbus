@@ -1,10 +1,19 @@
-# Durable spill/merge row source (dark)
+# Durable spill/merge row source
 
-**Status**: internal library primitive only
+**Status**: active — the production publish path streams through this source
 
-**Does not**: activate continuous-state publication, rewrite `PublishSnapshot`,
-load prior-run state for ordinary builds, or raise enrich scale ceilings.
-Streaming segment write is a separate dark primitive — see
+`PublishSnapshot` compacts sealed journals against the prior state by draining
+this prepare-then-drain source into the streaming segment writer, so the full
+current-state row set is never materialized in memory. The committed
+row/artifact/digest contract is identical to the previous materialized
+`Compact` → `WriteSegmentSet` path.
+
+**Does not** (still unactivated): load prior-run state for ordinary builds
+(builds publish a baseline-only current state), emit continuous-state lineage,
+enable timestamp-scoped incremental builds, or raise enrich scale ceilings. The
+parent source today carries only caller-supplied prior rows (empty for ordinary
+builds; the parent rows already loaded by enrich). Streaming segment write is
+described in
 [durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
 
 ## Purpose
@@ -18,9 +27,9 @@ parent rows (sorted, unique) + sealed journals
   → sorted CurrentObjectRow iterator
 ```
 
-Production publication still uses `Compact` → `WriteSegmentSet`. This primitive
-exists so a later activation path can stream without holding a full in-memory
-state map, while remaining differential-tested against `Compact` today.
+Production publication drains this source instead of holding a full in-memory
+state map. It remains differential-tested against `Compact` so the committed
+projection is provably identical.
 
 ## API (`internal/indexsubstrate`)
 
@@ -109,7 +118,7 @@ mutate the parent directory namespace.
 Portable Go/POSIX can bind and wipe a directory through an open FD, but the
 final empty-directory unlink is still name-based. A concurrent actor with write
 authority on the parent can still swap an **empty** dentry in that last window.
-**Hostile concurrent namespace mutation is out of scope for this dark primitive.** If a
+**Hostile concurrent namespace mutation is out of scope for this source.** If a
 future product requirement needs adversarial dentry-swap immunity, that is a
 separate OS-specific handle-disposition / authority-boundary slice — not more
 SameFile checks on pathname delete.
@@ -157,15 +166,16 @@ Caller-supplied `RunStartedAt` is validated **before** any `.UTC()` laundering
 or workspace creation. Non-zero zone offsets refuse as invalid config (same
 discipline as lineage write seams).
 
-## Darkness
+## Activation boundary
 
-| Path                        | Behavior                                 |
-| --------------------------- | ---------------------------------------- |
-| `PublishSnapshot`           | Still uses `Compact` / materialize path  |
-| CLI / durable build adapter | No PriorRows load for ordinary builds    |
-| Lineage emission            | Unchanged (schema-only from prior slice) |
-| Streaming segment writer    | Separate dark primitive (see linked doc) |
-| Enrich 2M ceiling           | Unchanged                                |
+| Path                        | Behavior                                                  |
+| --------------------------- | --------------------------------------------------------- |
+| `PublishSnapshot`           | **Active** — drains this source into the streaming writer |
+| CLI / durable build adapter | No PriorRows load for ordinary builds (baseline-only)     |
+| Lineage emission            | Not activated (schema-only; no continuous-state parent)   |
+| Streaming segment writer    | **Active** — the publish sink (see linked doc)            |
+| Timestamp-scoped builds     | Not activated                                             |
+| Enrich scale ceiling        | Unchanged                                                 |
 
 ## Related
 

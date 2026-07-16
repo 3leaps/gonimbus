@@ -164,7 +164,7 @@ func run(ctx context.Context, cfg Config, hooks runHooks) (Result, error) {
 		return res, fmt.Errorf("index set authority at publish: %w", err)
 	}
 
-	pub, pubErr := publishEnrich(cfg, snap, priorRows, parentToken, updates, runID, runStartedAt, lease, hooks)
+	pub, pubErr := publishEnrich(ctx, cfg, snap, priorRows, parentToken, updates, runID, runStartedAt, lease, hooks)
 	res.LatestAdvanced = pub.LatestAdvanced
 	res.Published = pub.LatestAdvanced
 	res.ManifestSHA256 = pub.ManifestSHA256
@@ -560,6 +560,7 @@ func emitState(cfg Config, result headResult) error {
 }
 
 func publishEnrich(
+	ctx context.Context,
 	cfg Config,
 	snap indexsubstrate.PublishedSnapshot,
 	priorRows []indexsubstrate.CurrentObjectRow,
@@ -630,7 +631,7 @@ func publishEnrich(
 	}
 
 	latestPath := filepath.Join(cfg.SegmentSetRoot, "latest.json")
-	result, err := indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
+	result, err := indexsubstrate.PublishSnapshotContext(ctx, indexsubstrate.PublishConfig{
 		IndexSetID:   cfg.IndexSetID,
 		RunID:        runID,
 		RunStartedAt: runStartedAt,

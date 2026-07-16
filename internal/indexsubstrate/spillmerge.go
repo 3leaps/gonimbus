@@ -16,9 +16,10 @@ import (
 	"time"
 )
 
-// Spill/merge is the dark current-state row source. It does not
-// publish artifacts, advance latest, emit lineage, or replace Compact on the
-// production publish path.
+// Spill/merge is the current-state row source drained by the production publish
+// path (PublishSnapshot) in place of the materialized Compact projection. The
+// source itself does not publish artifacts, advance latest, or emit lineage;
+// continuous-parent loading and lineage emission remain a later activation.
 
 const (
 	spillMergeWorkspaceDir   = "spillmerge"
@@ -151,7 +152,7 @@ type SpillMergeBudget struct {
 	MaxMergePasses    int
 }
 
-// DefaultSpillMergeBudget returns the frozen dark spill-merge defaults.
+// DefaultSpillMergeBudget returns the frozen spill-merge budget defaults.
 func DefaultSpillMergeBudget() SpillMergeBudget {
 	return SpillMergeBudget{
 		MaxBufferedRows:   defaultMaxBufferedRows,
@@ -918,7 +919,7 @@ func (s *CurrentStateSource) finishOwnedTrash(sm *os.Root, held bool) error {
 // the opened directory FD matches attemptBound, unlinks residual children, then
 // removes an empty directory entry.
 //
-// Trust model (this dark spill/merge primitive): SpillRoot is exclusive operator-controlled space;
+// Trust model (spill/merge source): SpillRoot is exclusive operator-controlled space;
 // concurrent hostile namespace mutation is out of scope. Under that model this
 // refuses live-name / non-empty post-bind substitutes and avoids recursive
 // pathname RemoveAll after a detached identity check. It does NOT claim

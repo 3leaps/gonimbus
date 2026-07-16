@@ -347,6 +347,38 @@ func TestDependencyBoundary(t *testing.T) {
 	}
 }
 
+func TestBuildRefusesNonUTCRunStartedAtBeforeSideEffects(t *testing.T) {
+	cfg := testConfig(t, "build_nonutc")
+	edt := time.FixedZone("EDT", -4*60*60)
+	// Same instant, non-UTC zone: must refuse before crawl/sink/publish, not
+	// launder through .UTC().
+	cfg.RunStartedAt = cfg.RunStartedAt.In(edt)
+
+	_, err := NewRunner(cfg).Build(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "UTC")
+	require.NoDirExists(t, cfg.Paths.SegmentDir, "no segment dir before a refused run start")
+	require.NoDirExists(t, cfg.Paths.JournalDir, "no journal dir before a refused run start")
+	require.NoFileExists(t, cfg.Paths.LatestPath)
+}
+
+func TestRetryRefusesNonUTCRunStartedAtBeforeSideEffects(t *testing.T) {
+	cfg := testConfig(t, "retry_nonutc")
+	edt := time.FixedZone("EDT", -4*60*60)
+
+	_, err := Retry(context.Background(), RetryConfig{
+		IndexSetID:   cfg.IndexSetID,
+		RunID:        cfg.RunID,
+		Paths:        cfg.Paths,
+		JournalPaths: []string{filepath.Join(cfg.Paths.JournalDir, "shard-0001.jsonl")},
+		Coverage:     cfg.Coverage,
+		RunStartedAt: cfg.RunStartedAt.In(edt),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "UTC")
+	require.NoFileExists(t, cfg.Paths.LatestPath)
+}
+
 func testConfig(t *testing.T, name string) Config {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)

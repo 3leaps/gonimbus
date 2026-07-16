@@ -1,6 +1,7 @@
 package indexsubstrate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +61,14 @@ type PublishConfig struct {
 	CompletePath         string
 	LatestPath           string
 	TargetRowsPerSegment int
+	// SpillRoot is the operator-controlled directory under which the streaming
+	// current-state merge stages its owner-only, symlink-safe workspace. When
+	// empty it defaults to a "spillmerge" directory beside the sealed journals
+	// (which are already resolved through operator app-data path classes).
+	SpillRoot string
+	// SpillBudget bounds the streaming merge's memory, workspace disk, and merge
+	// topology. Zero fields fall back to DefaultSpillMergeBudget.
+	SpillBudget SpillMergeBudget
 	// Mode selects compaction/publication policy (default crawl vs enrich-only).
 	Mode PublicationMode
 	// ExpectedParent, when non-nil, enforces latest-pointer CAS at advance.
@@ -105,7 +114,31 @@ type publishedLatestDoc struct {
 	CompletePath string `json:"complete_path"`
 }
 
+// PublishSnapshot publishes a durable snapshot with a background context. Prefer
+// PublishSnapshotContext so cancellation propagates into the streaming merge.
 func PublishSnapshot(config PublishConfig) (PublishResult, error) {
+	return PublishSnapshotContext(context.Background(), config)
+}
+
+// PublishSnapshotContext compacts the sealed journals against the prior state and
+// publishes the resulting current-state snapshot. Compaction and segment writing
+// run through the streaming spill/merge current-state source and the streaming
+// segment writer so the full current-state row set is never materialized in
+// memory. The row/artifact/digest contract is identical to the prior materialized
+// Compact -> WriteSegmentSet path.
+func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Refuse a non-UTC run start on the raw caller value before normalization
+	// launders it through .UTC(). The streaming publish seam must not silently
+	// accept an offset the lineage/spill contract would reject. Zero remains the
+	// concern of validatePublishConfig ("required") for a clearer message.
+	if !config.RunStartedAt.IsZero() {
+		if err := validateAuthoritativeRunStartedAt(config.RunStartedAt); err != nil {
+			return PublishResult{}, err
+		}
+	}
 	config = normalizePublishConfig(config)
 	if err := validatePublishConfig(config); err != nil {
 		return PublishResult{}, err
@@ -127,23 +160,35 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		return result, err
 	}
 
-	compaction, err := CompactJournalFiles(CompactionInput{
+	// Stream parent rows + ordered journals into a sorted current-state source.
+	// The streaming segment writer owns the terminal Close of this source on every
+	// exit path (success and failure).
+	stateSource, err := PrepareCurrentStateSource(ctx, SpillMergeConfig{
 		IndexSetID:   config.IndexSetID,
 		RunID:        config.RunID,
 		RunStartedAt: config.RunStartedAt,
-		PriorRows:    config.PriorRows,
+		Parent:       NewSliceParentRows(config.PriorRows),
+		JournalPaths: config.JournalPaths,
 		Coverage:     config.Coverage,
 		Mode:         config.Mode,
-	}, config.JournalPaths)
+		SpillRoot:    config.SpillRoot,
+		Budget:       config.SpillBudget,
+	})
 	if err != nil {
 		return result, err
 	}
-	result.Compaction = compaction
 	if err := runPublishHook(config, PublishStepCompacted); err != nil {
+		// The streaming writer owns the terminal Close once it starts; here the
+		// prepared source is still caller-owned. Close it now and preserve any
+		// sticky cleanup failure alongside the hook error so protected spill
+		// residue is never silently stranded (both causes stay classifiable).
+		if closeErr := stateSource.Close(); closeErr != nil {
+			return result, errors.Join(err, closeErr)
+		}
 		return result, err
 	}
 
-	manifest, err := WriteSegmentSet(SegmentWriterConfig{
+	manifest, err := WriteStreamingSegmentSet(ctx, SegmentWriterConfig{
 		Dir:                    config.SegmentDir,
 		IndexSetID:             config.IndexSetID,
 		RunID:                  config.RunID,
@@ -153,9 +198,17 @@ func PublishSnapshot(config PublishConfig) (PublishResult, error) {
 		ParentManifests:        config.ParentManifests,
 		Coverage:               config.Coverage,
 		OnSegmentProgress:      config.OnSegmentProgress,
-	}, compaction.Rows)
+	}, stateSource)
 	if err != nil {
 		return result, err
+	}
+	// Summarize compaction from streaming stats; the full row/tombstone slices are
+	// intentionally not materialized on the streaming path. Callers that need row
+	// or tombstone counts read result.Manifest.Counts.
+	stats := stateSource.Stats()
+	result.Compaction = CompactionResult{
+		ObservedRecords:   stats.ObservedRecords,
+		EnrichmentRecords: stats.EnrichmentRecords,
 	}
 	result.Manifest = manifest
 	if err := runPublishHook(config, PublishStepSegmentsWritten); err != nil {
@@ -501,6 +554,12 @@ func normalizePublishConfig(config PublishConfig) PublishConfig {
 	config.ManifestPath = strings.TrimSpace(config.ManifestPath)
 	config.CompletePath = strings.TrimSpace(config.CompletePath)
 	config.LatestPath = strings.TrimSpace(config.LatestPath)
+	config.SpillRoot = strings.TrimSpace(config.SpillRoot)
+	if config.SpillRoot == "" && len(config.JournalPaths) > 0 {
+		// Co-locate the streaming merge workspace with the sealed journals, which
+		// are already resolved through operator-controlled app-data path classes.
+		config.SpillRoot = filepath.Join(filepath.Dir(config.JournalPaths[0]), "spillmerge")
+	}
 	if !config.RunStartedAt.IsZero() {
 		config.RunStartedAt = config.RunStartedAt.UTC()
 	}

@@ -255,7 +255,7 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, authority *indexcoord.
 		return Summary{}, fmt.Errorf("index set authority: %w", err)
 	}
 
-	result, err := indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
+	result, err := indexsubstrate.PublishSnapshotContext(ctx, indexsubstrate.PublishConfig{
 		IndexSetID:           cfg.IndexSetID,
 		RunID:                cfg.RunID,
 		RunStartedAt:         cfg.RunStartedAt,
@@ -370,10 +370,11 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.RunID = strings.TrimSpace(cfg.RunID)
 	cfg.BaseURI = strings.TrimSpace(cfg.BaseURI)
 	cfg.Clock = normalizeClock(cfg.Clock)
-	if cfg.RunStartedAt.IsZero() {
-		cfg.RunStartedAt = cfg.Clock()
+	runStartedAt, err := resolveRunStartedAtUTC(cfg.RunStartedAt, cfg.Clock)
+	if err != nil {
+		return Config{}, err
 	}
-	cfg.RunStartedAt = cfg.RunStartedAt.UTC()
+	cfg.RunStartedAt = runStartedAt
 	if cfg.CreatedAt.IsZero() {
 		cfg.CreatedAt = cfg.RunStartedAt
 	}
@@ -401,10 +402,11 @@ func normalizeRetryConfig(cfg RetryConfig) (RetryConfig, error) {
 	cfg.RunID = strings.TrimSpace(cfg.RunID)
 	cfg.BaseURI = strings.TrimSpace(cfg.BaseURI)
 	cfg.Clock = normalizeClock(cfg.Clock)
-	if cfg.RunStartedAt.IsZero() {
-		cfg.RunStartedAt = cfg.Clock()
+	runStartedAt, err := resolveRunStartedAtUTC(cfg.RunStartedAt, cfg.Clock)
+	if err != nil {
+		return RetryConfig{}, err
 	}
-	cfg.RunStartedAt = cfg.RunStartedAt.UTC()
+	cfg.RunStartedAt = runStartedAt
 	if cfg.CreatedAt.IsZero() {
 		cfg.CreatedAt = cfg.RunStartedAt
 	}
@@ -420,6 +422,21 @@ func normalizeClock(clock Clock) Clock {
 		return clock
 	}
 	return func() time.Time { return time.Now().UTC() }
+}
+
+// resolveRunStartedAtUTC defaults a zero run start to the clock, then refuses a
+// non-UTC value (caller-supplied or clock-produced) on the raw input before any
+// .UTC() laundering, so direct-library Build/Retry callers receive the
+// authoritative-time contract before crawl or observation-sink mutation. The
+// returned value is UTC-normalized.
+func resolveRunStartedAtUTC(runStartedAt time.Time, clock Clock) (time.Time, error) {
+	if runStartedAt.IsZero() {
+		runStartedAt = clock()
+	}
+	if err := indexsubstrate.ValidateAuthoritativeRunStartedAt(runStartedAt); err != nil {
+		return time.Time{}, err
+	}
+	return runStartedAt.UTC(), nil
 }
 
 func basePrefixFromURI(baseURI string) (string, error) {

@@ -234,6 +234,15 @@ func validateAuthoritativeRunStartedAt(t time.Time) error {
 	return nil
 }
 
+// ValidateAuthoritativeRunStartedAt validates a run-start timestamp against the
+// authoritative lineage wire rule (non-zero, UTC — non-zero offset refused). It
+// is exposed so library build/publish entry points can refuse a non-UTC caller
+// value or clock on the *raw* input, before any UTC normalization or side
+// effect, and surface the same stable LineageCodeInvalidTime classification.
+func ValidateAuthoritativeRunStartedAt(t time.Time) error {
+	return validateAuthoritativeRunStartedAt(t)
+}
+
 func validateStateParentShape(parent StateParent) error {
 	parent.IndexSetID = strings.TrimSpace(parent.IndexSetID)
 	parent.RunID = strings.TrimSpace(parent.RunID)
