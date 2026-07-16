@@ -72,9 +72,11 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		return Summary{}, parentErr
 	}
 	cfg.ExpectedParent = plan.expectedToken()
-	// Refuse a same-run publication at a relocated artifact locus now — before
-	// the provider crawl, journal creation, or any observation-sink mutation.
-	if err := plan.preflightSameRunRecovery(cfg.RunID, cfg.Paths); err != nil {
+	// Enforce the continuity layout contract now — before the provider crawl,
+	// journal creation, or any observation-sink mutation: same-run recovery at
+	// its exact captured locus; an edge-emitting build only over a canonically
+	// resolvable parent and into a canonical target.
+	if err := plan.preflightContinuityLayout(cfg.RunID, cfg.Paths); err != nil {
 		return Summary{}, err
 	}
 
@@ -212,9 +214,9 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	// Refuse a same-run publication at a relocated artifact locus before any
-	// publication work (same boundary contract as Build's pre-crawl check).
-	if err := plan.preflightSameRunRecovery(cfg.RunID, cfg.Paths); err != nil {
+	// Enforce the continuity layout contract before any publication work (same
+	// boundary contract as Build's pre-crawl check).
+	if err := plan.preflightContinuityLayout(cfg.RunID, cfg.Paths); err != nil {
 		return Summary{}, err
 	}
 	return retryWithLease(ctx, cfg, plan, authority, lease)
@@ -476,25 +478,56 @@ func (p *verifiedParentPlan) hasParent() bool {
 	return p != nil && p.snapshot != nil
 }
 
-// preflightSameRunRecovery refuses a same-run publication whose requested
-// artifact paths differ from the captured run's recorded immutable locus —
-// complete marker, manifest, and segment directory. A same set/run id at any
-// other locus is not idempotent recovery: it would write a second artifact
-// identity for that run id. Build and public Retry call this immediately after
-// capture, before any provider crawl, journal creation, or observation-sink
-// mutation; the publish seam retains the same check as defense.
-func (p *verifiedParentPlan) preflightSameRunRecovery(runID string, paths PathConfig) error {
+// preflightContinuityLayout enforces the continuity layout contract before any
+// provider crawl, journal creation, or observation-sink mutation. Build and
+// public Retry call it immediately after the verified capture; the publish
+// seam re-checks it as defense.
+//
+//   - Same-run recovery: the requested paths must equal the captured run's
+//     recorded immutable locus exactly (complete marker, manifest, segment dir).
+//     A same set/run id at any other locus is not idempotent recovery — it
+//     would write a second artifact identity for that run id.
+//   - New run over a captured parent (an edge-emitting publication): the
+//     captured parent — whatever its own lineage shape — must sit at the
+//     latest-owned canonical runs/<run>/complete.json locus with its recorded
+//     manifest/segment artifacts contained in that run directory, because the
+//     child records it as a pathless state_parent that the production ancestry
+//     lookup can only rediscover at that root. The new target must satisfy the
+//     same canonical contract, so the advanced latest is never a
+//     continuity-bearing root the next capture would reject.
+//   - First publication (no captured parent): no layout constraint. It emits
+//     no edge and resolves without any ancestry lookup; extending it later
+//     requires the canonical layout.
+func (p *verifiedParentPlan) preflightContinuityLayout(runID string, paths PathConfig) error {
 	if !p.hasParent() {
 		return nil
 	}
+	runID = strings.TrimSpace(runID)
 	snap := p.snapshot
-	if strings.TrimSpace(snap.Complete.RunID) != strings.TrimSpace(runID) {
+	if strings.TrimSpace(snap.Complete.RunID) == runID {
+		if filepath.Clean(paths.CompletePath) != filepath.Clean(snap.CompletePath) ||
+			filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.Complete.ManifestPath) ||
+			filepath.Clean(paths.SegmentDir) != filepath.Clean(snap.SegmentDir) {
+			return fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
+		}
 		return nil
 	}
-	if filepath.Clean(paths.CompletePath) != filepath.Clean(snap.CompletePath) ||
-		filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.Complete.ManifestPath) ||
-		filepath.Clean(paths.SegmentDir) != filepath.Clean(snap.SegmentDir) {
-		return fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
+	// Edge-emitting publication: the captured parent becomes the child's
+	// pathless state_parent, so it must be resolvable at the canonical root.
+	if _, err := canonicalRunsRoot(snap.CompletePath, snap.Complete.RunID, paths.LatestPath); err != nil {
+		return fmt.Errorf("captured parent for continuity edge: %w", err)
+	}
+	parentRunDir := filepath.Dir(filepath.Clean(snap.CompletePath))
+	if !pathWithinDir(snap.Complete.ManifestPath, parentRunDir) || !pathWithinDir(snap.SegmentDir, parentRunDir) {
+		return fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
+	}
+	// The new continuity-bearing target must itself be canonical.
+	if _, err := canonicalRunsRoot(paths.CompletePath, runID, paths.LatestPath); err != nil {
+		return fmt.Errorf("continuity target: %w", err)
+	}
+	targetRunDir := filepath.Dir(filepath.Clean(paths.CompletePath))
+	if !pathWithinDir(paths.ManifestPath, targetRunDir) || !pathWithinDir(paths.SegmentDir, targetRunDir) {
+		return fmt.Errorf("%w: continuity target manifest/segment paths are not contained in the canonical run directory", indexsubstrate.ErrStaleParent)
 	}
 	return nil
 }
@@ -549,13 +582,15 @@ func canonicalRunsRoot(completePath, capturedRunID, latestPath string) (string, 
 	return runsRoot, nil
 }
 
-// pathWithinDir reports whether p is contained in dir (strictly below it).
+// pathWithinDir reports whether p is contained in dir — the directory itself
+// or below it. Equality is allowed because the enrich publisher records its
+// segment directory as the run directory itself.
 func pathWithinDir(p, dir string) bool {
 	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(strings.TrimSpace(p)))
 	if err != nil {
 		return false
 	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // runCompleteLookup returns a PublishedRunLookup rooted at the captured snapshot.
@@ -609,6 +644,13 @@ func runCompleteLookup(snap *indexsubstrate.PublishedSnapshot) indexsubstrate.Pu
 // reproduced verbatim — the run never extends itself into a self-cycle.
 func (p *verifiedParentPlan) continuityInputs(runID string, publishPaths PathConfig) (continuityPublication, error) {
 	runID = strings.TrimSpace(runID)
+	// Publish-seam defense re-check of the continuity layout contract that
+	// Build/Retry already enforced before any sink ran: same-run recovery at the
+	// exact captured locus; edge emission only over a canonically resolvable
+	// parent into a canonical target.
+	if err := p.preflightContinuityLayout(runID, publishPaths); err != nil {
+		return continuityPublication{}, err
+	}
 	if !p.hasParent() {
 		return continuityPublication{
 			lineage: &indexsubstrate.LineageRecord{
@@ -620,13 +662,6 @@ func (p *verifiedParentPlan) continuityInputs(runID string, publishPaths PathCon
 	}
 	snap := p.snapshot
 	if strings.TrimSpace(snap.Complete.RunID) == runID {
-		// Idempotent re-publish is recovery only at the captured run's exact
-		// immutable locus (complete + manifest + segment paths). Build/Retry
-		// already refused a relocated locus before any sink ran; this is the
-		// publish-seam defense re-check.
-		if err := p.preflightSameRunRecovery(runID, publishPaths); err != nil {
-			return continuityPublication{}, err
-		}
 		return reproduceRunInputs(snap)
 	}
 

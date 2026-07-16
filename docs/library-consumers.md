@@ -283,10 +283,18 @@ Embedding contract highlights:
   provider-prefix observation plan (the library form of a compiled
   `build.scope`). Faithful-coverage publication expects coverage attestations
   to match that plan.
-- **Paths are caller-owned.** `PathConfig` points at journal/segment/manifest
-  locations resolved by the adapter. The engine rejects journal/segment paths
-  under a supplied `IndexDBDir` so v2 working state is not silently nested
-  under a legacy SQLite directory.
+- **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
+  journal/segment/manifest locations resolved by the adapter. The engine
+  rejects journal/segment paths under a supplied `IndexDBDir` so v2 working
+  state is not silently nested under a legacy SQLite directory. Multi-run
+  continuity additionally requires the canonical latest-owned layout
+  (`<dir(LatestPath)>/runs/<run_id>/complete.json`, manifest/segments contained
+  in the run directory): a build that records a state parent refuses — before
+  any crawl or sink — a parent or target outside that layout, because
+  continuity edges are pathless and the production ancestry lookup rediscovers
+  parents only under the latest-owned `runs/` root. A standalone first
+  publication may use any layout but cannot be extended until canonical.
+  Same-run recovery must target the run's exact recorded locus.
 - **Whole-set mutation authority is shared.** `pkg/indexbuild` and
   `pkg/indexenrich` acquire an OS-backed `pkg/indexcoord` lease before opening
   or creating set state. Its lock lives in the stable sibling

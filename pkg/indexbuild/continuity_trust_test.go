@@ -18,6 +18,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
+	"github.com/3leaps/gonimbus/pkg/indexenrich"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -444,4 +445,247 @@ func TestBuildRefusesOffLayoutCapturedParentPointer(t *testing.T) {
 			require.Equal(t, tampered, latestAfter)
 		})
 	}
+}
+
+// TestBuildRefusesOffLayoutBaselineParentBeforeSinks proves canonical
+// validation applies to every captured parent an edge-emitting build would
+// record — including a baseline with no state parent of its own. A standalone
+// first publication at a caller-owned off-layout locus is allowed (it emits no
+// edge), but a canonical child over it must refuse before any provider crawl,
+// journal creation, or sink mutation: the child would record a pathless
+// state_parent the production ancestry lookup could never rediscover.
+func TestBuildRefusesOffLayoutBaselineParentBeforeSinks(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+	objs := []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}
+
+	// Standalone first publication at an off-layout locus: allowed.
+	legacyDir := filepath.Join(setRoot, "legacy", "run1")
+	cfg1 := contConfig(setRoot, "run1", objs, base)
+	cfg1.Paths = PathConfig{
+		JournalDir:   filepath.Join(legacyDir, "journals"),
+		SegmentDir:   filepath.Join(legacyDir, "segments"),
+		ManifestPath: filepath.Join(legacyDir, "manifest.json"),
+		CompletePath: filepath.Join(legacyDir, "complete.json"),
+		LatestPath:   latestPath,
+	}
+	_, err := NewRunner(cfg1).Build(ctx)
+	require.NoError(t, err, "a standalone first publication may use a caller-owned layout")
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	// A canonical child over the off-layout baseline parent refuses pre-sink.
+	prov := &countingListProvider{inner: fakeProvider{objects: objs}}
+	cfg2 := contConfig(setRoot, "run2", objs, base.Add(time.Hour))
+	cfg2.Source = Source{Provider: prov, ProviderName: "s3"}
+	cfg2.Paths.JournalDir = filepath.Join(setRoot, "attempts", "run2", "journals")
+	_, err = NewRunner(cfg2).Build(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+	require.Contains(t, err.Error(), "captured parent for continuity edge")
+	require.Contains(t, err.Error(), "canonical runs/ root")
+
+	require.Zero(t, prov.lists.Load(), "provider crawl must not start")
+	require.NoDirExists(t, cfg2.Paths.JournalDir)
+	require.NoDirExists(t, filepath.Join(setRoot, "runs", "run2"))
+	latestAfter, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, latestBefore, latestAfter)
+}
+
+// TestBuildRefusesOffLayoutLegacyParentBeforeSinks proves the same parent
+// contract for a verified pre-continuity (no-lineage) parent, because case 2
+// of the three-way rule also emits it as the child's state_parent.
+func TestBuildRefusesOffLayoutLegacyParentBeforeSinks(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	objs := []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}
+
+	// Donor sealed journal from an isolated canonical build of the same
+	// set/run identity.
+	donorRoot := t.TempDir()
+	donorCfg := contConfig(donorRoot, "runL", objs, base)
+	donorSum, err := NewRunner(donorCfg).Build(ctx)
+	require.NoError(t, err)
+	donorSnap, err := indexsubstrate.OpenLatestPublishedSnapshot(filepath.Join(donorRoot, "latest.json"))
+	require.NoError(t, err)
+
+	// Publish a legacy-shaped (no lineage, no state parent) snapshot at an
+	// off-layout locus of the real set root, with latest at the set root.
+	setRoot := t.TempDir()
+	latestPath := filepath.Join(setRoot, "latest.json")
+	legacyDir := filepath.Join(setRoot, "legacy", "runL")
+	lease, err := indexsubstrate.AcquireWriteLease(setRoot, "idx_cont", "legacy-fixture", 0)
+	require.NoError(t, err)
+	_, err = indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
+		IndexSetID:   "idx_cont",
+		RunID:        "runL",
+		RunStartedAt: base,
+		CreatedAt:    base,
+		JournalPaths: donorSum.JournalPaths,
+		Coverage:     donorSnap.Manifest.Coverage,
+		SegmentDir:   filepath.Join(legacyDir, "segments"),
+		ManifestPath: filepath.Join(legacyDir, "manifest.json"),
+		CompletePath: filepath.Join(legacyDir, "complete.json"),
+		LatestPath:   latestPath,
+		WriteLease:   lease,
+	})
+	require.NoError(t, err)
+	require.NoError(t, lease.Release())
+	legacySnap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Nil(t, legacySnap.Manifest.Lineage, "fixture parent must be pre-continuity")
+	require.Nil(t, legacySnap.Manifest.StateParent)
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	// A canonical child over the off-layout legacy parent refuses pre-sink.
+	prov := &countingListProvider{inner: fakeProvider{objects: objs}}
+	cfg2 := contConfig(setRoot, "run2", objs, base.Add(time.Hour))
+	cfg2.Source = Source{Provider: prov, ProviderName: "s3"}
+	cfg2.Paths.JournalDir = filepath.Join(setRoot, "attempts", "run2", "journals")
+	_, err = NewRunner(cfg2).Build(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+	require.Contains(t, err.Error(), "captured parent for continuity edge")
+
+	require.Zero(t, prov.lists.Load(), "provider crawl must not start")
+	require.NoDirExists(t, cfg2.Paths.JournalDir)
+	require.NoDirExists(t, filepath.Join(setRoot, "runs", "run2"))
+	latestAfter, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, latestBefore, latestAfter)
+}
+
+// TestBuildRefusesOffLayoutContinuityTargetBeforeSinks proves an edge-emitting
+// build refuses a new target outside the latest-owned canonical layout before
+// any sink runs, so latest can never advance to a continuity-bearing root the
+// next capture or recovery would reject.
+func TestBuildRefusesOffLayoutContinuityTargetBeforeSinks(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+	objs := []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}
+
+	_, err := NewRunner(contConfig(setRoot, "run1", objs, base)).Build(ctx)
+	require.NoError(t, err)
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	cases := map[string]struct {
+		relocate    func(p *PathConfig)
+		wantMessage string
+	}{
+		"target-foreign-runs-tree": {
+			relocate: func(p *PathConfig) {
+				foreign := filepath.Join(setRoot, "other", "runs", "run2")
+				p.CompletePath = filepath.Join(foreign, "complete.json")
+				p.ManifestPath = filepath.Join(foreign, "manifest.json")
+				p.SegmentDir = filepath.Join(foreign, "segments")
+			},
+			wantMessage: "continuity target",
+		},
+		"target-manifest-outside-run-dir": {
+			relocate: func(p *PathConfig) {
+				p.ManifestPath = filepath.Join(setRoot, "manifest-run2.json")
+			},
+			wantMessage: "continuity target manifest/segment",
+		},
+		"target-segments-outside-run-dir": {
+			relocate: func(p *PathConfig) {
+				p.SegmentDir = filepath.Join(setRoot, "segments-run2")
+			},
+			wantMessage: "continuity target manifest/segment",
+		},
+	}
+	for name, tc := range cases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			prov := &countingListProvider{inner: fakeProvider{objects: objs}}
+			cfg2 := contConfig(setRoot, "run2", objs, base.Add(time.Hour))
+			cfg2.Source = Source{Provider: prov, ProviderName: "s3"}
+			tc.relocate(&cfg2.Paths)
+			cfg2.Paths.JournalDir = filepath.Join(setRoot, "attempts", name, "journals")
+
+			_, err := NewRunner(cfg2).Build(ctx)
+			require.Error(t, err)
+			require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+			require.Contains(t, err.Error(), tc.wantMessage)
+
+			require.Zero(t, prov.lists.Load(), "provider crawl must not start")
+			require.NoDirExists(t, cfg2.Paths.JournalDir)
+			require.NoFileExists(t, cfg2.Paths.CompletePath)
+			require.NoFileExists(t, cfg2.Paths.ManifestPath)
+			require.NoDirExists(t, cfg2.Paths.SegmentDir)
+			latestAfter, err := os.ReadFile(latestPath)
+			require.NoError(t, err)
+			require.Equal(t, latestBefore, latestAfter)
+		})
+	}
+}
+
+// TestPublishedContinuityGraphResolvesViaProductionLookup is the positive
+// graph invariant: after every successful publication shape — first
+// publication, build over a verified pre-continuity (enrich) parent, and
+// continuous extension — the just-published latest resolves through the exact
+// production ancestry lookup, so the writer and resolver path contracts cannot
+// drift apart again.
+func TestPublishedContinuityGraphResolvesViaProductionLookup(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	objs := []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+		obj("data/b.xml", `"b1"`, 2, base),
+	}
+	prov := &listHeadProvider{
+		objects: objs,
+		metas: map[string]*provider.ObjectMeta{
+			"data/a.xml": {ObjectSummary: obj("data/a.xml", `"a1"`, 1, base), ContentType: "application/xml"},
+			"data/b.xml": {ObjectSummary: obj("data/b.xml", `"b1"`, 2, base), ContentType: "text/plain"},
+		},
+	}
+	resolves := func(step string) {
+		snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+		require.NoError(t, err, step)
+		_, err = indexsubstrate.ResolveAncestry(snap, indexsubstrate.AncestryResolveConfig{
+			Lookup: runCompleteLookup(&snap),
+		})
+		require.NoError(t, err, "published latest must resolve via the production lookup: %s", step)
+	}
+
+	// First publication (baseline generation 1).
+	cfg1 := contConfig(setRoot, "run1", objs, base)
+	cfg1.Source = Source{Provider: prov, ProviderName: "s3"}
+	_, err := NewRunner(cfg1).Build(ctx)
+	require.NoError(t, err)
+	resolves("first publication")
+
+	// Verified pre-continuity parent: enrich publishes a no-lineage run, then a
+	// build over it emits that run as a baseline's state_parent (case 2).
+	_, err = indexenrich.Run(ctx, indexenrich.Config{
+		IndexSetID:     "idx_cont",
+		BaseURI:        "s3://bucket/data/",
+		Provider:       prov,
+		SegmentSetRoot: setRoot,
+		JournalRoot:    filepath.Join(setRoot, "enrich-journals"),
+	})
+	require.NoError(t, err)
+	cfg2 := contConfig(setRoot, "run2", objs, base.Add(2*time.Hour))
+	cfg2.Source = Source{Provider: prov, ProviderName: "s3"}
+	_, err = NewRunner(cfg2).Build(ctx)
+	require.NoError(t, err)
+	resolves("build over pre-continuity parent")
+
+	// Continuous extension (generation + 1).
+	cfg3 := contConfig(setRoot, "run3", objs, base.Add(3*time.Hour))
+	cfg3.Source = Source{Provider: prov, ProviderName: "s3"}
+	_, err = NewRunner(cfg3).Build(ctx)
+	require.NoError(t, err)
+	resolves("continuous extension")
 }

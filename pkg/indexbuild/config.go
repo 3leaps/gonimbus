@@ -57,6 +57,16 @@ type MatchConfig struct {
 // app-data path classes. If IndexDBDir is supplied, the engine rejects journal
 // and segment paths below it so callers cannot silently place v2 working state
 // under the legacy SQLite index directory.
+//
+// Continuity layout contract: multi-run continuity requires the canonical
+// latest-owned set layout — CompletePath at
+// <dir(LatestPath)>/runs/<run_id>/complete.json with ManifestPath and
+// SegmentDir contained in that run directory. A standalone first publication
+// (no published latest) may use any caller-owned layout, but it can only be
+// extended — or serve as the state parent of a later run — when it sits at the
+// canonical locus, because continuity edges are recorded pathlessly and the
+// production ancestry lookup rediscovers parents only under the latest-owned
+// runs/ root. Same-run recovery must target the run's exact recorded locus.
 type PathConfig struct {
 	JournalDir   string
 	SegmentDir   string
