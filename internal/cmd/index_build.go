@@ -163,7 +163,7 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
-	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "durable", "Index artifact format to build (durable, sqlite, both)")
+	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "durable", "Index artifact format to build (durable, sqlite, both; both publishes durable and adds run-scoped SQLite parity verification, not a canonical index.db)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(deprecated) alias for --format durable")
 	_ = indexBuildCmd.Flags().MarkHidden("experimental-engine")
 	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
@@ -501,12 +501,48 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		return nil
 	}
 
-	// Canonical SQLite builds use one library-owned validation/binding/open
-	// operation. Explicit external paths retain the caller-owned indexstore
-	// behavior and are never given canonical trust by this adapter.
+	// SQLite target selection depends on format. Canonical `sqlite` builds use
+	// one library-owned validation/binding/open. Canonical `both` publishes
+	// canonical identity through the residue-safe publication guard — never
+	// adopting the shared canonical index.db — and routes its SQLite projection
+	// to a run-scoped verification database, so successive runs never contend
+	// for canonical index.db residue. Explicit external paths (any format)
+	// retain the caller-owned indexstore behavior and are never given canonical
+	// trust.
+	buildFormat := selectedIndexBuildFormat()
 	var db *sql.DB
 	var canonicalTarget *indexreader.SQLiteWriteTarget
-	if resolvedDB.Canonical {
+	if buildFormat == "both" && resolvedDB.Canonical {
+		guard, err := indexreader.OpenSQLiteIdentityPublicationGuard(ctx, indexreader.SQLiteWriteTargetOptions{
+			Path:           resolvedDB.Path,
+			IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
+			SegmentSetRoot: segmentSetRoot,
+			IndexSetID:     identityResult.IndexSetID,
+			Authority:      maintenance.Authority(),
+			MaxMarkerBytes: int64(maxHubMarkerBytes),
+		})
+		if err != nil {
+			return err
+		}
+		if err := guard.PublishIdentity(identityResult); err != nil {
+			return errors.Join(err, guard.Close())
+		}
+		if err := guard.PublishManifest(m); err != nil {
+			return errors.Join(err, guard.Close())
+		}
+		if err := guard.Close(); err != nil {
+			return err
+		}
+		verificationPath, err := bothVerificationDBPath(segmentSetRoot)
+		if err != nil {
+			return err
+		}
+		db, err = indexstore.Open(ctx, indexstore.Config{Path: verificationPath})
+		if err != nil {
+			return fmt.Errorf("open both-format verification database: %w", err)
+		}
+		defer func() { _ = db.Close() }()
+	} else if resolvedDB.Canonical {
 		canonicalTarget, err = indexreader.OpenSQLiteWriteTarget(ctx, indexreader.SQLiteWriteTargetOptions{
 			Path:           resolvedDB.Path,
 			IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
@@ -539,7 +575,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		cfg.Path = resolvedDB.Path
 	}
 
-	if resolvedDB.WriteIdentity {
+	// `both` already published canonical identity through the residue-safe guard
+	// above; the run-scoped verification database carries no canonical trust.
+	if resolvedDB.WriteIdentity && buildFormat != "both" {
 		if canonicalTarget == nil {
 			return fmt.Errorf("canonical metadata publication requires the library-owned SQLite write target")
 		}
@@ -752,7 +790,34 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		canonicalTarget = nil
 	}
 
-	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested)
+	// The verification-projection close is part of the `both` terminal boundary:
+	// the parity claim binds the exact compared projection, so a failed close
+	// (durable already authoritative and visible) emits no successful receipt.
+	var bothVerification *indexBuildBothVerificationRecord
+	if buildFormat == "both" && result.FinalStatus == indexstore.RunStatusSuccess {
+		if compareReport == nil {
+			return fmt.Errorf("both-format parity report missing after success")
+		}
+		if err := db.Close(); err != nil {
+			if store != nil && job != nil {
+				job.State = jobregistry.JobStateFailed
+				ended := time.Now().UTC()
+				job.EndedAt = &ended
+				_ = store.Write(job)
+			}
+			return fmt.Errorf("close both-format verification database: %w", err)
+		}
+		bothVerification = &indexBuildBothVerificationRecord{
+			ProjectionMaterialized: compareReport.SQLiteMaterialized,
+			ProjectionClosed:       true,
+			ObservationRunID:       compareReport.ObservationRunID,
+			ParityPassed:           compareReport.ParityPassed,
+			ProjectionRows:         compareReport.SQLiteRows,
+			ProjectionSHA256:       compareReport.SQLiteProjectionSHA256,
+		}
+	}
+
+	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested, bothVerification)
 	if receiptErr != nil {
 		return receiptErr
 	}
@@ -821,7 +886,7 @@ func emitCommittedIndexBuildJSON(
 	indexSetID, runID, scopeHash string,
 	objectsIngested int64,
 ) error {
-	rec, ok, err := committedIndexBuildResultRecord(format, finalStatus, bothSummary, bothSummaryOK, indexSetID, runID, scopeHash, objectsIngested)
+	rec, ok, err := committedIndexBuildResultRecord(format, finalStatus, bothSummary, bothSummaryOK, indexSetID, runID, scopeHash, objectsIngested, nil)
 	if err != nil || !ok {
 		return err
 	}
@@ -835,6 +900,7 @@ func committedIndexBuildResultRecord(
 	bothSummaryOK bool,
 	indexSetID, runID, scopeHash string,
 	objectsIngested int64,
+	verification *indexBuildBothVerificationRecord,
 ) (indexBuildResultRecord, bool, error) {
 	switch format {
 	case "both":
@@ -844,7 +910,10 @@ func committedIndexBuildResultRecord(
 		if !bothSummaryOK {
 			return indexBuildResultRecord{}, false, fmt.Errorf("build result: both-format summary missing after success")
 		}
-		return newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested), true, nil
+		if verification == nil {
+			return indexBuildResultRecord{}, false, fmt.Errorf("build result: both-format verification evidence missing after success")
+		}
+		return newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested, verification), true, nil
 	case "sqlite":
 		switch finalStatus {
 		case indexstore.RunStatusSuccess, indexstore.RunStatusPartial:
@@ -1994,8 +2063,9 @@ func runCrawlForIndex(
 	crawlPrefixesOverride []string,
 	deltaReport bool,
 ) (*indexBuildResult, error) {
-	// Create provider.
-	prov, err := providerdispatch.NewSource(ctx, &uri.ObjectURI{
+	// Create provider through the shared build-source seam so every index
+	// build format constructs its source identically.
+	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
 		Provider: m.Connection.Provider,
 		Bucket:   m.Connection.Bucket,
 	}, providerdispatch.SourceOptions{

@@ -126,7 +126,7 @@ func TestDurableQuery_CanonicalByETag(t *testing.T) {
 	require.Len(t, out, 2)
 }
 
-func TestSQLiteStillPreferredWhenBothPresent(t *testing.T) {
+func TestDurablePreferredWhenBothPresent(t *testing.T) {
 	ctx := context.Background()
 	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
 		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
@@ -140,7 +140,17 @@ func TestSQLiteStillPreferredWhenBothPresent(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
+	// A verified durable latest outranks the set-root index.db, including for
+	// base-URI targets that discover the set through the identity directory.
 	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
+	require.NoError(t, err)
+	require.Equal(t, FormatDurableV2, reader.Meta().Format)
+	require.NoError(t, reader.Close())
+
+	// Without a durable latest the set keeps its existing SQLite selection.
+	latestPath := filepath.Join(env.segmentRoot, "latest.json")
+	require.NoError(t, os.Rename(latestPath, latestPath+".bak"))
+	reader, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 	require.Equal(t, FormatSQLiteV1, reader.Meta().Format)

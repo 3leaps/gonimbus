@@ -286,6 +286,169 @@ build:
 	require.NotNil(t, snap.Manifest.RunStartedAt)
 }
 
+// TestIndexBuildFormatBothSuccessiveScopedRunsFormDurableContinuity proves the
+// case that used to fail: a second scoped --format both build of the same set
+// no longer contends for canonical index.db residue, extends durable lineage as
+// a continuous child, and passes per-run parity with a run-bound receipt. The
+// same two-run sequence replayed through --format durable in a fresh data root
+// must produce an identical current-state row projection, proving the durable
+// side of `both` is independent of its SQLite verification sink.
+func TestIndexBuildFormatBothSuccessiveScopedRunsFormDurableContinuity(t *testing.T) {
+	base := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: prefix_list
+    prefixes: ["hot/", "cold/"]
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	run1Objects := []provider.ObjectSummary{
+		{Key: "data/hot/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/cold/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	run2Objects := []provider.ObjectSummary{
+		{Key: "data/hot/a.xml", Size: 20, ETag: `"a2"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
+		{Key: "data/hot/a2.xml", Size: 12, ETag: `"n1"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
+	}
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	runBothBuild := func() indexBuildResultRecord {
+		t.Helper()
+		restore()
+		indexBuildJobPath = manifestPath
+		indexBuildFormat = "both"
+		indexBuildJSON = true
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		var stdout strings.Builder
+		cmd.SetOut(&stdout)
+		require.NoError(t, runIndexBuild(cmd, nil))
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		require.Len(t, lines, 2, "compare report then terminal receipt")
+		var report map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[0]), &report))
+		require.Equal(t, true, report["parity_passed"])
+		var rec indexBuildResultRecord
+		require.NoError(t, json.Unmarshal([]byte(lines[1]), &rec))
+		require.Equal(t, "success", rec.Status)
+		require.Equal(t, []string{"durable-v2"}, rec.FormatsCommitted)
+		require.NotNil(t, rec.Verification)
+		require.True(t, rec.Verification.ParityPassed)
+		require.True(t, rec.Verification.ProjectionMaterialized)
+		require.True(t, rec.Verification.ProjectionClosed)
+		require.Equal(t, rec.RunID, rec.Verification.ObservationRunID, "verification must bind the producing run")
+		return rec
+	}
+	currentRows := func(dataRoot string) (indexsubstrate.InternalManifest, map[string]indexbuild.ObjectState, string) {
+		t.Helper()
+		latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+		require.NoError(t, err)
+		require.Len(t, latestFiles, 1)
+		snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestFiles[0])
+		require.NoError(t, err)
+		_, rows, err := indexbuild.ReadLatest(latestFiles[0])
+		require.NoError(t, err)
+		byKey := map[string]indexbuild.ObjectState{}
+		for _, r := range rows {
+			byKey[r.RelKey] = r
+		}
+		return snap.Manifest, byKey, latestFiles[0]
+	}
+
+	// --- both path: two successive scoped runs in one data root, no cleanup ---
+	resetAppDataRootTestState(t)
+	bothRoot := filepath.Join(t.TempDir(), "gonimbus-data-both")
+	t.Setenv("GONIMBUS_DATA_DIR", bothRoot)
+
+	prov.objects = run1Objects
+	rec1 := runBothBuild()
+	manifest1, _, latestPath := currentRows(bothRoot)
+	require.NotNil(t, manifest1.Lineage)
+	require.True(t, manifest1.Lineage.Baseline)
+
+	// Shape 2: no canonical consumer index.db is created by `both`; canonical
+	// identity is published; the SQLite side lives on run-scoped verification
+	// paths (one per run, discoverable residue, never adopted).
+	dbGlobs, err := filepath.Glob(filepath.Join(bothRoot, "indexes", "idx_*", "index.db"))
+	require.NoError(t, err)
+	require.Empty(t, dbGlobs, "both must not create a canonical index.db")
+	identityGlobs, err := filepath.Glob(filepath.Join(bothRoot, "indexes", "idx_*", "identity.json"))
+	require.NoError(t, err)
+	require.Len(t, identityGlobs, 1)
+
+	prov.objects = run2Objects
+	rec2 := runBothBuild()
+	require.NotEqual(t, rec1.RunID, rec2.RunID)
+	require.Equal(t, rec1.IndexSetID, rec2.IndexSetID)
+
+	manifest2, bothByKey, _ := currentRows(bothRoot)
+	require.NotNil(t, manifest2.Lineage)
+	require.False(t, manifest2.Lineage.Baseline, "second scoped both build is a continuous child")
+	require.Equal(t, 2, manifest2.Lineage.Generation)
+	require.NotNil(t, manifest2.StateParent)
+	require.Equal(t, rec1.RunID, manifest2.StateParent.RunID)
+	require.Equal(t, `"a2"`, bothByKey["hot/a.xml"].ETag)
+	require.Nil(t, bothByKey["hot/a.xml"].DeletedAt)
+	require.Nil(t, bothByKey["hot/a2.xml"].DeletedAt)
+	require.NotNil(t, bothByKey["cold/b.xml"].DeletedAt, "unobserved in-plan key must be tombstoned")
+
+	verificationDBs, err := filepath.Glob(filepath.Join(bothRoot, "cache", "segments", "*", "verification", "run_*", "index.db"))
+	require.NoError(t, err)
+	require.Len(t, verificationDBs, 2, "one run-scoped verification projection per both run")
+	_ = latestPath
+
+	// --- durable-only twin: identical two-run sequence in a fresh data root ---
+	resetAppDataRootTestState(t)
+	durableRoot := filepath.Join(t.TempDir(), "gonimbus-data-durable")
+	t.Setenv("GONIMBUS_DATA_DIR", durableRoot)
+	runDurableBuild := func() {
+		t.Helper()
+		restore()
+		indexBuildJobPath = manifestPath
+		indexBuildFormat = "durable"
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		cmd.SetOut(&strings.Builder{})
+		require.NoError(t, runIndexBuild(cmd, nil))
+	}
+	prov.objects = run1Objects
+	runDurableBuild()
+	prov.objects = run2Objects
+	runDurableBuild()
+
+	durableManifest, durableByKey, _ := currentRows(durableRoot)
+	require.Equal(t, manifest2.Counts, durableManifest.Counts)
+	require.Equal(t, manifest2.Lineage.Generation, durableManifest.Lineage.Generation)
+	require.Equal(t, len(bothByKey), len(durableByKey))
+	for key, want := range durableByKey {
+		got, ok := bothByKey[key]
+		require.True(t, ok, "row %s missing from both-path state", key)
+		require.Equal(t, want.SizeBytes, got.SizeBytes, key)
+		require.Equal(t, want.ETag, got.ETag, key)
+		require.Equal(t, want.DeletedAt == nil, got.DeletedAt == nil, key)
+	}
+}
+
 func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
 	report := indexBuildBothFormatsFailureReport(nil, nil, resolvedIndexDB{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
 	require.Equal(t, "gonimbus.index.compare_result.v1", report.Type)

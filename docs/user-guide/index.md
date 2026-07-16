@@ -54,18 +54,19 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 
 ### Artifact formats
 
-| Format                | Build flag         | What it produces                                           | Local consumers today                                                                |
-| --------------------- | ------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare       |
-| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                  | All local consumers including **`gc`**, `--since-run`, full `--resume-run` lifecycle |
-| **both**              | `--format both`    | Dual-build + parity report for migration validation        | Both surfaces for the same crawl (SQLite preferred when `index.db` exists)           |
+| Format                | Build flag         | What it produces                                            | Local consumers today                                                                 |
+| --------------------- | ------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare        |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers including **`gc`**, `--since-run`, full `--resume-run` lifecycle  |
+| **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB |
 
 Durable is now the default index artifact format. SQLite remains an explicit
 compatibility/transition mode. Durable hydrate restores `manifest.json` +
 segments, **not** `index.db`. Format-aware local consumers work on durable-only
-sets; keep `--format sqlite` or `both` when you still need **`gc`**,
+sets; keep `--format sqlite` when you still need **`gc`**,
 **`query --since-run`**, **`stats --prefixes`**, or full **`--resume-run`**
-checkpoint recovery.
+checkpoint recovery. `both` does not produce a canonical `index.db`; when both
+substrates exist for a set, readers prefer the verified durable snapshot.
 
 See [Durable Index Format](durable-index.md) for the full migration map, green
 parity semantics, hub round-trip, segment packing defaults, and internal-render
@@ -446,16 +447,15 @@ source rebuild:
 1. Stop every Gonimbus process using that data root. Preserve the entire
    affected `indexes/idx_*` directory by **moving the whole directory** to a
    backup location outside the configured data root. A backup copy is not
-   sufficient: SQLite/both builds refuse an existing canonical `index.db`
+   sufficient: canonical SQLite builds refuse an existing canonical `index.db`
    whose valid matching marker is absent. Do not copy or open only `index.db`,
    and do not discard transaction sidecars from an artifact that may have been
    active.
 2. Rerun the original index manifest against the source with the required
    format, for example
-   `gonimbus index build --job index-manifest.yaml --format sqlite` (or
-   `--format both`). The build path takes stable whole-set authority and
-   publishes a new database and `identity.json`; this is a rebuild, not an
-   adoption of the old database.
+   `gonimbus index build --job index-manifest.yaml --format sqlite`. The build
+   path takes stable whole-set authority and publishes a new database and
+   `identity.json`; this is a rebuild, not an adoption of the old database.
 3. Require `gonimbus index list --json` to report `"identity_status": "ok"`,
    then run `gonimbus index doctor` before retiring the preserved backup under
    the operator's retention policy.
@@ -592,9 +592,10 @@ Compare index artifacts.
 gonimbus index build --job index-manifest.yaml --format both
 ```
 
-That single crawl materializes SQLite and durable artifacts and emits a
-`gonimbus.index.compare_result.v1` report. Green parity certifies LIST-projection
-fidelity only — not reflow readiness. See
+That single crawl publishes the durable artifact, materializes a run-scoped
+SQLite verification projection, and emits a `gonimbus.index.compare_result.v1`
+report. Green parity certifies LIST-projection fidelity only — not reflow
+readiness — and does not commit a consumer `index.db`. See
 [Durable Index Format](durable-index.md#dual-format-parity) and
 [Index Compare Projection v1](../architecture/index-compare-projection-v1.md).
 

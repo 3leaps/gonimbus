@@ -125,7 +125,7 @@ func TestDurableBuildRetainsExistingCanonicalProofThroughIdentityPublication(t *
 	restore := withIndexBuildExperimentalEngineTestState(t)
 	restore()
 	indexBuildJobPath = manifestPath
-	indexBuildFormat = "both"
+	indexBuildFormat = "sqlite"
 	runBuild := func() error {
 		cmd := &cobra.Command{Use: "build"}
 		cmd.SetContext(context.Background())
@@ -349,9 +349,9 @@ func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
 	restore := withIndexBuildExperimentalEngineTestState(t)
 	restore()
 	indexBuildJobPath = manifestPath
-	// The dual-format rebuild uses the injected engine source while still
-	// publishing the canonical SQLite compatibility artifact and identity.
-	indexBuildFormat = "both"
+	// The canonical SQLite build publishes the consumer index.db and identity;
+	// `both` no longer commits a canonical SQLite artifact.
+	indexBuildFormat = "sqlite"
 	indexBuildJSON = true
 	runBuild := func() error {
 		cmd := &cobra.Command{Use: "build"}
@@ -378,6 +378,7 @@ func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
 	require.NoError(t, err)
 	segmentRoot := filepath.Join(dataRoot, "cache", "segments", setID)
 	journalRoot := filepath.Join(dataRoot, "journals", "crawl", setID)
+	require.NoError(t, os.MkdirAll(segmentRoot, 0o700))
 	require.NoError(t, os.MkdirAll(journalRoot, 0o700))
 	identityBefore := snapshotIndexGCTreeState(t, identityDir)
 	segmentBefore := snapshotIndexGCTreeState(t, segmentRoot)
@@ -428,7 +429,7 @@ func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
 	backupBytes, err := os.ReadFile(filepath.Join(backupDir, "index.db"))
 	require.NoError(t, err)
 	require.Equal(t, before, backupBytes)
-	indexBuildFormat = "both"
+	indexBuildFormat = "sqlite"
 	indexBuildDBPath = ""
 	require.NoError(t, runBuild())
 	require.Greater(t, providerCalls, 0)
@@ -590,11 +591,11 @@ func TestIndexDoctorDurableOnly(t *testing.T) {
 	require.Equal(t, true, entries[0]["identity_ok"])
 }
 
-func TestPreferListedIndexesPrefersSQLite(t *testing.T) {
+func TestPreferListedIndexesPrefersDurable(t *testing.T) {
 	listed := []indexreader.ListedIndex{
-		{Meta: indexreader.Meta{IndexSetID: "idx_a", Format: indexreader.FormatDurableV2, SourcePath: "/d/latest.json"}},
 		{Meta: indexreader.Meta{IndexSetID: "idx_a", Format: indexreader.FormatSQLiteV1, SourcePath: "/s/index.db"}},
-		{Meta: indexreader.Meta{IndexSetID: "idx_b", Format: indexreader.FormatDurableV2, SourcePath: "/d2/latest.json"}},
+		{Meta: indexreader.Meta{IndexSetID: "idx_a", Format: indexreader.FormatDurableV2, SourcePath: "/d/latest.json"}},
+		{Meta: indexreader.Meta{IndexSetID: "idx_b", Format: indexreader.FormatSQLiteV1, SourcePath: "/s2/index.db"}},
 	}
 	got := preferListedIndexes(listed)
 	require.Len(t, got, 2)
@@ -602,8 +603,8 @@ func TestPreferListedIndexesPrefersSQLite(t *testing.T) {
 	for _, g := range got {
 		byID[g.Meta.IndexSetID] = g.Meta.Format
 	}
-	require.Equal(t, indexreader.FormatSQLiteV1, byID["idx_a"])
-	require.Equal(t, indexreader.FormatDurableV2, byID["idx_b"])
+	require.Equal(t, indexreader.FormatDurableV2, byID["idx_a"])
+	require.Equal(t, indexreader.FormatSQLiteV1, byID["idx_b"])
 }
 
 // Doctor must inspect durable even when sqlite also exists for the same set.
@@ -641,7 +642,17 @@ build:
 	restore := withIndexBuildExperimentalEngineTestState(t)
 	restore()
 	indexBuildJobPath = manifestPath
-	indexBuildFormat = "both"
+	// `both` no longer commits a canonical SQLite artifact, so a genuine
+	// dual-substrate set is two separate builds: canonical SQLite, then durable.
+	indexBuildFormat = "sqlite"
+	require.NoError(t, runIndexBuild(&cobra.Command{Use: "build"}, nil))
+	// Exact-epoch cleanup retains discoverable quarantine captures that block
+	// later canonical adoption until recovery. Multi-step fixtures clear
+	// temp-dir residue only (not a production API).
+	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
 	require.NoError(t, runIndexBuild(&cobra.Command{Use: "build"}, nil))
 
 	// Corrupt durable latest pointer type so trust fails while sqlite remains healthy.
@@ -663,7 +674,7 @@ build:
 			durable = e
 		}
 	}
-	require.True(t, formats["sqlite-v1"], "doctor must still report sqlite for format-both")
+	require.True(t, formats["sqlite-v1"], "doctor must still report sqlite when durable shares the set")
 	require.True(t, formats["durable-v2"], "doctor must not suppress durable when sqlite exists")
 	require.NotNil(t, durable)
 	require.Equal(t, false, durable["durable_marker_ok"])
@@ -874,7 +885,12 @@ func TestIndexDoctorMissingLatestOnExistingSegmentSet(t *testing.T) {
 	require.Equal(t, false, entries[0]["durable_marker_ok"])
 }
 
-func TestIndexDoctorDetailRequiresFormatForBoth(t *testing.T) {
+// TestIndexDoctorDetailForBothResolvesDurableRefusesSQLite proves the Shape 2
+// contract: a --format both build publishes durable as the canonical store and
+// no canonical SQLite consumer artifact. Doctor resolves durable without
+// --format, serves explicit durable-v2 detail, and refuses an explicit
+// sqlite-v1 selection.
+func TestIndexDoctorDetailForBothResolvesDurableRefusesSQLite(t *testing.T) {
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
 	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
@@ -923,13 +939,17 @@ build:
 	setID := filepath.Base(filepath.Dir(latestFiles[0]))
 	_ = receipt
 
-	// Without --format, detail fails closed on dual substrates.
-	_, _, err = executeIndexDoctorCommand(t, "--detail", setID[:16])
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--format")
+	// Shape 2: `both` publishes durable as the canonical store and routes SQLite
+	// to a run-scoped verification projection, so no canonical index.db sits
+	// beside the durable latest. Doctor resolves durable without --format.
+	stdout, stderr, err := executeIndexDoctorCommand(t, "--detail", setID[:16])
+	require.NoError(t, err, stderr)
+	var autoDetail map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &autoDetail))
+	require.Equal(t, "durable-v2", autoDetail["format"])
 
-	// Durable detail retains identity directory metadata.
-	stdout, stderr, err := executeIndexDoctorCommand(t, "--detail", "--format", "durable-v2", setID[:16])
+	// Explicit durable detail retains identity directory metadata.
+	stdout, stderr, err = executeIndexDoctorCommand(t, "--detail", "--format", "durable-v2", setID[:16])
 	require.NoError(t, err, stderr)
 	var detail map[string]any
 	require.NoError(t, json.Unmarshal([]byte(stdout), &detail))
@@ -937,15 +957,16 @@ build:
 	require.Equal(t, true, detail["identity_present"])
 	require.NotEmpty(t, detail["identity_path"])
 
-	// Exact-epoch cleanup retains discoverable quarantine captures that block
-	// later SQLite readers until recovery. Multi-step fixtures clear temp-dir
-	// residue only (not a production API).
+	// Clear any run-scoped verification-projection residue left under the data
+	// root (temp-dir fixture cleanup only, not a production API).
 	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
 
-	stdout, stderr, err = executeIndexDoctorCommand(t, "--detail", "--format", "sqlite-v1", setID[:16])
-	require.NoError(t, err, stderr)
-	require.NoError(t, json.Unmarshal([]byte(stdout), &detail))
-	require.Equal(t, "sqlite-v1", detail["format"])
+	// Shape 2: `both` commits no canonical SQLite consumer artifact, so an
+	// explicit pinned sqlite-v1 selection refuses rather than resolving a stale
+	// or verification-only database. Use --format sqlite for a canonical SQLite.
+	_, _, err = executeIndexDoctorCommand(t, "--detail", "--format", "sqlite-v1", setID[:16])
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sqlite-v1")
 }
 
 func TestBoundedIdentityReadRejectsOversized(t *testing.T) {

@@ -30,8 +30,10 @@ func indexSetHexMatches(storedHex, wantHex string) bool {
 // ResolveIndexReader opens a format-aware reader for the target.
 //
 // Dispatch is marker-authoritative:
-//   - index.db present → sqlite-v1 (preferred when both formats exist)
-//   - else durable latest+complete+manifest trust chain → durable-v2
+//   - durable latest+complete+manifest trust chain → durable-v2 (preferred when
+//     both formats exist for the same set; a set-root index.db beside a
+//     verified durable latest may be a stale artifact from an earlier run)
+//   - else index.db present → sqlite-v1
 //   - absent/unknown/malformed markers → reject (no layout guessing)
 //
 // When target.RunID is set, dispatch is pin-mode: durable-v2 only, via the run
@@ -214,6 +216,16 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 				c.meta.Provider = identity.Provider
 			}
 			out = append(out, c)
+			// A trusted SQLite candidate may sit beside a verified durable
+			// latest for the same set (legacy dual-format layout). Surface the
+			// durable sibling too so preference can rank it; base-URI targets
+			// never reach segment-cache discovery on their own.
+			if opts.SegmentCacheRoot != "" && isFullIndexSetID(identity.IndexSetID) {
+				latest := filepath.Join(opts.SegmentCacheRoot, identity.IndexSetID, "latest.json")
+				if sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identity); siblingErr == nil {
+					out = append(out, sibling)
+				}
+			}
 			continue
 		}
 
@@ -502,7 +514,10 @@ func openCandidate(ctx context.Context, opts ResolveOptions, c candidate) (Reade
 }
 
 func selectPreferredCandidate(candidates []candidate) *candidate {
-	// Prefer sqlite when both formats for the same set are present.
+	// Prefer durable when both formats for the same set are present: a durable
+	// candidate only exists behind a verified latest trust chain, while a
+	// set-root index.db may be a stale artifact from an earlier run. Sets with
+	// no durable candidate keep their existing SQLite selection.
 	bySet := map[string][]candidate{}
 	for _, c := range candidates {
 		bySet[c.meta.IndexSetID] = append(bySet[c.meta.IndexSetID], c)
@@ -515,7 +530,7 @@ func selectPreferredCandidate(candidates []candidate) *candidate {
 		only = list
 	}
 	for i := range only {
-		if only[i].meta.Format == FormatSQLiteV1 {
+		if only[i].meta.Format == FormatDurableV2 {
 			return &only[i]
 		}
 	}

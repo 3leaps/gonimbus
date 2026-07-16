@@ -108,7 +108,9 @@ As of v0.4.0, durable-v2 is the **default** index build format. The durable path
 writes immutable segment snapshots behind an internal manifest. Internal
 manifests may expose exact segment shape metadata needed for engine validation,
 including segment key ranges, tombstone counts, and artifact-level ETag counts.
-SQLite remains an explicit compatibility path (`--format sqlite` or `both`).
+SQLite remains an explicit compatibility path (`--format sqlite`); `--format
+both` publishes durable and builds a run-scoped SQLite projection only as
+per-run parity verification.
 
 Durable snapshots store segment files in a shared immutable segment namespace.
 Phase 1 manifests carry parent manifest references and an explicit reachability
