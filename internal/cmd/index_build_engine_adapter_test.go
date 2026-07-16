@@ -385,6 +385,106 @@ build:
 	require.Equal(t, []string{"cold/", "hot/"}, got)
 }
 
+func TestIndexBuildFormatDurableRepeatedScopeContinuityMergesCoverage(t *testing.T) {
+	// Repeated exact static scope through the CLI adapter: the second scoped
+	// build of the same identity extends the first as a continuous child,
+	// applies add/change/delete inside the attested plan, and publishes
+	// coverage equal to the plan on every generation.
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: prefix_list
+    prefixes: ["hot/", "cold/"]
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+
+	prov := &countingIndexBuildProvider{objects: []provider.ObjectSummary{
+		{Key: "data/hot/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/cold/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
+	}}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	runBuild := func() {
+		t.Helper()
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		require.NoError(t, runIndexBuild(cmd, nil))
+	}
+	runBuild()
+
+	latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, latestFiles, 1)
+	latestPath := latestFiles[0]
+	snap1, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.True(t, snap1.Manifest.Lineage.Baseline)
+
+	// Second build of the same scoped identity: hot/a changed, hot/a2 added,
+	// cold/b deleted (in-plan -> tombstone).
+	prov.objects = []provider.ObjectSummary{
+		{Key: "data/hot/a.xml", Size: 20, ETag: `"a2"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
+		{Key: "data/hot/a2.xml", Size: 12, ETag: `"n1"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
+	}
+	runBuild()
+
+	snap2, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.NotNil(t, snap2.Manifest.Lineage)
+	require.False(t, snap2.Manifest.Lineage.Baseline, "second scoped build is a continuous child")
+	require.Equal(t, 2, snap2.Manifest.Lineage.Generation)
+	require.NotNil(t, snap2.Manifest.StateParent)
+	require.Equal(t, snap1.Complete.RunID, snap2.Manifest.StateParent.RunID)
+
+	_, rows, err := indexbuild.ReadLatest(latestPath)
+	require.NoError(t, err)
+	byKey := map[string]indexbuild.ObjectState{}
+	for _, r := range rows {
+		byKey[r.RelKey] = r
+	}
+	require.Equal(t, `"a2"`, byKey["hot/a.xml"].ETag)
+	require.Nil(t, byKey["hot/a.xml"].DeletedAt)
+	require.Nil(t, byKey["hot/a2.xml"].DeletedAt)
+	require.NotNil(t, byKey["cold/b.xml"].DeletedAt, "unobserved in-plan key must be tombstoned")
+
+	// Coverage on generation 2 equals the plan exactly (never rolled up).
+	got := make([]string, 0, len(snap2.Manifest.Coverage))
+	for _, entry := range snap2.Manifest.Coverage {
+		require.NotNil(t, entry.Scope)
+		require.Nil(t, entry.Scope.Window)
+		require.True(t, entry.Complete)
+		got = append(got, entry.Scope.Prefix)
+	}
+	sort.Strings(got)
+	require.Equal(t, []string{"cold/", "hot/"}, got)
+}
+
 func TestIndexBuildFormatBothRejectsScopePlusMatchExcludes(t *testing.T) {
 	// Scope-relax must not open the match-predicate door.
 	resetAppDataRootTestState(t)

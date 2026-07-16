@@ -780,6 +780,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if err := validatePaths(cfg.Paths); err != nil {
 		return Config{}, err
 	}
+	// Coverage authorizes tombstones over verified-parent rows, so a supplied
+	// crawl-prefix plan and the coverage attestation must agree exactly before
+	// any event, sink, or crawl side effect.
+	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, cfg.CrawlPrefixes, cfg.Coverage); err != nil {
+		return Config{}, err
+	}
 	cfg.IndexSetID = strings.TrimSpace(cfg.IndexSetID)
 	cfg.RunID = strings.TrimSpace(cfg.RunID)
 	cfg.BaseURI = strings.TrimSpace(cfg.BaseURI)

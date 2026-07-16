@@ -445,8 +445,10 @@ func indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, i
 // crawl prefix. Never roll up to a parent/base prefix.
 //
 // The engine streams prior state from the verified parent (caller PriorRows is
-// refused). Coverage merge for scope-reduced builds is not yet active; scoped
-// incremental tombstone soundness needs re-review when it lands.
+// refused) and merges coverage: prior rows outside this plan are retained and
+// tombstones require the current confirmed-complete attestation. The engine
+// independently re-checks coverage↔plan set equality before any side effect,
+// so this derivation and that gate are defense in depth, not one control.
 func indexBuildEngineCoverageFromCrawl(basePrefix string, crawlPrefixes []string) ([]indexbuild.CoverageAttestation, error) {
 	coverage, err := deriveIndexBuildCoverageFromCrawlPrefixes(basePrefix, crawlPrefixes)
 	if err != nil {

@@ -132,6 +132,13 @@ portable content hash. See
 prefix must be attested, with no silent roll-up. That is what makes a
 date-partitioned cohort safe to dual-build at scale.
 
+Repeated builds of the same scoped identity merge coverage against the
+verified parent: prior rows outside the current run's attested plan are
+retained verbatim (including their first-seen lineage, HEAD enrichment, and
+existing tombstones), and deletes are inferred only for keys inside the
+current confirmed-complete attestation. The published coverage still lists
+exactly the crawled plan — retained rows carry no fresh observation claim.
+
 Some dual-format combinations remain intentionally closed in this cut (for
 example `--format both` with `--since` or non-default match filters).
 Background execution is supported for `sqlite`, `durable`, and `both`; the

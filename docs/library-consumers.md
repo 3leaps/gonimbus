@@ -281,8 +281,11 @@ Embedding contract highlights:
   Callers construct a `pkg/provider` handle and pass it as `Config.Source`.
 - **Plan input is explicit.** Optional `Config.CrawlPrefixes` is the exact
   provider-prefix observation plan (the library form of a compiled
-  `build.scope`). Faithful-coverage publication expects coverage attestations
-  to match that plan.
+  `build.scope`). When it is supplied, `Build` refuses — before any crawl or
+  sink side effect — coverage attestations that do not match that plan exactly
+  (set equality; no roll-up, extra, missing, duplicate, or windowed entries),
+  because coverage authorizes tombstones over rows loaded from the verified
+  parent. Prior rows outside the attested plan are retained verbatim.
 - **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
   journal/segment/manifest locations resolved by the adapter. The engine
   rejects journal/segment paths under a supplied `IndexDBDir` so v2 working

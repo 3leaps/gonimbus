@@ -8,8 +8,11 @@ current-state row set is never materialized in memory. The committed
 row/artifact/digest contract is identical to the previous materialized
 `Compact` → `WriteSegmentSet` path.
 
-**Does not** (true boundaries): enable timestamp-scoped incremental builds,
-merge coverage for scope-reduced builds, or raise enrich scale ceilings. For
+**Does not** (true boundaries): enable timestamp-scoped incremental builds or
+raise enrich scale ceilings. Tombstoning while draining is coverage-gated
+(scope-reduced coverage merge): an unobserved active parent row is tombstoned
+only when the current run's confirmed-complete coverage contains its key;
+parent rows outside that coverage pass through verbatim. For
 ordinary durable builds the parent source streams the verified same-set
 parent's published rows (a bounded pull reader over its segments); the enrich
 path still supplies its already-loaded prior rows as a slice. Lineage emission

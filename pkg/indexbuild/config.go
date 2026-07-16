@@ -154,6 +154,10 @@ type Config struct {
 	// CrawlPrefixes, when supplied, is the exact provider-prefix observation
 	// plan. It lets CLI adapters pass a manifest scope plan into the engine
 	// without making the engine import manifest or command packages.
+	// When set, Coverage must equal this plan exactly (per-prefix set equality,
+	// no roll-up/extra/missing/windowed entries) or Build refuses before any
+	// side effect: coverage authorizes tombstones over rows loaded from the
+	// verified parent, and prior rows outside the attested plan are retained.
 	CrawlPrefixes []string
 	// ObservationSinks receive the same observed crawl stream as the durable
 	// journal materializer. This is the library-owned fanout boundary used by

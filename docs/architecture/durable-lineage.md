@@ -4,8 +4,8 @@
 load verified parent state
 
 **Does not**: enable durable `--since` / `--since-run` (timestamp-scoped
-reduction), merge coverage for scope-reduced builds, raise enrich scale
-ceilings, or make the SQLite index a lineage authority
+reduction), raise enrich scale ceilings, or make the SQLite index a lineage
+authority
 
 ## Purpose
 
@@ -88,15 +88,15 @@ byte hash, no depth budget).
 
 ## Activation status (current product behavior)
 
-| Path                                       | Behavior                                                                                                                                                                                                                                                    |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Production `PublishSnapshot`               | **Active** — persists `run_started_at`, digest-bound `state_parent`, and `lineage` supplied by the durable build path                                                                                                                                       |
-| Durable/`both` build adapter               | **Active** — ordinary builds stream the verified same-set parent's rows from a single lease-held capture (caller `PriorRows` refused) and derive the three-way baseline/generation rule; `both` derives durable lineage independently of the SQLite sidecar |
-| Ancestry validation                        | **Active** — a continuous parent's bounded ancestry is verified before extension and before a same-run recovery re-publish; defects fail closed without advancing latest                                                                                    |
-| Durable `--since` / `--since-run`          | Unsupported (timestamp-scoped reduction is not activated)                                                                                                                                                                                                   |
-| Scope-reduced coverage merge               | Not activated — a scope-reduced build does not yet retain out-of-scope prior rows under merged coverage                                                                                                                                                     |
-| Enrich publish                             | Pre-continuity (no lineage emission on the enrich path); enrich scale ceiling unchanged                                                                                                                                                                     |
-| Canonical authority / whole-set GC execute | Untouched by this schema                                                                                                                                                                                                                                    |
+| Path                                       | Behavior                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production `PublishSnapshot`               | **Active** — persists `run_started_at`, digest-bound `state_parent`, and `lineage` supplied by the durable build path                                                                                                                                                                                                                                                                                        |
+| Durable/`both` build adapter               | **Active** — ordinary builds stream the verified same-set parent's rows from a single lease-held capture (caller `PriorRows` refused) and derive the three-way baseline/generation rule; `both` derives durable lineage independently of the SQLite sidecar                                                                                                                                                  |
+| Ancestry validation                        | **Active** — a continuous parent's bounded ancestry is verified before extension and before a same-run recovery re-publish; defects fail closed without advancing latest                                                                                                                                                                                                                                     |
+| Durable `--since` / `--since-run`          | Unsupported (timestamp-scoped reduction is not activated)                                                                                                                                                                                                                                                                                                                                                    |
+| Scope-reduced coverage merge               | **Active** — a build whose crawl-prefix plan covers only part of the parent's rows retains every out-of-coverage prior row verbatim (state, first-seen lineage, HEAD enrichment, existing tombstones) and tombstones only keys inside the current confirmed-complete attestation; published coverage equals the crawl plan exactly (fail-closed set equality — never rolled up toward the parent's coverage) |
+| Enrich publish                             | Pre-continuity (no lineage emission on the enrich path); enrich scale ceiling unchanged                                                                                                                                                                                                                                                                                                                      |
+| Canonical authority / whole-set GC execute | Untouched by this schema                                                                                                                                                                                                                                                                                                                                                                                     |
 
 `SegmentWriterConfig` carries the lineage fields the publish path supplies. The
 writer validates the caller-supplied `run_started_at` **before** any UTC
@@ -106,7 +106,6 @@ refuse as `lineage_invalid_time` and do not create segment artifacts).
 ## Explicit non-goals
 
 - Enabling durable `--since` / `--since auto` / `--since-run`
-- Merging coverage for scope-reduced builds (retaining out-of-scope prior rows)
 - Reachability delete driven by new edges
 - Backfilling history onto legacy artifacts
 - Treating the SQLite index as a lineage authority
