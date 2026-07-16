@@ -108,6 +108,17 @@ func validateCoverageMatchesCrawlPlan(baseURI string, crawlPrefixes []string, co
 		if entry.Scope.Window != nil {
 			return fmt.Errorf("coverage[%d] must not set a temporal window under a crawl prefix plan", i)
 		}
+		// Eligibility must be enforced here, before side effects — not deferred to
+		// the publication gate after a crawl and journal already ran. An
+		// exact-prefix but inferred / incomplete / gapped attestation would
+		// otherwise pass this gate, crawl, and seal a journal before publication
+		// rejects it.
+		if entry.Basis != CoverageBasisConfirmed || !entry.Complete {
+			return fmt.Errorf("coverage[%d] must be confirmed and complete under a crawl prefix plan", i)
+		}
+		if len(entry.Gaps) > 0 {
+			return fmt.Errorf("coverage[%d] must not declare gaps under a crawl prefix plan", i)
+		}
 		key, err := normalizeCoveragePrefix(basePrefix, entry.Scope.Prefix)
 		if err != nil {
 			return err

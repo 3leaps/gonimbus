@@ -222,7 +222,14 @@ type RetryConfig struct {
 	BaseURI      string
 	Paths        PathConfig
 	JournalPaths []string
-	Coverage     []CoverageAttestation
+	// Coverage is destructive authority over verified-parent rows: a
+	// confirmed-complete scope tombstones unobserved parent keys under it. Public
+	// Retry does not trust this field on its own — it derives the observation
+	// plan from the sealed journal headers (`crawl_prefixes`) and requires
+	// Coverage to match that plan exactly, so a recovery cannot widen the
+	// tombstone universe beyond what the crawl observed. Journals without a
+	// recorded plan (pre-provenance) fail closed.
+	Coverage []CoverageAttestation
 	// PriorRows is retained only for source compatibility and is NOT an accepted
 	// input: public Retry rejects any non-nil value (including an empty non-nil
 	// slice) before side effects. Durable prior state is loaded from the verified

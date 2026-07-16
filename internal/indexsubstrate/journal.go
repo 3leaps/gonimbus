@@ -44,12 +44,20 @@ type Window struct {
 }
 
 type JournalHeader struct {
-	Type               string    `json:"type"`
-	JournalID          string    `json:"journal_id"`
-	IndexSetID         string    `json:"index_set_id"`
-	RunID              string    `json:"run_id"`
-	Shard              string    `json:"shard"`
-	Scope              *Scope    `json:"scope,omitempty"`
+	Type       string `json:"type"`
+	JournalID  string `json:"journal_id"`
+	IndexSetID string `json:"index_set_id"`
+	RunID      string `json:"run_id"`
+	Shard      string `json:"shard"`
+	Scope      *Scope `json:"scope,omitempty"`
+	// CrawlPrefixes records the canonical provider-key prefix plan whose complete
+	// observation this journal attests. It is sealed observation provenance: on a
+	// recovery re-publish, coverage authorizes tombstones over verified-parent
+	// rows, so public Retry validates its caller-supplied coverage against this
+	// plan — a recovery cannot widen the tombstone universe beyond what the crawl
+	// actually observed. Absent on legacy (pre-provenance) journals; recovery over
+	// such a journal fails closed rather than trusting caller coverage.
+	CrawlPrefixes      []string  `json:"crawl_prefixes,omitempty"`
 	IndexSchemaVersion int       `json:"index_schema_version"`
 	StartedAt          time.Time `json:"started_at"`
 }

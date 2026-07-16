@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,16 +89,24 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
+	// The sealed journal records the canonical observation plan so a later
+	// recovery re-publish can bind its coverage authority to what was actually
+	// crawled (scoped plan, or the full base prefix when unscoped).
+	journalPlan, err := journalCrawlPlan(basePrefix, cfg.CrawlPrefixes)
+	if err != nil {
+		return Summary{}, err
+	}
 	journalPath := filepath.Join(cfg.Paths.JournalDir, "shard-0001.jsonl")
 	writer, err := newJournalWriter(journalWriterConfig{
-		Path:       journalPath,
-		IndexSetID: cfg.IndexSetID,
-		RunID:      cfg.RunID,
-		StartedAt:  cfg.RunStartedAt,
-		BaseURI:    cfg.BaseURI,
-		BasePrefix: basePrefix,
-		Now:        cfg.Clock,
-		Events:     cfg.Events,
+		Path:          journalPath,
+		IndexSetID:    cfg.IndexSetID,
+		RunID:         cfg.RunID,
+		StartedAt:     cfg.RunStartedAt,
+		BaseURI:       cfg.BaseURI,
+		BasePrefix:    basePrefix,
+		CrawlPrefixes: journalPlan,
+		Now:           cfg.Clock,
+		Events:        cfg.Events,
 	})
 	if err != nil {
 		return Summary{}, err
@@ -218,6 +227,20 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 	// boundary contract as Build's pre-crawl check).
 	if err := plan.preflightContinuityLayout(cfg.RunID, cfg.Paths); err != nil {
 		return Summary{}, err
+	}
+	// Bind coverage authority to sealed-journal provenance before any publish
+	// side effect. Coverage authorizes tombstones over the verified-parent rows,
+	// so the plan it must match comes from the journals (what was actually
+	// observed), never from a caller field that could widen both plan and
+	// coverage together. Legacy journals without a recorded plan fail closed.
+	// Runs after capture/authority so wrong-set and stale-parent refusals keep
+	// priority; no publish artifact exists yet, so latest stays byte-identical.
+	boundPlan, err := boundCrawlPlanFromJournals(cfg.JournalPaths)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, boundPlan, cfg.Coverage); err != nil {
+		return Summary{}, fmt.Errorf("retry coverage authority: %w", err)
 	}
 	return retryWithLease(ctx, cfg, plan, authority, lease)
 }
@@ -761,6 +784,133 @@ func rejectCallerPriorRows(rows []ObjectState) error {
 	return nil
 }
 
+// journalCrawlPlan returns the canonical observation plan to seal into the
+// journal header. A scoped build stamps its exact crawl prefixes; an unscoped
+// build stamps the full base prefix (or the relative-root sentinel for a
+// bucket-root base), so every U4+ journal records a non-empty plan and a later
+// recovery can distinguish it from a legacy (pre-provenance) journal.
+func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, error) {
+	if len(crawlPrefixes) > 0 {
+		return append([]string(nil), crawlPrefixes...), nil
+	}
+	basePrefix = strings.TrimSpace(basePrefix)
+	if basePrefix == "" {
+		return []string{indexsubstrate.RelativeRootScopePrefix}, nil
+	}
+	return []string{basePrefix}, nil
+}
+
+// boundCrawlPlanFromJournals reads the sealed journal headers and returns the
+// single crawl-prefix plan they were built under. Every journal must record a
+// non-empty plan and they must all agree: this is the observation provenance
+// that bounds recovery coverage authority. A journal without a recorded plan
+// predates plan provenance and fails closed — recovery cannot prove the
+// observation universe, so it must not accept caller coverage as tombstone
+// authority over verified-parent rows.
+func boundCrawlPlanFromJournals(journalPaths []string) ([]string, error) {
+	if len(journalPaths) == 0 {
+		return nil, fmt.Errorf("journal paths are required")
+	}
+	var plan []string
+	var planKey string
+	for i, path := range journalPaths {
+		summary, err := indexsubstrate.ValidateJournal(path)
+		if err != nil {
+			return nil, fmt.Errorf("read journal header for coverage provenance: %w", err)
+		}
+		if len(summary.Header.CrawlPrefixes) == 0 {
+			return nil, fmt.Errorf("%w: journal %d predates crawl-plan provenance; recovery cannot validate coverage authority", indexsubstrate.ErrStaleParent, i)
+		}
+		key := crawlPlanSetKey(summary.Header.CrawlPrefixes)
+		if i == 0 {
+			plan = append([]string(nil), summary.Header.CrawlPrefixes...)
+			planKey = key
+			continue
+		}
+		if key != planKey {
+			return nil, fmt.Errorf("%w: sealed journals disagree on their crawl-prefix plan", indexsubstrate.ErrStaleParent)
+		}
+	}
+	return plan, nil
+}
+
+// crawlPlanSetKey is a normalized order-independent identity for a plan so
+// journals recorded in any order compare equal.
+func crawlPlanSetKey(prefixes []string) string {
+	trimmed := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		trimmed = append(trimmed, strings.TrimSpace(p))
+	}
+	sort.Strings(trimmed)
+	return strings.Join(trimmed, "\x00")
+}
+
+// validateCrawlPlanCanonical refuses a crawl-prefix plan entry whose bytes are
+// not the exact provider-key prefix that drives LIST. Surrounding whitespace or
+// a leading slash would let the coverage equality gate normalize a different
+// string than the crawler observes, so a scoped build could attest complete
+// coverage of a prefix it never listed and tombstone live parent rows.
+func validateCrawlPlanCanonical(crawlPrefixes []string) error {
+	for i, raw := range crawlPrefixes {
+		if raw != strings.TrimSpace(raw) {
+			return fmt.Errorf("crawl prefix plan[%d] has surrounding whitespace; supply the exact provider-key prefix", i)
+		}
+		if raw == "" {
+			return fmt.Errorf("crawl prefix plan[%d] is empty", i)
+		}
+		if strings.HasPrefix(raw, "/") {
+			return fmt.Errorf("crawl prefix plan[%d] must not begin with '/'; supply the exact provider-key prefix", i)
+		}
+	}
+	return nil
+}
+
+// validateScopedObservationSelector refuses a scoped build (explicit crawl-prefix
+// plan) whose match/filter would reduce observation below the plan. Coverage
+// attests complete observation of each plan prefix, so an exclude, non-default
+// include, hidden inclusion, or post-list filter silently drops objects inside a
+// plan prefix and the completeness attestation would authorize false tombstones
+// over parent rows the run intentionally skipped. This mirrors the CLI adapter's
+// faithful-coverage match gate at the engine seam so a direct-library caller
+// cannot bypass it. Unscoped builds keep full match/filter freedom.
+func validateScopedObservationSelector(cfg Config) error {
+	if len(cfg.CrawlPrefixes) == 0 {
+		return nil
+	}
+	const reason = "coverage attests complete observation of each plan prefix"
+	if len(cfg.Match.Excludes) > 0 {
+		return fmt.Errorf("a scoped build (crawl prefix plan) does not support match excludes: %s", reason)
+	}
+	if cfg.Match.IncludeHidden {
+		return fmt.Errorf("a scoped build (crawl prefix plan) does not support include_hidden: %s", reason)
+	}
+	if !isDefaultObservationIncludes(cfg.Match.Includes) {
+		return fmt.Errorf("a scoped build (crawl prefix plan) supports only the default include: %s", reason)
+	}
+	if cfg.Filter != nil {
+		return fmt.Errorf("a scoped build (crawl prefix plan) does not support a post-list filter: %s", reason)
+	}
+	return nil
+}
+
+// isDefaultObservationIncludes reports whether includes is the unrestricted
+// default (empty or a single "**"), the only match include compatible with a
+// scoped plan's complete-coverage attestation.
+func isDefaultObservationIncludes(includes []string) bool {
+	if len(includes) == 0 {
+		return true
+	}
+	if len(includes) != 1 {
+		return false
+	}
+	switch strings.TrimSpace(includes[0]) {
+	case "", "**":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeConfig(cfg Config) (Config, error) {
 	if strings.TrimSpace(cfg.IndexSetID) == "" {
 		return Config{}, fmt.Errorf("index_set_id is required")
@@ -780,9 +930,17 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if err := validatePaths(cfg.Paths); err != nil {
 		return Config{}, err
 	}
-	// Coverage authorizes tombstones over verified-parent rows, so a supplied
-	// crawl-prefix plan and the coverage attestation must agree exactly before
-	// any event, sink, or crawl side effect.
+	// Coverage authorizes tombstones over verified-parent rows. When a
+	// crawl-prefix plan is supplied, the plan bytes must be exactly what drives
+	// LIST (no lossy normalization), the observation selector must not silently
+	// reduce below the plan, and the coverage attestation must equal the plan —
+	// all validated before any event, sink, or crawl side effect.
+	if err := validateCrawlPlanCanonical(cfg.CrawlPrefixes); err != nil {
+		return Config{}, err
+	}
+	if err := validateScopedObservationSelector(cfg); err != nil {
+		return Config{}, err
+	}
 	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, cfg.CrawlPrefixes, cfg.Coverage); err != nil {
 		return Config{}, err
 	}

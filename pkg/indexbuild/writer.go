@@ -19,8 +19,11 @@ type journalWriterConfig struct {
 	StartedAt  time.Time
 	BaseURI    string
 	BasePrefix string
-	Now        Clock
-	Events     EventSink
+	// CrawlPrefixes is the canonical provider-key observation plan sealed into
+	// the journal header as coverage-authority provenance for recovery re-publish.
+	CrawlPrefixes []string
+	Now           Clock
+	Events        EventSink
 }
 
 type journalWriter struct {
@@ -43,6 +46,7 @@ func newJournalWriter(cfg journalWriterConfig) (*journalWriter, error) {
 		RunID:              cfg.RunID,
 		Shard:              "shard-0001",
 		Scope:              &indexsubstrate.Scope{Prefix: cfg.BasePrefix},
+		CrawlPrefixes:      append([]string(nil), cfg.CrawlPrefixes...),
 		IndexSchemaVersion: indexsubstrate.IndexSchemaVersion,
 		StartedAt:          cfg.StartedAt,
 	})
