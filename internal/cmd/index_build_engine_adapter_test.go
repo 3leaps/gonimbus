@@ -213,6 +213,79 @@ build:
 	require.Len(t, latestFiles, 1)
 }
 
+// TestIndexBuildFormatBothEmitsDurableLineageIndependentOfSQLite proves that a
+// --format both build emits authoritative durable lineage (baseline generation
+// 1 + run_started_at) on the durable side while the SQLite and durable row
+// projections match over the one crawl. The lineage is produced by the durable
+// path alone; SQLite never contributes to it.
+//
+// NOTE: successive --format both builds of the same set are additionally blocked
+// today on the SQLite side — the second build's canonical-DB adoption refuses to
+// reopen the prior index.db while quarantined transaction sidecars from the
+// first build are present. That is a SQLite-store limitation (pkg/indexstore
+// sidecar guard), orthogonal to durable continuity, which is proven end-to-end
+// by the durable-only successive-build tests in pkg/indexbuild.
+func TestIndexBuildFormatBothEmitsDurableLineageIndependentOfSQLite(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+
+	prov := &countingIndexBuildProvider{objects: []provider.ObjectSummary{
+		{Key: "data/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
+	}}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	var stdout strings.Builder
+	cmd.SetOut(&stdout)
+	require.NoError(t, runIndexBuild(cmd, nil))
+	require.Equal(t, 1, prov.listCalls, "one crawl feeds both sinks")
+
+	var report map[string]any
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
+	require.Equal(t, true, report["parity_passed"], "sqlite and durable projections match over the crawl")
+
+	// Durable side carries authoritative lineage produced independently.
+	latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, latestFiles, 1)
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestFiles[0])
+	require.NoError(t, err)
+	require.NotNil(t, snap.Manifest.Lineage, "durable emits lineage under --format both")
+	require.True(t, snap.Manifest.Lineage.Baseline)
+	require.Equal(t, indexsubstrate.LineageBaselineGeneration, snap.Manifest.Lineage.Generation)
+	require.NotNil(t, snap.Manifest.RunStartedAt)
+}
+
 func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
 	report := indexBuildBothFormatsFailureReport(nil, nil, resolvedIndexDB{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
 	require.Equal(t, "gonimbus.index.compare_result.v1", report.Type)
