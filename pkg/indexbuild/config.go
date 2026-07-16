@@ -151,7 +151,12 @@ type Config struct {
 	ObservationSinks []output.Writer
 	Paths            PathConfig
 	Coverage         []CoverageAttestation
-	PriorRows        []ObjectState
+	// PriorRows is retained only for source compatibility and is NOT an accepted
+	// input: public Build rejects any non-nil value (including an empty non-nil
+	// slice) before side effects. Durable prior state is loaded from the verified
+	// parent under the held lease at continuity activation, never from
+	// caller-supplied rows.
+	PriorRows []ObjectState
 	// ExpectedParent, when set, enforces latest-pointer CAS at publish advance.
 	// When nil, Build/Retry capture the current latest (or first-publish) under
 	// the write lease. Malformed latest fails closed (not first-publish).
@@ -204,7 +209,12 @@ type RetryConfig struct {
 	Paths        PathConfig
 	JournalPaths []string
 	Coverage     []CoverageAttestation
-	PriorRows    []ObjectState
+	// PriorRows is retained only for source compatibility and is NOT an accepted
+	// input: public Retry rejects any non-nil value (including an empty non-nil
+	// slice) before side effects. Durable prior state is loaded from the verified
+	// parent under the held lease at continuity activation, never from
+	// caller-supplied rows.
+	PriorRows []ObjectState
 	// ExpectedParent enforces latest CAS when republishing over an existing set.
 	ExpectedParent *ParentToken
 	// Authority follows Config.Authority semantics for public Retry.

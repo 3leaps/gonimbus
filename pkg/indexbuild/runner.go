@@ -64,12 +64,14 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
 	}
 	defer func() { _ = lease.Release() }()
-	// Capture/validate parent under the lease before any mutable sinks run.
-	parent, parentErr := resolveExpectedParent(cfg.Paths.LatestPath, cfg.ExpectedParent)
+	// Capture/validate the verified parent under the held authority/lease before
+	// any mutable sinks run. This single capture is the canonical parent authority
+	// for the whole build; retryWithLease reuses it rather than reopening latest.
+	plan, parentErr := captureVerifiedParent(cfg.Paths.LatestPath, cfg.IndexSetID, cfg.ExpectedParent)
 	if parentErr != nil {
 		return Summary{}, parentErr
 	}
-	cfg.ExpectedParent = parent
+	cfg.ExpectedParent = plan.expectedToken()
 
 	basePrefix, err := basePrefixFromURI(cfg.BaseURI)
 	if err != nil {
@@ -155,7 +157,6 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		Paths:                cfg.Paths,
 		JournalPaths:         []string{journalPath},
 		Coverage:             cfg.Coverage,
-		PriorRows:            cfg.PriorRows,
 		ExpectedParent:       cfg.ExpectedParent,
 		RunStartedAt:         cfg.RunStartedAt,
 		CreatedAt:            cfg.CreatedAt,
@@ -165,8 +166,9 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		OnSegmentProgress:    cfg.OnSegmentProgress,
 		Authority:            cfg.Authority,
 	}
-	// Private path: reuse the held Build lease (never a public forgeable guard).
-	result, err := retryWithLease(ctx, retryCfg, authority, lease)
+	// Private path: reuse the held Build lease (never a public forgeable guard)
+	// and the parent captured once above (no second latest reopen).
+	result, err := retryWithLease(ctx, retryCfg, plan, authority, lease)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -199,7 +201,13 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		return Summary{}, fmt.Errorf("acquire durable write lease: %w", err)
 	}
 	defer func() { _ = lease.Release() }()
-	return retryWithLease(ctx, cfg, authority, lease)
+	// Capture the verified parent once under the held authority/lease, bound to
+	// the requested set.
+	plan, err := captureVerifiedParent(cfg.Paths.LatestPath, cfg.IndexSetID, cfg.ExpectedParent)
+	if err != nil {
+		return Summary{}, err
+	}
+	return retryWithLease(ctx, cfg, plan, authority, lease)
 }
 
 func acquireIndexSetAuthority(ctx context.Context, held *indexcoord.Lease, segmentRoot, indexSetID, holder string) (*indexcoord.Lease, bool, error) {
@@ -216,8 +224,11 @@ func acquireIndexSetAuthority(ctx context.Context, held *indexcoord.Lease, segme
 	return authority, true, nil
 }
 
-// retryWithLease publishes under an already-held package-owned lease.
-func retryWithLease(ctx context.Context, cfg RetryConfig, authority *indexcoord.Lease, lease *indexsubstrate.WriteLease) (Summary, error) {
+// retryWithLease publishes under an already-held package-owned lease, using the
+// parent captured once by the caller (Build or public Retry). It does not reopen
+// latest to re-derive the parent; the publish-time CAS revalidation is the sole
+// later read of the authoritative latest pointer.
+func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPlan, authority *indexcoord.Lease, lease *indexsubstrate.WriteLease) (Summary, error) {
 	if authority == nil {
 		return Summary{}, fmt.Errorf("index set authority is required")
 	}
@@ -231,15 +242,18 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, authority *indexcoord.
 	if err := lease.AssertHeld(); err != nil {
 		return Summary{}, fmt.Errorf("write lease: %w", err)
 	}
+	// The verified-parent plan is mandatory: it is the sole canonical parent
+	// authority. A nil plan (missing/mis-threaded) must fail closed here, never
+	// be treated as a verified first publication.
+	if plan == nil {
+		return Summary{}, fmt.Errorf("verified parent plan is required")
+	}
 	coverage, err := normalizeCoverageForBaseURI(cfg.BaseURI, cfg.Coverage)
 	if err != nil {
 		return Summary{}, err
 	}
 
-	expectedParent, err := resolveExpectedParent(cfg.Paths.LatestPath, cfg.ExpectedParent)
-	if err != nil {
-		return Summary{}, err
-	}
+	expectedParent := plan.expectedToken()
 	var substrateParent *indexsubstrate.ExpectedParentToken
 	if expectedParent != nil {
 		substrateParent = &indexsubstrate.ExpectedParentToken{
@@ -260,7 +274,6 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, authority *indexcoord.
 		RunID:                cfg.RunID,
 		RunStartedAt:         cfg.RunStartedAt,
 		CreatedAt:            cfg.CreatedAt,
-		PriorRows:            toSubstrateRows(cfg.PriorRows),
 		JournalPaths:         append([]string(nil), cfg.JournalPaths...),
 		Coverage:             toSubstrateCoverage(coverage),
 		SegmentDir:           cfg.Paths.SegmentDir,
@@ -306,13 +319,40 @@ func ReadLatest(latestPath string) (ManifestSummary, []ObjectState, error) {
 	return manifestSummary(manifest), fromSubstrateRows(rows), nil
 }
 
-// resolveExpectedParent returns the CAS token derived from the live verified
-// latest under the caller's write lease. Only a true "not published" state
-// means first publish (nil token). Any other open/trust error fails closed.
+// verifiedParentPlan is the single lease-held capture of the canonical parent.
+// One latest -> complete -> digest-checked manifest open supplies every
+// downstream input derived from the same verified bytes: the CAS assertion
+// token today, and (as continuity activates) the parent row source, StateParent,
+// lineage decision, coverage, and ParentManifests. Caller-supplied metadata is
+// never authority; a provided ExpectedParent is only asserted against this live
+// capture. A nil snapshot with a nil token means a proven first publication.
+type verifiedParentPlan struct {
+	snapshot *indexsubstrate.PublishedSnapshot
+	expected *ParentToken
+}
+
+// expectedToken returns the CAS assertion token from the capture (nil only for a
+// proven first publication — a non-nil plan with no captured parent). It does
+// not tolerate a nil receiver: a missing plan must fail closed at the call site,
+// never silently degrade to a first-publication token.
+func (p *verifiedParentPlan) expectedToken() *ParentToken {
+	return p.expected
+}
+
+// captureVerifiedParent opens the canonical latest once under the caller's held
+// authority/write lease and returns the verified-parent plan. The captured
+// snapshot must belong to the requested index set (indexSetID); a validly
+// digested foreign-set latest is refused before any sink/publish so a build for
+// set B can never adopt or advance set A's latest. Only a true "not published"
+// state is a first publish (empty plan). Any other open/trust error fails
+// closed. Callers must not independently reopen latest to derive rows versus
+// lineage; the sole later reopen is the publish-time CAS revalidation.
 //
 // When provided is non-nil it must equal the live parent token (including
-// coverage digest); otherwise the token is rejected as stale before sinks run.
-func resolveExpectedParent(latestPath string, provided *ParentToken) (*ParentToken, error) {
+// coverage digest); otherwise it is rejected as stale before sinks run. The
+// caller assertion is checked, never trusted as authority.
+func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken) (*verifiedParentPlan, error) {
+	indexSetID = strings.TrimSpace(indexSetID)
 	snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(
 		latestPath,
 		indexsubstrate.DefaultMaxPublishedMarkerBytes,
@@ -323,11 +363,17 @@ func resolveExpectedParent(latestPath string, provided *ParentToken) (*ParentTok
 			if provided != nil {
 				return nil, fmt.Errorf("%w: ExpectedParent provided but latest is not published", indexsubstrate.ErrStaleParent)
 			}
-			return nil, nil
+			return &verifiedParentPlan{}, nil
 		}
 		// Malformed/unreadable/digest-invalid latest must not be treated as
 		// first publication (would silently overwrite a damaged pointer).
-		return nil, fmt.Errorf("open durable latest for parent CAS: %w", err)
+		return nil, fmt.Errorf("open durable latest for parent capture: %w", err)
+	}
+	// Bind the capture to the requested set: a foreign latest (even validly
+	// digested) is not a parent of this set. Same-set continuity is mandatory;
+	// cross-set adoption is prohibited.
+	if strings.TrimSpace(snap.Complete.IndexSetID) != indexSetID {
+		return nil, fmt.Errorf("%w: latest belongs to a different index set", indexsubstrate.ErrStaleParent)
 	}
 	covDigest, err := indexsubstrate.CoverageSHA256(snap.Manifest.Coverage)
 	if err != nil {
@@ -347,12 +393,30 @@ func resolveExpectedParent(latestPath string, provided *ParentToken) (*ParentTok
 			return nil, fmt.Errorf("%w: provided ExpectedParent does not match live latest", indexsubstrate.ErrStaleParent)
 		}
 	}
-	return live, nil
+	captured := snap
+	return &verifiedParentPlan{snapshot: &captured, expected: live}, nil
+}
+
+// rejectCallerPriorRows fails closed when a public Build/Retry caller supplies
+// prior rows. Durable prior state is canonical only when loaded from the verified
+// parent under the held lease; caller-supplied rows plus independently supplied
+// parent metadata cannot authorize continuity. The PriorRows fields remain for
+// API compatibility but are not an accepted canonical-state channel. The check
+// is strict presence (any non-nil slice, including an empty non-nil slice), so
+// the field's rejected status is unambiguous.
+func rejectCallerPriorRows(rows []ObjectState) error {
+	if rows != nil {
+		return fmt.Errorf("PriorRows is not an accepted input: durable prior state is loaded from the verified parent, not caller-supplied rows")
+	}
+	return nil
 }
 
 func normalizeConfig(cfg Config) (Config, error) {
 	if strings.TrimSpace(cfg.IndexSetID) == "" {
 		return Config{}, fmt.Errorf("index_set_id is required")
+	}
+	if err := rejectCallerPriorRows(cfg.PriorRows); err != nil {
+		return Config{}, err
 	}
 	if strings.TrimSpace(cfg.RunID) == "" {
 		cfg.RunID = "run_" + uuid.NewString()
@@ -388,6 +452,9 @@ func normalizeConfig(cfg Config) (Config, error) {
 func normalizeRetryConfig(cfg RetryConfig) (RetryConfig, error) {
 	if strings.TrimSpace(cfg.IndexSetID) == "" {
 		return RetryConfig{}, fmt.Errorf("index_set_id is required")
+	}
+	if err := rejectCallerPriorRows(cfg.PriorRows); err != nil {
+		return RetryConfig{}, err
 	}
 	if strings.TrimSpace(cfg.RunID) == "" {
 		return RetryConfig{}, fmt.Errorf("run_id is required")
@@ -568,14 +635,6 @@ func toSubstrateScopes(in []Scope) []indexsubstrate.Scope {
 	out := make([]indexsubstrate.Scope, 0, len(in))
 	for i := range in {
 		out = append(out, *toSubstrateScope(&in[i]))
-	}
-	return out
-}
-
-func toSubstrateRows(in []ObjectState) []indexsubstrate.CurrentObjectRow {
-	out := make([]indexsubstrate.CurrentObjectRow, 0, len(in))
-	for _, row := range in {
-		out = append(out, indexsubstrate.CurrentObjectRow(row))
 	}
 	return out
 }

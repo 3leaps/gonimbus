@@ -600,6 +600,15 @@ func validatePublishConfig(config PublishConfig) error {
 	case config.LatestPath == "":
 		return fmt.Errorf("latest path is required")
 	}
+	// Defense in depth for every mode: a parent token must belong to the set being
+	// published. Same-set continuity is mandatory; a foreign-set ExpectedParent is
+	// refused here even if it digests against some other latest. Library build
+	// adapters also bind the parent capture to the requested set before sinks run.
+	if config.ExpectedParent != nil {
+		if strings.TrimSpace(config.ExpectedParent.IndexSetID) != config.IndexSetID {
+			return fmt.Errorf("ExpectedParent index_set_id does not match publication index set")
+		}
+	}
 	if config.Mode == PublicationModeEnrichOnly {
 		if config.ExpectedParent == nil {
 			return fmt.Errorf("enrich-only mode requires ExpectedParent")
