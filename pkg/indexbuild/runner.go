@@ -263,6 +263,14 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 			CoverageSHA256: expectedParent.CoverageSHA256,
 		}
 	}
+	// Derive continuity inputs (parent rows, state parent, lineage, parent
+	// manifests) from the single verified capture under the three-way rule; this
+	// validates a continuous parent's ancestry before extension.
+	continuity, err := plan.continuityInputs(cfg.RunID)
+	if err != nil {
+		return Summary{}, err
+	}
+
 	// Revalidate the stable authority at the commit boundary. This is separate
 	// from the inner publish lease because GC can rename the whole segment root.
 	if err := authority.AssertHeldFor(cfg.IndexSetID, segmentRoot); err != nil {
@@ -281,6 +289,10 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		CompletePath:         cfg.Paths.CompletePath,
 		LatestPath:           cfg.Paths.LatestPath,
 		ExpectedParent:       substrateParent,
+		ParentSource:         continuity.parentSource,
+		StateParent:          continuity.stateParent,
+		Lineage:              continuity.lineage,
+		ParentManifests:      continuity.parentManifests,
 		WriteLease:           lease,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 		OnSegmentProgress:    toSubstrateSegmentProgress(cfg.OnSegmentProgress),
@@ -395,6 +407,136 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 	}
 	captured := snap
 	return &verifiedParentPlan{snapshot: &captured, expected: live}, nil
+}
+
+// hasParent reports whether a verified parent snapshot was captured.
+func (p *verifiedParentPlan) hasParent() bool {
+	return p != nil && p.snapshot != nil
+}
+
+// continuityPublication is the same-set continuity metadata plus the streaming
+// parent row source derived from the single verified capture, ready to thread
+// into publication.
+type continuityPublication struct {
+	parentSource    indexsubstrate.ParentRowSource
+	stateParent     *indexsubstrate.StateParent
+	lineage         *indexsubstrate.LineageRecord
+	parentManifests []indexsubstrate.ManifestReference
+}
+
+// runCompleteLookup returns a PublishedRunLookup over the canonical
+// runs/<run_id>/complete.json layout, derived from a known complete-marker path
+// in that layout.
+func runCompleteLookup(knownCompletePath string) indexsubstrate.PublishedRunLookup {
+	runsDir := filepath.Dir(filepath.Dir(knownCompletePath))
+	return func(_ string, runID string) (string, error) {
+		runID = strings.TrimSpace(runID)
+		if runID == "" {
+			return "", fmt.Errorf("ancestry lookup requires a run id")
+		}
+		return filepath.Join(runsDir, runID, "complete.json"), nil
+	}
+}
+
+// continuityInputs derives the publication continuity inputs from the captured
+// verified parent under the three-way baseline/generation rule. Every input
+// comes only from the single retained same-set capture (plus, for an idempotent
+// re-publish, that run's own recorded parent). For a continuous parent it
+// validates bounded ancestry before extending and fails closed on any defect.
+//
+//  1. no verified parent      -> baseline gen 1, no state_parent, no parent rows;
+//  2. pre-continuity parent   -> baseline gen 1 + digest-bound state_parent;
+//  3. continuous parent        -> gen = parent.gen + 1, non-baseline, digest-bound.
+//
+// When latest already names the run being published (idempotent recovery
+// re-publish), the run's own recorded lineage/state_parent/parent_manifests are
+// reproduced verbatim — the run never extends itself into a self-cycle.
+func (p *verifiedParentPlan) continuityInputs(runID string) (continuityPublication, error) {
+	runID = strings.TrimSpace(runID)
+	if !p.hasParent() {
+		return continuityPublication{
+			lineage: &indexsubstrate.LineageRecord{
+				Version:    indexsubstrate.LineageVersionV1,
+				Generation: indexsubstrate.LineageBaselineGeneration,
+				Baseline:   true,
+			},
+		}, nil
+	}
+	snap := p.snapshot
+	if strings.TrimSpace(snap.Complete.RunID) == runID {
+		return reproduceRunInputs(snap)
+	}
+
+	stateParent := &indexsubstrate.StateParent{
+		IndexSetID:     strings.TrimSpace(snap.Complete.IndexSetID),
+		RunID:          strings.TrimSpace(snap.Complete.RunID),
+		ManifestSHA256: strings.TrimSpace(snap.Complete.ManifestSHA256),
+	}
+	parentManifests := []indexsubstrate.ManifestReference{{
+		IndexSetID:     stateParent.IndexSetID,
+		RunID:          stateParent.RunID,
+		ManifestSHA256: stateParent.ManifestSHA256,
+	}}
+	// Validate the parent's ancestry before extending. A legacy (no-lineage)
+	// parent is an accepted verified state source (ResolveAncestry returns legacy
+	// mode without walking); a continuous parent's chain is walked to its baseline
+	// under a run lookup derived from the canonical runs/<run_id>/complete.json
+	// layout of the parent's own complete marker.
+	if _, err := indexsubstrate.ResolveAncestry(*snap, indexsubstrate.AncestryResolveConfig{
+		Lookup: runCompleteLookup(snap.CompletePath),
+	}); err != nil {
+		return continuityPublication{}, fmt.Errorf("verify parent ancestry before extend: %w", err)
+	}
+	var lineage *indexsubstrate.LineageRecord
+	if indexsubstrate.HasContinuousLineage(snap.Manifest) {
+		lineage = &indexsubstrate.LineageRecord{
+			Version:    indexsubstrate.LineageVersionV1,
+			Generation: snap.Manifest.Lineage.Generation + 1,
+			Baseline:   false,
+		}
+	} else {
+		lineage = &indexsubstrate.LineageRecord{
+			Version:    indexsubstrate.LineageVersionV1,
+			Generation: indexsubstrate.LineageBaselineGeneration,
+			Baseline:   true,
+		}
+	}
+	return continuityPublication{
+		parentSource:    indexsubstrate.NewPublishedParentRowSource(*snap),
+		stateParent:     stateParent,
+		lineage:         lineage,
+		parentManifests: parentManifests,
+	}, nil
+}
+
+// reproduceRunInputs reproduces a run's own recorded continuity metadata for an
+// idempotent re-publish. Parent rows come from the run's recorded state parent
+// (the grandparent), opened digest-bound; a baseline run with no state parent
+// re-publishes with no parent rows.
+func reproduceRunInputs(snap *indexsubstrate.PublishedSnapshot) (continuityPublication, error) {
+	out := continuityPublication{
+		stateParent:     snap.Manifest.StateParent,
+		lineage:         snap.Manifest.Lineage,
+		parentManifests: snap.Manifest.ParentManifests,
+	}
+	sp := snap.Manifest.StateParent
+	if sp == nil {
+		return out, nil
+	}
+	lookup := runCompleteLookup(snap.CompletePath)
+	gpComplete, err := lookup(strings.TrimSpace(sp.IndexSetID), strings.TrimSpace(sp.RunID))
+	if err != nil {
+		return continuityPublication{}, fmt.Errorf("resolve re-publish parent: %w", err)
+	}
+	gp, err := indexsubstrate.OpenPublishedRunSnapshot(gpComplete, strings.TrimSpace(sp.IndexSetID), strings.TrimSpace(sp.RunID))
+	if err != nil {
+		return continuityPublication{}, fmt.Errorf("open re-publish parent: %w", err)
+	}
+	if strings.TrimSpace(gp.Complete.ManifestSHA256) != strings.TrimSpace(sp.ManifestSHA256) {
+		return continuityPublication{}, fmt.Errorf("%w: re-publish parent digest mismatch", indexsubstrate.ErrStaleParent)
+	}
+	out.parentSource = indexsubstrate.NewPublishedParentRowSource(gp)
+	return out, nil
 }
 
 // rejectCallerPriorRows fails closed when a public Build/Retry caller supplies

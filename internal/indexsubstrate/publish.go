@@ -48,12 +48,23 @@ type ExpectedParentToken struct {
 }
 
 type PublishConfig struct {
-	IndexSetID           string
-	RunID                string
-	RunStartedAt         time.Time
-	CreatedAt            time.Time
-	ParentManifests      []ManifestReference
-	PriorRows            []CurrentObjectRow
+	IndexSetID      string
+	RunID           string
+	RunStartedAt    time.Time
+	CreatedAt       time.Time
+	ParentManifests []ManifestReference
+	// PriorRows seeds prior current-state when no ParentSource is supplied (the
+	// slice adapter path, used by enrich and tests). When ParentSource is set it
+	// takes precedence and PriorRows is ignored.
+	PriorRows []CurrentObjectRow
+	// ParentSource, when non-nil, streams the verified parent's current-state rows
+	// into the compaction merge without materializing them. Continuity activation
+	// passes a bounded reader over the verified parent snapshot here.
+	ParentSource ParentRowSource
+	// StateParent and Lineage are the digest-bound continuity metadata written
+	// into the published manifest. Nil on a legacy/baseline-free publication.
+	StateParent          *StateParent
+	Lineage              *LineageRecord
 	JournalPaths         []string
 	Coverage             []CoverageAttestation
 	SegmentDir           string
@@ -163,11 +174,15 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 	// Stream parent rows + ordered journals into a sorted current-state source.
 	// The streaming segment writer owns the terminal Close of this source on every
 	// exit path (success and failure).
+	parent := config.ParentSource
+	if parent == nil {
+		parent = NewSliceParentRows(config.PriorRows)
+	}
 	stateSource, err := PrepareCurrentStateSource(ctx, SpillMergeConfig{
 		IndexSetID:   config.IndexSetID,
 		RunID:        config.RunID,
 		RunStartedAt: config.RunStartedAt,
-		Parent:       NewSliceParentRows(config.PriorRows),
+		Parent:       parent,
 		JournalPaths: config.JournalPaths,
 		Coverage:     config.Coverage,
 		Mode:         config.Mode,
@@ -188,6 +203,11 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		return result, err
 	}
 
+	var runStartedAt *time.Time
+	if !config.RunStartedAt.IsZero() {
+		rs := config.RunStartedAt
+		runStartedAt = &rs
+	}
 	manifest, err := WriteStreamingSegmentSet(ctx, SegmentWriterConfig{
 		Dir:                    config.SegmentDir,
 		IndexSetID:             config.IndexSetID,
@@ -197,6 +217,9 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		AllowExistingIdentical: true,
 		ParentManifests:        config.ParentManifests,
 		Coverage:               config.Coverage,
+		RunStartedAt:           runStartedAt,
+		StateParent:            config.StateParent,
+		Lineage:                config.Lineage,
 		OnSegmentProgress:      config.OnSegmentProgress,
 	}, stateSource)
 	if err != nil {
