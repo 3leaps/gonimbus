@@ -153,11 +153,16 @@ type Config struct {
 	Crawl      crawler.Config
 	// CrawlPrefixes, when supplied, is the exact provider-prefix observation
 	// plan. It lets CLI adapters pass a manifest scope plan into the engine
-	// without making the engine import manifest or command packages.
-	// When set, Coverage must equal this plan exactly (per-prefix set equality,
-	// no roll-up/extra/missing/windowed entries) or Build refuses before any
-	// side effect: coverage authorizes tombstones over rows loaded from the
-	// verified parent, and prior rows outside the attested plan are retained.
+	// without making the engine import manifest or command packages. Entries
+	// must be canonical provider-key prefixes (no leading slash or surrounding
+	// whitespace) so the plan compared against coverage is exactly what drives
+	// LIST. Coverage must equal this plan exactly (per-prefix set equality, no
+	// roll-up/extra/missing/duplicate/windowed and confirmed-complete only) or
+	// Build refuses before any side effect. When empty the effective plan is the
+	// full base prefix; either way the plan is sealed into the journal as
+	// recovery provenance and prior rows outside the attested plan are retained.
+	// Any durable build additionally rejects a reducing observation selector
+	// (see Match) so the sealed plan is a truthful record of what was observed.
 	CrawlPrefixes []string
 	// ObservationSinks receive the same observed crawl stream as the durable
 	// journal materializer. This is the library-owned fanout boundary used by
@@ -225,10 +230,12 @@ type RetryConfig struct {
 	// Coverage is destructive authority over verified-parent rows: a
 	// confirmed-complete scope tombstones unobserved parent keys under it. Public
 	// Retry does not trust this field on its own — it derives the observation
-	// plan from the sealed journal headers (`crawl_prefixes`) and requires
-	// Coverage to match that plan exactly, so a recovery cannot widen the
-	// tombstone universe beyond what the crawl observed. Journals without a
-	// recorded plan (pre-provenance) fail closed.
+	// plan from the integrity-verified journals (the sealed `crawl_prefixes`
+	// header, authenticated by the footer `content_sha256` over header+records)
+	// and requires Coverage to match that plan exactly, so a recovery cannot
+	// widen the tombstone universe beyond what the crawl observed. Journals
+	// without a recorded plan or content digest, or whose recorded plan is
+	// non-canonical, fail closed.
 	Coverage []CoverageAttestation
 	// PriorRows is retained only for source compatibility and is NOT an accepted
 	// input: public Retry rejects any non-nil value (including an empty non-nil

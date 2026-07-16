@@ -801,12 +801,16 @@ func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, erro
 }
 
 // boundCrawlPlanFromJournals reads the sealed journal headers and returns the
-// single crawl-prefix plan they were built under. Every journal must record a
-// non-empty plan and they must all agree: this is the observation provenance
-// that bounds recovery coverage authority. A journal without a recorded plan
-// predates plan provenance and fails closed — recovery cannot prove the
-// observation universe, so it must not accept caller coverage as tombstone
-// authority over verified-parent rows.
+// single crawl-prefix plan they were built under. This is the observation
+// provenance that bounds recovery coverage authority, so every journal must:
+//   - be content-integrity verified (ValidateJournal recomputes the footer
+//     ContentSHA256 over the header+records, so a post-seal header edit fails);
+//   - carry that sealed digest (a journal without one is not tamper-evident and
+//     fails closed — a plan added to an unauthenticated legacy journal is not
+//     provenance);
+//   - record a canonical, non-empty plan (leading slash / whitespace / empty /
+//     duplicate entries are invalid provenance, never trimmed into validity);
+//   - agree with every other journal on the exact plan (order-independent).
 func boundCrawlPlanFromJournals(journalPaths []string) ([]string, error) {
 	if len(journalPaths) == 0 {
 		return nil, fmt.Errorf("journal paths are required")
@@ -818,8 +822,14 @@ func boundCrawlPlanFromJournals(journalPaths []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read journal header for coverage provenance: %w", err)
 		}
+		if strings.TrimSpace(summary.ContentSHA256) == "" {
+			return nil, fmt.Errorf("%w: journal %d is not content-integrity sealed; recovery cannot trust its crawl-plan provenance", indexsubstrate.ErrStaleParent, i)
+		}
 		if len(summary.Header.CrawlPrefixes) == 0 {
 			return nil, fmt.Errorf("%w: journal %d predates crawl-plan provenance; recovery cannot validate coverage authority", indexsubstrate.ErrStaleParent, i)
+		}
+		if err := validateJournalPlanCanonical(summary.Header.CrawlPrefixes); err != nil {
+			return nil, fmt.Errorf("%w: journal %d: %v", indexsubstrate.ErrStaleParent, i, err)
 		}
 		key := crawlPlanSetKey(summary.Header.CrawlPrefixes)
 		if i == 0 {
@@ -834,15 +844,32 @@ func boundCrawlPlanFromJournals(journalPaths []string) ([]string, error) {
 	return plan, nil
 }
 
-// crawlPlanSetKey is a normalized order-independent identity for a plan so
-// journals recorded in any order compare equal.
+// crawlPlanSetKey is an order-independent identity for a canonical plan so
+// journals recorded in any order compare equal. It does not trim: canonicality
+// is enforced separately by validateJournalPlanCanonical so a plan cannot be
+// normalized into agreement.
 func crawlPlanSetKey(prefixes []string) string {
-	trimmed := make([]string, 0, len(prefixes))
-	for _, p := range prefixes {
-		trimmed = append(trimmed, strings.TrimSpace(p))
+	sorted := append([]string(nil), prefixes...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "\x00")
+}
+
+// validateJournalPlanCanonical enforces the same canonical-bytes and
+// no-duplicate rules on a recovered journal plan that Build enforces on the
+// caller plan, so a structurally valid but non-canonical or duplicated journal
+// plan is rejected rather than trimmed/deduplicated into agreement.
+func validateJournalPlanCanonical(prefixes []string) error {
+	if err := validateCrawlPlanCanonical(prefixes); err != nil {
+		return err
 	}
-	sort.Strings(trimmed)
-	return strings.Join(trimmed, "\x00")
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		if _, dup := seen[p]; dup {
+			return fmt.Errorf("crawl plan has duplicate prefix %q", p)
+		}
+		seen[p] = struct{}{}
+	}
+	return nil
 }
 
 // validateCrawlPlanCanonical refuses a crawl-prefix plan entry whose bytes are
@@ -865,37 +892,38 @@ func validateCrawlPlanCanonical(crawlPrefixes []string) error {
 	return nil
 }
 
-// validateScopedObservationSelector refuses a scoped build (explicit crawl-prefix
-// plan) whose match/filter would reduce observation below the plan. Coverage
-// attests complete observation of each plan prefix, so an exclude, non-default
-// include, hidden inclusion, or post-list filter silently drops objects inside a
-// plan prefix and the completeness attestation would authorize false tombstones
-// over parent rows the run intentionally skipped. This mirrors the CLI adapter's
-// faithful-coverage match gate at the engine seam so a direct-library caller
-// cannot bypass it. Unscoped builds keep full match/filter freedom.
-func validateScopedObservationSelector(cfg Config) error {
-	if len(cfg.CrawlPrefixes) == 0 {
-		return nil
-	}
-	const reason = "coverage attests complete observation of each plan prefix"
+// validateDurableObservationSelector refuses any durable build whose match or
+// filter would observe fewer objects than its recorded plan attests complete.
+// Coverage is destructive authority over verified-parent rows, and the sealed
+// crawl plan is the observation universe recovery re-publishes against — so an
+// exclude, non-default include, hidden inclusion, or post-list filter would make
+// the plan a false record of what was observed and authorize tombstones over
+// rows the run intentionally skipped. The check is unconditional (scoped and
+// unscoped): an unscoped build stamps its base prefix as the plan, so the base
+// prefix must genuinely be the complete observation universe. This mirrors the
+// CLI adapter's faithful-coverage match gate at the engine seam; it intentionally
+// narrows the Experimental library API — restrictive match/filter selection is
+// no longer a durable-build surface.
+func validateDurableObservationSelector(cfg Config) error {
+	const reason = "coverage and the sealed crawl plan attest complete observation"
 	if len(cfg.Match.Excludes) > 0 {
-		return fmt.Errorf("a scoped build (crawl prefix plan) does not support match excludes: %s", reason)
+		return fmt.Errorf("a durable build does not support match excludes: %s", reason)
 	}
 	if cfg.Match.IncludeHidden {
-		return fmt.Errorf("a scoped build (crawl prefix plan) does not support include_hidden: %s", reason)
+		return fmt.Errorf("a durable build does not support include_hidden: %s", reason)
 	}
 	if !isDefaultObservationIncludes(cfg.Match.Includes) {
-		return fmt.Errorf("a scoped build (crawl prefix plan) supports only the default include: %s", reason)
+		return fmt.Errorf("a durable build supports only the default include: %s", reason)
 	}
 	if cfg.Filter != nil {
-		return fmt.Errorf("a scoped build (crawl prefix plan) does not support a post-list filter: %s", reason)
+		return fmt.Errorf("a durable build does not support a post-list filter: %s", reason)
 	}
 	return nil
 }
 
 // isDefaultObservationIncludes reports whether includes is the unrestricted
 // default (empty or a single "**"), the only match include compatible with a
-// scoped plan's complete-coverage attestation.
+// complete-coverage attestation over the crawl plan.
 func isDefaultObservationIncludes(includes []string) bool {
 	if len(includes) == 0 {
 		return true
@@ -930,18 +958,29 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if err := validatePaths(cfg.Paths); err != nil {
 		return Config{}, err
 	}
-	// Coverage authorizes tombstones over verified-parent rows. When a
-	// crawl-prefix plan is supplied, the plan bytes must be exactly what drives
-	// LIST (no lossy normalization), the observation selector must not silently
-	// reduce below the plan, and the coverage attestation must equal the plan —
-	// all validated before any event, sink, or crawl side effect.
+	// Coverage authorizes tombstones over verified-parent rows and the crawl
+	// plan is the observation universe recovery re-publishes against, so both
+	// must be faithful to what is actually observed — validated before any event,
+	// sink, or crawl side effect. The effective plan is the explicit crawl
+	// prefixes when scoped, or the full base prefix when unscoped; coverage must
+	// equal it exactly (so an unscoped [base] stamp is truthful and Build/Retry
+	// are symmetric), the plan bytes must be exactly what drives LIST, and the
+	// observation selector must not reduce below the plan.
+	basePrefix, err := basePrefixFromURI(cfg.BaseURI)
+	if err != nil {
+		return Config{}, err
+	}
 	if err := validateCrawlPlanCanonical(cfg.CrawlPrefixes); err != nil {
 		return Config{}, err
 	}
-	if err := validateScopedObservationSelector(cfg); err != nil {
+	if err := validateDurableObservationSelector(cfg); err != nil {
 		return Config{}, err
 	}
-	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, cfg.CrawlPrefixes, cfg.Coverage); err != nil {
+	effectivePlan, err := journalCrawlPlan(basePrefix, cfg.CrawlPrefixes)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, effectivePlan, cfg.Coverage); err != nil {
 		return Config{}, err
 	}
 	cfg.IndexSetID = strings.TrimSpace(cfg.IndexSetID)

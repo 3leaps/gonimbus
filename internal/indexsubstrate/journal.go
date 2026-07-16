@@ -2,9 +2,12 @@ package indexsubstrate
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -83,16 +86,25 @@ type ObjectRecord struct {
 }
 
 type JournalFooter struct {
-	Type        string    `json:"type"`
-	JournalID   string    `json:"journal_id"`
-	Records     uint64    `json:"records"`
-	CompletedAt time.Time `json:"completed_at"`
+	Type      string `json:"type"`
+	JournalID string `json:"journal_id"`
+	Records   uint64 `json:"records"`
+	// ContentSHA256 is the writer-generated lowercase-hex SHA-256 over the exact
+	// header line and every ordered record line (the footer line itself
+	// excluded). Any post-seal mutation of the header — including its
+	// crawl_prefixes provenance — or of any record, or truncation, changes the
+	// recomputed digest and fails validation. Absent on legacy journals sealed
+	// before content integrity; those are not tamper-evident and must not be
+	// trusted as observation provenance.
+	ContentSHA256 string    `json:"content_sha256,omitempty"`
+	CompletedAt   time.Time `json:"completed_at"`
 }
 
 type JournalSummary struct {
-	Header  JournalHeader
-	Footer  JournalFooter
-	Records uint64
+	Header        JournalHeader
+	Footer        JournalFooter
+	Records       uint64
+	ContentSHA256 string
 }
 
 type Journal struct {
@@ -106,6 +118,7 @@ type JournalWriter struct {
 	path     string
 	file     *os.File
 	writer   *bufio.Writer
+	content  hash.Hash
 	header   JournalHeader
 	records  uint64
 	nextSeq  uint64
@@ -142,10 +155,11 @@ func CreateJournal(path string, header JournalHeader) (*JournalWriter, error) {
 		path:    path,
 		file:    file,
 		writer:  bufio.NewWriter(file),
+		content: sha256.New(),
 		header:  header,
 		nextSeq: 1,
 	}
-	if err := writeJSONLine(jw.writer, header); err != nil {
+	if err := writeHashedJSONLine(jw.writer, jw.content, header); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("write journal header: %w", err)
 	}
@@ -175,7 +189,7 @@ func (w *JournalWriter) Append(record ObjectRecord) (ObjectRecord, error) {
 	if err := validateObjectRecord(record); err != nil {
 		return ObjectRecord{}, err
 	}
-	if err := writeJSONLine(w.writer, record); err != nil {
+	if err := writeHashedJSONLine(w.writer, w.content, record); err != nil {
 		return ObjectRecord{}, fmt.Errorf("write journal record: %w", err)
 	}
 	w.records++
@@ -199,10 +213,11 @@ func (w *JournalWriter) Seal(completedAt time.Time) error {
 		completedAt = time.Now().UTC()
 	}
 	footer := JournalFooter{
-		Type:        JournalFooterType,
-		JournalID:   w.header.JournalID,
-		Records:     w.records,
-		CompletedAt: completedAt.UTC(),
+		Type:          JournalFooterType,
+		JournalID:     w.header.JournalID,
+		Records:       w.records,
+		ContentSHA256: hex.EncodeToString(w.content.Sum(nil)),
+		CompletedAt:   completedAt.UTC(),
 	}
 	if err := writeJSONLine(w.writer, footer); err != nil {
 		return fmt.Errorf("write journal footer: %w", err)
@@ -259,9 +274,10 @@ func ValidateJournal(path string) (JournalSummary, error) {
 		return JournalSummary{}, err
 	}
 	return JournalSummary{
-		Header:  journal.Header,
-		Footer:  journal.Footer,
-		Records: records,
+		Header:        journal.Header,
+		Footer:        journal.Footer,
+		Records:       records,
+		ContentSHA256: journal.Footer.ContentSHA256,
 	}, nil
 }
 
@@ -360,6 +376,11 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 	var records uint64
 	var sawHeader bool
 	var sawFooter bool
+	// content accumulates the digest over the header line and every record line
+	// (footer excluded), recomputed from the exact bytes on disk so a post-seal
+	// mutation of the header (including crawl_prefixes) or any record fails the
+	// footer's ContentSHA256 check.
+	content := sha256.New()
 	lineNo := 0
 	for {
 		line, err := reader.ReadString('\n')
@@ -400,6 +421,7 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 			if err := validateHeader(header); err != nil {
 				return Journal{}, 0, err
 			}
+			_, _ = content.Write([]byte(line))
 			journal.Header = header
 			sawHeader = true
 		case ObjectRecordType:
@@ -424,6 +446,7 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 				return Journal{}, 0, fmt.Errorf("%w: non-monotonic record sequence %d, expected %d", ErrInvalidJournal, rec.Sequence, expected)
 			}
 			records++
+			_, _ = content.Write([]byte(line))
 			if collectRecords {
 				journal.Records = append(journal.Records, normalizeObjectRecord(rec, rec.JournalID, rec.Sequence))
 			}
@@ -442,6 +465,9 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 			if err := validateFooter(journal.Header, footer, records); err != nil {
 				return Journal{}, 0, err
 			}
+			if err := verifyJournalContentDigest(footer, content); err != nil {
+				return Journal{}, 0, err
+			}
 			journal.Footer = footer
 			sawFooter = true
 		default:
@@ -455,6 +481,41 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 		return Journal{}, 0, fmt.Errorf("%w: missing footer", ErrIncompleteJournal)
 	}
 	return journal, records, nil
+}
+
+// verifyJournalContentDigest checks the recomputed header+records digest against
+// the footer's sealed ContentSHA256. A legacy footer without ContentSHA256 is
+// not tamper-evident and is left unverified here (callers that require
+// provenance must reject an absent digest); a present digest that disagrees is a
+// tampered or truncated journal and fails closed.
+func verifyJournalContentDigest(footer JournalFooter, content hash.Hash) error {
+	sealed := strings.TrimSpace(footer.ContentSHA256)
+	if sealed == "" {
+		return nil
+	}
+	got := hex.EncodeToString(content.Sum(nil))
+	if got != sealed {
+		return fmt.Errorf("%w: journal content digest mismatch (tampered or truncated)", ErrInvalidJournal)
+	}
+	return nil
+}
+
+// writeHashedJSONLine writes v as a JSON line and feeds the exact marshaled
+// bytes (without the newline) into h, so the writer's running content digest
+// covers the same bytes a reader recomputes from disk.
+func writeHashedJSONLine(w io.Writer, h hash.Hash, v any) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(raw); err != nil {
+		return err
+	}
+	if _, err := h.Write(raw); err != nil {
+		return err
+	}
+	_, err = w.Write([]byte{'\n'})
+	return err
 }
 
 func writeJSONLine(w io.Writer, v any) error {

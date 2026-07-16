@@ -279,21 +279,30 @@ Embedding contract highlights:
 - **Providers are injected.** The package does not import concrete provider
   packages, command packages, cobra/viper, or SQLite-backed `pkg/indexstore`.
   Callers construct a `pkg/provider` handle and pass it as `Config.Source`.
-- **Plan input is explicit and provenance-bound.** Optional
+- **The observation plan is faithful and integrity-bound.** Optional
   `Config.CrawlPrefixes` is the exact provider-prefix observation plan (the
-  library form of a compiled `build.scope`). When it is supplied, `Build`
-  refuses — before any crawl or sink side effect — non-canonical plan entries
-  (leading slash / surrounding whitespace, so the bytes compared are the bytes
-  crawled), an observation selector that would reduce below the plan (non-default
-  `Match.Includes`, any `Excludes`, `IncludeHidden`, or a `Filter`), and any
-  coverage attestation that is not exactly the plan and confirmed-complete
-  (set equality; no roll-up, extra, missing, duplicate, windowed, inferred,
-  incomplete, or gapped entries). Coverage is destructive authority over the
-  verified-parent rows, so the plan is sealed into each journal header
-  (`crawl_prefixes`): a later `Retry` derives the plan from the sealed journals
-  and requires its `Coverage` to match, never trusting a caller field, so a
-  recovery cannot widen the tombstone universe. Prior rows outside the attested
-  plan are retained verbatim; journals without a recorded plan fail closed.
+  library form of a compiled `build.scope`); an unscoped build's plan is the
+  full base prefix. `Build` refuses — before any crawl or sink side effect — a
+  plan/coverage pair that does not faithfully describe the observation universe:
+  non-canonical plan entries (leading slash / surrounding whitespace, so the
+  bytes compared are the bytes crawled); a coverage attestation that is not
+  exactly the plan and confirmed-complete (set equality — no roll-up, extra,
+  missing, duplicate, windowed, inferred, incomplete, or gapped entries — so an
+  unscoped build must attest exactly full-base coverage); and, for every durable
+  build, an observation selector that would reduce below the plan (non-default
+  `Match.Includes`, any `Excludes`, `IncludeHidden`, or a `Filter`). Restrictive
+  match/filter selection is intentionally **not** a durable-build surface in this
+  Experimental API — the plan alone defines what is observed. Coverage is
+  destructive authority over the verified-parent rows, so the plan is sealed into
+  each journal header (`crawl_prefixes`) and the journal footer carries a
+  writer-generated content digest (`content_sha256`) over the header and records:
+  any post-seal edit of the plan or a record fails validation on read. A later
+  `Retry` derives the plan from the integrity-verified journals (never a caller
+  field), rejects a journal that is not content-sealed or whose recorded plan is
+  non-canonical, requires all journals to agree, and requires its `Coverage` to
+  match that plan — so a recovery cannot widen the tombstone universe. Prior rows
+  outside the attested plan are retained verbatim; journals without a recorded
+  plan or content digest fail closed.
 - **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
   journal/segment/manifest locations resolved by the adapter. The engine
   rejects journal/segment paths under a supplied `IndexDBDir` so v2 working
