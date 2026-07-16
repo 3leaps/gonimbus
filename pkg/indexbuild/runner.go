@@ -242,11 +242,12 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	if err := lease.AssertHeld(); err != nil {
 		return Summary{}, fmt.Errorf("write lease: %w", err)
 	}
-	// The verified-parent plan is mandatory: it is the sole canonical parent
-	// authority. A nil plan (missing/mis-threaded) must fail closed here, never
-	// be treated as a verified first publication.
-	if plan == nil {
-		return Summary{}, fmt.Errorf("verified parent plan is required")
+	// The verified-parent plan is the sole canonical parent authority. Validate it
+	// as one invariant (both-absent first publication, or both-present and mutually
+	// consistent) before any token or continuity use, so an inconsistent plan can
+	// never degrade into a baseline or a token/continuity disagreement.
+	if err := plan.validate(); err != nil {
+		return Summary{}, err
 	}
 	coverage, err := normalizeCoverageForBaseURI(cfg.BaseURI, cfg.Coverage)
 	if err != nil {
@@ -266,7 +267,7 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	// Derive continuity inputs (parent rows, state parent, lineage, parent
 	// manifests) from the single verified capture under the three-way rule; this
 	// validates a continuous parent's ancestry before extension.
-	continuity, err := plan.continuityInputs(cfg.RunID)
+	continuity, err := plan.continuityInputs(cfg.RunID, cfg.Paths.CompletePath, cfg.Paths.SegmentDir)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -351,6 +352,42 @@ func (p *verifiedParentPlan) expectedToken() *ParentToken {
 	return p.expected
 }
 
+// validate enforces the typed-plan invariant before any token or continuity use.
+// The only legal shapes are a proven first publication (snapshot and token both
+// absent) or a fully consistent captured parent (both present and mutually
+// identical on index set, run, manifest digest, and coverage digest derived from
+// the captured snapshot). Every mixed or mismatched shape — and a nil plan —
+// fails closed, so an inconsistent plan can never degrade into a baseline
+// first-publication or a token/continuity disagreement.
+func (p *verifiedParentPlan) validate() error {
+	if p == nil {
+		return fmt.Errorf("verified parent plan is required")
+	}
+	hasSnapshot := p.snapshot != nil
+	hasToken := p.expected != nil
+	if hasSnapshot != hasToken {
+		return fmt.Errorf("%w: inconsistent verified parent plan (snapshot and token must both be present or both absent)", indexsubstrate.ErrStaleParent)
+	}
+	if !hasSnapshot {
+		return nil
+	}
+	snap := p.snapshot
+	tok := p.expected
+	if strings.TrimSpace(snap.Complete.IndexSetID) != strings.TrimSpace(tok.IndexSetID) ||
+		strings.TrimSpace(snap.Complete.RunID) != strings.TrimSpace(tok.RunID) ||
+		strings.TrimSpace(snap.Complete.ManifestSHA256) != strings.TrimSpace(tok.ManifestSHA256) {
+		return fmt.Errorf("%w: verified parent plan snapshot and token identity disagree", indexsubstrate.ErrStaleParent)
+	}
+	covDigest, err := indexsubstrate.CoverageSHA256(snap.Manifest.Coverage)
+	if err != nil {
+		return fmt.Errorf("hash captured parent coverage: %w", err)
+	}
+	if strings.TrimSpace(tok.CoverageSHA256) != covDigest {
+		return fmt.Errorf("%w: verified parent plan coverage digest disagrees with the captured snapshot", indexsubstrate.ErrStaleParent)
+	}
+	return nil
+}
+
 // captureVerifiedParent opens the canonical latest once under the caller's held
 // authority/write lease and returns the verified-parent plan. The captured
 // snapshot must belong to the requested index set (indexSetID); a validly
@@ -405,6 +442,15 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 			return nil, fmt.Errorf("%w: provided ExpectedParent does not match live latest", indexsubstrate.ErrStaleParent)
 		}
 	}
+	// If the captured parent carries a state parent, any continuation (extend or
+	// continuous re-publish) walks ancestry through the canonical runs layout;
+	// validate that layout now — before any sink — so an off-layout captured
+	// pointer fails closed early rather than mid-publish.
+	if snap.Manifest.StateParent != nil {
+		if _, err := canonicalRunsRoot(snap.CompletePath, snap.Complete.RunID); err != nil {
+			return nil, err
+		}
+	}
 	captured := snap
 	return &verifiedParentPlan{snapshot: &captured, expected: live}, nil
 }
@@ -424,17 +470,63 @@ type continuityPublication struct {
 	parentManifests []indexsubstrate.ManifestReference
 }
 
-// runCompleteLookup returns a PublishedRunLookup over the canonical
-// runs/<run_id>/complete.json layout, derived from a known complete-marker path
-// in that layout.
-func runCompleteLookup(knownCompletePath string) indexsubstrate.PublishedRunLookup {
-	runsDir := filepath.Dir(filepath.Dir(knownCompletePath))
-	return func(_ string, runID string) (string, error) {
-		runID = strings.TrimSpace(runID)
-		if runID == "" {
-			return "", fmt.Errorf("ancestry lookup requires a run id")
+// safeRunComponent reports whether s is a single safe path component usable as a
+// run directory name (no separators, traversal, or empty/dot names).
+func safeRunComponent(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	if strings.ContainsAny(s, `/\`) || strings.Contains(s, "..") {
+		return false
+	}
+	return s == filepath.Base(s)
+}
+
+// canonicalRunsRoot validates that a captured complete-marker path is exactly
+// <set-root>/runs/<capturedRunID>/complete.json and returns the runs root. It
+// rejects any off-layout path so a digest-valid but non-canonical latest pointer
+// cannot redirect ancestry/re-publish lookups to a sibling root.
+func canonicalRunsRoot(completePath, capturedRunID string) (string, error) {
+	runDir := filepath.Dir(completePath)
+	if filepath.Base(runDir) != strings.TrimSpace(capturedRunID) {
+		return "", fmt.Errorf("%w: captured complete marker is not under its canonical run directory", indexsubstrate.ErrStaleParent)
+	}
+	runsRoot := filepath.Dir(runDir)
+	if filepath.Base(runsRoot) != "runs" {
+		return "", fmt.Errorf("%w: captured complete marker is not under a canonical runs/ root", indexsubstrate.ErrStaleParent)
+	}
+	return runsRoot, nil
+}
+
+// runCompleteLookup returns a PublishedRunLookup rooted at the captured snapshot.
+// It validates the canonical runs/<run_id>/complete.json layout on every call
+// (so an off-layout captured pointer fails closed rather than redirecting to a
+// sibling root), reasserts the captured index set, rejects unsafe run
+// components, and keeps every resolved marker contained directly under the
+// canonical runs root. The validation is per-call so a baseline parent that
+// never triggers an ancestry walk does not require the canonical layout.
+func runCompleteLookup(snap *indexsubstrate.PublishedSnapshot) indexsubstrate.PublishedRunLookup {
+	setID := strings.TrimSpace(snap.Complete.IndexSetID)
+	completePath := snap.CompletePath
+	capturedRun := strings.TrimSpace(snap.Complete.RunID)
+	return func(reqSetID, runID string) (string, error) {
+		runsRoot, err := canonicalRunsRoot(completePath, capturedRun)
+		if err != nil {
+			return "", err
 		}
-		return filepath.Join(runsDir, runID, "complete.json"), nil
+		if s := strings.TrimSpace(reqSetID); s != "" && s != setID {
+			return "", fmt.Errorf("%w: ancestry lookup crossed index sets", indexsubstrate.ErrStaleParent)
+		}
+		runID = strings.TrimSpace(runID)
+		if !safeRunComponent(runID) {
+			return "", fmt.Errorf("ancestry lookup requires a safe run id")
+		}
+		resolved := filepath.Join(runsRoot, runID, "complete.json")
+		if filepath.Dir(filepath.Dir(resolved)) != runsRoot {
+			return "", fmt.Errorf("%w: ancestry lookup escaped the canonical runs root", indexsubstrate.ErrStaleParent)
+		}
+		return resolved, nil
 	}
 }
 
@@ -451,7 +543,7 @@ func runCompleteLookup(knownCompletePath string) indexsubstrate.PublishedRunLook
 // When latest already names the run being published (idempotent recovery
 // re-publish), the run's own recorded lineage/state_parent/parent_manifests are
 // reproduced verbatim — the run never extends itself into a self-cycle.
-func (p *verifiedParentPlan) continuityInputs(runID string) (continuityPublication, error) {
+func (p *verifiedParentPlan) continuityInputs(runID, publishCompletePath, publishSegmentDir string) (continuityPublication, error) {
 	runID = strings.TrimSpace(runID)
 	if !p.hasParent() {
 		return continuityPublication{
@@ -464,6 +556,14 @@ func (p *verifiedParentPlan) continuityInputs(runID string) (continuityPublicati
 	}
 	snap := p.snapshot
 	if strings.TrimSpace(snap.Complete.RunID) == runID {
+		// Idempotent re-publish is recovery only when the target publication is the
+		// captured run's exact artifact locus. A same set/run id at any other
+		// complete/segment locus is not recovery: it would write a second artifact
+		// identity for that run id, so it fails stale before any publish.
+		if filepath.Clean(publishCompletePath) != filepath.Clean(snap.CompletePath) ||
+			filepath.Clean(publishSegmentDir) != filepath.Clean(snap.SegmentDir) {
+			return continuityPublication{}, fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
+		}
 		return reproduceRunInputs(snap)
 	}
 
@@ -483,7 +583,7 @@ func (p *verifiedParentPlan) continuityInputs(runID string) (continuityPublicati
 	// under a run lookup derived from the canonical runs/<run_id>/complete.json
 	// layout of the parent's own complete marker.
 	if _, err := indexsubstrate.ResolveAncestry(*snap, indexsubstrate.AncestryResolveConfig{
-		Lookup: runCompleteLookup(snap.CompletePath),
+		Lookup: runCompleteLookup(snap),
 	}); err != nil {
 		return continuityPublication{}, fmt.Errorf("verify parent ancestry before extend: %w", err)
 	}
@@ -519,11 +619,21 @@ func reproduceRunInputs(snap *indexsubstrate.PublishedSnapshot) (continuityPubli
 		lineage:         snap.Manifest.Lineage,
 		parentManifests: snap.Manifest.ParentManifests,
 	}
+	lookup := runCompleteLookup(snap)
+	// A continuous run must revalidate its own bounded ancestry before reproducing
+	// — the same fail-closed contract as extension, so a re-publish cannot re-emit
+	// a continuous claim over a broken deep ancestor.
+	if indexsubstrate.HasContinuousLineage(snap.Manifest) {
+		if _, err := indexsubstrate.ResolveAncestry(*snap, indexsubstrate.AncestryResolveConfig{
+			Lookup: lookup,
+		}); err != nil {
+			return continuityPublication{}, fmt.Errorf("verify re-publish ancestry: %w", err)
+		}
+	}
 	sp := snap.Manifest.StateParent
 	if sp == nil {
 		return out, nil
 	}
-	lookup := runCompleteLookup(snap.CompletePath)
 	gpComplete, err := lookup(strings.TrimSpace(sp.IndexSetID), strings.TrimSpace(sp.RunID))
 	if err != nil {
 		return continuityPublication{}, fmt.Errorf("resolve re-publish parent: %w", err)
