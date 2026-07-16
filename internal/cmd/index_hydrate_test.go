@@ -389,8 +389,8 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 }
 
 // TestRunIndexExportHydrate_StreamedDurableSegments proves export→hydrate
-// compatibility for segments produced by the dark streaming segment writer
-// (library path only; no production publish activation).
+// compatibility for segments produced by the streaming segment writer (the
+// production publish sink).
 func TestRunIndexExportHydrate_StreamedDurableSegments(t *testing.T) {
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")

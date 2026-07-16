@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-// Dark durable-lineage schema and bounded digest-verifying ancestry readers.
-// Does not activate continuous-state publish, PriorRows loading, durable
-// --since, or --since-run. See docs/architecture/durable-lineage.md.
+// Durable-lineage schema and bounded digest-verifying ancestry readers, active
+// on the durable build path: ordinary builds emit lineage and a digest-bound
+// state_parent, and validate bounded ancestry before extending a continuous
+// parent. Timestamp-scoped reduction (durable --since / --since-run) is not
+// activated. See docs/architecture/durable-lineage.md.
 
 const (
 	// LineageVersionV1 is the only supported lineage.version.

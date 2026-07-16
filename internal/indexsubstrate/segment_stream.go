@@ -108,8 +108,8 @@ func streamSegErr(cat StreamSegmentCategory, phase, message string, rowIndex int
 //
 // This writer is the production publish sink (drained by PublishSnapshot); it
 // does not itself write manifest.json, complete, or latest — PublishSnapshot
-// owns those. Continuous-parent loading and lineage emission remain a later
-// activation.
+// owns those. Continuous-parent rows arrive through src and lineage metadata
+// through the publish configuration; the writer derives neither itself.
 //
 // Contract (folded seat freezes):
 //   - Writer owns one terminal src.Close on every exit path.

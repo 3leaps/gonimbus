@@ -7,10 +7,11 @@ source through this writer, producing the same committed `InternalManifest` /
 parquet segment / digest contract as batch `WriteSegmentSet` without
 materializing a full-set `[]CurrentObjectRow`.
 
-**Does not** (still unactivated): load prior-run state for ordinary builds
-(baseline-only publication), emit continuous-state lineage, enable
-timestamp-scoped incremental builds, raise enrich scale ceilings, or claim
-exclusive adversarial isolation over the segment directory.
+**Does not** (true boundaries): enable timestamp-scoped incremental builds,
+raise enrich scale ceilings, or claim exclusive adversarial isolation over the
+segment directory. Ordinary builds stream verified parent state and emit
+lineage, but those are owned by the publish/build path — this writer persists
+only the rows and lineage metadata handed to it and derives neither.
 
 ## Purpose
 
@@ -145,12 +146,12 @@ final.
 
 ### Activation boundary
 
-| Surface                  | Status                                                |
-| ------------------------ | ----------------------------------------------------- |
-| `PublishSnapshot`        | **Active** — this writer is the publish sink          |
-| complete / latest        | Written by `PublishSnapshot`, not this writer         |
-| Prior-run load / lineage | Not activated (ordinary builds publish baseline-only) |
-| Production callers       | `PublishSnapshot` (durable build + enrich publish)    |
+| Surface                  | Status                                                                                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PublishSnapshot`        | **Active** — this writer is the publish sink                                                                                                        |
+| complete / latest        | Written by `PublishSnapshot`, not this writer                                                                                                       |
+| Prior-run load / lineage | **Active** on the durable build path — parent rows arrive through the row source and lineage through the publish config; the writer derives neither |
+| Production callers       | `PublishSnapshot` (durable build + enrich publish)                                                                                                  |
 
 ## Compatibility
 
@@ -162,5 +163,5 @@ rows via `WalkManifestRows` / verified segment readers.
 
 - [Durable spill/merge row source](durable-spill-merge.md) — sorted current-state
   iterator that can feed this writer
-- [Durable lineage schema](durable-lineage.md) — optional dark lineage fields
-  accepted on the segment writer config
+- [Durable lineage](durable-lineage.md) — lineage fields carried on the
+  segment writer config

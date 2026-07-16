@@ -209,21 +209,27 @@ replacement for `index query --since-run`. Forward object deltas via
 `--since-run` still require a SQLite-backed index (`--format sqlite` or
 `both`); durable-only snapshots do not support `--since-run` yet.
 
-### Lineage schema (dark)
+### Lineage and continuity
 
-Durable manifests may carry optional additive fields for a continuous
-lineage contract (`run_started_at`, `state_parent`, `lineage`). See
+Ordinary durable builds emit a continuous lineage contract on the manifest
+(`run_started_at`, digest-bound `state_parent`, `lineage`) and load prior state
+from the verified latest snapshot of the same index set. See
 [durable lineage](../architecture/durable-lineage.md).
 
-- **Legacy manifests** (fields absent) remain readable as a **verified
-  current-state** source.
-- Legacy latest is **not** a trustworthy `--since-run` / forward-delta boundary.
-- When lineage fields are present, `run_started_at` must be a non-zero **UTC**
-  authoritative run start (not `created_at` or journal time).
-- A baseline may optionally name one exact pre-continuity parent as a verified
+- A **first publication** is a baseline (generation 1, no state parent).
+- A build over a **pre-continuity** (no-lineage) parent — for example an
+  enriched snapshot — publishes a baseline bound to that parent as a verified
   state source; that parent is still **not** a delta boundary.
-- Production builds do **not** emit continuity edges or load prior-run state for
-  ordinary durable/`both` builds today.
+- A build over a **continuous** parent extends it (generation + 1) after
+  validating the parent's bounded ancestry; any ancestry defect fails closed
+  without advancing latest.
+- **Legacy manifests** (fields absent) remain readable as a **verified
+  current-state** source. Legacy latest is **not** a trustworthy `--since-run` /
+  forward-delta boundary.
+- `run_started_at` is a non-zero **UTC** authoritative run start (not
+  `created_at` or journal time).
+- Durable `--since` / `--since-run` remains unsupported: forward object deltas
+  still require a SQLite-backed index.
 
 ## Hub export and hydrate
 

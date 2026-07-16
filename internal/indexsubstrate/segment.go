@@ -52,8 +52,9 @@ type SegmentWriterConfig struct {
 	AllowExistingIdentical bool
 	ParentManifests        []ManifestReference
 	Coverage               []CoverageAttestation
-	// Optional dark lineage plumbing for tests and future continuity activation.
-	// Ordinary production builds leave these zero/nil.
+	// Continuity lineage inputs supplied by the durable build path: ordinary
+	// builds set these from the verified parent capture (a first publication
+	// emits a baseline lineage record with no state parent).
 	RunStartedAt *time.Time
 	StateParent  *StateParent
 	Lineage      *LineageRecord

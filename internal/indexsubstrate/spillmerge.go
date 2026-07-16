@@ -18,8 +18,10 @@ import (
 
 // Spill/merge is the current-state row source drained by the production publish
 // path (PublishSnapshot) in place of the materialized Compact projection. The
-// source itself does not publish artifacts, advance latest, or emit lineage;
-// continuous-parent loading and lineage emission remain a later activation.
+// source itself does not publish artifacts, advance latest, or emit lineage —
+// PublishSnapshot and the durable build path own those: ordinary builds stream
+// the verified parent's rows through this source and publish continuity
+// metadata derived from that same verified capture.
 
 const (
 	spillMergeWorkspaceDir   = "spillmerge"

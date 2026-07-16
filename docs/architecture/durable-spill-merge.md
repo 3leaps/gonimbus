@@ -8,13 +8,14 @@ current-state row set is never materialized in memory. The committed
 row/artifact/digest contract is identical to the previous materialized
 `Compact` → `WriteSegmentSet` path.
 
-**Does not** (still unactivated): load prior-run state for ordinary builds
-(builds publish a baseline-only current state), emit continuous-state lineage,
-enable timestamp-scoped incremental builds, or raise enrich scale ceilings. The
-parent source today carries only caller-supplied prior rows (empty for ordinary
-builds; the parent rows already loaded by enrich). Streaming segment write is
-described in
-[durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
+**Does not** (true boundaries): enable timestamp-scoped incremental builds,
+merge coverage for scope-reduced builds, or raise enrich scale ceilings. For
+ordinary durable builds the parent source streams the verified same-set
+parent's published rows (a bounded pull reader over its segments); the enrich
+path still supplies its already-loaded prior rows as a slice. Lineage emission
+is owned by the publish/build path, not this source (see
+[durable-lineage.md](durable-lineage.md)). Streaming segment write is described
+in [durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
 
 ## Purpose
 
@@ -38,6 +39,7 @@ projection is provably identical.
 | `SpillMergeConfig`                             | Identity, parent source, journal paths, coverage, mode, spill root, budget                                |
 | `SpillMergeBudget` / `DefaultSpillMergeBudget` | Prospective memory/disk/fan-in/pass bounds                                                                |
 | `ParentRowSource` / `NewSliceParentRows`       | Already-authorized parent stream (no latest lookup)                                                       |
+| `NewPublishedParentRowSource`                  | Bounded pull stream over a verified published snapshot's segments (ordinary builds' parent source)        |
 | `PrepareCurrentStateSource`                    | Validate → stage → READY (no rows until ready)                                                            |
 | `CurrentStateSource.Next`                      | Owned rows in strict bytewise `RelKey` order                                                              |
 | `CurrentStateSource.Close`                     | Idempotent; cleans this attempt under the SpillRoot trust model (below)                                   |
@@ -168,17 +170,17 @@ discipline as lineage write seams).
 
 ## Activation boundary
 
-| Path                        | Behavior                                                  |
-| --------------------------- | --------------------------------------------------------- |
-| `PublishSnapshot`           | **Active** — drains this source into the streaming writer |
-| CLI / durable build adapter | No PriorRows load for ordinary builds (baseline-only)     |
-| Lineage emission            | Not activated (schema-only; no continuous-state parent)   |
-| Streaming segment writer    | **Active** — the publish sink (see linked doc)            |
-| Timestamp-scoped builds     | Not activated                                             |
-| Enrich scale ceiling        | Unchanged                                                 |
+| Path                        | Behavior                                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `PublishSnapshot`           | **Active** — drains this source into the streaming writer                                                       |
+| CLI / durable build adapter | **Active** — ordinary builds stream the verified parent's rows through this source (caller `PriorRows` refused) |
+| Lineage emission            | **Active** on the build path — derived from the verified parent capture; this source carries rows only          |
+| Streaming segment writer    | **Active** — the publish sink (see linked doc)                                                                  |
+| Timestamp-scoped builds     | Not activated                                                                                                   |
+| Enrich scale ceiling        | Unchanged (enrich still materializes its prior rows)                                                            |
 
 ## Related
 
-- Lineage schema (dark): `docs/architecture/durable-lineage.md`
+- Lineage contract: `docs/architecture/durable-lineage.md`
 - Materialized oracle: `Compact` in `internal/indexsubstrate`
 - Canonical authority: ADR-0007 (not reopened here)

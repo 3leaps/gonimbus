@@ -444,8 +444,9 @@ func indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, i
 // base prefix. Scoped: one confirmed-complete, non-windowed attestation per
 // crawl prefix. Never roll up to a parent/base prefix.
 //
-// This adapter does not load PriorRows in this slice; when prior-row loading
-// lands alongside scope, scoped incremental tombstone soundness needs re-review.
+// The engine streams prior state from the verified parent (caller PriorRows is
+// refused). Coverage merge for scope-reduced builds is not yet active; scoped
+// incremental tombstone soundness needs re-review when it lands.
 func indexBuildEngineCoverageFromCrawl(basePrefix string, crawlPrefixes []string) ([]indexbuild.CoverageAttestation, error) {
 	coverage, err := deriveIndexBuildCoverageFromCrawlPrefixes(basePrefix, crawlPrefixes)
 	if err != nil {

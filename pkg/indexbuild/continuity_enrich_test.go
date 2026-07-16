@@ -41,7 +41,7 @@ func (p *listHeadProvider) Head(_ context.Context, key string) (*provider.Object
 func (p *listHeadProvider) Close() error { return nil }
 
 // TestBuildEnrichBuildPreservesHeadEnrichment is the anti-regression for
-// dropping HEAD (Slice-C) enrichment across continuity: build -> enrich ->
+// dropping HEAD enrichment across continuity: build -> enrich ->
 // build, where the second build captures the enriched latest as its exact parent
 // and unchanged observed rows retain their HEAD enrichment fields.
 func TestBuildEnrichBuildPreservesHeadEnrichment(t *testing.T) {
