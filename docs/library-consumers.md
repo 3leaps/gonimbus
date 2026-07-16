@@ -293,16 +293,21 @@ Embedding contract highlights:
   `Match.Includes`, any `Excludes`, `IncludeHidden`, or a `Filter`). Restrictive
   match/filter selection is intentionally **not** a durable-build surface in this
   Experimental API — the plan alone defines what is observed. Coverage is
-  destructive authority over the verified-parent rows, so the plan is sealed into
+  destructive authority over the verified-parent rows, so the plan is recorded in
   each journal header (`crawl_prefixes`) and the journal footer carries a
-  writer-generated content digest (`content_sha256`) over the header and records:
-  any post-seal edit of the plan or a record fails validation on read. A later
-  `Retry` derives the plan from the integrity-verified journals (never a caller
-  field), rejects a journal that is not content-sealed or whose recorded plan is
-  non-canonical, requires all journals to agree, and requires its `Coverage` to
-  match that plan — so a recovery cannot widen the tombstone universe. Prior rows
-  outside the attested plan are retained verbatim; journals without a recorded
-  plan or content digest fail closed.
+  writer-generated integrity checksum (`content_sha256`) over the header and
+  records. A later `Retry` derives the plan from the journals (never a caller
+  field), rejects a journal that lacks the checksum or records a non-canonical
+  plan, requires all journals to agree, and requires its `Coverage` to match that
+  plan; prior rows outside the attested plan are retained verbatim, and journals
+  without a recorded plan or checksum fail closed. Trust model: `Retry` consumes
+  `JournalPaths` as **engine-produced recovery artifacts** in the engine's
+  working storage, which is assumed trusted. The `content_sha256` is an unkeyed
+  integrity checksum that detects corruption, truncation, and partial
+  modification of a journal on read (at both validation and the
+  streaming-compaction reopen); it is not a cryptographic authentication
+  mechanism. Stronger authentication for deployments where recovery artifacts are
+  not trusted storage is a tracked follow-up.
 - **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
   journal/segment/manifest locations resolved by the adapter. The engine
   rejects journal/segment paths under a supplied `IndexDBDir` so v2 working

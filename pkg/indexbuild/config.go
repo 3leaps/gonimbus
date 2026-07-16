@@ -230,12 +230,16 @@ type RetryConfig struct {
 	// Coverage is destructive authority over verified-parent rows: a
 	// confirmed-complete scope tombstones unobserved parent keys under it. Public
 	// Retry does not trust this field on its own — it derives the observation
-	// plan from the integrity-verified journals (the sealed `crawl_prefixes`
-	// header, authenticated by the footer `content_sha256` over header+records)
-	// and requires Coverage to match that plan exactly, so a recovery cannot
-	// widen the tombstone universe beyond what the crawl observed. Journals
-	// without a recorded plan or content digest, or whose recorded plan is
-	// non-canonical, fail closed.
+	// plan from the recorded `crawl_prefixes` journal header and requires Coverage
+	// to match that plan exactly. The footer `content_sha256` is an unkeyed
+	// integrity checksum over header+records (verified at validation and at the
+	// compaction reopen) that detects corruption, truncation, and partial
+	// modification on read; Retry consumes JournalPaths as engine-produced
+	// recovery artifacts in trusted working storage. It is not a cryptographic
+	// authentication mechanism; stronger authentication for untrusted
+	// recovery-artifact storage is a tracked follow-up. Journals without a
+	// recorded plan or checksum, or whose recorded plan is non-canonical, fail
+	// closed.
 	Coverage []CoverageAttestation
 	// PriorRows is retained only for source compatibility and is NOT an accepted
 	// input: public Retry rejects any non-nil value (including an empty non-nil
