@@ -153,6 +153,155 @@ func TestPublishedParentRowSourceCanceledContext(t *testing.T) {
 	require.NoError(t, src.Close())
 }
 
+// TestPublishedParentRowSourceUsesSameFDAfterPathReplacement proves the
+// same-open trust contract for the bounded parent reader itself (the walk-path
+// twin lives in trust_toctou_test.go): after the digest verifies on the open
+// descriptor, replacing the pathname must not affect the parse — the verified
+// bytes are read from the held FD, never a re-open.
+func TestPublishedParentRowSourceUsesSameFDAfterPathReplacement(t *testing.T) {
+	base := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	std := "STANDARD"
+	rows := []CurrentObjectRow{
+		segmentTestRow("idx_parent", "data/a.xml", 1, `"a"`, base, &std, nil, nil, nil),
+		segmentTestRow("idx_parent", "data/b.xml", 2, `"b"`, base, &std, nil, nil, nil),
+	}
+	snap, _ := writeParentSnapshotFixture(t, rows, 10) // single segment
+	require.Len(t, snap.Manifest.Segments, 1)
+
+	t.Cleanup(func() { afterSegmentDigestVerifiedForTest = nil })
+	afterSegmentDigestVerifiedForTest = func(gotPath string) {
+		// Pathname replacement via rename: the open FD keeps the verified inode.
+		evil := gotPath + ".evil"
+		require.NoError(t, os.WriteFile(evil, []byte("not-a-parquet-file"), 0o600))
+		require.NoError(t, os.Rename(evil, gotPath))
+	}
+
+	src := NewPublishedParentRowSource(snap)
+	got := drainParent(t, src)
+	require.Equal(t, rows, got, "parse must read the digest-verified descriptor, not the substituted pathname")
+	require.NoError(t, src.Close())
+}
+
+// TestPublishedParentRowSourceRefusesOrderViolation pins the cross-segment
+// strict bytewise-increasing unique RelKey enforcement: segment descriptors
+// reordered in the manifest (each still digest-valid) make the stream
+// non-increasing at the first cross-segment step and must refuse with the
+// order category, sanitized.
+func TestPublishedParentRowSourceRefusesOrderViolation(t *testing.T) {
+	base := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	std := "STANDARD"
+	rows := []CurrentObjectRow{
+		segmentTestRow("idx_parent", "data/a.xml", 1, `"a"`, base, &std, nil, nil, nil),
+		segmentTestRow("idx_parent", "data/b.xml", 2, `"b"`, base, &std, nil, nil, nil),
+		segmentTestRow("idx_parent", "data/c.xml", 3, `"c"`, base, &std, nil, nil, nil),
+		segmentTestRow("idx_parent", "data/d.xml", 4, `"d"`, base, &std, nil, nil, nil),
+	}
+	snap, _ := writeParentSnapshotFixture(t, rows, 2) // 2 segments (a,b | c,d)
+	require.Len(t, snap.Manifest.Segments, 2)
+	snap.Manifest.Segments[0], snap.Manifest.Segments[1] = snap.Manifest.Segments[1], snap.Manifest.Segments[0]
+
+	src := NewPublishedParentRowSource(snap)
+	var err error
+	for range rows {
+		if _, err = src.Next(context.Background()); err != nil {
+			break
+		}
+	}
+	require.Error(t, err)
+	var pe *ParentReaderError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ParentReaderOrder, pe.Category)
+	require.NotContains(t, err.Error(), "data/")
+	require.NoError(t, src.Close())
+}
+
+// TestPublishedParentRowSourceRefusesSegmentCountMismatch pins the per-segment
+// declared-count enforcement, distinct from the whole-stream total: a segment
+// yielding fewer rows than its descriptor declares refuses at the segment
+// boundary; one yielding more refuses during the read.
+func TestPublishedParentRowSourceRefusesSegmentCountMismatch(t *testing.T) {
+	base := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	std := "STANDARD"
+	rows := []CurrentObjectRow{
+		segmentTestRow("idx_parent", "data/a.xml", 1, `"a"`, base, &std, nil, nil, nil),
+		segmentTestRow("idx_parent", "data/b.xml", 2, `"b"`, base, &std, nil, nil, nil),
+	}
+
+	t.Run("under-run", func(t *testing.T) {
+		snap, _ := writeParentSnapshotFixture(t, rows, 10)
+		require.Len(t, snap.Manifest.Segments, 1)
+		snap.Manifest.Segments[0].Rows = 3
+		snap.Manifest.Counts.Rows = 3
+
+		src := NewPublishedParentRowSource(snap)
+		var err error
+		for i := 0; i <= len(rows); i++ {
+			if _, err = src.Next(context.Background()); err != nil {
+				break
+			}
+		}
+		require.Error(t, err)
+		var pe *ParentReaderError
+		require.ErrorAs(t, err, &pe)
+		require.Equal(t, ParentReaderCount, pe.Category)
+		require.Contains(t, err.Error(), "do not match declared")
+		require.NoError(t, src.Close())
+	})
+
+	t.Run("over-run", func(t *testing.T) {
+		snap, _ := writeParentSnapshotFixture(t, rows, 10)
+		require.Len(t, snap.Manifest.Segments, 1)
+		snap.Manifest.Segments[0].Rows = 1
+		snap.Manifest.Counts.Rows = 1
+
+		src := NewPublishedParentRowSource(snap)
+		var err error
+		for i := 0; i <= len(rows); i++ {
+			if _, err = src.Next(context.Background()); err != nil {
+				break
+			}
+		}
+		require.Error(t, err)
+		var pe *ParentReaderError
+		require.ErrorAs(t, err, &pe)
+		require.Equal(t, ParentReaderCount, pe.Category)
+		require.Contains(t, err.Error(), "more rows than declared")
+		require.NoError(t, src.Close())
+	})
+}
+
+// TestPublishedParentRowSourceTerminalErrorIsSticky pins that a terminal
+// failure latches: every subsequent Next returns the same classified error
+// (never EOF, never fresh rows), and a closed source refuses with the closed
+// category.
+func TestPublishedParentRowSourceTerminalErrorIsSticky(t *testing.T) {
+	base := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	std := "STANDARD"
+	rows := []CurrentObjectRow{
+		segmentTestRow("idx_parent", "data/a.xml", 1, `"a"`, base, &std, nil, nil, nil),
+	}
+	snap, dir := writeParentSnapshotFixture(t, rows, 10)
+	segPath := filepath.Join(dir, snap.Manifest.Segments[0].Path)
+	orig, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(segPath, append(orig, 0x00), 0o600))
+
+	src := NewPublishedParentRowSource(snap)
+	_, err = src.Next(context.Background())
+	require.Error(t, err)
+	var pe *ParentReaderError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ParentReaderDigest, pe.Category)
+
+	_, again := src.Next(context.Background())
+	require.Equal(t, err, again, "terminal error must latch on subsequent Next")
+
+	require.NoError(t, src.Close())
+	_, closedErr := src.Next(context.Background())
+	require.ErrorAs(t, closedErr, &pe)
+	require.Equal(t, ParentReaderClosed, pe.Category)
+}
+
 // TestPublishedParentRowSourceDrainsThroughSpillMerge proves the reader is a
 // drop-in ParentRowSource for the streaming publish merge.
 func TestPublishedParentRowSourceDrainsThroughSpillMerge(t *testing.T) {

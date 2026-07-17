@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
@@ -447,6 +448,68 @@ func TestBuildIndexGCPlanRetainsSetWithActiveCheckpoint(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// TestDoctorInventoriesVerificationProjectionsAndGCStaysSetScoped pins the
+// contract-8 lifecycle classification for run-scoped verification projections:
+// doctor inventories the attempts by name, a dry-run GC leaves the residue
+// byte-intact (run-scoping grants isolation, never deletion authority), and
+// the only removal path is the receipt-backed whole-set deletion — which must
+// succeed with the residue present rather than treating it as an unexpected
+// tree.
+func TestDoctorInventoriesVerificationProjectionsAndGCStaysSetScoped(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	env := seedDurableOnlyAppData(t, dataRoot, nil)
+	segmentRoot := filepath.Join(dataRoot, "cache", "segments", env.indexSetID)
+
+	for _, attempt := range []string{"run_attempt_a", "run_attempt_b"} {
+		attemptDir := filepath.Join(segmentRoot, "verification", attempt)
+		require.NoError(t, os.MkdirAll(attemptDir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(attemptDir, "index.db"), []byte("projection-"+attempt), 0o600))
+	}
+
+	entry, err := inspectDurableForDoctor(indexreader.Meta{
+		Format:      indexreader.FormatDurableV2,
+		IndexSetID:  env.indexSetID,
+		IdentityDir: env.identityDir,
+		SourcePath:  filepath.Join(segmentRoot, "latest.json"),
+	}, indexDoctorOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, entry.VerificationProjectionCount)
+	require.Equal(t, []string{"run_attempt_a", "run_attempt_b"}, entry.VerificationProjections)
+	var classified bool
+	for _, note := range entry.Notes {
+		if strings.Contains(note, "receipt-backed set-scoped GC") {
+			classified = true
+		}
+	}
+	require.True(t, classified, "inventory note must state the deletion-authority posture")
+
+	// Dry-run GC: no sub-set deletion path may touch the residue.
+	dry := &cobra.Command{Use: "gc"}
+	dry.Flags().String("max-age", "24h", "")
+	dry.Flags().Int("keep-last", 0, "")
+	dry.Flags().Bool("dry-run", true, "")
+	dry.Flags().Bool("json", false, "")
+	require.NoError(t, runIndexGC(dry, nil))
+	for _, attempt := range []string{"run_attempt_a", "run_attempt_b"} {
+		data, readErr := os.ReadFile(filepath.Join(segmentRoot, "verification", attempt, "index.db"))
+		require.NoError(t, readErr)
+		require.Equal(t, []byte("projection-"+attempt), data, "dry-run must leave verification residue byte-intact")
+	}
+
+	// Receipt-backed whole-set deletion is the one legitimate removal path and
+	// must succeed with the residue present.
+	cmd := &cobra.Command{Use: "gc"}
+	cmd.Flags().String("max-age", "24h", "")
+	cmd.Flags().Int("keep-last", 0, "")
+	cmd.Flags().Bool("dry-run", false, "")
+	cmd.Flags().Bool("json", false, "")
+	require.NoError(t, runIndexGC(cmd, nil))
+	require.NoDirExists(t, segmentRoot, "whole-set removal includes the verification residue under set-scoped authority")
+	require.NoDirExists(t, env.identityDir)
 }
 
 func TestRunIndexGCExecutesLeasedWholeSetDeletion(t *testing.T) {
