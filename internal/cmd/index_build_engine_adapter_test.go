@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/internal/indexcompare"
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
@@ -359,6 +360,17 @@ build:
 		require.True(t, rec.Verification.ProjectionMaterialized)
 		require.True(t, rec.Verification.ProjectionClosed)
 		require.Equal(t, rec.RunID, rec.Verification.ObservationRunID, "verification must bind the producing run")
+		// Report and receipt share the actual compared artifact identity: an
+		// opaque attempt ID plus a set-relative locator naming the run-scoped
+		// projection (never the canonical index.db path, never host-absolute).
+		sqliteArtifact, _ := report["sqlite_artifact"].(map[string]any)
+		require.NotNil(t, sqliteArtifact)
+		require.Equal(t, rec.Verification.ArtifactID, sqliteArtifact["id"])
+		require.Equal(t, rec.Verification.ArtifactLocator, sqliteArtifact["path"])
+		require.Equal(t, "verification/"+rec.Verification.ArtifactID+"/index.db", rec.Verification.ArtifactLocator)
+		require.False(t, filepath.IsAbs(rec.Verification.ArtifactLocator))
+		locatorPath := filepath.Join(os.Getenv("GONIMBUS_DATA_DIR"), "cache", "segments", rec.IndexSetID, rec.Verification.ArtifactLocator)
+		require.FileExists(t, locatorPath, "locator must name the projection that exists through comparison and close")
 		return rec
 	}
 	currentRows := func(dataRoot string) (indexsubstrate.InternalManifest, map[string]indexbuild.ObjectState, string) {
@@ -633,7 +645,7 @@ func TestIndexBuildFormatBothRefusesPlantedVerificationSymlink(t *testing.T) {
 }
 
 func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
-	report := indexBuildBothFormatsFailureReport(nil, nil, resolvedIndexDB{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
+	report := indexBuildBothFormatsFailureReport(nil, nil, indexcompare.Artifact{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
 	require.Equal(t, "gonimbus.index.compare_result.v1", report.Type)
 	require.Equal(t, "LIST-projection fidelity (sqlite vs durable row projection over one crawl)", report.ProjectionSemantics.Certifies)
 	require.Equal(t, "reflow-input readiness (HEAD-enrichment parity)", report.ProjectionSemantics.DoesNotCertify)

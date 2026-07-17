@@ -33,28 +33,46 @@ type SQLiteVerificationTargetOptions struct {
 	AttemptName string
 }
 
+// verificationDirBinding retains the identity of one authority-bearing
+// directory component so Check/Close can re-attest that the named path still
+// resolves to the exact directory that was validated at creation time. The
+// held handle pins the inode against reuse for the target's lifetime.
+type verificationDirBinding struct {
+	path   string
+	label  string
+	handle *os.File
+	info   os.FileInfo
+}
+
 // SQLiteVerificationTarget owns the run-scoped SQLite parity-verification
 // database of a dual-format build. The projection carries no canonical trust
-// and is never a reader-selectable consumer artifact; this type only
-// guarantees that the projection is created exclusively on a fresh owner-only
-// path under the bound segment-set root (prefix possession is not authority),
-// and that the exact created file is retained through close so a pathname
-// substitution refuses instead of mutating or blessing foreign state.
+// and is never a reader-selectable consumer artifact; this type guarantees
+// that the projection is created exclusively on a fresh owner-only path under
+// the bound segment-set root (prefix possession is not authority), that the
+// SQLite connection is bound to the exclusively created file through the
+// attested-VFS open, and that every authority-bearing directory component
+// (segment-set root, verification intermediate, attempt directory) plus the
+// exact database binding is re-attested at every mutation boundary and through
+// close — so a substituted parent namespace refuses instead of blessing a
+// projection through a foreign tree, even when the final pathname still names
+// the originally created inode.
 type SQLiteVerificationTarget struct {
 	db        *sql.DB
 	opts      SQLiteVerificationTargetOptions
 	path      string
 	bound     *os.File
 	boundInfo os.FileInfo
+	dirs      []verificationDirBinding
 	closed    bool
 }
 
 // OpenSQLiteVerificationTarget exclusively creates the attempt directory and
 // database file for one verification projection, then opens the SQLite
-// connection through the created pathname. Every intermediate is validated
-// no-follow: a symlinked or non-directory segment-set root, `verification`
-// intermediate, or database name refuses before any SQLite mutation, as does a
-// pre-existing attempt directory or database file.
+// connection bound to the created file with Check as the before-mutation
+// attestation. Every intermediate is validated no-follow and retained: a
+// symlinked or non-directory segment-set root, `verification` intermediate, or
+// database name refuses before any SQLite mutation, as does a pre-existing
+// attempt directory or database file.
 func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTargetOptions) (*SQLiteVerificationTarget, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -80,56 +98,86 @@ func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTa
 		return nil, fmt.Errorf("verification projection authority: %w", err)
 	}
 
+	target := &SQLiteVerificationTarget{opts: opts}
+	fail := func(err error) (*SQLiteVerificationTarget, error) {
+		target.releaseHandles()
+		return nil, err
+	}
+
 	// A first build may dispatch before the durable engine creates the segment
 	// tree; create-if-absent like every other set-root writer, then validate
-	// the final component no-follow.
+	// and retain the final component no-follow.
 	if _, err := os.Lstat(opts.SegmentSetRoot); os.IsNotExist(err) {
 		if mkErr := os.MkdirAll(opts.SegmentSetRoot, 0o700); mkErr != nil {
-			return nil, fmt.Errorf("%w: create segment set root: %v", ErrVerificationProjectionTarget, mkErr)
+			return fail(fmt.Errorf("%w: create segment set root: %v", ErrVerificationProjectionTarget, mkErr))
 		}
 	}
-	if err := requireRealDirectoryNoFollow(opts.SegmentSetRoot, "segment set root"); err != nil {
-		return nil, err
+	rootBinding, err := bindRealDirectoryNoFollow(opts.SegmentSetRoot, "segment set root")
+	if err != nil {
+		return fail(err)
 	}
+	target.dirs = append(target.dirs, rootBinding)
+
 	verificationDir := filepath.Join(opts.SegmentSetRoot, "verification")
-	if err := ensureRealDirectoryNoFollow(verificationDir, "verification intermediate"); err != nil {
-		return nil, err
+	if _, err := os.Lstat(verificationDir); os.IsNotExist(err) {
+		// Mkdir cannot traverse or replace a symlink at the final component; a
+		// racing plant surfaces as EEXIST-then-binding-failure below.
+		if mkErr := os.Mkdir(verificationDir, 0o700); mkErr != nil && !os.IsExist(mkErr) {
+			return fail(fmt.Errorf("%w: create verification intermediate: %v", ErrVerificationProjectionTarget, mkErr))
+		}
 	}
+	verificationBinding, err := bindRealDirectoryNoFollow(verificationDir, "verification intermediate")
+	if err != nil {
+		return fail(err)
+	}
+	target.dirs = append(target.dirs, verificationBinding)
+
 	attemptDir := filepath.Join(verificationDir, opts.AttemptName)
 	// The attempt directory must be created by this call. EEXIST covers both a
 	// concurrent honest writer (attempt names are per-run unique) and a planted
 	// directory or symlink waiting to be adopted.
 	if err := os.Mkdir(attemptDir, 0o700); err != nil {
-		return nil, fmt.Errorf("%w: create verification attempt directory: %v", ErrVerificationProjectionTarget, err)
+		return fail(fmt.Errorf("%w: create verification attempt directory: %v", ErrVerificationProjectionTarget, err))
 	}
-	if err := requireRealDirectoryNoFollow(attemptDir, "verification attempt directory"); err != nil {
-		return nil, err
+	attemptBinding, err := bindRealDirectoryNoFollow(attemptDir, "verification attempt directory")
+	if err != nil {
+		return fail(err)
 	}
+	target.dirs = append(target.dirs, attemptBinding)
 
 	dbPath := filepath.Join(attemptDir, "index.db")
 	bound, err := openSQLiteWriteBinding(dbPath, true)
 	if err != nil {
-		return nil, fmt.Errorf("%w: create verification database exclusively: %v", ErrVerificationProjectionTarget, err)
+		return fail(fmt.Errorf("%w: create verification database exclusively: %v", ErrVerificationProjectionTarget, err))
 	}
+	target.bound = bound
 	boundInfo, err := bound.Stat()
 	if err != nil || !boundInfo.Mode().IsRegular() {
-		_ = bound.Close()
-		return nil, errors.Join(fmt.Errorf("%w: retained verification database proof is not a regular file", ErrVerificationProjectionTarget), err)
+		return fail(errors.Join(fmt.Errorf("%w: retained verification database proof is not a regular file", ErrVerificationProjectionTarget), err))
+	}
+	target.boundInfo = boundInfo
+	target.path = dbPath
+	if err := target.Check(); err != nil {
+		return fail(err)
 	}
 
-	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+	// Bind the connection to the exclusively created file through the attested
+	// VFS: SQLite's exact main-file handle is matched against bound, sidecars
+	// are reserved through a retained no-follow directory binding, and Check
+	// (authority + full parent-namespace + database identity) runs before
+	// mutation boundaries — never a generic pathname open.
+	db, err := indexstore.OpenLocalMutableCanonical(ctx, dbPath, bound, target.Check)
 	if err != nil {
-		_ = bound.Close()
-		return nil, fmt.Errorf("open verification database: %w", err)
+		return fail(fmt.Errorf("open bound verification database: %w", err))
 	}
-	target := &SQLiteVerificationTarget{db: db, opts: opts, path: dbPath, bound: bound, boundInfo: boundInfo}
+	target.db = db
 	if err := target.Check(); err != nil {
 		return nil, errors.Join(err, target.Close())
 	}
 	return target, nil
 }
 
-// DB returns the mutable verification connection.
+// DB returns the bound mutable verification connection.
 func (t *SQLiteVerificationTarget) DB() *sql.DB {
 	if t == nil {
 		return nil
@@ -145,14 +193,40 @@ func (t *SQLiteVerificationTarget) Path() string {
 	return t.path
 }
 
-// Check revalidates authority and that the verification pathname still names
-// the exclusively created database file.
+// AttemptName returns the per-run attempt identifier for this projection.
+func (t *SQLiteVerificationTarget) AttemptName() string {
+	if t == nil {
+		return ""
+	}
+	return t.opts.AttemptName
+}
+
+// Locator returns the stable set-relative locator of the projection database
+// (never a host-absolute path).
+func (t *SQLiteVerificationTarget) Locator() string {
+	if t == nil {
+		return ""
+	}
+	return "verification/" + t.opts.AttemptName + "/index.db"
+}
+
+// Check revalidates caller authority, every retained authority-bearing
+// directory component, and that the verification pathname still names the
+// exclusively created database file. A rename, symlink/replacement, or
+// hardlink alias through a foreign parent refuses even when the final inode is
+// unchanged.
 func (t *SQLiteVerificationTarget) Check() error {
 	if t == nil || t.closed || t.bound == nil || t.boundInfo == nil {
 		return fmt.Errorf("verification projection target is closed")
 	}
 	if err := t.opts.Authority.AssertHeldFor(t.opts.IndexSetID, t.opts.SegmentSetRoot); err != nil {
 		return fmt.Errorf("verification projection authority: %w", err)
+	}
+	for _, d := range t.dirs {
+		info, err := os.Lstat(d.path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(d.info, info) {
+			return fmt.Errorf("%w: %s identity changed", ErrVerificationProjectionTarget, d.label)
+		}
 	}
 	boundInfo, err := t.bound.Stat()
 	if err != nil || !boundInfo.Mode().IsRegular() || !os.SameFile(t.boundInfo, boundInfo) {
@@ -165,8 +239,8 @@ func (t *SQLiteVerificationTarget) Check() error {
 	return nil
 }
 
-// Close closes the verification connection after revalidating that the
-// pathname still names the created file, and verifies live SQLite transaction
+// Close closes the verification connection after re-attesting the retained
+// parent namespace and database binding, and verifies live SQLite transaction
 // sidecars are gone on a clean close. A failed Close means the projection is
 // not bindable evidence: callers must not emit a successful dual-format
 // terminal result. Close never deletes projection files.
@@ -188,8 +262,20 @@ func (t *SQLiteVerificationTarget) Close() error {
 		t.db = nil
 	}
 	if dbCloseOK && checkErr == nil {
-		if namedInfo, err := os.Lstat(t.path); err != nil || namedInfo.Mode()&os.ModeSymlink != 0 || !namedInfo.Mode().IsRegular() || !os.SameFile(t.boundInfo, namedInfo) {
-			errs = append(errs, fmt.Errorf("%w: verification database pathname changed during close", ErrVerificationProjectionTarget))
+		postClose := func() error {
+			for _, d := range t.dirs {
+				info, err := os.Lstat(d.path)
+				if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(d.info, info) {
+					return fmt.Errorf("%w: %s identity changed during close", ErrVerificationProjectionTarget, d.label)
+				}
+			}
+			if namedInfo, err := os.Lstat(t.path); err != nil || namedInfo.Mode()&os.ModeSymlink != 0 || !namedInfo.Mode().IsRegular() || !os.SameFile(t.boundInfo, namedInfo) {
+				return fmt.Errorf("%w: verification database pathname changed during close", ErrVerificationProjectionTarget)
+			}
+			return nil
+		}
+		if err := postClose(); err != nil {
+			errs = append(errs, err)
 		} else if err := indexstore.RejectLiveSQLiteTransactionSidecars(t.path); err != nil {
 			errs = append(errs, fmt.Errorf("verification SQLite transaction state remains after close: %w", err))
 		}
@@ -198,39 +284,40 @@ func (t *SQLiteVerificationTarget) Close() error {
 		errs = append(errs, t.bound.Close())
 		t.bound = nil
 	}
+	t.releaseHandles()
 	t.closed = true
 	return errors.Join(errs...)
 }
 
-// requireRealDirectoryNoFollow refuses paths whose final component is absent,
-// a symlink, or anything other than a real directory.
-func requireRealDirectoryNoFollow(path, label string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("%w: inspect %s: %v", ErrVerificationProjectionTarget, label, err)
+func (t *SQLiteVerificationTarget) releaseHandles() {
+	for i := range t.dirs {
+		if t.dirs[i].handle != nil {
+			_ = t.dirs[i].handle.Close()
+			t.dirs[i].handle = nil
+		}
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("%w: %s is not a real directory", ErrVerificationProjectionTarget, label)
-	}
-	return nil
 }
 
-// ensureRealDirectoryNoFollow creates the directory when absent and refuses a
-// pre-existing symlink or non-directory in its place, before and after the
-// create.
-func ensureRealDirectoryNoFollow(path, label string) error {
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("%w: %s is not a real directory", ErrVerificationProjectionTarget, label)
-		}
-	case os.IsNotExist(err):
-		if mkErr := os.Mkdir(path, 0o700); mkErr != nil && !os.IsExist(mkErr) {
-			return fmt.Errorf("%w: create %s: %v", ErrVerificationProjectionTarget, label, mkErr)
-		}
-	default:
-		return fmt.Errorf("%w: inspect %s: %v", ErrVerificationProjectionTarget, label, err)
+// bindRealDirectoryNoFollow refuses a path whose final component is absent, a
+// symlink, or anything other than a real directory, then retains an open
+// handle whose identity matches the validated component (a symlink swapped in
+// between the validation and the open is caught by the identity comparison).
+func bindRealDirectoryNoFollow(path, label string) (verificationDirBinding, error) {
+	lstatInfo, err := os.Lstat(path)
+	if err != nil {
+		return verificationDirBinding{}, fmt.Errorf("%w: inspect %s: %v", ErrVerificationProjectionTarget, label, err)
 	}
-	return requireRealDirectoryNoFollow(path, label)
+	if lstatInfo.Mode()&os.ModeSymlink != 0 || !lstatInfo.IsDir() {
+		return verificationDirBinding{}, fmt.Errorf("%w: %s is not a real directory", ErrVerificationProjectionTarget, label)
+	}
+	handle, err := os.Open(path) // #nosec G304 -- path was validated no-follow above and identity is re-attested below
+	if err != nil {
+		return verificationDirBinding{}, fmt.Errorf("%w: retain %s: %v", ErrVerificationProjectionTarget, label, err)
+	}
+	info, err := handle.Stat()
+	if err != nil || !info.IsDir() || !os.SameFile(lstatInfo, info) {
+		_ = handle.Close()
+		return verificationDirBinding{}, errors.Join(fmt.Errorf("%w: retained %s does not name the validated directory", ErrVerificationProjectionTarget, label), err)
+	}
+	return verificationDirBinding{path: path, label: label, handle: handle, info: info}, nil
 }

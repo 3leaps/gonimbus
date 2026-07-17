@@ -281,6 +281,9 @@ func TestIndexInitAfterIdentityQuarantineCannotRecreateAndGCRecoveryConverges(t 
 
 func TestSQLiteListAndDoctorUseNonMutatingAuthorityHeldSnapshots(t *testing.T) {
 	env := seedSQLiteEnrichGCAppData(t)
+	// This test pins SQLite read surfaces; keep the durable latest hidden so
+	// format-aware resolution selects the set-root SQLite database.
+	_ = hideDurableLatestForSQLiteSelection(t, env.indexSetID)
 	dbPath := filepath.Join(env.identityDir, "index.db")
 	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: dbPath})
 	require.NoError(t, err)

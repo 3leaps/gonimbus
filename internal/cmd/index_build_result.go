@@ -58,6 +58,12 @@ type indexBuildBothVerificationRecord struct {
 	ParityPassed           bool   `json:"parity_passed"`
 	ProjectionRows         int64  `json:"projection_rows"`
 	ProjectionSHA256       string `json:"projection_sha256,omitempty"`
+	// ArtifactID and ArtifactLocator bind the receipt to the exact SQLite
+	// database the parity report compared: the opaque per-run attempt ID and a
+	// set-relative locator for canonical builds (never a host-absolute path),
+	// or the caller-provided path for an explicit external --db.
+	ArtifactID      string `json:"artifact_id"`
+	ArtifactLocator string `json:"artifact_locator"`
 }
 
 func intPtr(v int) *int       { return &v }
@@ -181,6 +187,9 @@ func validateIndexBuildResultRecord(rec indexBuildResultRecord) error {
 		}
 		if rec.Verification.ObservationRunID != rec.RunID {
 			return fmt.Errorf("build result verification observation_run_id must bind the receipt run")
+		}
+		if strings.TrimSpace(rec.Verification.ArtifactID) == "" || strings.TrimSpace(rec.Verification.ArtifactLocator) == "" {
+			return fmt.Errorf("build result verification must bind the compared artifact identity")
 		}
 		if status == "success" {
 			if !rec.Verification.ProjectionMaterialized || !rec.Verification.ProjectionClosed {

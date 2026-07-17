@@ -15,6 +15,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -37,7 +38,7 @@ type indexBuildBothFormatsResult struct {
 	Report  *indexcompare.Report
 }
 
-func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db *sql.DB, indexSet *indexstore.IndexSet, run *indexstore.IndexRun, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters, authority *indexcoord.Lease) (indexBuildBothFormatsResult, error) {
+func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db *sql.DB, indexSet *indexstore.IndexSet, run *indexstore.IndexRun, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters, authority *indexcoord.Lease, verification *indexreader.SQLiteVerificationTarget) (indexBuildBothFormatsResult, error) {
 	out := indexBuildBothFormatsResult{Result: &indexBuildResult{FinalStatus: indexstore.RunStatusSuccess}}
 	if m == nil {
 		return out, fmt.Errorf("index manifest is required")
@@ -99,6 +100,15 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	if err != nil {
 		return out, err
 	}
+	// The report must bind the SQLite database actually compared. Canonical
+	// `both` compares the run-scoped verification projection (identified by an
+	// opaque attempt ID plus a set-relative locator — never a host-absolute
+	// path); an explicit external --db is the caller's own path and is named
+	// as given.
+	sqliteArtifact := indexcompare.Artifact{ID: indexSet.IndexSetID, Path: resolvedDB.Path}
+	if verification != nil {
+		sqliteArtifact = indexcompare.Artifact{ID: verification.AttemptName(), Path: verification.Locator()}
+	}
 	paths := indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, run.RunID, resolvedDB.IdentityDir)
 	sqliteWriter := newIndexIngestWriter(db, indexSet.IndexSetID, run, m.Connection.BaseURI, basePrefix, indexIngestWriterConfig{
 		ObjectBatchSize: DefaultObjectBatchSize,
@@ -133,18 +143,18 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	out.Result = sqliteWriter.Result()
 	out.Result.CrawlPrefixes = append([]string(nil), crawlPrefixes...)
 	if err != nil {
-		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, resolvedDB, paths, false, false)
+		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, sqliteArtifact, paths, false, false)
 		return out, err
 	}
 	manifestDoc, err := indexsubstrate.ReadInternalManifestFile(paths.ManifestPath)
 	if err != nil {
-		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, resolvedDB, paths, true, false)
+		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, sqliteArtifact, paths, true, false)
 		return out, fmt.Errorf("read durable manifest: %w", err)
 	}
 	report, err := indexcompare.Compare(ctx, indexcompare.Input{
 		SQLiteDB:             db,
 		SQLiteIndexSetID:     indexSet.IndexSetID,
-		SQLiteArtifact:       indexcompare.Artifact{ID: indexSet.IndexSetID, Path: resolvedDB.Path},
+		SQLiteArtifact:       sqliteArtifact,
 		DurableManifest:      manifestDoc,
 		DurableSegmentDir:    paths.SegmentDir,
 		DurableArtifact:      indexcompare.Artifact{ID: run.RunID, Path: paths.ManifestPath},
@@ -583,7 +593,7 @@ func exactCoveragePrefixKey(prefix string) string {
 	return strings.TrimSpace(prefix)
 }
 
-func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, resolvedDB resolvedIndexDB, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {
+func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, sqliteArtifact indexcompare.Artifact, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {
 	report := &indexcompare.Report{
 		Type:                 indexcompare.CompareResultType,
 		ProjectionVersion:    indexcompare.ProjectionVersion,
@@ -594,10 +604,10 @@ func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *inde
 		ComparisonRan:        comparisonRan,
 		ParityPassed:         false,
 		ContentIdentityCheck: indexcompare.ContentIdentityCheck{Semantics: "provider_etag_equivalence"},
-		SQLiteArtifact:       indexcompare.Artifact{Path: resolvedDB.Path},
+		SQLiteArtifact:       sqliteArtifact,
 		DurableArtifact:      indexcompare.Artifact{Path: paths.ManifestPath},
 	}
-	if indexSet != nil {
+	if indexSet != nil && report.SQLiteArtifact.ID == "" {
 		report.SQLiteArtifact.ID = indexSet.IndexSetID
 	}
 	if run != nil {

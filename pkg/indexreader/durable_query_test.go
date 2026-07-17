@@ -156,6 +156,47 @@ func TestDurablePreferredWhenBothPresent(t *testing.T) {
 	require.Equal(t, FormatSQLiteV1, reader.Meta().Format)
 }
 
+// TestValidDurableWinsOverResidueBlockedSQLite pins the precedence order: a
+// verified durable latest is the current authority for the set, so it must be
+// selected without opening the lower-priority set-root SQLite at all — a
+// historical canonical index.db carrying transaction-quarantine residue (which
+// correctly fail-closes the ordinary SQLite open) must not veto durable
+// resolution. Absent durable, the same residue keeps refusing targeted SQLite
+// reads.
+func TestValidDurableWinsOverResidueBlockedSQLite(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	dbPath := filepath.Join(env.identityDir, "index.db")
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(ctx, db))
+	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, env.params)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	// Historical quarantine residue beside the legacy canonical SQLite.
+	residue := filepath.Join(env.identityDir, ".gonimbus-sqlite-quarantine-historical")
+	require.NoError(t, os.WriteFile(residue, []byte("captured"), 0o600))
+
+	for _, target := range []ResolveTarget{
+		{BaseURI: env.baseURI},
+		{IndexSetID: env.indexSetID},
+	} {
+		reader, err := ResolveIndexReader(ctx, env.opts, target)
+		require.NoError(t, err, "valid durable must not be vetoed by residue-blocked SQLite (%+v)", target)
+		require.Equal(t, FormatDurableV2, reader.Meta().Format)
+		require.NoError(t, reader.Close())
+	}
+
+	// Absent durable: the ordinary SQLite residue refusal is unchanged.
+	latestPath := filepath.Join(env.segmentRoot, "latest.json")
+	require.NoError(t, os.Remove(latestPath))
+	_, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sidecars")
+}
+
 // TestCorruptDurableBesideSQLiteFailsClosedNotDowngrade pins the tri-state
 // sibling contract: a present-but-invalid durable latest beside a canonical
 // SQLite makes targeted reads refuse (no silent downgrade to possibly-stale

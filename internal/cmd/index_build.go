@@ -671,7 +671,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	var bothSummary indexbuild.Summary
 	var bothSummaryOK bool
 	if selectedIndexBuildFormat() == "both" {
-		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters, maintenance.Authority())
+		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters, maintenance.Authority(), verificationTarget)
 		result = bothResult.Result
 		crawlErr = err
 		if err == nil {
@@ -802,6 +802,15 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		if compareReport == nil {
 			return fmt.Errorf("both-format parity report missing after success")
 		}
+		// The receipt repeats the report's artifact identity only after it is
+		// verified against the actually opened target: a mismatch between
+		// opened target, report identity, and receipt identity refuses
+		// terminal success.
+		if verificationTarget != nil {
+			if compareReport.SQLiteArtifact.ID != verificationTarget.AttemptName() || compareReport.SQLiteArtifact.Path != verificationTarget.Locator() {
+				return fmt.Errorf("both-format verification artifact identity mismatch between parity report and opened target")
+			}
+		}
 		var closeErr error
 		if verificationTarget != nil {
 			closeErr = verificationTarget.Close()
@@ -824,6 +833,8 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 			ParityPassed:           compareReport.ParityPassed,
 			ProjectionRows:         compareReport.SQLiteRows,
 			ProjectionSHA256:       compareReport.SQLiteProjectionSHA256,
+			ArtifactID:             compareReport.SQLiteArtifact.ID,
+			ArtifactLocator:        compareReport.SQLiteArtifact.Path,
 		}
 	}
 

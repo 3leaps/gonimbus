@@ -146,6 +146,67 @@ func TestVerificationTargetRefusesSubstitutionBeforeClose(t *testing.T) {
 	require.Error(t, target.Close(), "substituted pathname must fail close so no success receipt can bind it")
 }
 
+func TestVerificationTargetRefusesAttemptDirSubstitutionAfterOpen(t *testing.T) {
+	// Rename the attempt directory away and symlink the original name back to
+	// it: the final pathname still names the originally bound DB inode, but the
+	// containing authority path changed. Check and Close must refuse; the moved
+	// database must be preserved.
+	env := newVerificationTargetEnv(t)
+	target, err := openVerificationTarget(env, "run_1")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(context.Background(), target.DB()))
+
+	attemptDir := filepath.Join(env.segmentRoot, "verification", "run_1")
+	moved := filepath.Join(t.TempDir(), "moved-attempt")
+	require.NoError(t, os.Rename(attemptDir, moved))
+	require.NoError(t, os.Symlink(moved, attemptDir))
+
+	require.ErrorIs(t, target.Check(), ErrVerificationProjectionTarget)
+	require.ErrorIs(t, target.Close(), ErrVerificationProjectionTarget)
+	require.FileExists(t, filepath.Join(moved, "index.db"), "moved projection must be preserved")
+}
+
+func TestVerificationTargetRefusesVerificationDirSubstitutionWithHardlinkAlias(t *testing.T) {
+	// Rename the legitimate verification directory, replace it with a symlink
+	// to an outside tree, and expose the originally created DB inode there via
+	// a hardlink: SameFile on the final pathname passes, so only parent
+	// re-attestation can refuse. Check and Close must both refuse.
+	env := newVerificationTargetEnv(t)
+	target, err := openVerificationTarget(env, "run_1")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(context.Background(), target.DB()))
+
+	verificationDir := filepath.Join(env.segmentRoot, "verification")
+	moved := filepath.Join(t.TempDir(), "moved-verification")
+	require.NoError(t, os.Rename(verificationDir, moved))
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "run_1"), 0o700))
+	require.NoError(t, os.Link(filepath.Join(moved, "run_1", "index.db"), filepath.Join(outside, "run_1", "index.db")))
+	require.NoError(t, os.Symlink(outside, verificationDir))
+
+	require.ErrorIs(t, target.Check(), ErrVerificationProjectionTarget)
+	require.ErrorIs(t, target.Close(), ErrVerificationProjectionTarget)
+}
+
+func TestVerificationTargetRefusesRealDirectoryReplacement(t *testing.T) {
+	// Replace the attempt directory with a different real directory carrying a
+	// hardlink to the bound inode: no symlink anywhere, final SameFile passes,
+	// but the retained directory identity differs. Check and Close must refuse.
+	env := newVerificationTargetEnv(t)
+	target, err := openVerificationTarget(env, "run_1")
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(context.Background(), target.DB()))
+
+	attemptDir := filepath.Join(env.segmentRoot, "verification", "run_1")
+	moved := filepath.Join(t.TempDir(), "moved-attempt")
+	require.NoError(t, os.Rename(attemptDir, moved))
+	require.NoError(t, os.Mkdir(attemptDir, 0o700))
+	require.NoError(t, os.Link(filepath.Join(moved, "index.db"), filepath.Join(attemptDir, "index.db")))
+
+	require.ErrorIs(t, target.Check(), ErrVerificationProjectionTarget)
+	require.ErrorIs(t, target.Close(), ErrVerificationProjectionTarget)
+}
+
 func TestVerificationTargetRefusesInvalidAttemptNames(t *testing.T) {
 	env := newVerificationTargetEnv(t)
 	for _, attempt := range []string{"", "..", "a/b", "../escape", ".hidden"} {

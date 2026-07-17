@@ -199,6 +199,36 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 				out = append(out, untrustedSQLiteCandidate(dbPath, dirPath, IdentityStatusMismatch, "identity.json does not match canonical directory"))
 				continue
 			}
+			// Durable authority is decided BEFORE the SQLite candidate is
+			// opened: a set-root index.db beside a durable latest is a
+			// lower-priority legacy projection and must not veto the current
+			// authority (for example via historical transaction residue that
+			// correctly fail-closes the ordinary SQLite open). Sibling handling
+			// is tri-state and marker-authoritative: a verified latest selects
+			// durable without touching SQLite; a present-but-invalid latest
+			// fails targeted reads closed with the durable diagnostic (never a
+			// downgrade to possibly-stale SQLite) and list mode surfaces
+			// neither entry as current (doctor inventories and diagnoses
+			// both); only an absent latest falls through to SQLite validation.
+			if opts.SegmentCacheRoot != "" && isFullIndexSetID(identity.IndexSetID) {
+				latest := filepath.Join(opts.SegmentCacheRoot, identity.IndexSetID, "latest.json")
+				if _, latestErr := os.Lstat(latest); latestErr == nil {
+					sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identity)
+					if siblingErr != nil {
+						if target.IndexSetID != "" || target.BaseURI != "" {
+							return nil, fmt.Errorf("open durable snapshot beside canonical SQLite %s: %w", dirName, siblingErr)
+						}
+						continue
+					}
+					out = append(out, sibling)
+					continue
+				} else if !os.IsNotExist(latestErr) {
+					if target.IndexSetID != "" || target.BaseURI != "" {
+						return nil, fmt.Errorf("inspect durable latest beside canonical SQLite %s: %w", dirName, latestErr)
+					}
+					continue
+				}
+			}
 			c, err := candidateFromSQLite(ctx, opts, dbPath, dirPath, target, identity)
 			if err != nil {
 				if target.IndexSetID != "" || target.BaseURI != "" {
@@ -214,34 +244,6 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 			}
 			if identity.Provider != "" {
 				c.meta.Provider = identity.Provider
-			}
-			// A trusted SQLite candidate may sit beside a durable latest for
-			// the same set (legacy dual-format layout). Sibling handling is
-			// tri-state and marker-authoritative: an absent latest keeps the
-			// SQLite-only selection; a verified latest is surfaced so
-			// preference ranks durable first; a present-but-invalid latest is
-			// a durable-authoritative set whose current state cannot be
-			// trusted — targeted reads fail closed rather than silently
-			// downgrading to a possibly-stale SQLite, and list mode surfaces
-			// neither entry as current (doctor inventories and diagnoses both).
-			if opts.SegmentCacheRoot != "" && isFullIndexSetID(identity.IndexSetID) {
-				latest := filepath.Join(opts.SegmentCacheRoot, identity.IndexSetID, "latest.json")
-				if _, latestErr := os.Lstat(latest); latestErr == nil {
-					sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identity)
-					if siblingErr != nil {
-						if target.IndexSetID != "" || target.BaseURI != "" {
-							return nil, fmt.Errorf("open durable snapshot beside canonical SQLite %s: %w", dirName, siblingErr)
-						}
-						continue
-					}
-					out = append(out, c, sibling)
-					continue
-				} else if !os.IsNotExist(latestErr) {
-					if target.IndexSetID != "" || target.BaseURI != "" {
-						return nil, fmt.Errorf("inspect durable latest beside canonical SQLite %s: %w", dirName, latestErr)
-					}
-					continue
-				}
 			}
 			out = append(out, c)
 			continue
