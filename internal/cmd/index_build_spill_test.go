@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
+
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 )
 
 func TestIndexBuildSpillFlags_DefaultEmpty(t *testing.T) {
@@ -14,70 +18,165 @@ func TestIndexBuildSpillFlags_DefaultEmpty(t *testing.T) {
 	}
 }
 
-// withIndexBuildSpill saves and restores the spill flag package vars.
-func withIndexBuildSpill(t *testing.T, workspaceMax, root string) {
+// withSpillSurfaces sets the CLI flag vars and (via t.Setenv/viper) the env and
+// config surfaces, restoring all of them on cleanup.
+func withSpillSurfaces(t *testing.T, flagVal, rootFlagVal string) {
 	t.Helper()
 	oldMax := indexBuildSpillWorkspaceMax
 	oldRoot := indexBuildSpillRoot
-	oldBytes := indexBuildSpillWorkspaceBytes
-	indexBuildSpillWorkspaceMax = workspaceMax
-	indexBuildSpillRoot = root
-	indexBuildSpillWorkspaceBytes = 0
+	oldResolved := indexBuildSpillResolved
+	indexBuildSpillWorkspaceMax = flagVal
+	indexBuildSpillRoot = rootFlagVal
 	t.Cleanup(func() {
 		indexBuildSpillWorkspaceMax = oldMax
 		indexBuildSpillRoot = oldRoot
-		indexBuildSpillWorkspaceBytes = oldBytes
+		indexBuildSpillResolved = oldResolved
 	})
 }
 
-func TestResolveIndexBuildSpillFlags(t *testing.T) {
+// setSpillConfig sets a viper config key for the test and clears it after.
+func setSpillConfig(t *testing.T, key, val string) {
+	t.Helper()
+	viper.Set(key, val)
+	t.Cleanup(func() { viper.Set(key, "") })
+}
+
+func TestResolveIndexBuildSpill_Default(t *testing.T) {
+	withSpillSurfaces(t, "", "")
+	res, err := resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), res.WorkspaceBytes, "zero lets the library default apply")
+	require.Equal(t, indexsubstrate.DefaultSpillMergeBudget().MaxWorkspaceBytes, res.EffectiveBytes)
+	require.Equal(t, int64(8)<<30, res.EffectiveBytes, "entarch-ratified 8 GiB default")
+	require.Equal(t, spillSourceDefault, res.WorkspaceSource)
+	require.Equal(t, "", res.Root)
+}
+
+func TestResolveIndexBuildSpill_ParseAndUnits(t *testing.T) {
 	cases := []struct {
-		name  string
-		in    string
-		want  int64
-		errIs string
+		name string
+		in   string
+		want int64
 	}{
-		{"empty uses default", "", 0, ""},
-		{"raw bytes", "1048576", 1 << 20, ""},
-		{"gib", "8GiB", 8 << 30, ""},
-		{"gb base10", "16GB", 16_000_000_000, ""},
-		{"whitespace trimmed", "  4GiB  ", 4 << 30, ""},
-		{"bad unit", "8XB", 0, "--spill-workspace-max"},
-		{"zero rejected", "0", 0, "at least 1 byte"},
+		{"gib", "16GiB", 16 << 30},
+		{"gb base10", "16GB", 16_000_000_000},
+		{"raw bytes", "1048576", 1 << 20},
+		{"lower to below default", "2GiB", 2 << 30},
+		{"raise above default", "32GiB", 32 << 30},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			withIndexBuildSpill(t, tc.in, "")
-			err := resolveIndexBuildSpillFlags()
-			if tc.errIs != "" {
-				require.ErrorContains(t, err, tc.errIs)
-				return
-			}
+			withSpillSurfaces(t, tc.in, "")
+			res, err := resolveIndexBuildSpill()
 			require.NoError(t, err)
-			require.Equal(t, tc.want, indexBuildSpillWorkspaceBytes)
+			require.Equal(t, tc.want, res.WorkspaceBytes)
+			require.Equal(t, tc.want, res.EffectiveBytes)
+			require.Equal(t, spillSourceFlag, res.WorkspaceSource)
 		})
 	}
 }
 
-func TestIndexBuildBackgroundRejectsSpillWorkspaceMax(t *testing.T) {
-	withIndexBuildModes(t, true, false, false)
-	withIndexBuildSpill(t, "8GiB", "")
-
-	err := validateIndexBuildBackgroundFlags()
-	require.ErrorContains(t, err, "--spill-workspace-max/--spill-root are not yet supported with --background")
+func TestResolveIndexBuildSpill_Refusals(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		errIs string
+	}{
+		{"malformed unit", "8XB", "spill workspace budget"},
+		{"explicit zero", "0", "at least 1 byte"},
+		{"negative", "-4GiB", "spill workspace budget"},
+		{"overflow", "99999999999GiB", "spill workspace budget"},
+		{"unlimited spelling", "unlimited", "spill workspace budget"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withSpillSurfaces(t, tc.in, "")
+			_, err := resolveIndexBuildSpill()
+			require.ErrorContains(t, err, tc.errIs)
+		})
+	}
 }
 
-func TestIndexBuildBackgroundRejectsSpillRoot(t *testing.T) {
-	withIndexBuildModes(t, true, false, false)
-	withIndexBuildSpill(t, "", "/tmp/scratch")
-
-	err := validateIndexBuildBackgroundFlags()
-	require.ErrorContains(t, err, "--spill-workspace-max/--spill-root are not yet supported with --background")
+func TestResolveIndexBuildSpill_EnvAndConfig(t *testing.T) {
+	t.Run("env", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		t.Setenv(spillWorkspaceMaxEnv, "4GiB")
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, int64(4)<<30, res.WorkspaceBytes)
+		require.Equal(t, spillSourceEnv, res.WorkspaceSource)
+	})
+	t.Run("config", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		setSpillConfig(t, spillWorkspaceMaxConfig, "2GiB")
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, int64(2)<<30, res.WorkspaceBytes)
+		require.Equal(t, spillSourceConfig, res.WorkspaceSource)
+	})
 }
 
-func TestIndexBuildBackgroundAcceptsNoSpillFlags(t *testing.T) {
-	withIndexBuildModes(t, true, false, false)
-	withIndexBuildSpill(t, "", "")
+// TestResolveIndexBuildSpill_Precedence proves CLI flag > env > config > default.
+func TestResolveIndexBuildSpill_Precedence(t *testing.T) {
+	// All three set: flag wins.
+	withSpillSurfaces(t, "16GiB", "")
+	t.Setenv(spillWorkspaceMaxEnv, "4GiB")
+	setSpillConfig(t, spillWorkspaceMaxConfig, "2GiB")
+	res, err := resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, int64(16)<<30, res.WorkspaceBytes)
+	require.Equal(t, spillSourceFlag, res.WorkspaceSource)
 
-	require.NoError(t, validateIndexBuildBackgroundFlags())
+	// Flag cleared: env wins over config.
+	indexBuildSpillWorkspaceMax = ""
+	res, err = resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, int64(4)<<30, res.WorkspaceBytes)
+	require.Equal(t, spillSourceEnv, res.WorkspaceSource)
+}
+
+func TestResolveIndexBuildSpill_Root(t *testing.T) {
+	withSpillSurfaces(t, "", "/mnt/scratch")
+	res, err := resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, "/mnt/scratch", res.Root)
+	require.Equal(t, spillRootSourceFlag, res.RootSource)
+}
+
+// TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath proves the operator
+// diagnostic shows the effective ceiling and source but never the host path.
+func TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath(t *testing.T) {
+	var buf bytes.Buffer
+	emitIndexBuildSpillDiagnostics(&buf, indexBuildSpillResolution{
+		WorkspaceBytes:  16 << 30,
+		WorkspaceSource: spillSourceFlag,
+		EffectiveBytes:  16 << 30,
+		Root:            "/mnt/secret-scratch",
+		RootSource:      spillRootSourceEnv,
+	})
+	out := buf.String()
+	require.Contains(t, out, "16.0GiB")
+	require.Contains(t, out, spillSourceFlag)
+	require.NotContains(t, out, "/mnt/secret-scratch", "host-absolute root must never be echoed")
+	require.Contains(t, out, spillRootSourceEnv, "root source/presence is enough")
+}
+
+func TestIndexBuildBackgroundRejectsSpillFlagButNotEnvConfig(t *testing.T) {
+	t.Run("flag rejected", func(t *testing.T) {
+		withIndexBuildModes(t, true, false, false)
+		withSpillSurfaces(t, "8GiB", "")
+		err := validateIndexBuildBackgroundFlags()
+		require.ErrorContains(t, err, "not forwarded to --background")
+		require.ErrorContains(t, err, spillWorkspaceMaxEnv)
+	})
+	t.Run("root flag rejected", func(t *testing.T) {
+		withIndexBuildModes(t, true, false, false)
+		withSpillSurfaces(t, "", "/mnt/scratch")
+		require.Error(t, validateIndexBuildBackgroundFlags())
+	})
+	t.Run("no flag accepted (env/config path)", func(t *testing.T) {
+		withIndexBuildModes(t, true, false, false)
+		withSpillSurfaces(t, "", "")
+		require.NoError(t, validateIndexBuildBackgroundFlags())
+	})
 }

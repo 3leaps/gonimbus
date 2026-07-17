@@ -95,6 +95,54 @@ Default target packing is **500,000 rows per segment**. That target is an
 engine packing lever, **not operator-facing configuration** in this cut. Do not
 plan automation around a custom segment-size flag.
 
+### Sizing the merge workspace (successive builds at scale)
+
+A **successive** durable build (a second or later build of the same index set)
+stages the **full prior current-state** into an on-disk scratch workspace before
+merging in the new observations. Peak workspace therefore scales roughly with
+corpus size, not with the change set. A first build has no prior state to stage
+and is unaffected.
+
+The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
+the build **closed** — a typed error, the prior published run and `latest`
+untouched — rather than growing without bound. The default ceiling is **8 GiB**
+(roughly the 10M-object tier). It is a floor for convenience, **not a guarantee**
+for multi-tens-of-millions-object sets; larger runs must raise it explicitly.
+
+Size the ceiling (and, if needed, point the scratch at a roomier disk) via — in
+precedence order — the CLI flag, an environment variable, or application config:
+
+```bash
+# CLI flag (foreground builds)
+gonimbus index build --job index.yaml --spill-workspace-max 16GiB --spill-root /mnt/scratch
+
+# Environment (also inherited by --background jobs)
+export GONIMBUS_SPILL_WORKSPACE_MAX=16GiB
+export GONIMBUS_SPILL_ROOT=/mnt/scratch
+```
+
+```yaml
+# Application config (XDG config file — never the index job manifest)
+index:
+  spill:
+    workspace_max: 16GiB # 8GiB/16GB/raw bytes; explicit 0/negative/unlimited is refused
+    root: /mnt/scratch # absolute, real, non-symlink, operator-exclusive
+```
+
+Notes:
+
+- **Precedence:** CLI flag > environment > application config > 8 GiB default.
+- The value is a **ceiling, not a reservation**, and a self-protection control
+  against runaway scratch — keep it a finite positive size; there is no
+  "unlimited" spelling.
+- `--spill-workspace-max` / `--spill-root` are **not forwarded to `--background`
+  jobs** (the managed child is reconstructed from a fingerprinted invocation).
+  Use the environment or config keys, which the managed child inherits.
+- The scratch **root is host/operator configuration**, never index identity — it
+  never enters manifests, receipts, or committed digests, and is never echoed
+  into artifacts or sanitized errors (diagnostics show its source, not the path).
+- Each durable build prints the effective ceiling and its source on **stderr**.
+
 ## Dual-format parity
 
 `--format both` runs **one crawl** and publishes the **durable index as the

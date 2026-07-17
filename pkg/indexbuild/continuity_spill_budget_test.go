@@ -2,6 +2,7 @@ package indexbuild
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 )
 
 // TestBuildContinuitySpillWorkspaceOverrideConstrainsMerge proves the
-// Config.SpillWorkspaceBytes override reaches the durable streaming merge. A
+// Config.Spill.WorkspaceBytes override reaches the durable streaming merge. A
 // successive build stages the full prior current-state into the spill workspace
 // before merging, so a 1-byte budget must fail that stage with the typed
 // MaxWorkspaceBytes error while leaving the prior latest intact (no clobber), and
@@ -42,7 +43,7 @@ func TestBuildContinuitySpillWorkspaceOverrideConstrainsMerge(t *testing.T) {
 		require.NoError(t, err)
 
 		cfg2 := contConfig(setRoot, "run2", run2Objs, base.Add(time.Hour))
-		cfg2.SpillWorkspaceBytes = 1 // below the parent spill-run header; must trip
+		cfg2.Spill.WorkspaceBytes = 1 // below the parent spill-run header; must trip
 		_, err = NewRunner(cfg2).Build(ctx)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "MaxWorkspaceBytes exceeded")
@@ -63,7 +64,7 @@ func TestBuildContinuitySpillWorkspaceOverrideConstrainsMerge(t *testing.T) {
 		require.NoError(t, err)
 
 		cfg2 := contConfig(setRoot, "run2", run2Objs, base.Add(time.Hour))
-		cfg2.SpillWorkspaceBytes = 64 << 20 // generous explicit override
+		cfg2.Spill.WorkspaceBytes = 64 << 20 // generous explicit override
 		_, err = NewRunner(cfg2).Build(ctx)
 		require.NoError(t, err)
 
@@ -73,4 +74,49 @@ func TestBuildContinuitySpillWorkspaceOverrideConstrainsMerge(t *testing.T) {
 		require.Equal(t, 2, snap2.Manifest.Lineage.Generation)
 		require.Equal(t, "run1", snap2.Manifest.StateParent.RunID)
 	})
+}
+
+// TestRetrySpillWorkspaceOverridePropagates proves the Spill override also reaches
+// the merge through the public Retry path: a re-publish from sealed journals
+// stages the parent into the workspace, so a tiny budget fails fail-closed
+// (latest byte-identical) and a generous budget completes.
+func TestRetrySpillWorkspaceOverridePropagates(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	_, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+		obj("data/b.xml", `"b1"`, 2, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	run2Start := base.Add(time.Hour)
+	cfg2 := contConfig(setRoot, "run2", []provider.ObjectSummary{
+		obj("data/a.xml", `"a2"`, 9, run2Start),
+		obj("data/b.xml", `"b1"`, 2, base),
+	}, run2Start)
+	sum2, err := NewRunner(cfg2).Build(ctx)
+	require.NoError(t, err)
+
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	// Undersized budget: Retry re-publish must fail closed, latest unchanged.
+	rcTiny := retryConfigFor(cfg2, sum2)
+	rcTiny.Spill.WorkspaceBytes = 1
+	_, err = Retry(ctx, rcTiny)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "MaxWorkspaceBytes exceeded")
+
+	latestAfter, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, latestBefore, latestAfter, "refused Retry must not advance latest")
+
+	// Generous budget completes the same Retry re-publish.
+	rcOK := retryConfigFor(cfg2, sum2)
+	rcOK.Spill.WorkspaceBytes = 64 << 20
+	_, err = Retry(ctx, rcOK)
+	require.NoError(t, err)
 }
