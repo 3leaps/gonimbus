@@ -242,6 +242,143 @@ func TestCorruptDurableBesideSQLiteFailsClosedNotDowngrade(t *testing.T) {
 	require.Equal(t, FormatSQLiteV1, reader.Meta().Format)
 }
 
+// corruptLegacyIdentity variants make the legacy identity marker untrusted in
+// each of the three ways the resolver distinguishes: unreadable JSON, missing
+// file, and a validly parsed identity that does not match the canonical
+// directory.
+func corruptLegacyIdentityVariants(t *testing.T) map[string]func(t *testing.T, env durableTestEnv) {
+	t.Helper()
+	return map[string]func(t *testing.T, env durableTestEnv){
+		"malformed": func(t *testing.T, env durableTestEnv) {
+			require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{invalid\n"), 0o600))
+		},
+		"missing": func(t *testing.T, env durableTestEnv) {
+			require.NoError(t, os.Remove(filepath.Join(env.identityDir, "identity.json")))
+		},
+		"mismatch": func(t *testing.T, env durableTestEnv) {
+			otherParams := env.params
+			otherParams.BaseURI = "s3://test-bucket/other/"
+			otherIdentity, err := indexstore.ComputeIndexSetID(otherParams)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte(otherIdentity.CanonicalJSON+"\n"), 0o600))
+		},
+	}
+}
+
+func seedLegacySQLiteBesideDurable(t *testing.T, env durableTestEnv) {
+	t.Helper()
+	ctx := context.Background()
+	dbPath := filepath.Join(env.identityDir, "index.db")
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(ctx, db))
+	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, env.params)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+}
+
+// TestValidDurableWinsForFullSetIDWhenLegacyIdentityMalformed pins that a
+// corrupt lower-priority legacy identity marker cannot veto a verified durable
+// authority identified by the caller's explicit full set ID: the durable
+// snapshot is selected without parsing or opening the legacy SQLite. Covers
+// malformed, missing, and directory-mismatched identity.json.
+func TestValidDurableWinsForFullSetIDWhenLegacyIdentityMalformed(t *testing.T) {
+	ctx := context.Background()
+	for name, corrupt := range corruptLegacyIdentityVariants(t) {
+		t.Run(name, func(t *testing.T) {
+			env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+				durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+			})
+			seedLegacySQLiteBesideDurable(t, env)
+			corrupt(t, env)
+
+			reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
+			require.NoError(t, err, "valid durable must win for the full set ID despite untrusted legacy identity")
+			require.Equal(t, FormatDurableV2, reader.Meta().Format)
+			require.Equal(t, env.indexSetID, reader.Meta().IndexSetID)
+			require.NoError(t, reader.Close())
+		})
+	}
+}
+
+// TestInvalidDurableWinsDiagnosticOverMalformedLegacyIdentity pins the
+// present-but-invalid arm of the tri-state: the durable diagnostic surfaces —
+// never the lower-priority legacy identity error and never a SQLite downgrade.
+func TestInvalidDurableWinsDiagnosticOverMalformedLegacyIdentity(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	seedLegacySQLiteBesideDurable(t, env)
+	require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{invalid\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(env.segmentRoot, "latest.json"), []byte(`{"type":"","index_set_id":"x"`), 0o600))
+
+	_, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "durable")
+	require.NotContains(t, err.Error(), "requires a valid full index_set_id",
+		"the durable diagnostic must win over the legacy identity refusal")
+}
+
+// TestAbsentDurableFallsBackToLegacyIdentityRefusal pins the absent arm: with
+// no durable latest, the ordinary legacy identity refusal is unchanged.
+func TestAbsentDurableFallsBackToLegacyIdentityRefusal(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	seedLegacySQLiteBesideDurable(t, env)
+	require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{invalid\n"), 0o600))
+	require.NoError(t, os.Remove(filepath.Join(env.segmentRoot, "latest.json")))
+
+	_, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires a valid full index_set_id")
+}
+
+// TestBaseURIStillRefusesWhenIdentityCannotBindSet pins that a base-URI target
+// never rides the durable shortcut: a corrupt identity marker cannot bind a
+// base URI, so the targeted read refuses even though a verified durable latest
+// exists for the set.
+func TestBaseURIStillRefusesWhenIdentityCannotBindSet(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	seedLegacySQLiteBesideDurable(t, env)
+	require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{invalid\n"), 0o600))
+
+	_, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
+	require.Error(t, err, "a corrupt marker must not bind a base URI to the durable authority")
+}
+
+// TestListShowsDurableCurrentWhenLegacyIdentityMalformed pins the list-mode
+// mirror: the verified durable lists as current for the set and the corrupt
+// legacy SQLite projection is not advertised as a current peer (doctor remains
+// the anomaly inventory surface).
+func TestListShowsDurableCurrentWhenLegacyIdentityMalformed(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	seedLegacySQLiteBesideDurable(t, env)
+	require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{invalid\n"), 0o600))
+
+	listed, err := ListIndexReaders(ctx, env.opts)
+	require.NoError(t, err)
+	var durableSeen bool
+	for _, item := range listed {
+		if item.Meta.SourcePath == filepath.Join(env.identityDir, "index.db") {
+			t.Fatalf("corrupt legacy SQLite projection must not list as a current peer")
+		}
+		if item.Meta.IndexSetID == env.indexSetID {
+			require.Equal(t, FormatDurableV2, item.Meta.Format)
+			durableSeen = true
+		}
+	}
+	require.True(t, durableSeen, "verified durable must list as current for the set")
+}
+
 type durableTestEnv struct {
 	opts        ResolveOptions
 	baseURI     string

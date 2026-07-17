@@ -534,7 +534,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		if err := guard.Close(); err != nil {
 			return err
 		}
-		verificationTarget, err = indexreader.OpenSQLiteVerificationTarget(ctx, indexreader.SQLiteVerificationTargetOptions{
+		verificationTarget, err = openIndexBuildVerificationTarget(ctx, indexreader.SQLiteVerificationTargetOptions{
 			SegmentSetRoot: segmentSetRoot,
 			IndexSetID:     identityResult.IndexSetID,
 			Authority:      maintenance.Authority(),

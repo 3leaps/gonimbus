@@ -179,6 +179,50 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 
 		dbPath := filepath.Join(dirPath, "index.db")
 		if st, statErr := os.Stat(dbPath); statErr == nil && !st.IsDir() {
+			// A corrupt, missing, or mismatched legacy identity marker must not
+			// veto a verified durable authority that can be identified without
+			// trusting that marker: the caller's explicit full set ID, or a
+			// unique verified segment-cache match for the directory prefix.
+			// Base-URI targets are excluded — a corrupt marker never binds a
+			// base URI, so they keep the existing identity refusal. The sibling
+			// decision stays tri-state: a verified latest selects durable
+			// without parsing or opening the legacy SQLite; a present-but-
+			// invalid latest fails targeted reads closed with the durable
+			// diagnostic (list advertises neither); an absent latest falls
+			// through to the ordinary identity refusal below.
+			identityTrusted := identityErr == nil && identityMatchesCanonicalDir(identity.IndexSetID, dirName)
+			if !identityTrusted && opts.SegmentCacheRoot != "" && target.BaseURI == "" {
+				fullID := ""
+				if target.IndexSetID != "" && len(wantID) == 64 {
+					fullID = "idx_" + wantID
+				} else if dirHex != "" && validHexPattern.MatchString(dirHex) {
+					if matched, matchErr := matchSegmentCacheID(opts.SegmentCacheRoot, dirHex); matchErr == nil {
+						fullID = matched
+					}
+				}
+				if fullID != "" {
+					latest := filepath.Join(opts.SegmentCacheRoot, fullID, "latest.json")
+					if _, latestErr := os.Lstat(latest); latestErr == nil {
+						sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identityMeta{IndexSetID: fullID})
+						if siblingErr != nil {
+							if target.IndexSetID != "" {
+								return nil, fmt.Errorf("open durable snapshot beside untrusted canonical identity %s: %w", dirName, siblingErr)
+							}
+							continue
+						}
+						if target.IndexSetID != "" && !indexSetHexMatches(strings.TrimPrefix(sibling.meta.IndexSetID, "idx_"), wantID) {
+							continue
+						}
+						out = append(out, sibling)
+						continue
+					} else if !os.IsNotExist(latestErr) {
+						if target.IndexSetID != "" {
+							return nil, fmt.Errorf("inspect durable latest beside untrusted canonical identity %s: %w", dirName, latestErr)
+						}
+						continue
+					}
+				}
+			}
 			if identityErr != nil {
 				if target.IndexSetID != "" || target.BaseURI != "" {
 					return nil, fmt.Errorf("open canonical SQLite candidate %s: canonical SQLite identity requires a valid full index_set_id: %w", dirName, identityErr)

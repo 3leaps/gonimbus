@@ -189,6 +189,11 @@ func TestListIndexReadersSurfacesUntrustedCanonicalSQLiteIdentity(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			env, dbPath := seedSQLiteSnapshotEnv(t)
 			tc.mutate(t, filepath.Join(env.identityDir, "identity.json"))
+			// Hide the durable latest: with a verified durable sibling the set
+			// correctly lists durable as current instead of the untrusted
+			// SQLite row; this test pins the untrusted surface that remains
+			// when no durable authority exists.
+			require.NoError(t, os.Remove(filepath.Join(env.segmentRoot, "latest.json")))
 
 			listed, err := ListIndexReaders(context.Background(), env.opts)
 			require.NoError(t, err)

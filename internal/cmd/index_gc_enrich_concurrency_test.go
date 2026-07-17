@@ -165,6 +165,10 @@ func TestCanonicalSQLiteMissingIdentityRefusesDuringActiveWriter(t *testing.T) {
 	_, err = db.ExecContext(context.Background(), `UPDATE index_sets SET created_at = ? WHERE index_set_id = ?`, time.Now().UTC().Format(time.RFC3339Nano), env.indexSetID)
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(filepath.Join(env.identityDir, "identity.json")))
+	// Hide the durable latest: with a verified durable sibling the full-ID
+	// resolve correctly selects durable despite the missing legacy marker;
+	// this test pins the absent-durable arm where the identity refusal holds.
+	require.NoError(t, os.Remove(filepath.Join(segmentRoot, "latest.json")))
 	before := snapshotIndexGCTreeState(t, env.identityDir)
 
 	reader, err := openIndexReader(context.Background(), "", env.indexSetID, "")

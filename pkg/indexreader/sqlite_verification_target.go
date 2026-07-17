@@ -66,14 +66,34 @@ type SQLiteVerificationTarget struct {
 	closed    bool
 }
 
+// verificationTargetOpenHooks are package-private interposition points,
+// analogous to mutableCanonicalOpenHooks, so tests can deterministically
+// substitute a bound parent between its binding and the next
+// descriptor-relative creation, or fail the open after the database
+// reservation to prove full handle cleanup.
+type verificationTargetOpenHooks struct {
+	afterRootBind         func(root *os.File) error
+	afterVerificationBind func(verification *os.File) error
+	afterAttemptBind      func(attempt *os.File) error
+	afterDBReserve        func(db *os.File) error
+}
+
 // OpenSQLiteVerificationTarget exclusively creates the attempt directory and
 // database file for one verification projection, then opens the SQLite
 // connection bound to the created file with Check as the before-mutation
-// attestation. Every intermediate is validated no-follow and retained: a
-// symlinked or non-directory segment-set root, `verification` intermediate, or
-// database name refuses before any SQLite mutation, as does a pre-existing
-// attempt directory or database file.
+// attestation. Every intermediate is validated no-follow and retained, and
+// every child (verification intermediate, attempt directory, database file) is
+// created relative to its already-bound parent handle — never by rewalking the
+// pathname — with the named namespace re-attested before and after each
+// creation. A symlinked or non-directory segment-set root, `verification`
+// intermediate, or database name refuses before any SQLite mutation, as does a
+// pre-existing attempt directory or database file; a parent substituted
+// mid-creation refuses without touching the substituted tree.
 func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTargetOptions) (*SQLiteVerificationTarget, error) {
+	return openSQLiteVerificationTarget(ctx, opts, verificationTargetOpenHooks{})
+}
+
+func openSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTargetOptions, hooks verificationTargetOpenHooks) (*SQLiteVerificationTarget, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -100,13 +120,24 @@ func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTa
 
 	target := &SQLiteVerificationTarget{opts: opts}
 	fail := func(err error) (*SQLiteVerificationTarget, error) {
-		target.releaseHandles()
+		target.releaseAll()
 		return nil, err
+	}
+	runHook := func(hook func(*os.File) error, handle *os.File, label string) error {
+		if hook == nil {
+			return nil
+		}
+		if err := hook(handle); err != nil {
+			return fmt.Errorf("%w: %s interposition was denied: %v", ErrVerificationProjectionTarget, label, err)
+		}
+		return nil
 	}
 
 	// A first build may dispatch before the durable engine creates the segment
 	// tree; create-if-absent like every other set-root writer, then validate
-	// and retain the final component no-follow.
+	// and retain the final component no-follow. The root pathname is the trust
+	// anchor: every descendant below is created relative to a retained handle,
+	// never by rewalking this pathname.
 	if _, err := os.Lstat(opts.SegmentSetRoot); os.IsNotExist(err) {
 		if mkErr := os.MkdirAll(opts.SegmentSetRoot, 0o700); mkErr != nil {
 			return fail(fmt.Errorf("%w: create segment set root: %v", ErrVerificationProjectionTarget, mkErr))
@@ -117,36 +148,53 @@ func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTa
 		return fail(err)
 	}
 	target.dirs = append(target.dirs, rootBinding)
+	if err := runHook(hooks.afterRootBind, rootBinding.handle, "segment set root"); err != nil {
+		return fail(err)
+	}
 
 	verificationDir := filepath.Join(opts.SegmentSetRoot, "verification")
-	if _, err := os.Lstat(verificationDir); os.IsNotExist(err) {
-		// Mkdir cannot traverse or replace a symlink at the final component; a
-		// racing plant surfaces as EEXIST-then-binding-failure below.
-		if mkErr := os.Mkdir(verificationDir, 0o700); mkErr != nil && !os.IsExist(mkErr) {
-			return fail(fmt.Errorf("%w: create verification intermediate: %v", ErrVerificationProjectionTarget, mkErr))
-		}
+	if err := target.attestDirs(); err != nil {
+		return fail(err)
 	}
-	verificationBinding, err := bindRealDirectoryNoFollow(verificationDir, "verification intermediate")
+	verificationHandle, err := createDirectoryAt(rootBinding.handle, "verification", verificationDir, false)
+	if err != nil {
+		return fail(fmt.Errorf("%w: create verification intermediate: %v", ErrVerificationProjectionTarget, err))
+	}
+	verificationBinding, err := bindDirectoryFromHandle(verificationHandle, verificationDir, "verification intermediate")
 	if err != nil {
 		return fail(err)
 	}
 	target.dirs = append(target.dirs, verificationBinding)
+	if err := runHook(hooks.afterVerificationBind, verificationBinding.handle, "verification intermediate"); err != nil {
+		return fail(err)
+	}
 
+	// The attempt directory must be created by this call. An existing name
+	// refuses exclusively — covering both a concurrent honest writer (attempt
+	// names are per-run unique) and a planted directory or symlink waiting to
+	// be adopted.
 	attemptDir := filepath.Join(verificationDir, opts.AttemptName)
-	// The attempt directory must be created by this call. EEXIST covers both a
-	// concurrent honest writer (attempt names are per-run unique) and a planted
-	// directory or symlink waiting to be adopted.
-	if err := os.Mkdir(attemptDir, 0o700); err != nil {
+	if err := target.attestDirs(); err != nil {
+		return fail(err)
+	}
+	attemptHandle, err := createDirectoryAt(verificationBinding.handle, opts.AttemptName, attemptDir, true)
+	if err != nil {
 		return fail(fmt.Errorf("%w: create verification attempt directory: %v", ErrVerificationProjectionTarget, err))
 	}
-	attemptBinding, err := bindRealDirectoryNoFollow(attemptDir, "verification attempt directory")
+	attemptBinding, err := bindDirectoryFromHandle(attemptHandle, attemptDir, "verification attempt directory")
 	if err != nil {
 		return fail(err)
 	}
 	target.dirs = append(target.dirs, attemptBinding)
+	if err := runHook(hooks.afterAttemptBind, attemptBinding.handle, "verification attempt directory"); err != nil {
+		return fail(err)
+	}
 
 	dbPath := filepath.Join(attemptDir, "index.db")
-	bound, err := openSQLiteWriteBinding(dbPath, true)
+	if err := target.attestDirs(); err != nil {
+		return fail(err)
+	}
+	bound, err := createFileExclusiveAt(attemptBinding.handle, "index.db", dbPath)
 	if err != nil {
 		return fail(fmt.Errorf("%w: create verification database exclusively: %v", ErrVerificationProjectionTarget, err))
 	}
@@ -157,6 +205,9 @@ func OpenSQLiteVerificationTarget(ctx context.Context, opts SQLiteVerificationTa
 	}
 	target.boundInfo = boundInfo
 	target.path = dbPath
+	if err := runHook(hooks.afterDBReserve, bound, "verification database reservation"); err != nil {
+		return fail(err)
+	}
 	if err := target.Check(); err != nil {
 		return fail(err)
 	}
@@ -222,11 +273,8 @@ func (t *SQLiteVerificationTarget) Check() error {
 	if err := t.opts.Authority.AssertHeldFor(t.opts.IndexSetID, t.opts.SegmentSetRoot); err != nil {
 		return fmt.Errorf("verification projection authority: %w", err)
 	}
-	for _, d := range t.dirs {
-		info, err := os.Lstat(d.path)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(d.info, info) {
-			return fmt.Errorf("%w: %s identity changed", ErrVerificationProjectionTarget, d.label)
-		}
+	if err := t.attestDirs(); err != nil {
+		return err
 	}
 	boundInfo, err := t.bound.Stat()
 	if err != nil || !boundInfo.Mode().IsRegular() || !os.SameFile(t.boundInfo, boundInfo) {
@@ -289,6 +337,19 @@ func (t *SQLiteVerificationTarget) Close() error {
 	return errors.Join(errs...)
 }
 
+// attestDirs re-attests every retained authority-bearing directory component
+// against its named path: non-symlink real directory and the exact identity
+// bound at creation.
+func (t *SQLiteVerificationTarget) attestDirs() error {
+	for _, d := range t.dirs {
+		info, err := os.Lstat(d.path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(d.info, info) {
+			return fmt.Errorf("%w: %s identity changed", ErrVerificationProjectionTarget, d.label)
+		}
+	}
+	return nil
+}
+
 func (t *SQLiteVerificationTarget) releaseHandles() {
 	for i := range t.dirs {
 		if t.dirs[i].handle != nil {
@@ -296,6 +357,22 @@ func (t *SQLiteVerificationTarget) releaseHandles() {
 			t.dirs[i].handle = nil
 		}
 	}
+}
+
+// releaseAll closes every resource a failed open may have accumulated —
+// connection, retained database binding, and directory handles — exactly
+// once. A denied open must not leak the reserved descriptor: repeated
+// adversarial failures would otherwise exhaust descriptors.
+func (t *SQLiteVerificationTarget) releaseAll() {
+	if t.db != nil {
+		_ = t.db.Close()
+		t.db = nil
+	}
+	if t.bound != nil {
+		_ = t.bound.Close()
+		t.bound = nil
+	}
+	t.releaseHandles()
 }
 
 // bindRealDirectoryNoFollow refuses a path whose final component is absent, a
@@ -318,6 +395,27 @@ func bindRealDirectoryNoFollow(path, label string) (verificationDirBinding, erro
 	if err != nil || !info.IsDir() || !os.SameFile(lstatInfo, info) {
 		_ = handle.Close()
 		return verificationDirBinding{}, errors.Join(fmt.Errorf("%w: retained %s does not name the validated directory", ErrVerificationProjectionTarget, label), err)
+	}
+	return verificationDirBinding{path: path, label: label, handle: handle, info: info}, nil
+}
+
+// bindDirectoryFromHandle retains a directory handle obtained relative to an
+// already-bound parent and re-attests that the named pathname still resolves
+// to exactly that directory. A parent substituted between binding and the
+// descriptor-relative creation leaves the created child under the original
+// bound tree while the named path resolves elsewhere — the identity mismatch
+// (or absence) refuses here, and the substituted tree is never written. On
+// failure the handle is closed.
+func bindDirectoryFromHandle(handle *os.File, path, label string) (verificationDirBinding, error) {
+	info, err := handle.Stat()
+	if err != nil || !info.IsDir() {
+		_ = handle.Close()
+		return verificationDirBinding{}, errors.Join(fmt.Errorf("%w: retained %s is not a directory", ErrVerificationProjectionTarget, label), err)
+	}
+	named, err := os.Lstat(path)
+	if err != nil || named.Mode()&os.ModeSymlink != 0 || !named.IsDir() || !os.SameFile(info, named) {
+		_ = handle.Close()
+		return verificationDirBinding{}, errors.Join(fmt.Errorf("%w: %s does not name the descriptor-created directory", ErrVerificationProjectionTarget, label), err)
 	}
 	return verificationDirBinding{path: path, label: label, handle: handle, info: info}, nil
 }

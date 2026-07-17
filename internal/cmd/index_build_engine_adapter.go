@@ -28,6 +28,8 @@ var newIndexBuildEngineSource = func(ctx context.Context, src *uri.ObjectURI, op
 	return providerdispatch.NewSource(ctx, src, opts)
 }
 
+var openIndexBuildVerificationTarget = indexreader.OpenSQLiteVerificationTarget
+
 func runIndexBuildEngine(ctx context.Context, cfg indexbuild.Config) (indexbuild.Summary, error) {
 	return indexbuild.NewRunner(cfg).Build(ctx)
 }

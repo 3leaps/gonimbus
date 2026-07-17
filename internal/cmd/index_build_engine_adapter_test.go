@@ -644,6 +644,66 @@ func TestIndexBuildFormatBothRefusesPlantedVerificationSymlink(t *testing.T) {
 	require.Empty(t, latest, "no durable publication on refusal")
 }
 
+// TestIndexBuildFormatBothRefusesRootSubstitutionAtVerificationCreate covers
+// the create-time half of the namespace contract at the adapter boundary: the
+// segment-set root is substituted with a symlink to an outside tree after the
+// durable engine's setup but before the verification target's creation walk.
+// The build must refuse before any provider work, emit no report or receipt,
+// publish nothing durable, and leave the outside tree byte-identical.
+func TestIndexBuildFormatBothRefusesRootSubstitutionAtVerificationCreate(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o700))
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	require.NoError(t, os.WriteFile(sentinel, []byte("untouched\n"), 0o600))
+	movedParent := t.TempDir()
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	oldOpen := openIndexBuildVerificationTarget
+	openIndexBuildVerificationTarget = func(ctx context.Context, opts indexreader.SQLiteVerificationTargetOptions) (*indexreader.SQLiteVerificationTarget, error) {
+		require.NoError(t, os.MkdirAll(opts.SegmentSetRoot, 0o700))
+		require.NoError(t, os.Rename(opts.SegmentSetRoot, filepath.Join(movedParent, "moved-root")))
+		require.NoError(t, os.Symlink(outside, opts.SegmentSetRoot))
+		return indexreader.OpenSQLiteVerificationTarget(ctx, opts)
+	}
+	t.Cleanup(func() { openIndexBuildVerificationTarget = oldOpen })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+	indexBuildJSON = true
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	var stdout strings.Builder
+	cmd.SetOut(&stdout)
+	err := runIndexBuild(cmd, nil)
+	require.ErrorIs(t, err, indexreader.ErrVerificationProjectionTarget)
+	require.Zero(t, prov.listCalls, "refusal must happen before provider work")
+	require.Empty(t, strings.TrimSpace(stdout.String()), "no report or receipt on refusal")
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no verification component may be created in the substituted tree")
+	sentinelBytes, err := os.ReadFile(sentinel)
+	require.NoError(t, err)
+	require.Equal(t, []byte("untouched\n"), sentinelBytes)
+
+	latest, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Empty(t, latest, "no durable publication on refusal")
+}
+
 func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
 	report := indexBuildBothFormatsFailureReport(nil, nil, indexcompare.Artifact{Path: "/tmp/index.db"}, indexbuild.PathConfig{ManifestPath: "/tmp/manifest.json"}, true, false)
 	require.Equal(t, "gonimbus.index.compare_result.v1", report.Type)
