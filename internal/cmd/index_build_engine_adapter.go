@@ -133,7 +133,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		RunStartedAt:         run.StartedAt,
 		CreatedAt:            time.Now().UTC(),
 		TargetRowsPerSegment: 0,
-		Spill:                indexbuild.SpillConfig{WorkspaceBytes: indexBuildSpillResolved.WorkspaceBytes, Root: indexBuildSpillResolved.Root},
+		Spill:                indexbuild.SpillConfig{WorkspaceBytes: indexBuildSpillResolved.WorkspaceBytes, RecordBytes: indexBuildSpillResolved.RecordBytes, Root: indexBuildSpillResolved.Root},
 		// Crawl progress already flows via sqliteWriter; segmenting tail is
 		// after the crawl and needs an explicit observational hook.
 		OnSegmentProgress: newStderrSegmentProgress(os.Stderr),
@@ -258,7 +258,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		RunStartedAt:         now,
 		CreatedAt:            now,
 		TargetRowsPerSegment: 0,
-		Spill:                indexbuild.SpillConfig{WorkspaceBytes: indexBuildSpillResolved.WorkspaceBytes, Root: indexBuildSpillResolved.Root},
+		Spill:                indexbuild.SpillConfig{WorkspaceBytes: indexBuildSpillResolved.WorkspaceBytes, RecordBytes: indexBuildSpillResolved.RecordBytes, Root: indexBuildSpillResolved.Root},
 		OnSegmentProgress:    newStderrSegmentProgress(os.Stderr),
 	}
 	emitIndexBuildSpillDiagnostics(os.Stderr, indexBuildSpillResolved)

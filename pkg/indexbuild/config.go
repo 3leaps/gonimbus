@@ -213,6 +213,11 @@ type SpillConfig struct {
 	// Root overrides the scratch directory (resolved absolute, real, non-symlink,
 	// operator-exclusive at publish). Empty co-locates beside the run journals.
 	Root string
+	// RecordBytes overrides the max single journal-record (line) size
+	// (MaxRecordBytes). The journal header carries the crawl-prefix plan, which
+	// grows with scope prefix count, so very wide/dense scopes need a larger
+	// bound. Zero uses the substrate default; a sub-1 explicit value is rejected.
+	RecordBytes int64
 }
 
 // SegmentProgress is a sanitized segment-write progress signal (counts only).

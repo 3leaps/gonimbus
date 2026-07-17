@@ -144,9 +144,10 @@ var (
 	indexBuildExperimentalEngine bool
 	indexBuildJSON               bool
 	indexBuildSpillWorkspaceMax  string
+	indexBuildSpillRecordMax     string
 	indexBuildSpillRoot          string
-	// indexBuildSpillResolved is the workspace configuration resolved across CLI
-	// flag > env > config > default, set by resolveIndexBuildSpill before the crawl.
+	// indexBuildSpillResolved is the spill configuration resolved across CLI flag >
+	// env > config > default, set by resolveIndexBuildSpill before the crawl.
 	indexBuildSpillResolved indexBuildSpillResolution
 )
 
@@ -176,7 +177,8 @@ func init() {
 	}
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
-	indexBuildCmd.Flags().StringVar(&indexBuildSpillWorkspaceMax, "spill-workspace-max", "", "Max on-disk scratch for the durable merge (e.g. 16GiB, 16GB); empty uses the 8GiB default. Size to the corpus: a successive build stages the full prior index state before merging. Also settable via GONIMBUS_SPILL_WORKSPACE_MAX or the index.spill.workspace_max config key")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillWorkspaceMax, "spill-workspace-max", "", "Max on-disk scratch for the durable merge (e.g. 24GiB, 16GB); empty uses the 16GiB default. Size to the corpus: a successive build stages the full prior index state before merging. Also settable via GONIMBUS_SPILL_WORKSPACE_MAX or the index.spill.workspace_max config key")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillRecordMax, "spill-record-max", "", "Max single journal-record size for the durable merge (e.g. 32MiB); empty uses the 16MiB default. Very wide/dense scopes need a larger bound (the journal header carries the crawl-prefix plan). Also settable via GONIMBUS_SPILL_RECORD_MAX or the index.spill.record_max config key")
 	indexBuildCmd.Flags().StringVar(&indexBuildSpillRoot, "spill-root", "", "Directory for the durable merge's scratch workspace (default: beside the run journals). Point at a disk with room for --spill-workspace-max. Also settable via GONIMBUS_SPILL_ROOT or the index.spill.root config key")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
@@ -1354,9 +1356,8 @@ func validateIndexBuildBackgroundFlags() error {
 	// surfaces ARE inherited by the managed child (env via the process
 	// environment, config via the forwarded --config), so point operators there
 	// rather than let a flag silently fall back to the default workspace budget.
-	if strings.TrimSpace(indexBuildSpillWorkspaceMax) != "" || strings.TrimSpace(indexBuildSpillRoot) != "" {
-		return fmt.Errorf("the --spill-workspace-max/--spill-root flags are not forwarded to --background jobs; set %s / %s (or the %s / %s config keys) instead — the managed child inherits those",
-			spillWorkspaceMaxEnv, spillRootEnv, spillWorkspaceMaxConfig, spillRootConfig)
+	if strings.TrimSpace(indexBuildSpillWorkspaceMax) != "" || strings.TrimSpace(indexBuildSpillRecordMax) != "" || strings.TrimSpace(indexBuildSpillRoot) != "" {
+		return fmt.Errorf("the --spill-workspace-max/--spill-record-max/--spill-root flags are not forwarded to --background jobs; set the GONIMBUS_SPILL_* env vars (or the index.spill.* config keys) instead — the managed child inherits those")
 	}
 	return nil
 }

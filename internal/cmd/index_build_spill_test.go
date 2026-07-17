@@ -11,7 +11,7 @@ import (
 )
 
 func TestIndexBuildSpillFlags_DefaultEmpty(t *testing.T) {
-	for _, name := range []string{"spill-workspace-max", "spill-root"} {
+	for _, name := range []string{"spill-workspace-max", "spill-record-max", "spill-root"} {
 		flag := indexBuildCmd.Flags().Lookup(name)
 		require.NotNil(t, flag, "flag %q must be registered", name)
 		require.Equal(t, "", flag.DefValue)
@@ -19,16 +19,20 @@ func TestIndexBuildSpillFlags_DefaultEmpty(t *testing.T) {
 }
 
 // withSpillSurfaces sets the CLI flag vars and (via t.Setenv/viper) the env and
-// config surfaces, restoring all of them on cleanup.
+// config surfaces, restoring all of them on cleanup. Record-budget tests set
+// indexBuildSpillRecordMax directly; it is reset here so cases stay isolated.
 func withSpillSurfaces(t *testing.T, flagVal, rootFlagVal string) {
 	t.Helper()
 	oldMax := indexBuildSpillWorkspaceMax
+	oldRecord := indexBuildSpillRecordMax
 	oldRoot := indexBuildSpillRoot
 	oldResolved := indexBuildSpillResolved
 	indexBuildSpillWorkspaceMax = flagVal
+	indexBuildSpillRecordMax = ""
 	indexBuildSpillRoot = rootFlagVal
 	t.Cleanup(func() {
 		indexBuildSpillWorkspaceMax = oldMax
+		indexBuildSpillRecordMax = oldRecord
 		indexBuildSpillRoot = oldRoot
 		indexBuildSpillResolved = oldResolved
 	})
@@ -47,9 +51,55 @@ func TestResolveIndexBuildSpill_Default(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(0), res.WorkspaceBytes, "zero lets the library default apply")
 	require.Equal(t, indexsubstrate.DefaultSpillMergeBudget().MaxWorkspaceBytes, res.EffectiveBytes)
-	require.Equal(t, int64(8)<<30, res.EffectiveBytes, "entarch-ratified 8 GiB default")
+	require.Equal(t, int64(16)<<30, res.EffectiveBytes, "16 GiB workspace default")
 	require.Equal(t, spillSourceDefault, res.WorkspaceSource)
+	// Record budget defaults likewise.
+	require.Equal(t, int64(0), res.RecordBytes)
+	require.Equal(t, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes, res.EffectiveRecordBytes)
+	require.Equal(t, int64(16)<<20, res.EffectiveRecordBytes, "16 MiB record default")
+	require.Equal(t, spillRecordSourceDefault, res.RecordSource)
 	require.Equal(t, "", res.Root)
+}
+
+func TestResolveIndexBuildSpill_RecordBudget(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = "32MiB"
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, int64(32)<<20, res.RecordBytes)
+		require.Equal(t, int64(32)<<20, res.EffectiveRecordBytes)
+		require.Equal(t, spillRecordSourceFlag, res.RecordSource)
+	})
+	t.Run("env", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		t.Setenv(spillRecordMaxEnv, "8MiB")
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, int64(8)<<20, res.RecordBytes)
+		require.Equal(t, spillRecordSourceEnv, res.RecordSource)
+	})
+	t.Run("config", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		setSpillConfig(t, spillRecordMaxConfig, "4MiB")
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, int64(4)<<20, res.RecordBytes)
+		require.Equal(t, spillRecordSourceConfig, res.RecordSource)
+	})
+	t.Run("refuse explicit zero", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = "0"
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "spill record budget")
+		require.ErrorContains(t, err, "at least 1 byte")
+	})
+	t.Run("refuse malformed", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = "8XB"
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "spill record budget")
+	})
 }
 
 func TestResolveIndexBuildSpill_ParseAndUnits(t *testing.T) {
@@ -148,15 +198,19 @@ func TestResolveIndexBuildSpill_Root(t *testing.T) {
 func TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath(t *testing.T) {
 	var buf bytes.Buffer
 	emitIndexBuildSpillDiagnostics(&buf, indexBuildSpillResolution{
-		WorkspaceBytes:  16 << 30,
-		WorkspaceSource: spillSourceFlag,
-		EffectiveBytes:  16 << 30,
-		Root:            "/mnt/secret-scratch",
-		RootSource:      spillRootSourceEnv,
+		WorkspaceBytes:       16 << 30,
+		WorkspaceSource:      spillSourceFlag,
+		EffectiveBytes:       16 << 30,
+		RecordSource:         spillRecordSourceDefault,
+		EffectiveRecordBytes: 16 << 20,
+		Root:                 "/mnt/secret-scratch",
+		RootSource:           spillRootSourceEnv,
 	})
 	out := buf.String()
 	require.Contains(t, out, "16.0GiB")
 	require.Contains(t, out, spillSourceFlag)
+	require.Contains(t, out, "record ceiling")
+	require.Contains(t, out, "16.0MiB")
 	require.NotContains(t, out, "/mnt/secret-scratch", "host-absolute root must never be echoed")
 	require.Contains(t, out, spillRootSourceEnv, "root source/presence is enough")
 }
@@ -185,7 +239,13 @@ func TestIndexBuildBackgroundRejectsSpillFlagButNotEnvConfig(t *testing.T) {
 		withSpillSurfaces(t, "8GiB", "")
 		err := validateIndexBuildBackgroundFlags()
 		require.ErrorContains(t, err, "not forwarded to --background")
-		require.ErrorContains(t, err, spillWorkspaceMaxEnv)
+		require.ErrorContains(t, err, "GONIMBUS_SPILL_")
+	})
+	t.Run("record flag rejected", func(t *testing.T) {
+		withIndexBuildModes(t, true, false, false)
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = "32MiB"
+		require.Error(t, validateIndexBuildBackgroundFlags())
 	})
 	t.Run("root flag rejected", func(t *testing.T) {
 		withIndexBuildModes(t, true, false, false)

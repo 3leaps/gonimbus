@@ -332,9 +332,12 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		ParentManifests:      continuity.parentManifests,
 		WriteLease:           lease,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
-		SpillBudget:          indexsubstrate.SpillMergeBudget{MaxWorkspaceBytes: cfg.Spill.WorkspaceBytes},
-		SpillRoot:            cfg.Spill.Root,
-		OnSegmentProgress:    toSubstrateSegmentProgress(cfg.OnSegmentProgress),
+		SpillBudget: indexsubstrate.SpillMergeBudget{
+			MaxWorkspaceBytes: cfg.Spill.WorkspaceBytes,
+			MaxRecordBytes:    cfg.Spill.RecordBytes,
+		},
+		SpillRoot:         cfg.Spill.Root,
+		OnSegmentProgress: toSubstrateSegmentProgress(cfg.OnSegmentProgress),
 	})
 	if err != nil {
 		return Summary{}, err

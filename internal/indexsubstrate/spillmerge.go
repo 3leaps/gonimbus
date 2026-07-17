@@ -24,26 +24,32 @@ import (
 // metadata derived from that same verified capture.
 
 const (
-	spillMergeWorkspaceDir   = "spillmerge"
-	spillMergeMetaName       = "attempt.json"
-	spillMergeLockName       = "attempt.lock"
-	spillMergeFormatVersion  = 1
-	spillRunKindParent       = "parent"
-	spillRunKindEvents       = "events"
-	spillMagic               = "GNSPILL1"
-	defaultMaxBufferedRows   = 64_000
-	defaultMaxBufferedBytes  = 64 << 20
-	defaultMaxRecordBytes    = 1 << 20
+	spillMergeWorkspaceDir  = "spillmerge"
+	spillMergeMetaName      = "attempt.json"
+	spillMergeLockName      = "attempt.lock"
+	spillMergeFormatVersion = 1
+	spillRunKindParent      = "parent"
+	spillRunKindEvents      = "events"
+	spillMagic              = "GNSPILL1"
+	defaultMaxBufferedRows  = 64_000
+	defaultMaxBufferedBytes = 64 << 20
+	// defaultMaxRecordBytes bounds a single journal line. The journal header line
+	// carries the full crawl-prefix plan, so it grows with scope prefix count; at
+	// a very wide/dense scope (tens of thousands of prefixes) the header exceeds
+	// the old 1 MiB and fails a successive build closed at the journal phase. This
+	// 16 MiB ceiling covers headers up to roughly the scope-prefix cap with
+	// headroom; overridable per build (PublishConfig.SpillBudget.MaxRecordBytes).
+	defaultMaxRecordBytes    = 16 << 20
 	defaultMaxJournalSources = 256
 	// defaultMaxWorkspaceBytes is the live on-disk spill workspace ceiling. A
 	// successive build stages the full prior current-state into this workspace
 	// before merging, so peak demand scales ~linearly with corpus size; the prior
-	// 512 MiB froze successive builds at the ~single-segment boundary. At roughly
-	// 580 live workspace bytes per row this 8 GiB ceiling covers the ~10M-row tier
-	// with margin; larger runs must set an explicit bound. It is overridable per
-	// build (PublishConfig.SpillBudget.MaxWorkspaceBytes); the value is a ceiling,
-	// not a reservation, and not a guarantee for the multi-tens-of-millions regime.
-	defaultMaxWorkspaceBytes = 8 << 30
+	// 512 MiB froze successive builds at the ~single-segment boundary. Field peak
+	// runs ~1.2-1.4 KiB/row and rises with scale, so this 16 GiB ceiling covers
+	// roughly the ~10M-row tier; larger runs must set an explicit bound. It is
+	// overridable per build (PublishConfig.SpillBudget.MaxWorkspaceBytes); the
+	// value is a ceiling, not a reservation, and not a guarantee at 10M+.
+	defaultMaxWorkspaceBytes = 16 << 30
 	defaultMaxSpillRuns      = 4096
 	defaultMaxFanIn          = 16
 	defaultMaxMergePasses    = 64

@@ -105,19 +105,27 @@ and is unaffected.
 
 The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
 the build **closed** — a typed error, the prior published run and `latest`
-untouched — rather than growing without bound. The default ceiling is **8 GiB**
-(roughly the 10M-object tier). It is a floor for convenience, **not a guarantee**
-for multi-tens-of-millions-object sets; larger runs must raise it explicitly.
+untouched — rather than growing without bound. The default ceiling is **16 GiB**.
+Field peak runs ~1.2–1.4 KiB/row and rises with scale, so this covers roughly
+the ~10M-object tier; it is a floor for convenience, **not a guarantee** for
+larger sets, which must raise it explicitly.
+
+A second budget, the **max single journal-record size** (`MaxRecordBytes`,
+default **16 MiB**), bounds one journal line. The journal header carries the
+crawl-prefix plan, so a very wide/dense scope (tens of thousands of prefixes) can
+push the header past the default and fail the build closed at the journal phase.
+Raise it the same way when a very fine scope needs it.
 
 Size the ceiling (and, if needed, point the scratch at a roomier disk) via — in
 precedence order — the CLI flag, an environment variable, or application config:
 
 ```bash
 # CLI flag (foreground builds)
-gonimbus index build --job index.yaml --spill-workspace-max 16GiB --spill-root /mnt/scratch
+gonimbus index build --job index.yaml --spill-workspace-max 24GiB --spill-record-max 32MiB --spill-root /mnt/scratch
 
 # Environment (also inherited by --background jobs)
-export GONIMBUS_SPILL_WORKSPACE_MAX=16GiB
+export GONIMBUS_SPILL_WORKSPACE_MAX=24GiB
+export GONIMBUS_SPILL_RECORD_MAX=32MiB
 export GONIMBUS_SPILL_ROOT=/mnt/scratch
 ```
 
@@ -125,7 +133,8 @@ export GONIMBUS_SPILL_ROOT=/mnt/scratch
 # Application config (XDG config file — never the index job manifest)
 index:
   spill:
-    workspace_max: 16GiB # 8GiB/16GB/raw bytes; explicit 0/negative/unlimited is refused
+    workspace_max: 24GiB # 24GiB/16GB/raw bytes; explicit 0/negative/unlimited is refused
+    record_max: 32MiB # max single journal-record size
     root: /mnt/scratch # absolute, real, non-symlink, operator-exclusive
 ```
 
