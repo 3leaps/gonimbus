@@ -161,6 +161,24 @@ func TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath(t *testing.T) {
 	require.Contains(t, out, spillRootSourceEnv, "root source/presence is enough")
 }
 
+func TestEmitIndexBuildSpillCompletion(t *testing.T) {
+	res := indexBuildSpillResolution{EffectiveBytes: 8 << 30, WorkspaceSource: spillSourceDefault}
+
+	// Zero peak (nothing spilled) is not reported.
+	var quiet bytes.Buffer
+	emitIndexBuildSpillCompletion(&quiet, res, 0)
+	require.Empty(t, quiet.String())
+
+	// Non-zero peak is reported against the ceiling with its source.
+	var buf bytes.Buffer
+	emitIndexBuildSpillCompletion(&buf, res, 3<<30)
+	out := buf.String()
+	require.Contains(t, out, "peak workspace")
+	require.Contains(t, out, "3.0GiB")
+	require.Contains(t, out, "8.0GiB")
+	require.Contains(t, out, spillSourceDefault)
+}
+
 func TestIndexBuildBackgroundRejectsSpillFlagButNotEnvConfig(t *testing.T) {
 	t.Run("flag rejected", func(t *testing.T) {
 		withIndexBuildModes(t, true, false, false)

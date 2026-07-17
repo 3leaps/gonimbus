@@ -65,8 +65,12 @@ func TestBuildContinuitySpillWorkspaceOverrideConstrainsMerge(t *testing.T) {
 
 		cfg2 := contConfig(setRoot, "run2", run2Objs, base.Add(time.Hour))
 		cfg2.Spill.WorkspaceBytes = 64 << 20 // generous explicit override
-		_, err = NewRunner(cfg2).Build(ctx)
+		summary, err := NewRunner(cfg2).Build(ctx)
 		require.NoError(t, err)
+		// The successive merge staged the parent into the workspace, so the
+		// observed peak is surfaced (capacity evidence) and stays under the bound.
+		require.Positive(t, summary.PeakWorkspaceBytes, "successive merge must report a peak workspace")
+		require.Less(t, summary.PeakWorkspaceBytes, int64(64<<20), "peak must stay under the sized bound")
 
 		snap2, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
 		require.NoError(t, err)

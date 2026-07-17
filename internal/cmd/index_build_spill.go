@@ -125,3 +125,14 @@ func emitIndexBuildSpillDiagnostics(w io.Writer, res indexBuildSpillResolution) 
 	_, _ = fmt.Fprintf(w, "durable merge workspace ceiling: %s (source: %s); scratch root: %s\n",
 		match.FormatSize(res.EffectiveBytes), res.WorkspaceSource, root)
 }
+
+// emitIndexBuildSpillCompletion prints the observed peak workspace against the
+// resolved ceiling after a durable build, capacity evidence for sizing
+// successive builds. A zero peak (nothing spilled) is not reported.
+func emitIndexBuildSpillCompletion(w io.Writer, res indexBuildSpillResolution, peakWorkspaceBytes int64) {
+	if w == nil || peakWorkspaceBytes <= 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "durable merge peak workspace: %s of %s ceiling (source: %s)\n",
+		match.FormatSize(peakWorkspaceBytes), match.FormatSize(res.EffectiveBytes), res.WorkspaceSource)
+}

@@ -84,6 +84,10 @@ type CompactionResult struct {
 	Tombstones        []Tombstone
 	ObservedRecords   int
 	EnrichmentRecords int
+	// PeakWorkspaceBytes is the high-water live on-disk spill workspace observed
+	// during a streaming merge (0 on the non-streaming path or when nothing
+	// spilled). Observational capacity evidence, not an artifact field.
+	PeakWorkspaceBytes int64
 }
 
 func CompactJournalFiles(input CompactionInput, journalPaths []string) (CompactionResult, error) {

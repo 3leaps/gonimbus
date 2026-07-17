@@ -340,11 +340,12 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		return Summary{}, err
 	}
 	summary := Summary{
-		IndexSetID:     cfg.IndexSetID,
-		RunID:          cfg.RunID,
-		JournalPaths:   append([]string(nil), cfg.JournalPaths...),
-		ManifestSHA256: result.ManifestSHA256,
-		Manifest:       manifestSummary(result.Manifest),
+		IndexSetID:         cfg.IndexSetID,
+		RunID:              cfg.RunID,
+		JournalPaths:       append([]string(nil), cfg.JournalPaths...),
+		ManifestSHA256:     result.ManifestSHA256,
+		Manifest:           manifestSummary(result.Manifest),
+		PeakWorkspaceBytes: result.Compaction.PeakWorkspaceBytes,
 	}
 	if err := emitEvent(ctx, cfg.Events, Event{
 		Type:  EventTypeSnapshotPublished,

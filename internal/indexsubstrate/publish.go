@@ -230,8 +230,9 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 	// or tombstone counts read result.Manifest.Counts.
 	stats := stateSource.Stats()
 	result.Compaction = CompactionResult{
-		ObservedRecords:   stats.ObservedRecords,
-		EnrichmentRecords: stats.EnrichmentRecords,
+		ObservedRecords:    stats.ObservedRecords,
+		EnrichmentRecords:  stats.EnrichmentRecords,
+		PeakWorkspaceBytes: stats.PeakWorkspaceBytes,
 	}
 	result.Manifest = manifest
 	if err := runPublishHook(config, PublishStepSegmentsWritten); err != nil {

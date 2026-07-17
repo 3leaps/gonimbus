@@ -150,6 +150,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, sqliteArtifact, paths, false, false)
 		return out, err
 	}
+	emitIndexBuildSpillCompletion(os.Stderr, indexBuildSpillResolved, summary.PeakWorkspaceBytes)
 	manifestDoc, err := indexsubstrate.ReadInternalManifestFile(paths.ManifestPath)
 	if err != nil {
 		out.Report = indexBuildBothFormatsFailureReport(indexSet, run, sqliteArtifact, paths, true, false)
@@ -268,6 +269,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 	if err != nil {
 		return indexbuild.Summary{}, "", err
 	}
+	emitIndexBuildSpillCompletion(os.Stderr, indexBuildSpillResolved, summary.PeakWorkspaceBytes)
 	return summary, resolvedDB.IdentityDir, nil
 }
 
