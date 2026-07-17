@@ -191,7 +191,16 @@ type Config struct {
 	CreatedAt            time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
-	Events               EventSink
+	// SpillWorkspaceBytes overrides the durable streaming merge's live on-disk
+	// workspace budget (MaxWorkspaceBytes). A successive build stages the full
+	// prior current-state into this workspace, so it must scale with corpus size.
+	// Zero falls back to the substrate default via DefaultSpillMergeBudget.
+	SpillWorkspaceBytes int64
+	// SpillRoot overrides the directory under which the merge stages its
+	// owner-only, symlink-safe workspace. Empty defaults beside the sealed
+	// journals (resolved through operator app-data path classes).
+	SpillRoot string
+	Events    EventSink
 	// OnSegmentProgress is optional observational progress during segment write
 	// (counts only). Outside artifact bytes; never a publish failure vector.
 	OnSegmentProgress OnSegmentProgressFunc
@@ -256,8 +265,11 @@ type RetryConfig struct {
 	CreatedAt            time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
-	Events               EventSink
-	OnSegmentProgress    OnSegmentProgressFunc
+	// SpillWorkspaceBytes and SpillRoot follow Config semantics for public Retry.
+	SpillWorkspaceBytes int64
+	SpillRoot           string
+	Events              EventSink
+	OnSegmentProgress   OnSegmentProgressFunc
 }
 
 // String returns a redacted retry config summary.

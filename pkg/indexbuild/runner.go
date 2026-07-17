@@ -178,6 +178,8 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		CreatedAt:            cfg.CreatedAt,
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
+		SpillWorkspaceBytes:  cfg.SpillWorkspaceBytes,
+		SpillRoot:            cfg.SpillRoot,
 		Events:               cfg.Events,
 		OnSegmentProgress:    cfg.OnSegmentProgress,
 		Authority:            cfg.Authority,
@@ -331,6 +333,8 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		ParentManifests:      continuity.parentManifests,
 		WriteLease:           lease,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
+		SpillBudget:          indexsubstrate.SpillMergeBudget{MaxWorkspaceBytes: cfg.SpillWorkspaceBytes},
+		SpillRoot:            cfg.SpillRoot,
 		OnSegmentProgress:    toSubstrateSegmentProgress(cfg.OnSegmentProgress),
 	})
 	if err != nil {

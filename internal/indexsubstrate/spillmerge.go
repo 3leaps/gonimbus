@@ -35,7 +35,13 @@ const (
 	defaultMaxBufferedBytes  = 64 << 20
 	defaultMaxRecordBytes    = 1 << 20
 	defaultMaxJournalSources = 256
-	defaultMaxWorkspaceBytes = 512 << 20
+	// defaultMaxWorkspaceBytes is the live on-disk spill workspace floor. A
+	// successive build stages the full prior current-state into this workspace
+	// before merging, so peak demand scales ~linearly with corpus size; the prior
+	// 512 MiB froze successive builds at the ~single-segment boundary. This floor
+	// is overridable per build (PublishConfig.SpillBudget.MaxWorkspaceBytes) and
+	// is a placeholder pending maintainer/entarch ratification of the default.
+	defaultMaxWorkspaceBytes = 4 << 30
 	defaultMaxSpillRuns      = 4096
 	defaultMaxFanIn          = 16
 	defaultMaxMergePasses    = 64

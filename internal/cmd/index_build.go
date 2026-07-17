@@ -143,6 +143,11 @@ var (
 	indexBuildFormat             string
 	indexBuildExperimentalEngine bool
 	indexBuildJSON               bool
+	indexBuildSpillWorkspaceMax  string
+	indexBuildSpillRoot          string
+	// indexBuildSpillWorkspaceBytes is the parsed --spill-workspace-max byte
+	// budget (0 = use built-in default), set by resolveIndexBuildSpillFlags.
+	indexBuildSpillWorkspaceBytes int64
 )
 
 func init() {
@@ -171,6 +176,8 @@ func init() {
 	}
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillWorkspaceMax, "spill-workspace-max", "", "Max on-disk scratch for the durable merge (e.g. 8GiB, 16GB); empty uses the built-in default. Size to the corpus: a successive build stages the full prior index state before merging")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillRoot, "spill-root", "", "Directory for the durable merge's scratch workspace (default: beside the run journals). Point at a disk with room for --spill-workspace-max")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
 	indexBuildCmd.Flags().StringVar(&indexBuildStorageProv, "storage-provider", "", "Storage provider (aws_s3, cloudflare_r2, wasabi, gcs, azure_blob, generic_s3)")
@@ -178,6 +185,27 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildRegionKind, "region-kind", "", "Region naming scheme (aws, gcp, azure)")
 	indexBuildCmd.Flags().StringVar(&indexBuildRegion, "region", "", "Region name")
 	indexBuildCmd.Flags().StringVar(&indexBuildEndpointHost, "endpoint-host", "", "Endpoint host (host[:port])")
+}
+
+// resolveIndexBuildSpillFlags parses --spill-workspace-max into a byte budget for
+// the durable streaming merge and stores it in indexBuildSpillWorkspaceBytes. An
+// empty flag leaves the budget at 0 so the substrate default applies. Called
+// before the crawl so a malformed size fails fast rather than after LIST work.
+func resolveIndexBuildSpillFlags() error {
+	s := strings.TrimSpace(indexBuildSpillWorkspaceMax)
+	if s == "" {
+		indexBuildSpillWorkspaceBytes = 0
+		return nil
+	}
+	b, err := match.ParseSize(s)
+	if err != nil {
+		return fmt.Errorf("--spill-workspace-max %q: %w", s, err)
+	}
+	if b < 1 {
+		return fmt.Errorf("--spill-workspace-max must be at least 1 byte")
+	}
+	indexBuildSpillWorkspaceBytes = b
+	return nil
 }
 
 // validateIndexBuildResumeInvocation checks flags that conflict with --resume-run.
@@ -223,6 +251,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		return runIndexBuildResume(ctx, cmd, resumeRun)
 	}
 	if err := validateIndexBuildFormatFlags(""); err != nil {
+		return err
+	}
+	if err := resolveIndexBuildSpillFlags(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(indexBuildJobPath) == "" {
@@ -1336,6 +1367,13 @@ func validateIndexBuildBackgroundFlags() error {
 	}
 	if indexBuildSummary {
 		return fmt.Errorf("--background is not compatible with --summary")
+	}
+	// The managed executor reconstructs the child argv from the fingerprinted
+	// invocation, which does not yet carry the spill overrides; forwarding them
+	// through the job registry is a tracked follow-up. Refuse rather than let a
+	// managed child silently fall back to the default workspace budget.
+	if strings.TrimSpace(indexBuildSpillWorkspaceMax) != "" || strings.TrimSpace(indexBuildSpillRoot) != "" {
+		return fmt.Errorf("--spill-workspace-max/--spill-root are not yet supported with --background; run in the foreground to size the merge workspace")
 	}
 	return nil
 }

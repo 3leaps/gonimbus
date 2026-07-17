@@ -133,6 +133,8 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		RunStartedAt:         run.StartedAt,
 		CreatedAt:            time.Now().UTC(),
 		TargetRowsPerSegment: 0,
+		SpillWorkspaceBytes:  indexBuildSpillWorkspaceBytes,
+		SpillRoot:            strings.TrimSpace(indexBuildSpillRoot),
 		// Crawl progress already flows via sqliteWriter; segmenting tail is
 		// after the crawl and needs an explicit observational hook.
 		OnSegmentProgress: newStderrSegmentProgress(os.Stderr),
@@ -255,6 +257,8 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		RunStartedAt:         now,
 		CreatedAt:            now,
 		TargetRowsPerSegment: 0,
+		SpillWorkspaceBytes:  indexBuildSpillWorkspaceBytes,
+		SpillRoot:            strings.TrimSpace(indexBuildSpillRoot),
 		OnSegmentProgress:    newStderrSegmentProgress(os.Stderr),
 	}
 	if buildFilters != nil {

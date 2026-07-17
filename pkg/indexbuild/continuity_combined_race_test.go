@@ -34,8 +34,8 @@ func TestCombinedStreamingPublishAndContinuityLifecycle(t *testing.T) {
 	rel := func(i int) string { return fmt.Sprintf("p%d/obj-%03d.xml", i%prefixCount, i) }
 
 	// Six explicit crawl prefixes with set-equal coverage: a genuine
-	// multi-prefix plan (six concurrent crawl workers), stable across all three
-	// generations so faithful-coverage set-equality holds each run.
+	// multi-prefix plan (six prefix tasks under bounded concurrency), stable
+	// across all three generations so faithful-coverage set-equality holds each run.
 	prefixes := make([]string, prefixCount)
 	for p := range prefixes {
 		prefixes[p] = fmt.Sprintf("data/p%d/", p)
