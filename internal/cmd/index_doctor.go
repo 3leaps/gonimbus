@@ -158,6 +158,11 @@ type indexDoctorEntry struct {
 
 	// Warnings / notes
 	Notes []string `json:"notes,omitempty"`
+
+	// infoNoteCount counts entries in Notes that are purely informational
+	// lifecycle classifications (not health faults). IdentityOK excludes these
+	// so an expected, healthy Shape-2 retention note never degrades health.
+	infoNoteCount int
 }
 
 type indexDoctorOptions struct {
@@ -857,7 +862,10 @@ func inspectDurableForDoctor(meta indexreader.Meta, opts indexDoctorOptions) (*i
 	}
 
 	markerOK := entry.DurableMarkerOK != nil && *entry.DurableMarkerOK
-	entry.IdentityOK = entry.IndexSetID != "" && markerOK && len(entry.Notes) == 0
+	// Health counts only fault notes: informational lifecycle classifications
+	// (e.g. the expected Shape-2 verification-projection retention note) are
+	// excluded so a healthy durable-canonical both build reports identity_ok=true.
+	entry.IdentityOK = entry.IndexSetID != "" && markerOK && len(entry.Notes)-entry.infoNoteCount == 0
 	return entry, nil
 }
 
@@ -943,9 +951,13 @@ func fillDoctorVerificationProjections(entry *indexDoctorEntry, setDir string) {
 	}
 	entry.VerificationProjectionCount = len(entry.VerificationProjections)
 	if entry.VerificationProjectionCount > 0 {
+		// Informational lifecycle classification, not a health fault: retaining a
+		// run-scoped verification projection is the expected steady state after a
+		// successful Shape-2 both build.
 		entry.Notes = append(entry.Notes, fmt.Sprintf(
 			"%d run-scoped verification projection(s) retained under verification/ (dual-format parity artifacts; removed only by receipt-backed set-scoped GC)",
 			entry.VerificationProjectionCount))
+		entry.infoNoteCount++
 	}
 }
 

@@ -947,6 +947,15 @@ build:
 	var autoDetail map[string]any
 	require.NoError(t, json.Unmarshal([]byte(stdout), &autoDetail))
 	require.Equal(t, "durable-v2", autoDetail["format"])
+	// A healthy Shape-2 both build retains exactly one run-scoped verification
+	// projection, and that expected retention must NOT degrade health: the
+	// inventory is present, the durable marker is OK, and identity_ok stays
+	// true (informational lifecycle classification is orthogonal to health).
+	require.Equal(t, true, autoDetail["durable_marker_ok"])
+	require.EqualValues(t, 1, autoDetail["verification_projection_count"])
+	require.Len(t, autoDetail["verification_projections"], 1)
+	require.Equal(t, true, autoDetail["identity_ok"],
+		"expected verification-projection retention must not poison durable health")
 
 	// Explicit durable detail retains identity directory metadata.
 	stdout, stderr, err = executeIndexDoctorCommand(t, "--detail", "--format", "durable-v2", setID[:16])

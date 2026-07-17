@@ -100,12 +100,25 @@ func TestBuildStaleParentWhenLatestAdvancesMidCrawl(t *testing.T) {
 	require.Contains(t, err.Error(), "run_interloper")
 
 	// The racer legitimately wrote its run artifacts before the late CAS —
-	// segments/manifest/complete precede the advance decision. They form a
-	// valid non-latest run for GC inventory; "no artifacts" is NOT the
-	// contract here.
-	require.DirExists(t, racer.Paths.SegmentDir)
+	// segments/manifest/complete precede the advance decision. The ratified
+	// contract is that this is a VALID non-latest run for GC (not merely "some
+	// directory exists", and not "no artifacts"): its complete→manifest digest
+	// chain must verify and its segment rows must walk cleanly through the
+	// trusted run-snapshot reopen.
+	// OpenPublishedRunSnapshot enforces the complete→same-bytes-manifest digest
+	// chain internally; a successful open is that proof.
+	racerSnap, err := indexsubstrate.OpenPublishedRunSnapshot(racer.Paths.CompletePath, racer.IndexSetID, "run_racer")
+	require.NoError(t, err, "the racer's non-latest run must be a valid, trust-reopenable snapshot")
+	require.Equal(t, "run_racer", racerSnap.Complete.RunID)
+	require.NotEmpty(t, racerSnap.Complete.ManifestSHA256, "racer complete marker must bind its manifest digest")
+	var racerRows int
+	require.NoError(t, indexsubstrate.WalkManifestRows(racerSnap.SegmentDir, racerSnap.Manifest,
+		func(indexsubstrate.CurrentObjectRow) error { racerRows++; return nil }),
+		"racer segments must walk (per-segment digest verified) as a complete run")
+	require.Equal(t, racerSnap.Manifest.Counts.Rows, racerRows, "racer run is fully materialized, not partial")
 
-	// No latest clobber: the advanced latest is byte-identical.
+	// No latest clobber: the advanced latest is byte-identical, so the racer's
+	// publish never advanced latest (LatestAdvanced stayed false).
 	latestAfter, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
 	require.Equal(t, latestInterloper, latestAfter, "a stale racer must never advance or clobber latest")

@@ -16,8 +16,8 @@ import (
 // TestCombinedStreamingPublishAndContinuityLifecycle is the combined
 // streaming-publish + continuity assertion: a three-generation lifecycle where every
 // child run streams its verified multi-segment parent through the bounded
-// one-descriptor reader into the spill-merge streaming publish, over a
-// multi-prefix concurrent crawl. Run under the suite's -race gate this
+// one-descriptor reader into the spill-merge streaming publish, over a genuine
+// six-prefix crawl plan with set-equal faithful coverage. Run under the suite's -race gate this
 // exercises the streaming publish machinery and the continuity activation
 // together on one path — lineage generations, digest-bound parents, tombstone
 // and reappear semantics, and full current-state row accounting at a row/
@@ -28,12 +28,20 @@ func TestCombinedStreamingPublishAndContinuityLifecycle(t *testing.T) {
 	base := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
 	latestPath := filepath.Join(setRoot, "latest.json")
 
+	const prefixCount = 6
 	const initial = 180
-	key := func(i int) string { return fmt.Sprintf("data/p%d/obj-%03d.xml", i%6, i) }
-	rel := func(i int) string { return fmt.Sprintf("p%d/obj-%03d.xml", i%6, i) }
+	key := func(i int) string { return fmt.Sprintf("data/p%d/obj-%03d.xml", i%prefixCount, i) }
+	rel := func(i int) string { return fmt.Sprintf("p%d/obj-%03d.xml", i%prefixCount, i) }
 
+	// Six explicit crawl prefixes with set-equal coverage: a genuine
+	// multi-prefix plan (six concurrent crawl workers), stable across all three
+	// generations so faithful-coverage set-equality holds each run.
+	prefixes := make([]string, prefixCount)
+	for p := range prefixes {
+		prefixes[p] = fmt.Sprintf("data/p%d/", p)
+	}
 	mkcfg := func(runID string, objs []provider.ObjectSummary, started time.Time) Config {
-		cfg := contConfig(setRoot, runID, objs, started)
+		cfg := scopedContConfig(setRoot, runID, objs, prefixes, started)
 		// Small segments so the parent stream spans many segment files.
 		cfg.TargetRowsPerSegment = 7
 		return cfg
@@ -52,6 +60,8 @@ func TestCombinedStreamingPublishAndContinuityLifecycle(t *testing.T) {
 	require.True(t, snap1.Manifest.Lineage.Baseline)
 	require.Greater(t, len(snap1.Manifest.Segments), 20, "parent must span many segments for the bounded stream")
 	require.Equal(t, initial, snap1.Manifest.Counts.Rows)
+	// The multi-prefix plan is faithfully recorded: six covered prefixes.
+	require.Len(t, manifestCoveragePrefixes(t, latestPath), prefixCount)
 
 	// Run 2 — churn: i%5==0 changed, i%5==1 deleted, 30 added.
 	started2 := base.Add(2 * time.Hour)

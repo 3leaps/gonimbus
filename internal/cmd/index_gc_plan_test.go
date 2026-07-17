@@ -486,6 +486,26 @@ func TestDoctorInventoriesVerificationProjectionsAndGCStaysSetScoped(t *testing.
 		}
 	}
 	require.True(t, classified, "inventory note must state the deletion-authority posture")
+	require.True(t, entry.IdentityOK, "an expected retained projection beside a healthy latest must not degrade health")
+
+	// Broken-latest arm: the inventory still classifies the residue, but the
+	// marker fault correctly makes health false. Inventory visibility and
+	// health degradation are orthogonal. Restore the valid latest afterward so
+	// the GC steps below operate on a healthy set.
+	latestPath := filepath.Join(segmentRoot, "latest.json")
+	validLatest, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(latestPath, []byte(`{"type":"","index_set_id":"x"`), 0o600))
+	broken, err := inspectDurableForDoctor(indexreader.Meta{
+		Format:      indexreader.FormatDurableV2,
+		IndexSetID:  env.indexSetID,
+		IdentityDir: env.identityDir,
+		SourcePath:  latestPath,
+	}, indexDoctorOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, broken.VerificationProjectionCount, "inventory classifies residue even beside a broken latest")
+	require.False(t, broken.IdentityOK, "a broken durable marker must report unhealthy")
+	require.NoError(t, os.WriteFile(latestPath, validLatest, 0o600))
 
 	// Dry-run GC: no sub-set deletion path may touch the residue.
 	dry := &cobra.Command{Use: "gc"}
