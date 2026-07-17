@@ -512,6 +512,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	buildFormat := selectedIndexBuildFormat()
 	var db *sql.DB
 	var canonicalTarget *indexreader.SQLiteWriteTarget
+	var verificationTarget *indexreader.SQLiteVerificationTarget
 	if buildFormat == "both" && resolvedDB.Canonical {
 		guard, err := indexreader.OpenSQLiteIdentityPublicationGuard(ctx, indexreader.SQLiteWriteTargetOptions{
 			Path:           resolvedDB.Path,
@@ -533,15 +534,17 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		if err := guard.Close(); err != nil {
 			return err
 		}
-		verificationPath, err := bothVerificationDBPath(segmentSetRoot)
+		verificationTarget, err = indexreader.OpenSQLiteVerificationTarget(ctx, indexreader.SQLiteVerificationTargetOptions{
+			SegmentSetRoot: segmentSetRoot,
+			IndexSetID:     identityResult.IndexSetID,
+			Authority:      maintenance.Authority(),
+			AttemptName:    fmt.Sprintf("run_%d", time.Now().UnixNano()),
+		})
 		if err != nil {
 			return err
 		}
-		db, err = indexstore.Open(ctx, indexstore.Config{Path: verificationPath})
-		if err != nil {
-			return fmt.Errorf("open both-format verification database: %w", err)
-		}
-		defer func() { _ = db.Close() }()
+		db = verificationTarget.DB()
+		defer func() { _ = verificationTarget.Close() }()
 	} else if resolvedDB.Canonical {
 		canonicalTarget, err = indexreader.OpenSQLiteWriteTarget(ctx, indexreader.SQLiteWriteTargetOptions{
 			Path:           resolvedDB.Path,
@@ -792,20 +795,27 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 
 	// The verification-projection close is part of the `both` terminal boundary:
 	// the parity claim binds the exact compared projection, so a failed close
-	// (durable already authoritative and visible) emits no successful receipt.
+	// or binding revalidation (durable already authoritative and visible)
+	// emits no successful receipt.
 	var bothVerification *indexBuildBothVerificationRecord
 	if buildFormat == "both" && result.FinalStatus == indexstore.RunStatusSuccess {
 		if compareReport == nil {
 			return fmt.Errorf("both-format parity report missing after success")
 		}
-		if err := db.Close(); err != nil {
+		var closeErr error
+		if verificationTarget != nil {
+			closeErr = verificationTarget.Close()
+		} else {
+			closeErr = db.Close()
+		}
+		if closeErr != nil {
 			if store != nil && job != nil {
 				job.State = jobregistry.JobStateFailed
 				ended := time.Now().UTC()
 				job.EndedAt = &ended
 				_ = store.Write(job)
 			}
-			return fmt.Errorf("close both-format verification database: %w", err)
+			return fmt.Errorf("close both-format verification database: %w", closeErr)
 		}
 		bothVerification = &indexBuildBothVerificationRecord{
 			ProjectionMaterialized: compareReport.SQLiteMaterialized,

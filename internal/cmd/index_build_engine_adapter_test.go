@@ -16,8 +16,10 @@ import (
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/scope"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -447,6 +449,187 @@ build:
 		require.Equal(t, want.ETag, got.ETag, key)
 		require.Equal(t, want.DeletedAt == nil, got.DeletedAt == nil, key)
 	}
+}
+
+// TestIndexBuildFormatBothDiscoveryPlanRetainsOutOfPlanRowWithParity pins the
+// retained-row leg of the comparator predicate through the adapter: under one
+// discovery-driven scope identity, run 1 observes rows under two discovered
+// prefixes and run 2's compiled plan covers only one of them. The row outside
+// run 2's plan must stay active and lineage-stable in durable current state
+// (never tombstoned, never re-stamped), while run 2's SQLite verification
+// projection carries only current-run rows and parity still passes because the
+// comparator applies the observation-run predicate to the durable side.
+func TestIndexBuildFormatBothDiscoveryPlanRetainsOutOfPlanRowWithParity(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: date_partitions
+    discover:
+      segments:
+        - index: 0
+    date:
+      segment_index: 1
+      format: "2006-01-02"
+      range:
+        after: "2026-04-01"
+        before: "2026-04-02"
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	prov := &discoveringIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	runBothBuild := func() indexBuildResultRecord {
+		t.Helper()
+		restore()
+		indexBuildJobPath = manifestPath
+		indexBuildFormat = "both"
+		indexBuildJSON = true
+		cmd := &cobra.Command{Use: "build"}
+		cmd.SetContext(context.Background())
+		var stdout strings.Builder
+		cmd.SetOut(&stdout)
+		require.NoError(t, runIndexBuild(cmd, nil))
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		require.Len(t, lines, 2)
+		var report map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[0]), &report))
+		require.Equal(t, true, report["parity_passed"])
+		var rec indexBuildResultRecord
+		require.NoError(t, json.Unmarshal([]byte(lines[1]), &rec))
+		require.Equal(t, "success", rec.Status)
+		require.NotNil(t, rec.Verification)
+		require.True(t, rec.Verification.ParityPassed)
+		require.Equal(t, rec.RunID, rec.Verification.ObservationRunID)
+		return rec
+	}
+
+	// Run 1: discovery surfaces site-a and site-b; both rows observed.
+	prov.objects = []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/site-b/2026-04-01/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	rec1 := runBothBuild()
+	require.EqualValues(t, 2, rec1.Verification.ProjectionRows)
+
+	// Run 2: same manifest identity, but discovery now surfaces only site-a,
+	// so the compiled plan excludes site-b entirely. site-b's row is outside
+	// run 2's attested coverage.
+	prov.objects = []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 20, ETag: `"a2"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
+	}
+	rec2 := runBothBuild()
+	require.Equal(t, rec1.IndexSetID, rec2.IndexSetID, "discovery narrowing must not change identity")
+	require.NotEqual(t, rec1.RunID, rec2.RunID)
+	// The verification projection carries only current-run rows; without the
+	// symmetric observation-run predicate the retained durable row would read
+	// as SQLite-missing and parity (asserted green above) would fail.
+	require.EqualValues(t, 1, rec2.Verification.ProjectionRows)
+
+	latestFiles, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, latestFiles, 1)
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestFiles[0])
+	require.NoError(t, err)
+	require.NotNil(t, snap.Manifest.Lineage)
+	require.Equal(t, 2, snap.Manifest.Lineage.Generation, "run 2 extends run 1 continuously")
+	_, rows, err := indexbuild.ReadLatest(latestFiles[0])
+	require.NoError(t, err)
+	byKey := map[string]indexbuild.ObjectState{}
+	for _, r := range rows {
+		byKey[r.RelKey] = r
+	}
+	require.Len(t, byKey, 2)
+
+	observed := byKey["site-a/2026-04-01/a.xml"]
+	require.Equal(t, `"a2"`, observed.ETag)
+	require.Equal(t, rec2.RunID, observed.LastSeenRunID)
+	require.Nil(t, observed.DeletedAt)
+
+	retained := byKey["site-b/2026-04-01/b.xml"]
+	require.Nil(t, retained.DeletedAt, "out-of-plan row must never be tombstoned")
+	require.Equal(t, `"b1"`, retained.ETag)
+	require.Equal(t, rec1.RunID, retained.LastSeenRunID, "out-of-plan row must not be re-stamped by run 2")
+	require.Equal(t, rec1.RunID, retained.FirstSeenRunID)
+}
+
+// TestIndexBuildFormatBothRefusesPlantedVerificationSymlink reproduces the
+// review probe: a planted <set>/verification symlink must refuse before any
+// provider work or SQLite mutation, leaving the outside directory
+// byte-identical and emitting no receipt.
+func TestIndexBuildFormatBothRefusesPlantedVerificationSymlink(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	manifestPath := writeScopedPrefixManifest(t, []string{"hot/"})
+
+	m, err := manifest.LoadIndexManifest(manifestPath)
+	require.NoError(t, err)
+	scopeHash, err := scope.HashConfig(m.Build.Scope)
+	require.NoError(t, err)
+	indexSetID := computeTestIndexSetID(t, m, scopeHash)
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o700))
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	require.NoError(t, os.WriteFile(sentinel, []byte("untouched\n"), 0o600))
+	segmentRoot := filepath.Join(dataRoot, "cache", "segments", indexSetID)
+	require.NoError(t, os.MkdirAll(segmentRoot, 0o700))
+	require.NoError(t, os.Symlink(outside, filepath.Join(segmentRoot, "verification")))
+
+	prov := &countingIndexBuildProvider{}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return prov, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "both"
+	indexBuildJSON = true
+	cmd := &cobra.Command{Use: "build"}
+	cmd.SetContext(context.Background())
+	var stdout strings.Builder
+	cmd.SetOut(&stdout)
+	err = runIndexBuild(cmd, nil)
+	require.ErrorIs(t, err, indexreader.ErrVerificationProjectionTarget)
+	require.Zero(t, prov.listCalls, "refusal must happen before provider work")
+	require.Empty(t, strings.TrimSpace(stdout.String()), "no report or receipt on refusal")
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no files may be created through the planted symlink")
+	sentinelBytes, err := os.ReadFile(sentinel)
+	require.NoError(t, err)
+	require.Equal(t, []byte("untouched\n"), sentinelBytes)
+
+	latest, err := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
+	require.NoError(t, err)
+	require.Empty(t, latest, "no durable publication on refusal")
 }
 
 func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing.T) {
@@ -1114,6 +1297,40 @@ func (*countingIndexBuildProvider) Head(context.Context, string) (*provider.Obje
 }
 
 func (*countingIndexBuildProvider) Close() error { return nil }
+
+// discoveringIndexBuildProvider adds delimiter-based prefix discovery derived
+// from the fake object set, so discovery-driven scopes compile plans that
+// track the objects present at each run.
+type discoveringIndexBuildProvider struct {
+	countingIndexBuildProvider
+}
+
+func (p *discoveringIndexBuildProvider) ListCommonPrefixes(_ context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	delimiter := opts.Delimiter
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	seen := map[string]struct{}{}
+	var prefixes []string
+	for _, obj := range p.objects {
+		if !strings.HasPrefix(obj.Key, opts.Prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(obj.Key, opts.Prefix)
+		i := strings.Index(rest, delimiter)
+		if i < 0 {
+			continue
+		}
+		cp := opts.Prefix + rest[:i+1]
+		if _, ok := seen[cp]; ok {
+			continue
+		}
+		seen[cp] = struct{}{}
+		prefixes = append(prefixes, cp)
+	}
+	sort.Strings(prefixes)
+	return &provider.ListCommonPrefixesResult{Prefixes: prefixes}, nil
+}
 
 func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 	t.Helper()

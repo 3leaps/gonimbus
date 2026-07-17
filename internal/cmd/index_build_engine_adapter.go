@@ -161,24 +161,6 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	return out, nil
 }
 
-// bothVerificationDBPath returns a clean, non-contending path for the SQLite
-// parity-verification projection built during a --format both run. Under
-// Shape 2 the durable index is the canonical multi-run store and the SQLite
-// side is a per-run verification projection, so it is written to an isolated
-// run-scoped path and never creates, adopts, or contends for the shared
-// canonical index.db (which successive runs would otherwise block on residue).
-func bothVerificationDBPath(segmentSetRoot string) (string, error) {
-	root := strings.TrimSpace(segmentSetRoot)
-	if root == "" {
-		return "", fmt.Errorf("segment set root is required for the both-format verification database")
-	}
-	dir := filepath.Join(root, "verification", fmt.Sprintf("run_%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create both-format verification directory: %w", err)
-	}
-	return filepath.Join(dir, "index.db"), nil
-}
-
 func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identityResult *indexstore.IndexSetIdentityResult, buildFilters *indexBuildFilters, resolvedDB resolvedIndexDB, authority *indexcoord.Lease) (indexbuild.Summary, string, error) {
 	if m == nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("index manifest is required")

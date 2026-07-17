@@ -215,17 +215,35 @@ func discoverIndexRootCandidates(ctx context.Context, opts ResolveOptions, targe
 			if identity.Provider != "" {
 				c.meta.Provider = identity.Provider
 			}
-			out = append(out, c)
-			// A trusted SQLite candidate may sit beside a verified durable
-			// latest for the same set (legacy dual-format layout). Surface the
-			// durable sibling too so preference can rank it; base-URI targets
-			// never reach segment-cache discovery on their own.
+			// A trusted SQLite candidate may sit beside a durable latest for
+			// the same set (legacy dual-format layout). Sibling handling is
+			// tri-state and marker-authoritative: an absent latest keeps the
+			// SQLite-only selection; a verified latest is surfaced so
+			// preference ranks durable first; a present-but-invalid latest is
+			// a durable-authoritative set whose current state cannot be
+			// trusted — targeted reads fail closed rather than silently
+			// downgrading to a possibly-stale SQLite, and list mode surfaces
+			// neither entry as current (doctor inventories and diagnoses both).
 			if opts.SegmentCacheRoot != "" && isFullIndexSetID(identity.IndexSetID) {
 				latest := filepath.Join(opts.SegmentCacheRoot, identity.IndexSetID, "latest.json")
-				if sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identity); siblingErr == nil {
-					out = append(out, sibling)
+				if _, latestErr := os.Lstat(latest); latestErr == nil {
+					sibling, siblingErr := candidateFromDurable(opts, latest, dirPath, identity)
+					if siblingErr != nil {
+						if target.IndexSetID != "" || target.BaseURI != "" {
+							return nil, fmt.Errorf("open durable snapshot beside canonical SQLite %s: %w", dirName, siblingErr)
+						}
+						continue
+					}
+					out = append(out, c, sibling)
+					continue
+				} else if !os.IsNotExist(latestErr) {
+					if target.IndexSetID != "" || target.BaseURI != "" {
+						return nil, fmt.Errorf("inspect durable latest beside canonical SQLite %s: %w", dirName, latestErr)
+					}
+					continue
 				}
 			}
+			out = append(out, c)
 			continue
 		}
 

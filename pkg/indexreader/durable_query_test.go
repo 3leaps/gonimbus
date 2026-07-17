@@ -156,6 +156,51 @@ func TestDurablePreferredWhenBothPresent(t *testing.T) {
 	require.Equal(t, FormatSQLiteV1, reader.Meta().Format)
 }
 
+// TestCorruptDurableBesideSQLiteFailsClosedNotDowngrade pins the tri-state
+// sibling contract: a present-but-invalid durable latest beside a canonical
+// SQLite makes targeted reads refuse (no silent downgrade to possibly-stale
+// SQLite), while an absent latest keeps the SQLite-only fallback and list mode
+// stops advertising the SQLite as current for the durable-authoritative set.
+func TestCorruptDurableBesideSQLiteFailsClosedNotDowngrade(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a.txt", 1, "e", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	dbPath := filepath.Join(env.identityDir, "index.db")
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: dbPath})
+	require.NoError(t, err)
+	require.NoError(t, indexstore.Migrate(ctx, db))
+	_, _, err = indexstore.FindOrCreateIndexSet(ctx, db, env.params)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	latestPath := filepath.Join(env.segmentRoot, "latest.json")
+	require.NoError(t, os.WriteFile(latestPath, []byte(`{"type":"","index_set_id":"x"`), 0o600))
+
+	// Targeted reads refuse with the durable diagnostic — never sqlite-v1.
+	_, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "durable")
+	_, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
+	require.Error(t, err)
+
+	// List mode advertises neither entry as current for the set; doctor owns
+	// the diagnosis surface.
+	listed, err := ListIndexReaders(ctx, env.opts)
+	require.NoError(t, err)
+	for _, item := range listed {
+		require.NotEqual(t, env.indexSetID, item.Meta.IndexSetID,
+			"durable-authoritative invalid set must not list %s as current", item.Meta.Format)
+	}
+
+	// Absent latest restores the SQLite-only fallback.
+	require.NoError(t, os.Remove(latestPath))
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{BaseURI: env.baseURI})
+	require.NoError(t, err)
+	defer func() { _ = reader.Close() }()
+	require.Equal(t, FormatSQLiteV1, reader.Meta().Format)
+}
+
 type durableTestEnv struct {
 	opts        ResolveOptions
 	baseURI     string
