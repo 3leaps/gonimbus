@@ -106,9 +106,10 @@ and is unaffected.
 The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
 the build **closed** — a typed error, the prior published run and `latest`
 untouched — rather than growing without bound. The default ceiling is **16 GiB**.
-Field peak runs ~1.2–1.4 KiB/row and rises with scale, so this covers roughly
-the ~10M-object tier; it is a floor for convenience, **not a guarantee** for
-larger sets, which must raise it explicitly.
+Field peak runs ~1.2–1.35 KiB/row (bounded, flattening with scale), so this
+carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a floor
+for convenience, **not a guarantee** for larger sets, which must raise it
+explicitly.
 
 A second budget, the **max single journal-record size** (`MaxRecordBytes`,
 default **16 MiB**), bounds one journal line. The journal header carries the

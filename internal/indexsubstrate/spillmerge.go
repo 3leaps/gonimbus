@@ -45,10 +45,11 @@ const (
 	// successive build stages the full prior current-state into this workspace
 	// before merging, so peak demand scales ~linearly with corpus size; the prior
 	// 512 MiB froze successive builds at the ~single-segment boundary. Field peak
-	// runs ~1.2-1.4 KiB/row and rises with scale, so this 16 GiB ceiling covers
-	// roughly the ~10M-row tier; larger runs must set an explicit bound. It is
-	// overridable per build (PublishConfig.SpillBudget.MaxWorkspaceBytes); the
-	// value is a ceiling, not a reservation, and not a guarantee at 10M+.
+	// runs ~1.2-1.35 KiB/row (bounded, flattening with scale), so this 16 GiB
+	// ceiling carries to ~13.6M rows — validated with ~20% headroom at ~10.9M.
+	// Larger runs must set an explicit bound. It is overridable per build
+	// (PublishConfig.SpillBudget.MaxWorkspaceBytes); the value is a ceiling, not a
+	// reservation, and not a guarantee beyond ~13.6M rows.
 	defaultMaxWorkspaceBytes = 16 << 30
 	defaultMaxSpillRuns      = 4096
 	defaultMaxFanIn          = 16
