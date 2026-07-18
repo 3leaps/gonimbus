@@ -4,6 +4,76 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.4.1 (2026-07-18)
+
+**SQLite Independence + Streaming Durable Publication**
+
+v0.4.0 made the durable index the default build format. v0.4.1 completes the
+operator story: a durable-only default build no longer needs an `index.db` for
+everyday local work, and `index build` publishes durable snapshots through a
+streaming path that never materializes the full row set in memory.
+
+SQLite remains a first-class compatibility path (`--format sqlite` /
+`--format both`) for `query --since-run`, `stats --prefixes`, and full
+`--resume-run` recovery.
+
+### SQLite-independent local surfaces
+
+`query`, `list`, `stats`, `doctor`, and `enrich-with-head` now read the durable
+substrate natively (no `index.db`, no ephemeral SQLite bridge). A machine-stable
+`index build --json` receipt (`gonimbus.index.build_result.v1`) and a pinned
+durable query (`--index-set` + `--run-id`) let automation hand off the exact
+committed snapshot without list heuristics.
+
+```bash
+# Default durable build — now queryable and diagnosable natively
+gonimbus index build --job index.yaml
+
+# Machine-stable receipt for handoff
+gonimbus index build --job index.yaml --json
+
+# Query the durable snapshot directly (streaming verified JSONL)
+gonimbus index query --index-set idx_... --prefix data/
+
+# Dry-run whole-set reclamation plan
+gonimbus index gc --dry-run --keep-last 3 --json
+```
+
+### Also in this cut
+
+- **Streaming durable publication** with operator-tunable capacity budgets
+  (16 GiB workspace / 16 MiB record; flag > env > config > default). Invalid
+  budgets refuse before any side effect; exhaustion refuses fail-closed with no
+  `latest` advance. Emitted rows, segments, manifests, and digests are identical
+  to the prior materialized path.
+- **Managed background builds** (`index build --background`) with dedup, leases,
+  recovery, and terminal receipts.
+- **Whole-set GC** — `index gc --dry-run` (`--max-age` / `--keep-last` /
+  `--json`), leased execution, canonical SQLite authority.
+- **`index migrate-match-scope`** — fail-closed migration of prefix-shaped
+  `match.includes` to explicit `build.scope`.
+- **`transfer reflow` stdin `--parallel` restored** (a v0.3.5–v0.4.0
+  regression).
+
+### Boundary framing
+
+Durable-v2 remains a full-fidelity **internal render** for trusted operators and
+pipelines — not a reduced-trust, de-identified, or third-party publication
+format. Content digests are **content-integrity / tamper-evidence** checksums,
+not statements of author authenticity or provenance.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.1
+```
+
+No format or schema break; existing durable and SQLite artifacts are read as-is.
+See [docs/releases/v0.4.1.md](docs/releases/v0.4.1.md) for the complete release
+notes.
+
+---
+
 ## v0.4.0 (2026-07-09)
 
 **Durable Index Format Is the Default**
@@ -131,45 +201,4 @@ Existing command flags, manifest formats, and default platform app-data behavior
 remain compatible with v0.3.6.
 
 See [docs/releases/v0.3.7.md](docs/releases/v0.3.7.md) for the complete release
-notes.
-
----
-
-## v0.3.6 (2026-07-04)
-
-**Incremental Index Top-Ups and Query-Time Deltas**
-
-v0.3.6 makes recurring index operations cheaper and easier to feed into
-downstream workflows. `index build --since <timestamp>|auto` can narrow
-date-partitioned listing plans before provider LIST calls, and it reports
-whether that reduction actually applied. `index query --since-run <run_id>`
-then emits the current objects first seen or meaningfully changed after a
-successful run, giving consumers a forward delta without rebuilding or
-relisting the source.
-
-### Incremental top-ups with `--since`
-
-Use `--since <timestamp>` when a recurring build has a known lower bound, or
-`--since auto` to derive the watermark from the latest successful run in the
-same IndexSet.
-
-On date-partitioned scopes, Gonimbus narrows the listing plan before provider
-LIST when possible, then applies a last-modified ingest filter. Builds that
-cannot safely reduce enumeration still run and report that reduction was
-unavailable rather than silently paying full cost without a signal.
-
-### Query-time deltas with `--since-run`
-
-`index query --since-run <run_id>` emits current active rows first seen or
-meaningfully changed after a successful boundary run in the same IndexSet.
-Output keeps the existing object record shape and adds optional delta fields
-for change classification and run identity.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.3.6
-```
-
-See [docs/releases/v0.3.6.md](docs/releases/v0.3.6.md) for the complete release
 notes.

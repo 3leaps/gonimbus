@@ -15,6 +15,82 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-18
+
+**SQLite independence for the durable index, and memory-bounded streaming
+publication.**
+
+v0.4.0 made the durable index the default build format. v0.4.1 completes the
+operator story around it: the durable-only default no longer needs an
+`index.db` for everyday local work, and `index build` publishes durable
+snapshots through a streaming path that never materializes the full row set in
+memory. SQLite remains a first-class compatibility path (`--format sqlite` /
+`--format both`) for the surfaces that still require it.
+
+As in v0.4.0, the durable-v2 format is a full-fidelity **internal render** for
+trusted operator and pipeline use — **not** a reduced-trust, de-identified, or
+third-party publication format. Content digests carried by durable manifests
+and segments are **content-integrity / tamper-evidence** checksums, not
+statements of author authenticity or provenance.
+
+### Added
+
+- **Durable-native `index query`** — format-aware library reader seam
+  (`pkg/indexreader`, Experimental) scans durable segments natively with no
+  ephemeral SQLite bridge; plain query streams verified JSONL as rows arrive.
+  Marker-authoritative `sqlite-v1` / `durable-v2` dispatch with same-open /
+  same-bytes digest verification. `query --since-run` fails closed on
+  `durable-v2` (use `--format sqlite` or `both`).
+- **Machine-stable build receipt and pinned-run handoff** — `index build --json`
+  emits a terminal `gonimbus.index.build_result.v1` receipt (status, requested
+  and committed formats, full set/run/scope identity, counts, durable
+  `manifest_sha256`) so automation hands off the exact committed snapshot
+  without list heuristics. Pinned durable query via `--index-set` + `--run-id`
+  opens the run complete marker and never consults `latest.json`.
+- **Format-aware `index list`, `stats`, and `doctor`** — local inventory and
+  diagnostics work for durable-only sets with no `index.db`. `doctor` inspects
+  the SQLite and durable substrates independently so a broken durable marker
+  stays discoverable and reports unhealthy.
+- **Durable `index enrich-with-head`** — HEAD enrichment for durable-only sets
+  under an OS-level exclusive write lease; prior segments stay immutable and
+  unobserved keys are never tombstoned.
+- **Managed durable build execution** — `index build --background` runs a
+  managed durable build via canonical effective invocation and exact
+  child-process replay, with deduplication, leases, recovery, terminal
+  receipts, and job log/API surfaces. Credential-bearing, signed, and metadata
+  invocation material is rejected before persistence.
+- **Whole-set garbage collection** — `index gc --dry-run` (`--max-age`,
+  `--keep-last`, optional `--json`) produces a deterministic, format-aware plan
+  that groups SQLite and durable artifacts by full index-set identity and
+  retains conservatively when safety cannot be proven. Leased execution and a
+  canonical SQLite authority binding land alongside the planner (ADR-0007).
+- **`index migrate-match-scope`** — fail-closed migration of prefix-shaped
+  `build.match.includes` (literal prefix + terminal `/**`) into explicit
+  `build.scope` `prefix_list`, with LIST-plan equality and an independent
+  LIST-reachable projection proof. Exclusive emit publishes via hard-link-only
+  (no in-place replacement); `--force` uses atomic rename.
+- **Streaming durable publication** — `index build` publishes durable snapshots
+  by compacting sealed journals against the verified parent through a
+  spill/merge current-state source and a streaming segment-set writer, so the
+  full row set is never materialized in memory. The row / artifact / digest
+  contract is identical to the prior materialized path. Merge-workspace and
+  single-record ceilings are finite, operator-tunable budgets (CLI flag > env >
+  app config > built-in default; 16 GiB workspace / 16 MiB record defaults);
+  invalid budgets refuse with typed errors before any crawl or side effect, and
+  exhaustion refuses fail-closed with no authority advance. `--format both`
+  publishes durable as canonical with a per-run SQLite parity-verification
+  projection. Sealed journals carry a tamper-evident content digest and the
+  canonical crawl-prefix plan; `latest` advance is CAS-guarded. Streaming
+  segment progress and workspace peak/ceiling diagnostics render on stderr
+  (counts and sources only; best-effort, never fails a build).
+
+### Changed
+
+- `index build` on the durable path now executes through the streaming
+  publication engine instead of materializing the compacted row set. Emitted
+  rows, segment artifacts, manifests, and digests are unchanged; the difference
+  is bounded memory during publication.
+
 ### Fixed
 
 - **`transfer reflow` stdin live copies honor `--parallel` again:** for stdin
@@ -25,6 +101,17 @@ changes.
   serially while the run record still reported the requested `--parallel`
   value (materially slower multi-object runs). Dry-run continues on the
   library engine. Library engine concurrency is a follow-on.
+
+### Development
+
+- Documented a finding-driven gosec G101 triage and inline `#nosec` convention
+  in `docs/development/ci.md` (no Go-source suppressions, no scanner-config
+  allowlists).
+- Added an on-demand, measurement-only reflow throughput/concurrency harness
+  (`make test-reflow-throughput`, non-CI) with supervised smoke, saturation,
+  checkpoint, and full-pipe profiles, strict telemetry/parity/sterility
+  assertions, and a small-scale relative gate (absolute-envelope validation
+  remains a deferred BYO-cloud follow-on).
 
 ## [0.4.0] - 2026-07-09
 
