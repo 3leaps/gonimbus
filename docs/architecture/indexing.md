@@ -120,23 +120,12 @@ correctness. A future `index compact` command may derive refcounts as an audit
 and delete plan before applying retention policy, but those derived counts are
 not primary truth.
 
-Boundary manifests are a separate future render mode for publication across a
-data boundary. Phase 1 does not publish boundary manifests: invoking boundary
+Durable-v2 does not provide a reduced-trust publication mode. Invoking boundary
 rendering fails with a hard not-implemented error before any artifact is
-created. This prevents partial or half-hardened boundary output from being
-mistaken for a safe publication format.
-
-When boundary rendering is implemented, it must use tokens minted in a separate
-namespace rather than segment identifiers or hashes of restricted values. It
-must coarsen or omit restricted-axis shape metadata such as exact per-segment
-row counts, tombstone counts, byte sizes, and segment counts by restricted
-axis. It must omit boundary `distinct_etags` and suppress restricted-column
-min/max statistics, bloom filters, and dictionary surfaces in boundary segment
-variants.
-
-Boundary mode is not a row-key de-identification layer. A recipient that is not
-authorized to see row-level keys needs a different representation, not a
-boundary manifest over the same keys.
+created. This fail-closed guard prevents partial output from being mistaken for
+a safe publication format. Internal manifests retain full-fidelity engine
+metadata, and durable indexes do not de-identify row-level keys. Operators must
+not treat durable hub exports as disclosure-controlled share formats.
 
 `last_changed_*` advances on the same LIST-derived change predicate used by the
 incremental build delta report: size, ETag, storage class, or `last_modified`
