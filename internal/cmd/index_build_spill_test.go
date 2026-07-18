@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -306,5 +307,26 @@ func TestIndexBuildBackgroundRejectsSpillFlagButNotEnvConfig(t *testing.T) {
 		withIndexBuildModes(t, true, false, false)
 		withSpillSurfaces(t, "", "")
 		require.NoError(t, validateIndexBuildBackgroundFlags())
+	})
+}
+
+// TestResolveIndexBuildSpill_RecordBudgetPlatformCeiling proves the CLI
+// raw-byte surface refuses a record ceiling that cannot take the scanner
+// framing allowance on this platform — the same pre-crawl refusal the library
+// applies — instead of silently clamping.
+func TestResolveIndexBuildSpill_RecordBudgetPlatformCeiling(t *testing.T) {
+	t.Run("at ceiling accepted", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = strconv.FormatInt(indexsubstrate.MaxSpillRecordBytes, 10)
+		res, err := resolveIndexBuildSpill()
+		require.NoError(t, err)
+		require.Equal(t, indexsubstrate.MaxSpillRecordBytes, res.RecordBytes)
+	})
+	t.Run("above ceiling refused", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		indexBuildSpillRecordMax = "9223372036854775807" // math.MaxInt64 raw bytes
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "spill record budget")
+		require.ErrorContains(t, err, "supported maximum")
 	})
 }

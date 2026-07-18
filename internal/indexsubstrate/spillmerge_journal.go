@@ -23,16 +23,12 @@ func scanJournalStreaming(
 	onHeader func(JournalHeader),
 ) error {
 	sc := bufio.NewScanner(r)
-	maxLine := int(budget.MaxRecordBytes)
-	if maxLine < 64 {
-		maxLine = 64
-	}
-	// MaxRecordBytes bounds record payload bytes; the line terminator ("\n" or
-	// "\r\n") is framing. The scanner buffer must hold payload plus terminator
-	// before ScanLines can emit the token, so it gets a two-byte allowance —
-	// the explicit post-trim length check below remains the payload refusal, so
-	// exactly-max succeeds and max+1 refuses typed.
-	sc.Buffer(make([]byte, 0, min(maxLine+2, 64*1024)), maxLine+2)
+	// MaxRecordBytes bounds record payload bytes; the line terminator is
+	// framing. The canonical capacity translation adds the terminator allowance
+	// so exactly-max tokenizes — the explicit post-trim length check below
+	// remains the payload refusal (exactly-max succeeds, max+1 refuses typed).
+	maxTok := spillRecordScannerCapacity(budget.MaxRecordBytes)
+	sc.Buffer(make([]byte, 0, min(maxTok, 64*1024)), maxTok)
 
 	var header JournalHeader
 	var records uint64

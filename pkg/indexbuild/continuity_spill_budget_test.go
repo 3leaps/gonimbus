@@ -3,6 +3,7 @@ package indexbuild
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -247,6 +248,9 @@ func TestBuildRejectsInvalidSpillBudgetBeforeCrawl(t *testing.T) {
 	}{
 		{"negative record budget", func(c *Config) { c.Spill.RecordBytes = -1 }, "MaxRecordBytes must be >= 1"},
 		{"negative workspace budget", func(c *Config) { c.Spill.WorkspaceBytes = -1 }, "MaxWorkspaceBytes must be >= 1"},
+		// An extreme finite value the raw-byte surfaces admit must refuse typed
+		// pre-crawl — never reach the scanner-capacity translation and panic.
+		{"record budget above supported maximum", func(c *Config) { c.Spill.RecordBytes = math.MaxInt64 }, "supported maximum"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setRoot := t.TempDir()

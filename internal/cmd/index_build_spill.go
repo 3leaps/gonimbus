@@ -136,6 +136,13 @@ func resolveIndexBuildSpill() (indexBuildSpillResolution, error) {
 	); err != nil {
 		return indexBuildSpillResolution{}, err
 	} else if explicit {
+		// The record ceiling must remain representable with the scanner framing
+		// allowance on this platform; refuse here (same fail-fast surface as the
+		// other refusals) rather than silently clamp — the library validates the
+		// same bound as defense in depth.
+		if b > indexsubstrate.MaxSpillRecordBytes {
+			return indexBuildSpillResolution{}, fmt.Errorf("spill record budget (%s) exceeds the supported maximum", source)
+		}
 		res.RecordBytes = b
 		res.RecordSource = source
 		res.EffectiveRecordBytes = b

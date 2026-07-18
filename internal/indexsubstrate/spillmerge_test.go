@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1095,4 +1096,83 @@ func TestSpillMergeErrorDoesNotDisclosePaths(t *testing.T) {
 		// Underlying PathError may carry the path; it must not appear in Error().
 		require.NotContains(t, rendered, pe.Path)
 	}
+}
+
+// TestSpillMergeBudgetRecordCeilingBoundary pins the platform upper bound of
+// MaxRecordBytes: the largest representable payload ceiling (the framing
+// allowance must fit a platform int) validates, and the first unrepresentable
+// value — and math.MaxInt64 — refuse with typed SpillMergeInvalidConfig, never
+// a silent clamp or an overflow downstream.
+func TestSpillMergeBudgetRecordCeilingBoundary(t *testing.T) {
+	requireInvalid := func(t *testing.T, v int64) {
+		t.Helper()
+		b := DefaultSpillMergeBudget()
+		b.MaxRecordBytes = v
+		err := b.validate()
+		var sme *SpillMergeError
+		require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+		require.Equal(t, SpillMergeInvalidConfig, sme.Category)
+		require.Contains(t, err.Error(), "supported maximum")
+	}
+
+	largest := DefaultSpillMergeBudget()
+	largest.MaxRecordBytes = MaxSpillRecordBytes
+	require.NoError(t, largest.validate(), "largest representable ceiling must validate")
+	require.Positive(t, spillRecordScannerCapacity(MaxSpillRecordBytes), "capacity translation must not overflow at the ceiling")
+
+	requireInvalid(t, MaxSpillRecordBytes+1)
+	requireInvalid(t, math.MaxInt64)
+}
+
+// TestSpillRunExactPayloadLimitRoundTrip proves the exact-limit contract holds
+// for the spill-run path through the production writer AND reader: a record
+// budget equal to the largest written line's payload is accepted by the writer,
+// by direct attestation, and by a full stage-and-drain pass; one byte under
+// refuses through the existing bounded contract.
+func TestSpillRunExactPayloadLimitRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	runStartedAt := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	prior := []CurrentObjectRow{{
+		IndexSetID: "idx_test", RelKey: "data/a.xml", SizeBytes: 10,
+		FirstSeenRunID: "run_old", FirstSeenAt: runStartedAt.Add(-time.Hour),
+		LastChangedRunID: "run_old", LastChangedAt: runStartedAt.Add(-time.Hour),
+		LastSeenRunID: "run_old", LastSeenAt: runStartedAt.Add(-time.Hour),
+	}}
+	cfg := func(root string, budget SpillMergeBudget) SpillMergeConfig {
+		return SpillMergeConfig{
+			IndexSetID: "idx_test", RunID: "run_cur", RunStartedAt: runStartedAt,
+			Parent: NewSliceParentRows(prior), SpillRoot: root, Budget: budget,
+		}
+	}
+
+	// Phase 1: production writer under defaults; measure the largest written
+	// payload, then attest the same run at exactly that bound and one under.
+	src1, err := PrepareCurrentStateSource(ctx, cfg(t.TempDir(), SpillMergeBudget{}))
+	require.NoError(t, err)
+	largest := largestJournalPayload(t, src1.parentRun)
+	require.Greater(t, largest, int64(64), "fixture line must exceed the reader floor")
+
+	_, _, err = attestSpillRun(src1.parentRun, spillRunKindParent, src1.attemptID, largest)
+	require.NoError(t, err, "exact-limit payload must be accepted on reopen/attestation")
+	_, _, err = attestSpillRun(src1.parentRun, spillRunKindParent, src1.attemptID, largest-1)
+	require.Error(t, err, "payload one over the bound must refuse")
+	require.ErrorContains(t, err, "MaxRecordBytes")
+	require.NoError(t, src1.Close())
+
+	// Phase 2: full round trip under the exact-limit budget — the writer
+	// accepts the exact-limit line and the stage/attest/drain path accepts it.
+	src2, err := PrepareCurrentStateSource(ctx, cfg(t.TempDir(), SpillMergeBudget{MaxRecordBytes: largest}))
+	require.NoError(t, err)
+	require.Equal(t, largest, largestJournalPayload(t, src2.parentRun), "fixture drifted: attempt-invariant line lengths expected")
+	rows := 0
+	for {
+		_, err := src2.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		rows++
+	}
+	require.Equal(t, 1, rows, "parent row must survive the exact-limit drain")
+	require.NoError(t, src2.Close())
 }

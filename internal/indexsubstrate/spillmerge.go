@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -183,6 +184,29 @@ func DefaultSpillMergeBudget() SpillMergeBudget {
 	}
 }
 
+// MaxSpillRecordBytes is the largest accepted MaxRecordBytes: the payload
+// ceiling must stay representable as a platform int after the two-byte scanner
+// framing allowance, so an accepted finite budget can never overflow into a
+// runtime panic. Operator/library surfaces refuse larger values with typed
+// SpillMergeInvalidConfig — an explicit value is never silently clamped.
+const MaxSpillRecordBytes = int64(math.MaxInt - 2)
+
+// spillRecordScannerCapacity is the single translation from a validated
+// payload ceiling to a bufio.Scanner max token size, shared by every
+// MaxRecordBytes scanner consumer (journal streaming scan, spill-run reader):
+// the payload bound plus the two-byte "\r\n" framing allowance — ScanLines
+// must buffer the terminator before it can emit the token, so without the
+// allowance an exact-limit payload is refused one byte early — floored for
+// scanner sanity. SpillMergeBudget.validate rejects ceilings above
+// MaxSpillRecordBytes, so the conversion and addition cannot overflow.
+func spillRecordScannerCapacity(maxRecordBytes int64) int {
+	capBytes := int(maxRecordBytes)
+	if capBytes < 64 {
+		capBytes = 64
+	}
+	return capBytes + 2
+}
+
 // ResolveSpillMergeBudget applies the substrate defaults to zero fields and
 // validates the result: zero alone selects a default, while an explicit
 // invalid field (negative or otherwise sub-1) refuses with a typed
@@ -234,6 +258,10 @@ func (b SpillMergeBudget) validate() error {
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxBufferedBytes must be >= 1", "", nil)
 	case b.MaxRecordBytes < 1:
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxRecordBytes must be >= 1", "", nil)
+	case b.MaxRecordBytes > MaxSpillRecordBytes:
+		// The scanner framing allowance must fit a platform int; refuse rather
+		// than silently clamp an explicit operator/library value.
+		return spillErr(SpillMergeInvalidConfig, "validate", "MaxRecordBytes exceeds the supported maximum", "", nil)
 	case b.MaxJournalSources < 1:
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxJournalSources must be >= 1", "", nil)
 	case b.MaxWorkspaceBytes < 1:

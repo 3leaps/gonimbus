@@ -3,6 +3,7 @@ package indexsubstrate
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -714,6 +715,16 @@ func TestPublishRecordBudgetExactPayloadLimit(t *testing.T) {
 		require.NoFileExists(t, cfg.LatestPath)
 	})
 
+	t.Run("largest supported record budget publishes without panic", func(t *testing.T) {
+		// Every ACCEPTED finite ceiling must return normally: the scanner
+		// capacity translation may not overflow at the platform maximum.
+		cfg := publishRecordBudgetTestConfig(t)
+		cfg.SpillBudget.MaxRecordBytes = MaxSpillRecordBytes
+		result, err := PublishSnapshot(cfg)
+		require.NoError(t, err)
+		require.True(t, result.LatestAdvanced)
+	})
+
 	t.Run("CRLF terminator is framing not payload", func(t *testing.T) {
 		cfg := publishRecordBudgetTestConfig(t)
 		journalPath := cfg.JournalPaths[0]
@@ -743,6 +754,7 @@ func TestPublishRefusesInvalidSpillBudgetBeforeJournalValidation(t *testing.T) {
 	}{
 		{"negative record budget", func(c *PublishConfig) { c.SpillBudget.MaxRecordBytes = -1 }, "MaxRecordBytes must be >= 1"},
 		{"negative workspace budget", func(c *PublishConfig) { c.SpillBudget.MaxWorkspaceBytes = -1 }, "MaxWorkspaceBytes must be >= 1"},
+		{"record budget above supported maximum", func(c *PublishConfig) { c.SpillBudget.MaxRecordBytes = math.MaxInt64 }, "supported maximum"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, _ := publishTestConfig(t)
