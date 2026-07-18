@@ -61,6 +61,16 @@ func TestStderrSegmentProgressBestEffortAndShape(t *testing.T) {
 		buf.String(),
 	)
 
+	// The streaming segment writer reports Total=0 (unknown up front); the
+	// rendered line must omit the total rather than show "segment=1/0".
+	buf.Reset()
+	fn(indexbuild.SegmentProgress{Segment: 1, Total: 0, Rows: 100, RowsDone: 100})
+	fn(indexbuild.SegmentProgress{Segment: 2, Total: 0, Rows: 50, RowsDone: 150})
+	require.Equal(t,
+		"progress: phase=segmenting segment=1 rows=100\nprogress: phase=segmenting segment=2 rows=50\n",
+		buf.String(),
+	)
+
 	require.NotPanics(t, func() {
 		newStderrSegmentProgress(errorWriter{})(indexbuild.SegmentProgress{Segment: 1, Total: 1, Rows: 1})
 	})

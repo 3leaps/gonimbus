@@ -81,13 +81,20 @@ var _ output.Writer = (*stderrProgressWriter)(nil)
 
 // newStderrSegmentProgress returns an observational segment-write progress
 // hook (counts/phase only — no keys/rel_keys/prefixes). Best-effort: write
-// errors are swallowed.
+// errors are swallowed. The streaming segment writer cannot know the segment
+// total up front and reports Total=0 by contract; the total is rendered only
+// when known, so a streaming build shows "segment=3" rather than "segment=3/0".
 func newStderrSegmentProgress(w io.Writer) indexbuild.OnSegmentProgressFunc {
 	if w == nil {
 		w = os.Stderr
 	}
 	return func(progress indexbuild.SegmentProgress) {
-		_, _ = fmt.Fprintf(w, "progress: phase=segmenting segment=%d/%d rows=%d\n",
-			progress.Segment, progress.Total, progress.Rows)
+		if progress.Total > 0 {
+			_, _ = fmt.Fprintf(w, "progress: phase=segmenting segment=%d/%d rows=%d\n",
+				progress.Segment, progress.Total, progress.Rows)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "progress: phase=segmenting segment=%d rows=%d\n",
+			progress.Segment, progress.Rows)
 	}
 }
