@@ -15,6 +15,7 @@ import (
 const (
 	concurrencyFloor              = 1
 	concurrencyDefaultInitial     = 16
+	concurrencyDefaultRequested   = 16
 	concurrencyCleanIncreaseEvery = 8
 	concurrencyThrottleCooldown   = 4
 	resourceDefaultMemoryLimit    = int64(1 << 30)
@@ -161,6 +162,43 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 		Floor:            concurrencyFloor,
 		Initial:          initial,
 	}
+}
+
+// normalizeConcurrency resolves the documented zero-value Config.Concurrency to
+// resource-resolved defaults and floors partial configs into internal
+// consistency, so pool size, limiter configuration, and run-record fields all
+// derive from one normalized config. An unresolved effective ceiling (zero)
+// always goes through ResolveConcurrency — a run never executes with more (or
+// different) concurrency than its records report.
+func normalizeConcurrency(cfg ConcurrencyConfig) ConcurrencyConfig {
+	if cfg.EffectiveCeiling < 1 {
+		requested := cfg.RequestedCeiling
+		adaptive := cfg.AdaptiveEnabled
+		if requested < 1 {
+			requested = concurrencyDefaultRequested
+			adaptive = true
+		}
+		return ResolveConcurrency(requested, adaptive, DefaultResourceProbe())
+	}
+	if cfg.RequestedCeiling < 1 {
+		cfg.RequestedCeiling = cfg.EffectiveCeiling
+	}
+	if cfg.EffectiveCeiling > cfg.RequestedCeiling {
+		cfg.EffectiveCeiling = cfg.RequestedCeiling
+	}
+	if cfg.Floor < 1 {
+		cfg.Floor = concurrencyFloor
+	}
+	if cfg.Initial < cfg.Floor {
+		cfg.Initial = cfg.Floor
+	}
+	if cfg.Initial > cfg.EffectiveCeiling {
+		cfg.Initial = cfg.EffectiveCeiling
+	}
+	if cfg.CeilingReason == "" {
+		cfg.CeilingReason = "requested"
+	}
+	return cfg
 }
 
 // NewConcurrencyLimiter returns an AIMD limiter initialized from cfg.

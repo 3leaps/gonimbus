@@ -32,6 +32,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.Collision.Mode == "" {
 		cfg.Collision.Mode = CollisionSkipIfDuplicate
 	}
+	// Config.Concurrency documents that the zero value resolves to defaults;
+	// normalize here so pool size, limiter, and run records share one config.
+	cfg.Concurrency = normalizeConcurrency(cfg.Concurrency)
 	if cfg.Metadata.Policy == "" {
 		cfg.Metadata.Policy = MetadataPolicyClear
 	}

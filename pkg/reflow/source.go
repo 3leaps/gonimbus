@@ -50,6 +50,14 @@ type RecordStreamSource struct {
 // SourceResolver maps a parsed source URI to a source provider handle for
 // RecordStreamSource inputs. Returning an error fails (or skips, per source
 // policy) the affected record.
+//
+// Concurrency contract: the engine invokes the resolver only from its serial
+// planning stage, never concurrently — implementations (including lazy
+// provider caches) need no internal synchronization. Record execution fans out
+// to a worker pool, but each record's resolved handle is captured before
+// dispatch, so the returned provider must tolerate concurrent object
+// operations (the standing provider contract) while the resolver itself does
+// not need to.
 type SourceResolver func(ctx context.Context, sourceURI string) (provider.Provider, error)
 
 func (ObjectSource) isReflowSource()       {}

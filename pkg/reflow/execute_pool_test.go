@@ -130,15 +130,23 @@ func (s *serializedGuardSink) OnSummary(ctx context.Context, rec SummaryRecord) 
 }
 
 // memCheckpoint is a minimal in-memory CheckpointStore for engine pool tests.
+// It counts write multiplicity per destination key (E1: exactly one durable
+// observed-mark and one terminal upsert per established object) and supports
+// per-operation failure injection for the checkpoint-failure disposition tests.
 type memCheckpoint struct {
-	mu       sync.Mutex
-	done     map[string]string // sourceURI|destURI -> status
-	items    []CheckpointItem
-	observed map[string]bool
+	mu        sync.Mutex
+	done      map[string]string // sourceURI|destURI -> status
+	items     []CheckpointItem
+	observed  map[string]bool
+	markCalls map[string]int
+
+	failMark   error
+	failUpsert error
+	failNote   error
 }
 
 func newMemCheckpoint() *memCheckpoint {
-	return &memCheckpoint{done: map[string]string{}, observed: map[string]bool{}}
+	return &memCheckpoint{done: map[string]string{}, observed: map[string]bool{}, markCalls: map[string]int{}}
 }
 
 func (m *memCheckpoint) key(sourceURI, destURI string) string { return sourceURI + "|" + destURI }
@@ -159,6 +167,9 @@ func (m *memCheckpoint) ItemDone(_ context.Context, sourceURI, destURI string) (
 func (m *memCheckpoint) UpsertItem(_ context.Context, item CheckpointItem) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failUpsert != nil {
+		return m.failUpsert
+	}
 	m.items = append(m.items, item)
 	return nil
 }
@@ -172,12 +183,37 @@ func (m *memCheckpoint) DestKeyObserved(_ context.Context, destKey string) (bool
 func (m *memCheckpoint) MarkDestKeyObserved(_ context.Context, destKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.markCalls[destKey]++
+	if m.failMark != nil {
+		return m.failMark
+	}
 	m.observed[destKey] = true
 	return nil
 }
 
 func (m *memCheckpoint) NoteDestKeySource(context.Context, string, string, string, int64) error {
+	if m.failNote != nil {
+		return m.failNote
+	}
 	return nil
+}
+
+func (m *memCheckpoint) markCount(destKey string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.markCalls[destKey]
+}
+
+func (m *memCheckpoint) upsertCountByDestKey(destKey string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, item := range m.items {
+		if item.DestKey == destKey {
+			n++
+		}
+	}
+	return n
 }
 func (m *memCheckpoint) NoteCollision(context.Context, CheckpointCollision) error { return nil }
 func (m *memCheckpoint) Close() error                                             { return nil }
@@ -278,7 +314,8 @@ func TestRunnerRecordStreamSameDestKeyArbitration(t *testing.T) {
 	// The durable observed-mark (written inside the arbiter gate) is what makes
 	// exactly-one-conditional-PUT deterministic: the gate entry itself is
 	// deleted once idle, so late-arriving same-key workers rely on the store.
-	cfg.Checkpoint = newMemCheckpoint()
+	checkpoint := newMemCheckpoint()
+	cfg.Checkpoint = checkpoint
 	runner, err := NewRunner(cfg)
 	require.NoError(t, err)
 
@@ -296,6 +333,9 @@ func TestRunnerRecordStreamSameDestKeyArbitration(t *testing.T) {
 	// the conditional-PUT path entirely.
 	require.Len(t, dst.preconditions(), 3,
 		"same-dest-key records must arbitrate to a single conditional PUT (got %d preconditions)", len(dst.preconditions()))
+	// E1: one establishment = exactly one durable observed-mark write.
+	require.Equal(t, 1, checkpoint.markCount("data/same/key.xml"),
+		"same-key fan-in must produce exactly one durable observed-mark")
 	require.False(t, sink.violated.Load())
 }
 
@@ -339,6 +379,203 @@ func TestRunnerRecordStreamPoolResume(t *testing.T) {
 	require.Equal(t, objects/2, statuses["complete"])
 	require.Equal(t, objects/2, statuses["skipped"])
 	require.False(t, sink.violated.Load())
+}
+
+// TestRunnerRecordStreamSingleDurableMarkPerObject is the E1 write-multiplicity
+// gate: a fresh successful copy performs exactly one durable observed-mark and
+// one terminal item upsert per destination key — never two.
+func TestRunnerRecordStreamSingleDurableMarkPerObject(t *testing.T) {
+	const objects = 8
+	src := newCopyMemoryProvider()
+	seedPoolFixtures(src, objects)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(4)
+	checkpoint := newMemCheckpoint()
+	cfg.Checkpoint = checkpoint
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), copySource(src, poolInputLines(objects)))
+	require.NoError(t, err)
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+
+	for i := 0; i < objects; i++ {
+		destKey := fmt.Sprintf("data/a/%02d.xml", i)
+		require.Equal(t, 1, checkpoint.markCount(destKey), "exactly one durable observed-mark for %s", destKey)
+		require.Equal(t, 1, checkpoint.upsertCountByDestKey(destKey), "exactly one terminal upsert for %s", destKey)
+	}
+}
+
+// TestRunnerRecordStreamAuxiliaryMarkFailureWarnsAndCompletes pins the
+// checkpoint-failure disposition for auxiliary arbitration state: the durable
+// observed-mark and NoteDestKeySource may fail with a typed warning while the
+// object still completes (correctness held by the gate memo plus the
+// conditional/fallback collision path).
+func TestRunnerRecordStreamAuxiliaryMarkFailureWarnsAndCompletes(t *testing.T) {
+	src := newCopyMemoryProvider()
+	seedPoolFixtures(src, 1)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	checkpoint := newMemCheckpoint()
+	checkpoint.failMark = fmt.Errorf("injected mark failure")
+	checkpoint.failNote = fmt.Errorf("injected note failure")
+	cfg.Checkpoint = checkpoint
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), copySource(src, poolInputLines(1)))
+	require.NoError(t, err, "auxiliary state failures must not fail the run")
+	require.Equal(t, int64(1), summary.Statuses["complete"])
+	require.Zero(t, summary.Errors)
+	require.Equal(t, []byte("payload"), dst.body("data/a/00.xml"))
+
+	codes := map[string]int{}
+	for _, w := range sink.warnings {
+		codes[w.Code]++
+	}
+	require.GreaterOrEqual(t, codes[warningCodeArbitrationStateWrite], 2,
+		"typed arbitration-state warnings for mark + note failures; got %v", codes)
+}
+
+// TestRunnerRecordStreamTerminalUpsertFailureNeverAcksComplete pins the strict
+// half of the disposition: the terminal UpsertItem is the resume authority — on
+// failure the object is reported failed (typed), the run exits non-zero, and a
+// healthy-store resume converges without a second land.
+func TestRunnerRecordStreamTerminalUpsertFailureNeverAcksComplete(t *testing.T) {
+	src := newCopyMemoryProvider()
+	seedPoolFixtures(src, 1)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	checkpoint := newMemCheckpoint()
+	checkpoint.failUpsert = fmt.Errorf("injected terminal upsert failure")
+	cfg.Checkpoint = checkpoint
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), copySource(src, poolInputLines(1)))
+	var objErr *ObjectErrorsError
+	require.ErrorAs(t, err, &objErr, "terminal upsert failure must surface as a non-zero object-error run")
+	require.Zero(t, summary.Statuses["complete"], "no complete terminal on a store that could not record it")
+	require.Equal(t, int64(1), summary.Statuses["failed"])
+	require.Equal(t, int64(1), summary.Errors)
+
+	// The destination mutation itself succeeded; a resume against a healthy
+	// store must converge without a second land.
+	checkpoint.mu.Lock()
+	checkpoint.failUpsert = nil
+	checkpoint.mu.Unlock()
+	sink2 := &serializedGuardSink{}
+	cfg2 := copyConfig(dst, sink2)
+	cfg2.Concurrency = poolConcurrency(2)
+	cfg2.Checkpoint = checkpoint
+	runner2, err := NewRunner(cfg2)
+	require.NoError(t, err)
+	putsBefore := len(dst.preconditions())
+	summary2, err := runner2.Run(context.Background(), copySource(src, poolInputLines(1)))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), summary2.Statuses["skipped"], "resume converges via collision-duplicate skip")
+	// The second run adds exactly its two capability-preflight conditional puts
+	// and NO object-level conditional PUT — the object does not land twice.
+	require.Equal(t, putsBefore+2, len(dst.preconditions()), "no second object conditional PUT on convergence")
+}
+
+// TestRunnerRecordStreamResolverSerialAndIdentityGated is the engine half of
+// the E2 contract: SourceResolver is invoked only from the serial reader stage
+// (never concurrently) even while workers overlap, and a record with a
+// divergent source root is refused as INVALID_INPUT before resolution.
+func TestRunnerRecordStreamResolverSerialAndIdentityGated(t *testing.T) {
+	const objects = 12
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, objects)
+	src := newBarrierGetProvider(srcBase, 4, 2*time.Second)
+	dst := newCopyMemoryProvider()
+
+	var (
+		resolveInFlight  atomic.Int32
+		resolveConcurred atomic.Bool
+		resolveCalls     atomic.Int32
+	)
+	resolver := func(context.Context, string) (provider.Provider, error) {
+		if resolveInFlight.Add(1) > 1 {
+			resolveConcurred.Store(true)
+		}
+		defer resolveInFlight.Add(-1)
+		resolveCalls.Add(1)
+		return src, nil
+	}
+
+	lines := poolInputLines(objects) +
+		`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://other-bucket/x/y.xml","source_key":"x/y.xml","source_etag":"etag-x","source_size_bytes":7,"dest_rel_key":"x/y.xml"}}` + "\n"
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(8)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), RecordStreamSource{
+		Records: strings.NewReader(lines),
+		Resolve: resolver,
+	})
+	var invalidErr *InvalidInputsError
+	require.ErrorAs(t, err, &invalidErr)
+
+	require.False(t, resolveConcurred.Load(), "SourceResolver must never be invoked concurrently")
+	require.Equal(t, int32(objects), resolveCalls.Load(),
+		"resolver is called once per valid record and never for the divergent-root record")
+	require.Equal(t, int64(1), summary.InvalidInputs)
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+	require.GreaterOrEqual(t, src.maxInFlight.Load(), int64(4), "workers still overlap while resolution stays serial")
+}
+
+// TestRunnerZeroConcurrencyConfigResolves is the E3 gate: the documented
+// zero-value Config.Concurrency resolves to internally consistent defaults —
+// pool size, limiter, and run-record fields all derive from one normalized
+// config, and no run reports a requested/effective pair it does not apply.
+func TestRunnerZeroConcurrencyConfigResolves(t *testing.T) {
+	src := newCopyMemoryProvider()
+	seedPoolFixtures(src, 2)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = ConcurrencyConfig{} // documented zero value
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), copySource(src, poolInputLines(2)))
+	require.NoError(t, err)
+
+	require.Len(t, sink.runs, 1)
+	run := sink.runs[0]
+	require.Equal(t, concurrencyDefaultRequested, run.Parallel, "zero config resolves to the default requested ceiling")
+	require.Equal(t, run.Parallel, run.ConcurrencyCeilingRequested)
+	require.GreaterOrEqual(t, run.ConcurrencyCeilingEffective, 1)
+	require.LessOrEqual(t, run.ConcurrencyCeilingEffective, run.ConcurrencyCeilingRequested)
+	require.NotEmpty(t, run.ConcurrencyCeilingReason)
+	require.LessOrEqual(t, summary.ConcurrencyMaxActive, summary.ConcurrencyCeilingEffective,
+		"observed max-active must not exceed the reported effective ceiling")
+
+	// A partial config (requested only) resolves through the same arithmetic.
+	cfg2 := copyConfig(dst, &serializedGuardSink{})
+	cfg2.Concurrency = ConcurrencyConfig{RequestedCeiling: 4, AdaptiveEnabled: true}
+	runner2, err := NewRunner(cfg2)
+	require.NoError(t, err)
+	got := runner2.Config().Concurrency
+	require.Equal(t, 4, got.RequestedCeiling)
+	require.GreaterOrEqual(t, got.EffectiveCeiling, 1)
+	require.LessOrEqual(t, got.EffectiveCeiling, 4)
+	require.GreaterOrEqual(t, got.Initial, got.Floor)
+	require.LessOrEqual(t, got.Initial, got.EffectiveCeiling)
 }
 
 // TestRunnerRecordStreamPoolCancellation proves a canceled context aborts the

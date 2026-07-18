@@ -124,7 +124,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 				if poolCtx.Err() != nil {
 					continue // drain remaining tasks after cancellation
 				}
-				if err := r.copyAndEmit(poolCtx, src, layout, stats, capability, limiter, arbiter, task.in, task.destKey, task.destURI); err != nil {
+				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, capability, limiter, arbiter, task.in, task.destKey, task.destURI); err != nil {
 					recordFatal(err)
 				}
 			}
@@ -160,6 +160,20 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 			}
 			continue
 		}
+		// Source resolution stays on the serial reader stage: SourceResolver
+		// implementations are never invoked concurrently, so the adapter's lazy
+		// provider cache needs no synchronization and library resolvers carry no
+		// hidden concurrency requirement. Identity validation (planInputLine)
+		// precedes resolution, so a divergent source root never resolves.
+		sourceProvider, resolveErr := src.Resolve(ctx, task.in.SourceURI)
+		if resolveErr != nil {
+			if err := r.recordObjectError(ctx, stats, task.in, task.destURI, task.destKey, "failed to connect to provider", resolveErr, map[string]any{"source_uri": sanitizeSourceURI(task.in.SourceURI), "dest_uri": task.destURI}, nil); err != nil {
+				readerErr = err
+				break
+			}
+			continue
+		}
+		task.src = sourceProvider
 		select {
 		case tasks <- task:
 		case <-poolCtx.Done():
@@ -234,11 +248,14 @@ func (e *ObjectErrorsError) Error() string {
 	return fmt.Sprintf("reflow: completed with %d object error(s)", e.Count)
 }
 
-// plannedRecord is a reader-stage-planned input ready for worker execution.
+// plannedRecord is a reader-stage-planned input ready for worker execution. The
+// source provider handle is resolved in the serial reader stage (SourceResolver
+// implementations are never invoked concurrently) and carried to the worker.
 type plannedRecord struct {
 	in      reflowInput
 	destKey string
 	destURI string
+	src     provider.Provider
 }
 
 // planInputLine parses, validates, and plans one input line in the reader
@@ -281,12 +298,8 @@ func validateSourceIdentity(current *string, in reflowInput) error {
 	return nil
 }
 
-func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey, destURI string) error {
+func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey, destURI string) error {
 	sourceURI := sanitizeSourceURI(in.SourceURI)
-	sourceProvider, err := src.Resolve(ctx, in.SourceURI)
-	if err != nil {
-		return r.recordObjectError(ctx, stats, in, destURI, destKey, "failed to connect to provider", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
-	}
 
 	if r.cfg.Checkpoint != nil {
 		done, status, err := r.cfg.Checkpoint.ItemDone(ctx, sourceURI, destURI)
@@ -297,8 +310,13 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 			rec := in.record(destURI, destKey, "skipped")
 			rec.Reason = "resume." + status
 			stats.record(rec)
+			// The item's terminal state is already durable from the prior run;
+			// failing to refresh it as a resume-skip warns rather than failing
+			// an object whose destination state is settled.
 			if err := r.checkpointItem(ctx, in, destURI, destKey, "skipped", rec.Reason, 0, "", ""); err != nil {
-				return err
+				if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, err); werr != nil {
+					return werr
+				}
 			}
 			return r.emitRecord(ctx, rec)
 		}
@@ -355,14 +373,21 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 	}
 
 	if r.cfg.Checkpoint != nil {
-		if err := r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey); err != nil {
-			return err
-		}
+		// The durable destination-observed mark is written inside the arbiter
+		// gate (copyWithCollision); writing it again here would double a
+		// serialized state-store operation per successful object.
+		//
+		// NoteDestKeySource is auxiliary audit state: failure warns (typed) and
+		// continues. The terminal UpsertItem is the resume authority: failure is
+		// strict — the object is reported failed, never acknowledged with its
+		// success status on a store that could not record it.
 		if err := r.cfg.Checkpoint.NoteDestKeySource(ctx, destKey, sourceURI, sourceETag, sourceSize); err != nil {
-			return err
+			if werr := r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, destURI, err); werr != nil {
+				return werr
+			}
 		}
 		if err := r.checkpointItem(ctx, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, status, reason, bytes, "", ""); err != nil {
-			return err
+			return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "checkpoint write failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, collision)
 		}
 	}
 	_ = putResult
@@ -413,12 +438,22 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	// deleted once idle, so only the durable mark prevents a later same-key
 	// worker from re-attempting a conditional PUT (mirroring the CLI pool, whose
 	// durable per-run destination observations live in the checkpoint DB).
+	//
+	// The mark is auxiliary arbitration state, not the terminal resume
+	// authority: on store failure it warns (typed, same code as the CLI pool)
+	// and continues. Correctness holds — the in-process gate memo still covers
+	// concurrent same-key workers, and a later worker at worst re-drives a
+	// conditional PUT the provider (or head fallback) refuses. A returned error
+	// is an event-sink infrastructure failure only.
 	markObserved := func() error {
 		gate.observed = true
 		if r.cfg.Checkpoint == nil {
 			return nil
 		}
-		return r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey)
+		if err := r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey); err != nil {
+			return r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, "", err)
+		}
+		return nil
 	}
 
 	if capability.FallbackActive {
@@ -513,14 +548,42 @@ func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in refl
 	if err := r.emitError(ctx, ErrorEvent{Code: code, Key: in.SourceKey, Message: FormatErrorMessage(msg, err), Details: details, Collision: collision}); err != nil {
 		return err
 	}
-	if err := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); err != nil {
-		return err
+	// Recording the failure in the checkpoint store is best-effort: the object
+	// is already being reported failed, so a store write failure here warns
+	// (typed) rather than escalating — an unrecorded failed item is simply
+	// re-driven on resume.
+	if cperr := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); cperr != nil {
+		if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, cperr); werr != nil {
+			return werr
+		}
 	}
 	rec := in.record(destURI, destKey, "failed")
 	rec.Reason = failedRecordReason(code, collision)
 	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
+}
+
+// Checkpoint-write warning codes. warningCodeArbitrationStateWrite matches the
+// CLI pool's code for the same condition (auxiliary arbitration/audit state
+// write failed; run continues); warningCodeCheckpointWrite covers best-effort
+// item writes whose failure does not change the object's reported outcome.
+const (
+	warningCodeArbitrationStateWrite = "REFLOW_ARBITRATION_STATE_WRITE_FAILED"
+	warningCodeCheckpointWrite       = "REFLOW_CHECKPOINT_WRITE_FAILED"
+)
+
+func (r *Runner) emitCheckpointWriteWarning(ctx context.Context, code, destKey, destURI string, cause error) error {
+	details := map[string]any{}
+	if destURI != "" {
+		details["dest_uri"] = destURI
+	}
+	return r.emitWarning(ctx, Warning{
+		Code:    code,
+		Message: "checkpoint state write failed: " + SanitizeOperationCauseMessage(cause),
+		Key:     destKey,
+		Details: details,
+	})
 }
 
 func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Provider, key string) (*provider.ObjectMeta, error) {
