@@ -1,4 +1,4 @@
-.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush run install test-cov
+.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity
 .PHONY: test-cloud test-cloud-real test-reflow-throughput moto-start moto-stop moto-status
@@ -437,8 +437,11 @@ precommit:  ## Run pre-commit hooks
 	@echo "Running pre-commit validation..."; $(GONEAT_RESOLVE); $$GONEAT format; $$GONEAT assess --check --categories format,lint --fail-on critical
 	@echo "✅ Pre-commit checks passed"
 
-prepush: ## Run pre-push hooks
+prepush: verify-app-version ## Run pre-push hooks
 	@.goneat/hooks/pre-push
+
+verify-app-version: ## Guard: VERSION agrees with embedded buildinfo + app identity
+	@REPO_V="$$(cat VERSION)"; BI_V="$$(cat internal/buildinfo/VERSION)"; APP_V="$$(awk '/^[[:space:]]*version:/{print $$2; exit}' .fulmen/app.yaml)"; if [ "$$REPO_V" = "$$BI_V" ] && [ "$$REPO_V" = "$$APP_V" ]; then echo "✅ version consistent ($$REPO_V)"; else echo "❌ version drift: VERSION=$$REPO_V buildinfo=$$BI_V app=$$APP_V — run 'make sync-app-version'" >&2; exit 1; fi
 
 # License compliance
 license-inventory: ## Generate CSV inventory of dependency licenses

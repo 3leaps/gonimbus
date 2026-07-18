@@ -55,8 +55,15 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 ### Version Updates
 
 - [ ] Update VERSION file
-- [ ] Update `.fulmen/app.yaml` version
-- [ ] Sync embedded identity: `make sync-embedded-identity`
+- [ ] Sync all embedded version copies from VERSION:
+  - [ ] `make sync-app-version` (updates `.fulmen/app.yaml` **and**
+        `internal/buildinfo/VERSION` — the latter is the embed checked by
+        `internal/buildinfo` tests; `sync-embedded-identity` alone does not
+        cover it)
+  - [ ] `make sync-embedded-identity` (regenerates the embedded app identity
+        under `internal/assets/appidentity/`)
+- [ ] Version consistency guard: `make verify-app-version` (also runs as part
+      of `make prepush`)
 - [ ] Version sanity check: `GONIMBUS_RELEASE_TAG=v<version> make release-guard-signing-tag`
 - [ ] Search for hardcoded version references
 
