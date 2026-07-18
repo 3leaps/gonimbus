@@ -13,9 +13,9 @@ run-history, and soft-delete guidance.
 For content-addressed post-pass artifacts over completed index runs, see
 [Atlas Artifacts](atlas.md).
 
-For the v0.4.0 durable-default operator map (parity, hub round-trip, SQLite
-escape hatches, boundary framing), see
-[Durable Index Format](durable-index.md).
+For the durable-default operator map (format choices, streaming capacity
+budgets, LIST parity, hub round-trip, SQLite compatibility path, boundary
+framing), see [Durable Index Format](durable-index.md).
 
 ## When to Use the Index
 
@@ -45,7 +45,8 @@ Gonimbus supports two workflows based on bucket scale:
 # Then build the index (default format: durable)
 gonimbus index build --job index-manifest.yaml
 
-# SQLite when you need SQLite-only surfaces (gc, --since-run, --resume-run, …)
+# SQLite when you need a canonical index.db or SQLite-only surfaces
+# (query --since-run, stats --prefixes, full --resume-run)
 gonimbus index build --job index-manifest.yaml --format sqlite
 
 # Format-aware query works on durable or SQLite sets
@@ -54,22 +55,24 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 
 ### Artifact formats
 
-| Format                | Build flag         | What it produces                                            | Local consumers today                                                                 |
-| --------------------- | ------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare        |
-| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers including **`gc`**, `--since-run`, full `--resume-run` lifecycle  |
-| **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB |
+| Format                | Build flag         | What it produces                                            | Local consumers today                                                                    |
+| --------------------- | ------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare, `gc`     |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers; required for `--since-run`, `stats --prefixes`, full `--resume-run` |
+| **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB    |
 
-Durable is now the default index artifact format. SQLite remains an explicit
-compatibility/transition mode. Durable hydrate restores `manifest.json` +
-segments, **not** `index.db`. Format-aware local consumers work on durable-only
-sets; keep `--format sqlite` when you still need **`gc`**,
-**`query --since-run`**, **`stats --prefixes`**, or full **`--resume-run`**
-checkpoint recovery. `both` does not produce a canonical `index.db`; when both
-substrates exist for a set, readers prefer the verified durable snapshot.
+Durable is the default index artifact format. SQLite remains a first-class
+supported compatibility path (`--format sqlite` / `--format both`). Durable
+hydrate restores `manifest.json` + segments, **not** `index.db`. Format-aware
+local consumers work on durable-only sets; keep `--format sqlite` when you need
+a canonical `index.db` or a **SQLite-only** surface: **`query --since-run`**,
+**`stats --prefixes`**, or full **`--resume-run`** checkpoint recovery. `both`
+does not produce a canonical `index.db`; when both substrates exist for a set,
+readers prefer the verified durable snapshot.
 
-See [Durable Index Format](durable-index.md) for the full migration map, green
-parity semantics, hub round-trip, segment packing defaults, and internal-render
+See [Durable Index Format](durable-index.md) for the operator map, streaming
+capacity budgets (16 GiB workspace / 16 MiB record defaults), LIST parity
+semantics, hub round-trip, segment packing defaults, and internal-render
 boundary framing.
 
 ## Index Manifest

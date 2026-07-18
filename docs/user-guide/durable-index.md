@@ -1,14 +1,21 @@
-# Durable Index Format (v0.4.0 Default)
+# Durable Index Format
 
-v0.4.0 makes the **durable index format** the default artifact of
-`gonimbus index build`. This page is the operator-facing map of what that
-means, how to keep SQLite workflows during the transition, and how to validate
-a migration with dual-format parity.
+Since **v0.4.0**, the **durable index format** is the default artifact of
+`gonimbus index build`. **v0.4.1** completes the operator loop around that
+default: durable-only sets support everyday local work (`query`, `list`,
+`stats`, `doctor`, `enrich-with-head`) without an `index.db`, and durable
+publication runs through a memory-bounded streaming path under operator-tunable
+capacity budgets.
+
+This page is the operator-facing map: what durable is, how SQLite remains a
+supported compatibility path, how to set streaming budgets, and how to validate
+a dual-format build with LIST parity.
 
 For the full index command surface, see [Local Index](index.md). For LIST vs
 ingest mental model, see [Index Build Mental Model](index-build-mental-model.md).
 Architecture notes for the parity projection live in
 [Index Compare Projection v1](../architecture/index-compare-projection-v1.md).
+Release narrative: [v0.4.1 release notes](../releases/v0.4.1.md).
 
 ## Why durable exists
 
@@ -37,25 +44,27 @@ SQLite and faithful coverage for scoped dual-format builds.
 # Default: durable snapshot (no index.db)
 gonimbus index build --job index.yaml
 
-# SQLite when you still need SQLite-only surfaces (gc, --since-run, …)
+# SQLite when you need a canonical index.db or SQLite-only surfaces
+# (query --since-run, stats --prefixes, full --resume-run recovery)
 gonimbus index build --job index.yaml --format sqlite
 # Durable publication + per-run SQLite parity verification
 gonimbus index build --job index.yaml --format both
 ```
 
-| Need                                                             | Format choice                                |
-| ---------------------------------------------------------------- | -------------------------------------------- |
-| Hub-scale export/hydrate, default new builds                     | `durable` (default)                          |
-| Local `index query` / `list` / `stats` / `doctor`                | `durable` or `sqlite` (format-aware seam)    |
-| Local `enrich-with-head`                                         | `durable` or `sqlite` (format-aware)         |
-| Local inventory GC (`index gc --dry-run`)                        | Format-aware immutable plan; execution gated |
-| Canonical SQLite consumer artifact (`index.db`)                  | `sqlite` only                                |
-| Migration confidence (durable publication + per-run parity gate) | `both`                                       |
+| Need                                                          | Format choice                                |
+| ------------------------------------------------------------- | -------------------------------------------- |
+| Hub-scale export/hydrate, default new builds                  | `durable` (default)                          |
+| Local `index query` / `list` / `stats` / `doctor`             | `durable` or `sqlite` (format-aware seam)    |
+| Local `enrich-with-head`                                      | `durable` or `sqlite` (format-aware)         |
+| Local inventory GC (`index gc`)                               | Format-aware plan; durable sets included     |
+| Canonical SQLite consumer artifact (`index.db`)               | `sqlite` only                                |
+| `query --since-run`, `stats --prefixes`, full `--resume-run`  | `sqlite` (or build that produces `index.db`) |
+| Dual-format LIST parity gate (durable + per-run SQLite check) | `both`                                       |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
-first-class compatibility path. Resume printed as
-`gonimbus index build --resume-run <run_id>` still works under the durable
-default when `--format` is omitted (SQLite checkpoint lifecycle).
+first-class supported compatibility path alongside the durable default. Resume
+printed as `gonimbus index build --resume-run <run_id>` still works under the
+durable default when `--format` is omitted (SQLite checkpoint lifecycle).
 
 ### Artifact layout (conceptual)
 
@@ -83,49 +92,86 @@ see [Operational Data Root](index.md#operational-data-root) in Local Index.
 Multi-minute durable builds emit best-effort `progress:` lines on **stderr**:
 
 - Crawl cadence: listing progress by prefix / object counts
-- Publish tail: `phase=segmenting segment=k/N rows=…`
+- Publish tail: streaming segment progress and workspace peak/ceiling diagnostics
+  (counts and sources only)
 
-Progress is observational only — it does not change artifact bytes. A quiet
-terminal with no progress for a multi-minute durable build is unexpected on
-v0.4.0; check that you are running the new binary.
+Progress is observational only — it does not change artifact bytes and can never
+fail a build. During streaming publication, segment progress may report against a
+streaming total of `0` until the tail (the full count is not known earlier). A
+quiet terminal with no progress for a multi-minute durable build is unexpected on
+current releases; confirm the binary version.
 
-### Segment packing
+### Segment packing (not a setting)
 
-Default target packing is **500,000 rows per segment**. That target is an
-engine packing lever, **not operator-facing configuration** in this cut. Do not
-plan automation around a custom segment-size flag.
+Default target packing is **500,000 rows per segment**. That figure is a fixed
+engine packing lever in this cut — **not operator-facing configuration**. There
+is no flag or config key to change it. Do not plan automation around a custom
+segment-size control. Under default packing, individual hub PUTs are typically
+segment-sized (tens of megabytes), not a multi-gigabyte monolith.
 
-### Sizing the merge workspace (successive builds at scale)
+### Streaming capacity budgets (operator-tunable)
 
-A **successive** durable build (a second or later build of the same index set)
-stages the **full prior current-state** into an on-disk scratch workspace before
-merging in the new observations, so its peak workspace scales roughly with corpus
-size, not with the change set. A first build has no prior state to stage, so it
-spills only the run's own observations — its peak is much lower (field first
-builds recorded ~0.46 GiB at ~0.9M and ~2.3 GiB at ~3.6M), and the successive
-path is the one to size for.
+From **v0.4.1**, durable `index build` publishes through a **streaming**
+compaction path: sealed crawl journals are merged against the verified parent
+without holding the full row set in memory. Emitted rows, segment artifacts,
+manifests, and digests match the prior materialized path; the budgets below
+bound **scratch and journal-line size** during publication.
 
-The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
-the build **closed** — a typed error, the prior published run and `latest`
-untouched — rather than growing without bound. The default ceiling is **16 GiB**.
-Field peak runs ~1.2–1.35 KiB/row (bounded, flattening with scale), so this
-carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a
-**convenience default ceiling**, **not a guarantee** for larger sets, which must
-raise it explicitly.
+There are **three** operator knobs. For each knob, resolution order is:
 
-A second budget, the **max single journal-record size** (`MaxRecordBytes`,
-default **16 MiB**), bounds one journal line — its encoded payload bytes, with
-the line terminator excluded as framing. The journal header carries the
-crawl-prefix plan, so a very wide/dense scope (tens of thousands of prefixes) can
-push the header past the default and fail the build closed at the journal phase.
-Raise it the same way when a very fine scope needs it.
+**CLI flag > environment variable > application config key > built-in default.**
 
-Size the ceiling (and, if needed, point the scratch at a roomier disk) via — in
-precedence order — the CLI flag, an environment variable, or application config:
+| Knob                        | Flag                    | Env                            | Config key                  | Default                 |
+| --------------------------- | ----------------------- | ------------------------------ | --------------------------- | ----------------------- |
+| Merge scratch ceiling       | `--spill-workspace-max` | `GONIMBUS_SPILL_WORKSPACE_MAX` | `index.spill.workspace_max` | **16 GiB**              |
+| Max single journal-record   | `--spill-record-max`    | `GONIMBUS_SPILL_RECORD_MAX`    | `index.spill.record_max`    | **16 MiB**              |
+| Scratch workspace directory | `--spill-root`          | `GONIMBUS_SPILL_ROOT`          | `index.spill.root`          | beside the run journals |
+
+Accepted size forms include `MiB` / `GiB` / `GB` (for example `32MiB`, `24GiB`).
+Explicit `0`, negative, or “unlimited” values are **refused**.
+
+#### How to reason about each knob
+
+**`--spill-workspace-max` (merge scratch ceiling)**
+
+- Size this to the **corpus**, not the day’s change set.
+- A **successive** durable build (second or later build of the same index set)
+  stages the **full prior current-state** into on-disk scratch before merging
+  new observations, so peak workspace tracks corpus size.
+- A **first** build of a set has no prior state to stage and typically peaks
+  much lower (it only stages the run’s own observations).
+- The value is a **ceiling, not a reservation**. Crossing it fails the build
+  **closed**: typed error, prior published run and `latest` left intact.
+- The 16 GiB default is a convenience ceiling for common multi-million-object
+  sets. Larger inventories must raise it explicitly; it is not a guarantee for
+  every corpus shape.
+
+**`--spill-record-max` (max single journal-record)**
+
+- Bounds one journal line’s **encoded payload** (line terminators are framing,
+  not payload).
+- Enforced the same way across sealed-journal validation, the streaming scan,
+  and spill-run attestation.
+- The journal header carries the crawl-prefix plan. Very wide or dense scopes
+  (many thousands of prefixes) can push the header past the default and fail
+  closed at the journal phase — raise this bound when a fine-grained scope
+  needs it.
+
+**`--spill-root` (scratch directory)**
+
+- Point this at a disk with room for the workspace ceiling.
+- Host/operator configuration only: the path never enters manifests, receipts,
+  or committed digests, and is never echoed into artifacts or sanitized errors
+  (diagnostics show the **source** of the setting, not the path).
+
+#### Setting the budgets
 
 ```bash
-# CLI flag (foreground builds)
-gonimbus index build --job index.yaml --spill-workspace-max 24GiB --spill-record-max 32MiB --spill-root /mnt/scratch
+# CLI flags (foreground builds)
+gonimbus index build --job index.yaml \
+  --spill-workspace-max 24GiB \
+  --spill-record-max 32MiB \
+  --spill-root /mnt/scratch
 
 # Environment (also inherited by --background jobs)
 export GONIMBUS_SPILL_WORKSPACE_MAX=24GiB
@@ -137,26 +183,25 @@ export GONIMBUS_SPILL_ROOT=/mnt/scratch
 # Application config (XDG config file — never the index job manifest)
 index:
   spill:
-    workspace_max: 24GiB # 24GiB/16GB/raw bytes; explicit 0/negative/unlimited is refused
-    record_max: 32MiB # max single journal-record size
+    workspace_max: 24GiB # 24GiB / 16GB / raw bytes; 0/negative/unlimited refused
+    record_max: 32MiB # max single journal-record payload
     root: /mnt/scratch # absolute, real, non-symlink, operator-exclusive
 ```
 
-Notes:
+#### Refusal and background rules
 
-- **Precedence:** CLI flag > environment > application config > built-in default
-  (16 GiB workspace, 16 MiB record).
-- The value is a **ceiling, not a reservation**, and a self-protection control
-  against runaway scratch — keep it a finite positive size; there is no
-  "unlimited" spelling.
-- `--spill-workspace-max` / `--spill-record-max` / `--spill-root` are **not
-  forwarded to `--background` jobs** (the managed child is reconstructed from a
-  fingerprinted invocation). Use the environment or config keys, which the
-  managed child inherits.
-- The scratch **root is host/operator configuration**, never index identity — it
-  never enters manifests, receipts, or committed digests, and is never echoed
-  into artifacts or sanitized errors (diagnostics show its source, not the path).
+- **Invalid / unrepresentable budgets** refuse with a typed error **before** any
+  crawl, journal read, or side effect.
+- **Budget exhaustion** during publication refuses fail-closed with **no
+  `latest` advance** — a refused build never clobbers the prior snapshot.
+- CLI flags `--spill-workspace-max`, `--spill-record-max`, and `--spill-root`
+  are **not forwarded** to `--background` jobs (the managed child is
+  reconstructed from a fingerprinted invocation). Use the environment variables
+  or config keys, which the managed child inherits.
 - Each durable build prints the effective ceiling and its source on **stderr**.
+
+Leave the defaults alone unless a build refuses on a budget or you already know
+the corpus needs more headroom.
 
 ## Dual-format parity
 
@@ -179,10 +224,12 @@ succeeded" and "consumer artifact committed" are separate facts.
 gonimbus index build --job index.yaml --format both
 ```
 
-Use this as the **migration confidence gate** before switching consumers off
-SQLite for new hub traffic. Successive `both` builds of the same set extend
-durable lineage continuously; each run's verification projection starts clean,
-so runs never contend for a shared SQLite path.
+Use this as the **LIST parity gate** when validating durable publication
+against a per-run SQLite projection for the same crawl. Successive `both`
+builds of the same set extend durable lineage continuously; each run's
+verification projection starts clean, so runs never contend for a shared SQLite
+path. SQLite remains available whenever you need a canonical `index.db` or a
+SQLite-only surface.
 
 If durable publication succeeds but the verification projection or parity
 comparison fails, the durable snapshot stays authoritative and visible, no
@@ -280,8 +327,8 @@ under a new scope hash, and never synthesizes parent linkage.
 ### Still open (non-prefix match controls)
 
 Excludes, suffix/non-prefix globs, metadata filters, and non-default
-`include_hidden` are **not** retired by this migration. They remain rejected
-on durable builds until later control-by-control work.
+`include_hidden` are **not** converted by this migration. They remain rejected
+on durable builds.
 
 ## Temporal durable compare
 
@@ -416,36 +463,45 @@ ordering alone when multiple scopes share a base URI.
 
 ## Internal-render framing (mandatory)
 
-Durable-v2 in this release is a full-fidelity **internal render** for trusted
-operators and pipelines. It is **not**:
+Durable-v2 is a full-fidelity **internal render** for trusted operators and
+pipelines. It is **not**:
 
 - a reduced-trust or de-identified share format
 - a third-party publication format
 - a disclosure-controlled boundary product
 
-Do not treat a durable hub export as safe to hand across a trust boundary
-without the future reduced-trust boundary-render path. That path is separate
-work (column suppression, opaque tokens, coverage/statistics redaction) and is
-**not** part of v0.4.0.
+A durable hub export is not a disclosure-controlled share format. Rendering a
+durable index for any reduced-trust or third-party context is out of scope for
+this format.
 
-## Recommended migration path
+Content digests on durable manifests, segments, and sealed journals are
+**content-integrity / tamper-evidence** checksums. They detect corruption or
+modification of the bytes they cover. They are **not** statements of author
+authenticity or provenance.
 
-1. Install v0.4.0 and confirm `gonimbus version`.
-2. On a representative unit, run `--format both` and confirm green LIST parity.
-3. Point hub export/hydrate at format-aware paths; prefer durable for new hub
-   traffic.
-4. Default durable builds support format-aware `query`, `list`, `stats`,
-   `doctor`, and `enrich-with-head`. Keep `--format sqlite` only for
-   **SQLite-only** surfaces: `query --since-run`, `stats --prefixes`, and full
-   `--resume-run` checkpoint recovery. (`both` no longer produces a canonical
+## Recommended operator path
+
+1. Install the current release and confirm `gonimbus version`.
+2. Run default durable builds for everyday inventory work; use format-aware
+   `query`, `list`, `stats`, `doctor`, and `enrich-with-head` on durable-only
+   sets.
+3. On a representative unit, run `--format both` and confirm green LIST parity
+   when you want a dual-format confidence check.
+4. Keep `--format sqlite` when you need a canonical `index.db` or a
+   **SQLite-only** surface: `query --since-run`, `stats --prefixes`, and full
+   `--resume-run` checkpoint recovery. (`both` does not produce a canonical
    `index.db`; its SQLite side is per-run parity verification.)
-5. Treat durable hub artifacts as internal pipeline inputs only until a later
-   boundary-render release lands.
+5. For large builds, leave streaming capacity budgets at the defaults unless a
+   build refuses on a ceiling; size `--spill-workspace-max` to the corpus and
+   point `--spill-root` at disk with room.
+6. Treat durable hub artifacts as **internal** pipeline inputs only (see
+   boundary framing above).
 
 ## See also
 
 - [Local Index](index.md) — full command reference
 - [Steady-State Index Operations](steady-state-index-operations.md) — recurring builds
-- [v0.4.0 release notes](../releases/v0.4.0.md)
+- [v0.4.1 release notes](../releases/v0.4.1.md) — SQLite independence + streaming publication
+- [v0.4.0 release notes](../releases/v0.4.0.md) — durable as default
 - [Library consumers](../library-consumers.md) — `pkg/indexbuild` embedding notes
 - [API stability](../api-stability.md) — Experimental tier for the durable engine

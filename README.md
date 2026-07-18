@@ -146,14 +146,17 @@ current objects added or changed after a known run; see
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
-**Durable is now the default index format** (`index build` publishes durable-v2
+**Durable is the default index format** (`index build` publishes durable-v2
 segments + manifest unless you pass `--format sqlite` or `--format both`).
-Format-aware local consumers include `query`, `list`, `stats`, `doctor`, and
-`enrich-with-head`. SQLite remains required for `gc`, `query --since-run`,
-`stats --prefixes`, and full `--resume-run` checkpoint recovery. See
-[Durable Index Format](docs/user-guide/durable-index.md) and
-[docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the operator map and
-release notes.
+Format-aware local consumers include `query`, `list`, `stats`, `doctor`,
+`enrich-with-head`, and whole-set `gc`. SQLite remains a first-class
+compatibility path; it is still required for `query --since-run`,
+`stats --prefixes`, and full `--resume-run` checkpoint recovery. Streaming
+publication uses operator-tunable capacity budgets (16 GiB workspace / 16 MiB
+record defaults; flag > env > config > default). See
+[Durable Index Format](docs/user-guide/durable-index.md),
+[v0.4.1 release notes](docs/releases/v0.4.1.md), and
+[v0.4.0 release notes](docs/releases/v0.4.0.md).
 
 ### Outputs
 
