@@ -42,10 +42,12 @@ gonimbus index gc --dry-run --keep-last 3 --json
 ### Also in this cut
 
 - **Streaming durable publication** with operator-tunable capacity budgets
-  (16 GiB workspace / 16 MiB record; flag > env > config > default). Invalid
+  (`--spill-workspace-max` / `--spill-record-max` / `--spill-root`; 16 GiB
+  workspace / 16 MiB record defaults; flag > env > config > default). Invalid
   budgets refuse before any side effect; exhaustion refuses fail-closed with no
-  `latest` advance. Emitted rows, segments, manifests, and digests are identical
-  to the prior materialized path.
+  `latest` advance. Segment packing stays 500k rows/segment (engine lever, not a
+  setting). Operator guide:
+  [durable-index capacity budgets](docs/user-guide/durable-index.md#streaming-capacity-budgets-operator-tunable).
 - **Managed background builds** (`index build --background`) with dedup, leases,
   recovery, and terminal receipts.
 - **Whole-set GC** — `index gc --dry-run` (`--max-age` / `--keep-last` /
