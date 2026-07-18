@@ -96,8 +96,12 @@ normalized rows or counters.
 | MaxMergePasses    | 64                                                                                      |
 
 Invalid budgets fail before workspace creation. Exact limit succeeds; the next
-encoded byte/row/run/pass refuses with category `budget`. Workspace accounting
-includes headers, footers, and payload; charges are prospective before writes.
+encoded byte/row/run/pass refuses with category `budget`. `MaxRecordBytes`
+counts **encoded record payload bytes, excluding the line terminator** (`\n` or
+`\r\n` is framing, not record bytes) — identically in sealed-journal validation
+and the streaming scan, so a payload of exactly the limit passes both readers
+and one more byte refuses. Workspace accounting includes headers, footers, and
+payload; charges are prospective before writes.
 
 Field RSS evidence remains a later activation gate; hermetic tests use the
 deterministic high-water counters.

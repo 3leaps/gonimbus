@@ -605,6 +605,13 @@ func normalizePublishConfig(config PublishConfig) PublishConfig {
 }
 
 func validatePublishConfig(config PublishConfig) error {
+	// The spill budget (already defaulted by normalizePublishConfig) must be a
+	// finite positive bound before any journal read: an explicit invalid value
+	// (negative or otherwise sub-1) refuses with typed SpillMergeInvalidConfig
+	// here, never silently degrading the validation pass to unbounded reads.
+	if err := config.SpillBudget.validate(); err != nil {
+		return err
+	}
 	switch config.Mode {
 	case PublicationModeDefault, PublicationModeEnrichOnly:
 		// known modes
@@ -672,14 +679,11 @@ func validatePublishConfig(config PublishConfig) error {
 func validateSealedJournalFiles(config PublishConfig) ([]JournalSummary, error) {
 	summaries := make([]JournalSummary, 0, len(config.JournalPaths))
 	for _, path := range config.JournalPaths {
-		summary, err := validateJournalFile(path, config.SpillBudget.MaxRecordBytes)
+		// The canonical capacity-aware validator refuses an over-budget record
+		// with the typed SpillMergeBudgetExhausted before this journal is declared
+		// validated or any authority advances.
+		summary, err := ValidateJournalBounded(path, config.SpillBudget.MaxRecordBytes)
 		if err != nil {
-			// An over-budget record is a capacity refusal — surface the same typed
-			// SpillMergeBudgetExhausted as the streaming scan, before this journal
-			// is declared validated or any authority advances.
-			if errors.Is(err, errJournalRecordTooLong) {
-				return nil, spillErr(SpillMergeBudgetExhausted, "journal", "MaxRecordBytes exceeded", "", nil)
-			}
 			return nil, err
 		}
 		if summary.Header.IndexSetID != config.IndexSetID {

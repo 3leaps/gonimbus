@@ -2,6 +2,7 @@ package indexbuild
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -164,9 +165,11 @@ func TestBuildSpillRecordBudgetConstrainsJournalValidation(t *testing.T) {
 	require.Equal(t, 2, snap2.Manifest.Lineage.Generation)
 }
 
-// TestRetrySpillRecordBudgetPropagates proves Spill.RecordBytes also reaches the
-// validation pass through public Retry: an undersized budget refuses the
-// re-publish fail-closed (latest byte-identical), a sufficient budget completes.
+// TestRetrySpillRecordBudgetPropagates proves Spill.RecordBytes bounds public
+// Retry from its FIRST journal read: the undersized refusal comes from the
+// coverage-provenance binding pass (boundCrawlPlanFromJournals), typed and
+// fail-closed (latest byte-identical) — not merely from a later publish pass —
+// and a sufficient budget completes.
 func TestRetrySpillRecordBudgetPropagates(t *testing.T) {
 	ctx := context.Background()
 	setRoot := t.TempDir()
@@ -195,6 +198,12 @@ func TestRetrySpillRecordBudgetPropagates(t *testing.T) {
 	_, err = Retry(ctx, rcTiny)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "MaxRecordBytes exceeded")
+	// The refusal must come from the bounded provenance pass — Retry's first
+	// journal read — with the same typed capacity error as the publish path.
+	require.ErrorContains(t, err, "coverage provenance", "first (provenance) validation pass must be bounded")
+	var sme *indexsubstrate.SpillMergeError
+	require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+	require.Equal(t, indexsubstrate.SpillMergeBudgetExhausted, sme.Category)
 	latestAfter, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
 	require.Equal(t, latestBefore, latestAfter, "refused Retry must not advance latest")
@@ -203,4 +212,88 @@ func TestRetrySpillRecordBudgetPropagates(t *testing.T) {
 	rcOK.Spill.RecordBytes = 1 << 20
 	_, err = Retry(ctx, rcOK)
 	require.NoError(t, err)
+}
+
+// TestBoundCrawlPlanFromJournalsHonorsRecordBudget proves the provenance
+// binding pass itself is capacity-bounded: an over-budget journal refuses with
+// the typed SpillMergeBudgetExhausted (never an unbounded read), and the
+// resolved default budget returns the sealed plan.
+func TestBoundCrawlPlanFromJournalsHonorsRecordBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shard-0001.jsonl")
+	writeSealedJournalWithPlan(t, path, []string{"data/siteA/"})
+
+	_, err := boundCrawlPlanFromJournals([]string{path}, 1)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "MaxRecordBytes exceeded")
+	var sme *indexsubstrate.SpillMergeError
+	require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+	require.Equal(t, indexsubstrate.SpillMergeBudgetExhausted, sme.Category)
+
+	plan, err := boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
+	require.NoError(t, err)
+	require.Equal(t, []string{"data/siteA/"}, plan)
+}
+
+// TestBuildRejectsInvalidSpillBudgetBeforeCrawl proves an explicit invalid
+// library budget refuses public Build with typed SpillMergeInvalidConfig during
+// config normalization — before any event, journal, crawl, or publish side
+// effect; zero fields still select defaults.
+func TestBuildRejectsInvalidSpillBudgetBeforeCrawl(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		mut  func(*Config)
+		msg  string
+	}{
+		{"negative record budget", func(c *Config) { c.Spill.RecordBytes = -1 }, "MaxRecordBytes must be >= 1"},
+		{"negative workspace budget", func(c *Config) { c.Spill.WorkspaceBytes = -1 }, "MaxWorkspaceBytes must be >= 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRoot := t.TempDir()
+			cfg := contConfig(setRoot, "run1", []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}, base)
+			tc.mut(&cfg)
+
+			_, err := NewRunner(cfg).Build(context.Background())
+			require.Error(t, err)
+			require.ErrorContains(t, err, tc.msg)
+			var sme *indexsubstrate.SpillMergeError
+			require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+			require.Equal(t, indexsubstrate.SpillMergeInvalidConfig, sme.Category)
+
+			// Refused before side effects: no journal sealed, no latest advanced.
+			require.NoDirExists(t, cfg.Paths.JournalDir, "refusal must precede journal creation")
+			require.NoFileExists(t, cfg.Paths.LatestPath)
+		})
+	}
+}
+
+// TestRetryRejectsInvalidSpillBudgetBeforeSideEffects proves the same explicit
+// invalid budget refuses public Retry during config normalization — before
+// authority acquisition, the provenance journal read, or any publish side
+// effect (latest byte-identical).
+func TestRetryRejectsInvalidSpillBudgetBeforeSideEffects(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	cfg := contConfig(setRoot, "run1", []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}, base)
+	sum, err := NewRunner(cfg).Build(ctx)
+	require.NoError(t, err)
+
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	rc := retryConfigFor(cfg, sum)
+	rc.Spill.RecordBytes = -1
+	_, err = Retry(ctx, rc)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "MaxRecordBytes must be >= 1")
+	var sme *indexsubstrate.SpillMergeError
+	require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+	require.Equal(t, indexsubstrate.SpillMergeInvalidConfig, sme.Category)
+
+	latestAfter, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, latestBefore, latestAfter, "refused Retry must not touch latest")
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -186,10 +187,13 @@ func TestResolveIndexBuildSpill_Precedence(t *testing.T) {
 }
 
 func TestResolveIndexBuildSpill_Root(t *testing.T) {
-	withSpillSurfaces(t, "", "/mnt/scratch")
+	// OS-native absolute path so the filepath.IsAbs acceptance is portable
+	// (a Unix literal like "/mnt/scratch" is not absolute on Windows).
+	root := filepath.Join(t.TempDir(), "scratch")
+	withSpillSurfaces(t, "", root)
 	res, err := resolveIndexBuildSpill()
 	require.NoError(t, err)
-	require.Equal(t, "/mnt/scratch", res.Root)
+	require.Equal(t, root, res.Root)
 	require.Equal(t, spillRootSourceFlag, res.RootSource)
 }
 
@@ -217,20 +221,25 @@ func TestResolveIndexBuildSpill_RootRejectsRelative(t *testing.T) {
 	})
 }
 
-// TestResolveIndexBuildSpill_RootPrecedence proves root flag > env > config.
+// TestResolveIndexBuildSpill_RootPrecedence proves root flag > env > config,
+// using distinct OS-native absolute paths so the acceptance arm is portable.
 func TestResolveIndexBuildSpill_RootPrecedence(t *testing.T) {
-	withSpillSurfaces(t, "", "/mnt/flag")
-	t.Setenv(spillRootEnv, "/mnt/env")
-	setSpillConfig(t, spillRootConfig, "/mnt/config")
+	base := t.TempDir()
+	flagRoot := filepath.Join(base, "flag")
+	envRoot := filepath.Join(base, "env")
+	configRoot := filepath.Join(base, "config")
+	withSpillSurfaces(t, "", flagRoot)
+	t.Setenv(spillRootEnv, envRoot)
+	setSpillConfig(t, spillRootConfig, configRoot)
 	res, err := resolveIndexBuildSpill()
 	require.NoError(t, err)
-	require.Equal(t, "/mnt/flag", res.Root)
+	require.Equal(t, flagRoot, res.Root)
 	require.Equal(t, spillRootSourceFlag, res.RootSource)
 
 	indexBuildSpillRoot = ""
 	res, err = resolveIndexBuildSpill()
 	require.NoError(t, err)
-	require.Equal(t, "/mnt/env", res.Root)
+	require.Equal(t, envRoot, res.Root)
 	require.Equal(t, spillRootSourceEnv, res.RootSource)
 }
 

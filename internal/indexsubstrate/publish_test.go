@@ -587,8 +587,10 @@ func TestPublishRefusesOverBudgetJournalRecordBeforeValidation(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestPublishSufficientRecordBudgetValidates is the exact-limit companion: a
-// budget above the journal's largest line validates and publishes normally.
+// TestPublishSufficientRecordBudgetValidates is the sufficient-budget
+// companion: a budget above the journal's largest line validates and
+// publishes normally. The exact boundary is pinned by
+// TestPublishRecordBudgetExactPayloadLimit.
 func TestPublishSufficientRecordBudgetValidates(t *testing.T) {
 	cfg, _ := publishTestConfig(t)
 	var steps []PublishStep
@@ -599,4 +601,162 @@ func TestPublishSufficientRecordBudgetValidates(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.LatestAdvanced)
 	require.Contains(t, steps, PublishStepJournalsValidated)
+}
+
+// publishRecordBudgetTestConfig builds a publishable first-publication config
+// whose journal header (wide crawl-prefix plan) is decisively the largest
+// journal line, so the exact-limit arms below bound on a known payload through
+// both journal readers (bounded validation pass and streaming scan) without a
+// smaller internal spill line tripping first.
+func publishRecordBudgetTestConfig(t *testing.T) PublishConfig {
+	t.Helper()
+	root := t.TempDir()
+	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	runStartedAt := base.Add(time.Hour)
+
+	prefixes := make([]string, 0, 64)
+	for i := 0; i < 64; i++ {
+		prefixes = append(prefixes, fmt.Sprintf("data/site-%04d/", i))
+	}
+	journalPath := filepath.Join(root, "journals", "jrn_a.jsonl")
+	writer, err := CreateJournal(journalPath, JournalHeader{
+		Type:               JournalHeaderType,
+		JournalID:          "jrn_a",
+		IndexSetID:         "idx_test",
+		RunID:              "run_test",
+		Shard:              "shard-0001",
+		Scope:              &Scope{Prefix: "data/"},
+		CrawlPrefixes:      prefixes,
+		IndexSchemaVersion: IndexSchemaVersion,
+		StartedAt:          runStartedAt,
+	})
+	require.NoError(t, err)
+	size := int64(10)
+	standard := "STANDARD"
+	_, err = writer.Append(ObjectRecord{
+		Op:           ObjectRecordOpObserve,
+		RelKey:       "data/a.xml",
+		ObservedAt:   runStartedAt.Add(time.Minute),
+		SizeBytes:    &size,
+		ETag:         `"etag-a"`,
+		StorageClass: &standard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Seal(runStartedAt.Add(2*time.Minute)))
+	require.NoError(t, writer.Close())
+
+	lease, err := AcquireWriteLease(root, "idx_test", "publish-test", 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+
+	return PublishConfig{
+		IndexSetID:           "idx_test",
+		RunID:                "run_test",
+		RunStartedAt:         runStartedAt,
+		CreatedAt:            runStartedAt.Add(3 * time.Minute),
+		JournalPaths:         []string{journalPath},
+		Coverage:             []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:           filepath.Join(root, "segments"),
+		ManifestPath:         filepath.Join(root, "manifests", "manifest.json"),
+		CompletePath:         filepath.Join(root, "complete.json"),
+		LatestPath:           filepath.Join(root, "latest.json"),
+		TargetRowsPerSegment: 1,
+		WriteLease:           lease,
+	}
+}
+
+// largestJournalPayload returns the byte length of the largest journal line
+// with its terminator ("\n" or "\r\n") excluded — the payload MaxRecordBytes
+// bounds.
+func largestJournalPayload(t *testing.T, path string) int64 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var largest int
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if len(line) > largest {
+			largest = len(line)
+		}
+	}
+	require.Positive(t, largest)
+	return int64(largest)
+}
+
+// TestPublishRecordBudgetExactPayloadLimit pins the record-budget boundary
+// end-to-end through PublishSnapshot, covering both journal readers: a budget
+// equal to the largest record payload publishes, a budget one byte under it
+// refuses with the typed capacity error before the journals-validated hook, and
+// line terminators are framing rather than record bytes (the same payload
+// budget publishes a CRLF-framed copy of the journal).
+func TestPublishRecordBudgetExactPayloadLimit(t *testing.T) {
+	t.Run("exact limit publishes", func(t *testing.T) {
+		cfg := publishRecordBudgetTestConfig(t)
+		cfg.SpillBudget.MaxRecordBytes = largestJournalPayload(t, cfg.JournalPaths[0])
+		result, err := PublishSnapshot(cfg)
+		require.NoError(t, err)
+		require.True(t, result.LatestAdvanced)
+	})
+
+	t.Run("one byte under refuses typed before validation hook", func(t *testing.T) {
+		cfg := publishRecordBudgetTestConfig(t)
+		var steps []PublishStep
+		cfg.AfterStep = func(s PublishStep) error { steps = append(steps, s); return nil }
+		cfg.SpillBudget.MaxRecordBytes = largestJournalPayload(t, cfg.JournalPaths[0]) - 1
+
+		_, err := PublishSnapshot(cfg)
+		var sme *SpillMergeError
+		require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+		require.Equal(t, SpillMergeBudgetExhausted, sme.Category)
+		require.Contains(t, err.Error(), "MaxRecordBytes exceeded")
+		require.NotContains(t, steps, PublishStepJournalsValidated, "must refuse before journals are declared validated")
+		require.NotContains(t, steps, PublishStepCoverageValidated)
+		require.NoFileExists(t, cfg.LatestPath)
+	})
+
+	t.Run("CRLF terminator is framing not payload", func(t *testing.T) {
+		cfg := publishRecordBudgetTestConfig(t)
+		journalPath := cfg.JournalPaths[0]
+		budget := largestJournalPayload(t, journalPath)
+		raw, err := os.ReadFile(journalPath)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "\r", "fixture must start LF-framed")
+		require.NoError(t, os.WriteFile(journalPath, []byte(strings.ReplaceAll(string(raw), "\n", "\r\n")), 0o600))
+
+		cfg.SpillBudget.MaxRecordBytes = budget
+		result, err := PublishSnapshot(cfg)
+		require.NoError(t, err)
+		require.True(t, result.LatestAdvanced)
+	})
+}
+
+// TestPublishRefusesInvalidSpillBudgetBeforeJournalValidation proves an
+// explicit invalid library budget (negative field) refuses with typed
+// SpillMergeInvalidConfig before any journal read, publish hook, workspace, or
+// artifact — an invalid caller value can never degrade the validation pass to
+// unbounded reads.
+func TestPublishRefusesInvalidSpillBudgetBeforeJournalValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*PublishConfig)
+		msg  string
+	}{
+		{"negative record budget", func(c *PublishConfig) { c.SpillBudget.MaxRecordBytes = -1 }, "MaxRecordBytes must be >= 1"},
+		{"negative workspace budget", func(c *PublishConfig) { c.SpillBudget.MaxWorkspaceBytes = -1 }, "MaxWorkspaceBytes must be >= 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, _ := publishTestConfig(t)
+			var steps []PublishStep
+			cfg.AfterStep = func(s PublishStep) error { steps = append(steps, s); return nil }
+			tc.mut(&cfg)
+
+			_, err := PublishSnapshot(cfg)
+			var sme *SpillMergeError
+			require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+			require.Equal(t, SpillMergeInvalidConfig, sme.Category)
+			require.Contains(t, err.Error(), tc.msg)
+			require.Empty(t, steps, "no publish hook may fire on an invalid budget")
+			require.NoFileExists(t, cfg.LatestPath)
+		})
+	}
 }

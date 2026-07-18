@@ -114,7 +114,8 @@ carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a
 raise it explicitly.
 
 A second budget, the **max single journal-record size** (`MaxRecordBytes`,
-default **16 MiB**), bounds one journal line. The journal header carries the
+default **16 MiB**), bounds one journal line — its encoded payload bytes, with
+the line terminator excluded as framing. The journal header carries the
 crawl-prefix plan, so a very wide/dense scope (tens of thousands of prefixes) can
 push the header past the default and fail the build closed at the journal phase.
 Raise it the same way when a very fine scope needs it.

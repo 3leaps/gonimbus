@@ -183,6 +183,19 @@ func DefaultSpillMergeBudget() SpillMergeBudget {
 	}
 }
 
+// ResolveSpillMergeBudget applies the substrate defaults to zero fields and
+// validates the result: zero alone selects a default, while an explicit
+// invalid field (negative or otherwise sub-1) refuses with a typed
+// SpillMergeInvalidConfig. Capacity-sensitive callers (publish, Build, public
+// Retry) resolve through this before any crawl, provenance read, or journal
+// validation so an invalid caller budget can never degrade to unbounded reads.
+func ResolveSpillMergeBudget(b SpillMergeBudget) (SpillMergeBudget, error) {
+	if err := b.validate(); err != nil {
+		return SpillMergeBudget{}, err
+	}
+	return b.withDefaults(), nil
+}
+
 func (b SpillMergeBudget) withDefaults() SpillMergeBudget {
 	d := DefaultSpillMergeBudget()
 	if b.MaxBufferedRows == 0 {

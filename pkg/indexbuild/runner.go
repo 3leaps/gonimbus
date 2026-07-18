@@ -236,7 +236,14 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 	// coverage together. Legacy journals without a recorded plan fail closed.
 	// Runs after capture/authority so wrong-set and stale-parent refusals keep
 	// priority; no publish artifact exists yet, so latest stays byte-identical.
-	boundPlan, err := boundCrawlPlanFromJournals(cfg.JournalPaths)
+	// The read is bounded by the resolved record budget (normalizeRetryConfig
+	// already refused an invalid explicit value) so this first validation pass
+	// cannot allocate an over-budget line before enforcement.
+	budget, err := cfg.Spill.resolveBudget()
+	if err != nil {
+		return Summary{}, err
+	}
+	boundPlan, err := boundCrawlPlanFromJournals(cfg.JournalPaths, budget.MaxRecordBytes)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -810,7 +817,7 @@ func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, erro
 // boundCrawlPlanFromJournals reads the sealed journal headers and returns the
 // single crawl-prefix plan they were built under. This is the observation
 // provenance that bounds recovery coverage authority, so every journal must:
-//   - be content-integrity verified (ValidateJournal recomputes the footer
+//   - be content-integrity verified (the bounded validator recomputes the footer
 //     ContentSHA256 over the header+records, so a post-seal header edit fails);
 //   - carry that sealed digest (a journal without one is not tamper-evident and
 //     fails closed — a plan added to an unauthenticated legacy journal is not
@@ -818,14 +825,19 @@ func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, erro
 //   - record a canonical, non-empty plan (leading slash / whitespace / empty /
 //     duplicate entries are invalid provenance, never trimmed into validity);
 //   - agree with every other journal on the exact plan (order-independent).
-func boundCrawlPlanFromJournals(journalPaths []string) ([]string, error) {
+//
+// maxRecordBytes is the resolved record budget: every line read in this pass is
+// bounded, so an over-budget journal refuses with the typed
+// SpillMergeBudgetExhausted here — before any publish work — rather than
+// allocating unbounded during provenance binding.
+func boundCrawlPlanFromJournals(journalPaths []string, maxRecordBytes int64) ([]string, error) {
 	if len(journalPaths) == 0 {
 		return nil, fmt.Errorf("journal paths are required")
 	}
 	var plan []string
 	var planKey string
 	for i, path := range journalPaths {
-		summary, err := indexsubstrate.ValidateJournal(path)
+		summary, err := indexsubstrate.ValidateJournalBounded(path, maxRecordBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read journal header for coverage provenance: %w", err)
 		}
@@ -1006,6 +1018,11 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.TargetRowsPerSegment <= 0 {
 		cfg.TargetRowsPerSegment = indexsubstrate.DefaultTargetRowsPerSegment
 	}
+	// Refuse an invalid explicit spill budget before any event, sink, or crawl
+	// side effect (typed SpillMergeInvalidConfig); zero fields select defaults.
+	if _, err := cfg.Spill.resolveBudget(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -1040,6 +1057,11 @@ func normalizeRetryConfig(cfg RetryConfig) (RetryConfig, error) {
 	cfg.CreatedAt = cfg.CreatedAt.UTC()
 	if cfg.TargetRowsPerSegment <= 0 {
 		cfg.TargetRowsPerSegment = indexsubstrate.DefaultTargetRowsPerSegment
+	}
+	// Refuse an invalid explicit spill budget before authority acquisition, the
+	// provenance journal read, or any publish side effect; zero selects defaults.
+	if _, err := cfg.Spill.resolveBudget(); err != nil {
+		return RetryConfig{}, err
 	}
 	return cfg, nil
 }

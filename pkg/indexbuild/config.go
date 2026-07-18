@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
@@ -218,6 +219,18 @@ type SpillConfig struct {
 	// grows with scope prefix count, so very wide/dense scopes need a larger
 	// bound. Zero uses the substrate default; a sub-1 explicit value is rejected.
 	RecordBytes int64
+}
+
+// resolveBudget validates the public capacity overrides and returns the
+// effective substrate budget with defaults applied. An explicit sub-1 value
+// refuses with the substrate's typed invalid-config error; Build and Retry
+// resolve through this before any crawl, provenance read, or publish side
+// effect so an invalid caller value can never reach an unbounded journal read.
+func (s SpillConfig) resolveBudget() (indexsubstrate.SpillMergeBudget, error) {
+	return indexsubstrate.ResolveSpillMergeBudget(indexsubstrate.SpillMergeBudget{
+		MaxWorkspaceBytes: s.WorkspaceBytes,
+		MaxRecordBytes:    s.RecordBytes,
+	})
 }
 
 // SegmentProgress is a sanitized segment-write progress signal (counts only).

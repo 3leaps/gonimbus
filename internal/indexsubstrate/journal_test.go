@@ -1,6 +1,7 @@
 package indexsubstrate
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"path/filepath"
@@ -187,4 +188,76 @@ func appendFile(path string, data []byte) error {
 	defer func() { _ = f.Close() }()
 	_, err = f.Write(data)
 	return err
+}
+
+// TestReadJournalLineBoundedPayloadLimitSemantics pins the record-budget
+// contract at the read primitive: MaxRecordBytes bounds encoded record payload
+// bytes, the line terminator ("\n" or "\r\n") is framing. A payload of exactly
+// max succeeds, max+1 refuses, for both LF and CRLF framing.
+func TestReadJournalLineBoundedPayloadLimitSemantics(t *testing.T) {
+	const max = 8
+	cases := []struct {
+		name    string
+		line    string
+		tooLong bool
+	}{
+		{"exact payload LF", "12345678\n", false},
+		{"exact payload CRLF", "12345678\r\n", false},
+		{"payload plus one LF", "123456789\n", true},
+		{"payload plus one CRLF", "123456789\r\n", true},
+		{"payload under limit LF", "1234567\n", false},
+		{"far over budget LF", strings.Repeat("x", 4*max) + "\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line, err := readJournalLineBounded(bufio.NewReader(strings.NewReader(tc.line)), max)
+			if tc.tooLong {
+				require.ErrorIs(t, err, errJournalRecordTooLong)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.line, line, "bounded read must return the full framed line")
+		})
+	}
+}
+
+// TestReadJournalLineBoundedSpansSmallReaderBuffers proves the payload bound is
+// enforced across chunked ReadSlice accumulation (line longer than the bufio
+// buffer), not only within a single chunk.
+func TestReadJournalLineBoundedSpansSmallReaderBuffers(t *testing.T) {
+	payload := strings.Repeat("a", 100)
+	reader := bufio.NewReaderSize(strings.NewReader(payload+"\n"), 16)
+
+	line, err := readJournalLineBounded(reader, 100)
+	require.NoError(t, err)
+	require.Equal(t, payload+"\n", line)
+
+	reader = bufio.NewReaderSize(strings.NewReader(payload+"\n"), 16)
+	_, err = readJournalLineBounded(reader, 99)
+	require.ErrorIs(t, err, errJournalRecordTooLong)
+}
+
+// TestValidateJournalBoundedRefusesTyped proves the exported capacity-aware
+// validator maps an over-budget record to the same typed
+// SpillMergeBudgetExhausted as the streaming scan, and passes a sufficient
+// budget through unchanged.
+func TestValidateJournalBoundedRefusesTyped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shard-0001.jsonl")
+	writer, err := CreateJournal(path, testHeader())
+	require.NoError(t, err)
+	observed := time.Date(2026, 7, 6, 16, 0, 0, 0, time.UTC)
+	_, err = writer.Append(ObjectRecord{Op: ObjectRecordOpObserve, RelKey: "data/a.xml", ObservedAt: observed})
+	require.NoError(t, err)
+	require.NoError(t, writer.Seal(observed.Add(time.Minute)))
+	require.NoError(t, writer.Close())
+
+	_, err = ValidateJournalBounded(path, 1)
+	var sme *SpillMergeError
+	require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+	require.Equal(t, SpillMergeBudgetExhausted, sme.Category)
+	require.Contains(t, err.Error(), "MaxRecordBytes exceeded")
+
+	summary, err := ValidateJournalBounded(path, DefaultSpillMergeBudget().MaxRecordBytes)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), summary.Records)
 }

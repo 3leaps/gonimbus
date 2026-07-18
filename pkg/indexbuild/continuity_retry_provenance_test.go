@@ -228,7 +228,7 @@ func writeSealedJournalWithPlan(t *testing.T, path string, crawlPrefixes []strin
 func TestBoundCrawlPlanFromJournalsFailsClosedOnLegacyJournal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shard-0001.jsonl")
 	writeSealedJournalWithPlan(t, path, nil)
-	_, err := boundCrawlPlanFromJournals([]string{path})
+	_, err := boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 	require.Error(t, err)
 	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 	require.Contains(t, err.Error(), "predates crawl-plan provenance")
@@ -242,7 +242,7 @@ func TestBoundCrawlPlanFromJournalsRefusesDisagreement(t *testing.T) {
 	p2 := filepath.Join(dir, "b", "shard-0001.jsonl")
 	writeSealedJournalWithPlan(t, p1, []string{"data/siteA/"})
 	writeSealedJournalWithPlan(t, p2, []string{"data/siteB/"})
-	_, err := boundCrawlPlanFromJournals([]string{p1, p2})
+	_, err := boundCrawlPlanFromJournals([]string{p1, p2}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 	require.Error(t, err)
 	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 	require.Contains(t, err.Error(), "disagree")
@@ -250,7 +250,7 @@ func TestBoundCrawlPlanFromJournalsRefusesDisagreement(t *testing.T) {
 	// Agreement (recorded in either order) returns the shared plan.
 	p3 := filepath.Join(dir, "c", "shard-0001.jsonl")
 	writeSealedJournalWithPlan(t, p3, []string{"data/siteA/"})
-	plan, err := boundCrawlPlanFromJournals([]string{p1, p3})
+	plan, err := boundCrawlPlanFromJournals([]string{p1, p3}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 	require.NoError(t, err)
 	require.Equal(t, []string{"data/siteA/"}, plan)
 }
@@ -306,7 +306,7 @@ func TestJournalHeaderPlanMutationFailsIntegrity(t *testing.T) {
 	// The integrity digest catches it at every consumer.
 	_, err = indexsubstrate.ValidateJournal(journalPath)
 	require.ErrorIs(t, err, indexsubstrate.ErrInvalidJournal)
-	_, err = boundCrawlPlanFromJournals([]string{journalPath})
+	_, err = boundCrawlPlanFromJournals([]string{journalPath}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 	require.Error(t, err)
 
 	// Retry with the widened coverage that the forged header would authorize.
@@ -389,7 +389,7 @@ func TestBoundCrawlPlanRejectsUnauthenticatedPlan(t *testing.T) {
 	_, err := indexsubstrate.ValidateJournal(path)
 	require.NoError(t, err)
 	// ...but not trusted as provenance.
-	_, err = boundCrawlPlanFromJournals([]string{path})
+	_, err = boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 	require.Error(t, err)
 	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 	require.Contains(t, err.Error(), "not content-integrity sealed")
@@ -407,7 +407,7 @@ func TestBoundCrawlPlanRejectsNonCanonicalJournalPlan(t *testing.T) {
 	} {
 		path := filepath.Join(dir, string(rune('a'+i)), "shard-0001.jsonl")
 		writeSealedJournalWithPlan(t, path, plan)
-		_, err := boundCrawlPlanFromJournals([]string{path})
+		_, err := boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 		require.Error(t, err)
 		require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 	}

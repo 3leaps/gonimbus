@@ -27,7 +27,12 @@ func scanJournalStreaming(
 	if maxLine < 64 {
 		maxLine = 64
 	}
-	sc.Buffer(make([]byte, 0, min(maxLine, 64*1024)), maxLine)
+	// MaxRecordBytes bounds record payload bytes; the line terminator ("\n" or
+	// "\r\n") is framing. The scanner buffer must hold payload plus terminator
+	// before ScanLines can emit the token, so it gets a two-byte allowance —
+	// the explicit post-trim length check below remains the payload refusal, so
+	// exactly-max succeeds and max+1 refuses typed.
+	sc.Buffer(make([]byte, 0, min(maxLine+2, 64*1024)), maxLine+2)
 
 	var header JournalHeader
 	var records uint64

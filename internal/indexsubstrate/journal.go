@@ -257,6 +257,25 @@ func ValidateJournal(path string) (JournalSummary, error) {
 	return validateJournalFile(path, 0)
 }
 
+// ValidateJournalBounded is the capacity-aware journal validation primitive for
+// authority-sensitive paths (publish, Build, public Retry). Each line read is
+// bounded by maxRecordBytes — encoded record payload bytes excluding the line
+// terminator, matching the streaming scan and spill-run writer semantics — and
+// an over-budget record refuses with the same typed SpillMergeBudgetExhausted
+// as the streaming scan, before the journal is declared valid. maxRecordBytes
+// <= 0 is unbounded; capacity paths must pass a resolved (defaulted, validated)
+// budget, never a raw caller value.
+func ValidateJournalBounded(path string, maxRecordBytes int64) (JournalSummary, error) {
+	summary, err := validateJournalFile(path, maxRecordBytes)
+	if err != nil {
+		if errors.Is(err, errJournalRecordTooLong) {
+			return JournalSummary{}, spillErr(SpillMergeBudgetExhausted, "journal", "MaxRecordBytes exceeded", "", nil)
+		}
+		return JournalSummary{}, err
+	}
+	return summary, nil
+}
+
 // validateJournalFile validates a sealed journal, bounding each line read by
 // maxRecordBytes (0 = unbounded). The publish path passes the resolved
 // MaxRecordBytes so an oversized record is refused before the journal is declared
@@ -383,11 +402,15 @@ func splitJournalPath(path string) (string, string, error) {
 // never see it.
 var errJournalRecordTooLong = errors.New("journal record exceeds max record bytes")
 
-// readJournalLineBounded reads one '\n'-terminated line. When max > 0 it refuses
-// a line longer than max bytes instead of accumulating unbounded, so an oversized
-// header/record cannot allocate past the budget before enforcement. The returned
-// line includes the trailing '\n' (matching bufio.Reader.ReadString) so the
-// caller's newline trimming and partial-trailing-line detection are unchanged.
+// readJournalLineBounded reads one '\n'-terminated line. When max > 0 it bounds
+// the record payload — the line excluding its terminator ("\n" or "\r\n"),
+// matching the streaming scanner's post-trim comparison and the spill-run
+// writer — so a payload of exactly max bytes succeeds and max+1 refuses.
+// Terminators are framing, not record bytes. Accumulation is capped at max
+// plus the two-byte terminator allowance, so an oversized header/record cannot
+// allocate past the budget before enforcement. The returned line includes the
+// trailing '\n' (matching bufio.Reader.ReadString) so the caller's newline
+// trimming and partial-trailing-line detection are unchanged.
 func readJournalLineBounded(reader *bufio.Reader, max int64) (string, error) {
 	if max <= 0 {
 		return reader.ReadString('\n')
@@ -395,11 +418,20 @@ func readJournalLineBounded(reader *bufio.Reader, max int64) (string, error) {
 	var b []byte
 	for {
 		chunk, err := reader.ReadSlice('\n')
-		if int64(len(b))+int64(len(chunk)) > max {
+		// Written as sum-2 > max (not sum > max+2) so a huge configured max
+		// cannot overflow the comparison.
+		if int64(len(b))+int64(len(chunk))-2 > max {
 			return "", errJournalRecordTooLong
 		}
 		b = append(b, chunk...)
 		if err == nil {
+			payload := int64(len(b)) - 1 // complete line always ends '\n'
+			if payload > 0 && b[payload-1] == '\r' {
+				payload--
+			}
+			if payload > max {
+				return "", errJournalRecordTooLong
+			}
 			return string(b), nil
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
