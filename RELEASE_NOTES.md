@@ -137,8 +137,8 @@ gonimbus index compare durable-delta \
 ### Boundary framing
 
 Durable-v2 here is a full-fidelity **internal render** for trusted operators and
-pipelines — not a reduced-trust third-party publication format. That publication
-path is a separate future surface.
+pipelines — not a reduced-trust third-party publication format. A durable hub
+export is not a disclosure-controlled share format.
 
 ### Upgrade
 

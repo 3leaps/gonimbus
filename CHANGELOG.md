@@ -177,7 +177,8 @@ walkthrough.
   hydrate restores manifest + segments, not `index.db`.
 - Durable-v2 artifacts in this release are a full-fidelity **internal render**
   for trusted operator workflows. They are not a reduced-trust / de-identified
-  publication format; that path remains a future boundary-render surface.
+  publication format, and a durable hub export is not a disclosure-controlled
+  share format.
 
 ### Documentation
 
