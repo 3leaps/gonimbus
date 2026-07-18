@@ -58,6 +58,18 @@ func (r Record) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// Execution-path values for the dispatch-transparency contract: every run and
+// summary record names the path that executed it, so path selection between the
+// library engine and the CLI worker pool is observable evidence rather than an
+// implementation detail. Requested concurrency stays in `parallel`; the resolved
+// ceiling and observed max-active live in the embedded ConcurrencyStats.
+const (
+	// ExecutionPathEngine marks runs executed by the pkg/reflow engine.
+	ExecutionPathEngine = "engine"
+	// ExecutionPathCLIPool marks runs executed by the CLI worker pool.
+	ExecutionPathCLIPool = "cli-pool"
+)
+
 // RunRecord is the payload for gonimbus.reflow.run.v1 JSONL records.
 type RunRecord struct {
 	DestURI        string `json:"dest_uri"`
@@ -65,6 +77,7 @@ type RunRecord struct {
 	DryRun         bool   `json:"dry_run"`
 	Resume         bool   `json:"resume"`
 	Parallel       int    `json:"parallel"`
+	ExecutionPath  string `json:"execution_path"`
 	ConcurrencyStats
 	Provenance *ProvenanceRunConfig `json:"provenance,omitempty"`
 	Metadata   *MetadataRunConfig   `json:"metadata,omitempty"`
@@ -72,9 +85,10 @@ type RunRecord struct {
 
 // SummaryRecord is the payload for gonimbus.reflow.summary.v1 JSONL records.
 type SummaryRecord struct {
-	DestURI     string `json:"dest_uri"`
-	DryRun      bool   `json:"dry_run"`
-	OnCollision string `json:"on_collision"`
+	DestURI       string `json:"dest_uri"`
+	DryRun        bool   `json:"dry_run"`
+	OnCollision   string `json:"on_collision"`
+	ExecutionPath string `json:"execution_path"`
 	ConcurrencyStats
 	DestIfAbsentHonored     *bool            `json:"dest_ifabsent_honored"`
 	DestIfAbsentProbeStatus string           `json:"dest_ifabsent_probe_status,omitempty"`

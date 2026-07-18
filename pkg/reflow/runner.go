@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // ErrNotImplemented is returned by Runner.Run for source forms or scenarios that
@@ -14,6 +15,10 @@ var ErrNotImplemented = errors.New("reflow: runner execution not yet implemented
 // Construct one with NewRunner. Experimental.
 type Runner struct {
 	cfg Config
+
+	// emitMu serializes EventSink delivery: engine workers execute objects
+	// concurrently, but a sink implementation never observes concurrent calls.
+	emitMu sync.Mutex
 }
 
 // NewRunner validates cfg and returns a Runner. It performs no I/O.

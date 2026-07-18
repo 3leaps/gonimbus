@@ -44,6 +44,7 @@ func (s *reflowRunStats) summary(destURI string, dryRun bool, collCfg collisionC
 		DestURI:                 destURI,
 		DryRun:                  dryRun,
 		OnCollision:             collCfg.Mode,
+		ExecutionPath:           reflowpkg.ExecutionPathCLIPool,
 		ConcurrencyStats:        concurrency,
 		DestIfAbsentHonored:     capability.Honored,
 		DestIfAbsentProbeStatus: string(capability.ProbeStatus),

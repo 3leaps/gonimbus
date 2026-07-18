@@ -423,6 +423,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		DryRun:           reflowDryRun,
 		Resume:           reflowResume,
 		Parallel:         reflowParallel,
+		ExecutionPath:    reflowpkg.ExecutionPathCLIPool,
 		ConcurrencyStats: concurrencyLimiter.Snapshot(),
 		Provenance:       provCfg.runConfig(),
 		Metadata:         metadataRunConfig(metaCfg),
