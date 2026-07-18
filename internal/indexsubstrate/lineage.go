@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-// Dark durable-lineage schema and bounded digest-verifying ancestry readers.
-// Does not activate continuous-state publish, PriorRows loading, durable
-// --since, or --since-run. See docs/architecture/durable-lineage.md.
+// Durable-lineage schema and bounded digest-verifying ancestry readers, active
+// on the durable build path: ordinary builds emit lineage and a digest-bound
+// state_parent, and validate bounded ancestry before extending a continuous
+// parent. Timestamp-scoped reduction (durable --since / --since-run) is not
+// activated. See docs/architecture/durable-lineage.md.
 
 const (
 	// LineageVersionV1 is the only supported lineage.version.
@@ -232,6 +234,15 @@ func validateAuthoritativeRunStartedAt(t time.Time) error {
 		return lineageError(LineageCodeInvalidTime, "run_started_at must be UTC (non-zero offset refused)")
 	}
 	return nil
+}
+
+// ValidateAuthoritativeRunStartedAt validates a run-start timestamp against the
+// authoritative lineage wire rule (non-zero, UTC — non-zero offset refused). It
+// is exposed so library build/publish entry points can refuse a non-UTC caller
+// value or clock on the *raw* input, before any UTC normalization or side
+// effect, and surface the same stable LineageCodeInvalidTime classification.
+func ValidateAuthoritativeRunStartedAt(t time.Time) error {
+	return validateAuthoritativeRunStartedAt(t)
 }
 
 func validateStateParentShape(parent StateParent) error {

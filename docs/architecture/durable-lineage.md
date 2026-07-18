@@ -1,9 +1,11 @@
-# Durable lineage schema (dark)
+# Durable lineage
 
-**Status**: additive schema + dark ancestry readers only
+**Status**: active — ordinary durable builds emit lineage / `state_parent` and
+load verified parent state
 
-**Does not**: activate continuous-state publication, prior-run load for ordinary
-builds, durable `--since` / `--since-run`, spill/merge, or streaming writers
+**Does not**: enable durable `--since` / `--since-run` (timestamp-scoped
+reduction), raise enrich scale ceilings, or make the SQLite index a lineage
+authority
 
 ## Purpose
 
@@ -14,8 +16,11 @@ This document freezes the **additive** durable-manifest contract for:
 3. all-or-nothing `lineage` generation/baseline record
 4. bounded, digest-verifying **ancestry readers**
 
-Production builds do **not** emit continuity edges today. Legacy latest remains
-a **verified current-state source**, not a trustworthy delta boundary.
+Ordinary durable builds emit continuity edges: parent rows and continuity
+metadata derive from a single verified same-set capture of latest, under the
+three-way baseline/generation rule, with bounded ancestry validated before any
+continuous extension. Legacy (pre-continuity) latest remains a **verified
+current-state source**, not a trustworthy delta boundary.
 
 ## Wire fields (`gonimbus.index.manifest.v1`)
 
@@ -81,29 +86,29 @@ byte hash, no depth budget).
   **before** parent I/O. Stable reason codes from parent structural validation
   are preserved across hops.
 
-## Darkness (current product behavior)
+## Activation status (current product behavior)
 
-| Path                                       | Behavior                                                                                             |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| Production `PublishSnapshot`               | Does not emit `run_started_at` / `state_parent` / `lineage`                                          |
-| Durable/`both` build adapter               | Does not load prior-run state for ordinary builds                                                    |
-| Durable `--since-run`                      | Unsupported                                                                                          |
-| Canonical authority / whole-set GC execute | Untouched by this schema                                                                             |
-| Spill / streaming writer                   | Spill/merge dark primitive is separate (see durable-spill-merge.md); not activated by lineage schema |
+| Path                                       | Behavior                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production `PublishSnapshot`               | **Active** — persists `run_started_at`, digest-bound `state_parent`, and `lineage` supplied by the durable build path                                                                                                                                                                                                                                                                                        |
+| Durable/`both` build adapter               | **Active** — ordinary builds stream the verified same-set parent's rows from a single lease-held capture (caller `PriorRows` refused) and derive the three-way baseline/generation rule; `both` derives durable lineage independently of the SQLite sidecar                                                                                                                                                  |
+| Ancestry validation                        | **Active** — a continuous parent's bounded ancestry is verified before extension and before a same-run recovery re-publish; defects fail closed without advancing latest                                                                                                                                                                                                                                     |
+| Durable `--since` / `--since-run`          | Unsupported (timestamp-scoped reduction is not activated)                                                                                                                                                                                                                                                                                                                                                    |
+| Scope-reduced coverage merge               | **Active** — a build whose crawl-prefix plan covers only part of the parent's rows retains every out-of-coverage prior row verbatim (state, first-seen lineage, HEAD enrichment, existing tombstones) and tombstones only keys inside the current confirmed-complete attestation; published coverage equals the crawl plan exactly (fail-closed set equality — never rolled up toward the parent's coverage) |
+| Enrich publish                             | Pre-continuity (no lineage emission on the enrich path); enrich scale ceiling unchanged                                                                                                                                                                                                                                                                                                                      |
+| Canonical authority / whole-set GC execute | Untouched by this schema                                                                                                                                                                                                                                                                                                                                                                                     |
 
-`SegmentWriterConfig` accepts optional lineage fields for tests and future
-activation plumbing only. The writer validates the caller-supplied
-`run_started_at` **before** any UTC normalization, so decoder and emitter
-enforce one contract (non-UTC offsets refuse as `lineage_invalid_time` and do
-not create segment artifacts).
+`SegmentWriterConfig` carries the lineage fields the publish path supplies. The
+writer validates the caller-supplied `run_started_at` **before** any UTC
+normalization, so decoder and emitter enforce one contract (non-UTC offsets
+refuse as `lineage_invalid_time` and do not create segment artifacts).
 
 ## Explicit non-goals
 
-- Emitting continuous lineage from production publish
 - Enabling durable `--since` / `--since auto` / `--since-run`
-- Loading prior-run state / coverage merge / continuity activation
 - Reachability delete driven by new edges
 - Backfilling history onto legacy artifacts
+- Treating the SQLite index as a lineage authority
 
 ## Compatibility
 
@@ -114,5 +119,5 @@ not create segment artifacts).
 ## Related
 
 - Operator guide: `docs/user-guide/durable-index.md`
-- Dark spill/merge row source: `docs/architecture/durable-spill-merge.md`
+- Spill/merge row source: `docs/architecture/durable-spill-merge.md`
 - ADR-0006 (CLI as adapter), ADR-0007 (canonical authority — not reopened here)

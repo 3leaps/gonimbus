@@ -47,8 +47,9 @@ func openIndexReaderWithAuthority(ctx context.Context, baseURI, indexSetID, runI
 }
 
 // preferListedIndexes keeps one entry per IndexSetID. When both sqlite-v1 and
-// durable-v2 exist for the same set (format both), prefer sqlite for richer run
-// metadata while still surfacing durable-only sets that have no index.db.
+// durable-v2 exist for the same set, prefer durable: it is only listed behind a
+// verified latest trust chain, while a set-root index.db beside it may be a
+// stale artifact from an earlier run. SQLite-only sets keep their entry.
 func preferListedIndexes(listed []indexreader.ListedIndex) []indexreader.ListedIndex {
 	if len(listed) == 0 {
 		return nil
@@ -67,8 +68,8 @@ func preferListedIndexes(listed []indexreader.ListedIndex) []indexreader.ListedI
 			order = append(order, id)
 			continue
 		}
-		// Prefer SQLite when both formats exist for the same set.
-		if existing.Meta.Format != indexreader.FormatSQLiteV1 && item.Meta.Format == indexreader.FormatSQLiteV1 {
+		// Prefer durable when both formats exist for the same set.
+		if existing.Meta.Format != indexreader.FormatDurableV2 && item.Meta.Format == indexreader.FormatDurableV2 {
 			bySet[id] = item
 		}
 	}

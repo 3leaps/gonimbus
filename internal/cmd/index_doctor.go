@@ -145,11 +145,24 @@ type indexDoctorEntry struct {
 	DurableManifestSHA  string `json:"durable_manifest_sha256,omitempty"`
 	DurableSegmentCount int    `json:"durable_segment_count,omitempty"`
 
+	// Run-scoped SQLite parity-verification projections retained under
+	// <set>/verification/<attempt>/. Inventory classification only: these are
+	// non-canonical dual-format parity artifacts; run-scoping grants
+	// isolation, never deletion authority — they are removed solely as part
+	// of receipt-backed set-scoped GC.
+	VerificationProjectionCount int      `json:"verification_projection_count,omitempty"`
+	VerificationProjections     []string `json:"verification_projections,omitempty"`
+
 	// Overall health summary
 	IdentityOK bool `json:"identity_ok"`
 
 	// Warnings / notes
 	Notes []string `json:"notes,omitempty"`
+
+	// infoNoteCount counts entries in Notes that are purely informational
+	// lifecycle classifications (not health faults). IdentityOK excludes these
+	// so an expected, healthy Shape-2 retention note never degrades health.
+	infoNoteCount int
 }
 
 type indexDoctorOptions struct {
@@ -774,6 +787,12 @@ func inspectDurableForDoctor(meta indexreader.Meta, opts indexDoctorOptions) (*i
 		fillDoctorJobManifest(entry, filepath.Join(meta.IdentityDir, "manifest.json"), opts)
 	}
 
+	// Verification-projection inventory runs regardless of marker health:
+	// residue beside a broken latest still needs classification.
+	if strings.TrimSpace(meta.SourcePath) != "" {
+		fillDoctorVerificationProjections(entry, filepath.Dir(meta.SourcePath))
+	}
+
 	setMarkerOK := func(ok bool) {
 		entry.DurableMarkerOK = &ok
 	}
@@ -843,7 +862,10 @@ func inspectDurableForDoctor(meta indexreader.Meta, opts indexDoctorOptions) (*i
 	}
 
 	markerOK := entry.DurableMarkerOK != nil && *entry.DurableMarkerOK
-	entry.IdentityOK = entry.IndexSetID != "" && markerOK && len(entry.Notes) == 0
+	// Health counts only fault notes: informational lifecycle classifications
+	// (e.g. the expected Shape-2 verification-projection retention note) are
+	// excluded so a healthy durable-canonical both build reports identity_ok=true.
+	entry.IdentityOK = entry.IndexSetID != "" && markerOK && len(entry.Notes)-entry.infoNoteCount == 0
 	return entry, nil
 }
 
@@ -903,6 +925,40 @@ func fillDoctorIdentityFields(entry *indexDoctorEntry, identityPath string, opts
 	}
 	entry.IdentityBaseURIMatch = true
 	entry.IdentityProviderMatch = true
+}
+
+// fillDoctorVerificationProjections inventories run-scoped SQLite
+// parity-verification projections under <set>/verification/. This is the
+// contract-8 lifecycle classification: doctor names the attempts so operators
+// can see retained parity artifacts, and nothing here (or anywhere below
+// set-scoped receipt-backed GC) deletes them — run-scoping grants isolation,
+// never deletion authority.
+func fillDoctorVerificationProjections(entry *indexDoctorEntry, setDir string) {
+	verificationDir := filepath.Join(setDir, "verification")
+	info, err := os.Lstat(verificationDir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return
+	}
+	children, err := os.ReadDir(verificationDir)
+	if err != nil {
+		return
+	}
+	for _, child := range children {
+		if !child.IsDir() {
+			continue
+		}
+		entry.VerificationProjections = append(entry.VerificationProjections, child.Name())
+	}
+	entry.VerificationProjectionCount = len(entry.VerificationProjections)
+	if entry.VerificationProjectionCount > 0 {
+		// Informational lifecycle classification, not a health fault: retaining a
+		// run-scoped verification projection is the expected steady state after a
+		// successful Shape-2 both build.
+		entry.Notes = append(entry.Notes, fmt.Sprintf(
+			"%d run-scoped verification projection(s) retained under verification/ (dual-format parity artifacts; removed only by receipt-backed set-scoped GC)",
+			entry.VerificationProjectionCount))
+		entry.infoNoteCount++
+	}
 }
 
 func fillDoctorJobManifest(entry *indexDoctorEntry, manifestPath string, opts indexDoctorOptions) {

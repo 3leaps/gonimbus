@@ -106,8 +106,10 @@ func streamSegErr(cat StreamSegmentCategory, phase, message string, rowIndex int
 // segments under config.Dir and returns the same in-memory InternalManifest
 // contract as WriteSegmentSet.
 //
-// Dark primitive only: does not write manifest.json, complete, or latest.
-// Production publication remains Compact → WriteSegmentSet until activation.
+// This writer is the production publish sink (drained by PublishSnapshot); it
+// does not itself write manifest.json, complete, or latest — PublishSnapshot
+// owns those. Continuous-parent rows arrive through src and lineage metadata
+// through the publish configuration; the writer derives neither itself.
 //
 // Contract (folded seat freezes):
 //   - Writer owns one terminal src.Close on every exit path.

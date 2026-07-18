@@ -1,11 +1,24 @@
-# Durable spill/merge row source (dark)
+# Durable spill/merge row source
 
-**Status**: internal library primitive only
+**Status**: active — the production publish path streams through this source
 
-**Does not**: activate continuous-state publication, rewrite `PublishSnapshot`,
-load prior-run state for ordinary builds, or raise enrich scale ceilings.
-Streaming segment write is a separate dark primitive — see
-[durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
+`PublishSnapshot` compacts sealed journals against the prior state by draining
+this prepare-then-drain source into the streaming segment writer, so the full
+current-state row set is never materialized in memory. The committed
+row/artifact/digest contract is identical to the previous materialized
+`Compact` → `WriteSegmentSet` path.
+
+**Does not** (true boundaries): enable timestamp-scoped incremental builds or
+raise enrich scale ceilings. Tombstoning while draining is coverage-gated
+(scope-reduced coverage merge): an unobserved active parent row is tombstoned
+only when the current run's confirmed-complete coverage contains its key;
+parent rows outside that coverage pass through verbatim. For
+ordinary durable builds the parent source streams the verified same-set
+parent's published rows (a bounded pull reader over its segments); the enrich
+path still supplies its already-loaded prior rows as a slice. Lineage emission
+is owned by the publish/build path, not this source (see
+[durable-lineage.md](durable-lineage.md)). Streaming segment write is described
+in [durable-streaming-segment-writer.md](durable-streaming-segment-writer.md).
 
 ## Purpose
 
@@ -18,9 +31,9 @@ parent rows (sorted, unique) + sealed journals
   → sorted CurrentObjectRow iterator
 ```
 
-Production publication still uses `Compact` → `WriteSegmentSet`. This primitive
-exists so a later activation path can stream without holding a full in-memory
-state map, while remaining differential-tested against `Compact` today.
+Production publication drains this source instead of holding a full in-memory
+state map. It remains differential-tested against `Compact` so the committed
+projection is provably identical.
 
 ## API (`internal/indexsubstrate`)
 
@@ -29,6 +42,7 @@ state map, while remaining differential-tested against `Compact` today.
 | `SpillMergeConfig`                             | Identity, parent source, journal paths, coverage, mode, spill root, budget                                |
 | `SpillMergeBudget` / `DefaultSpillMergeBudget` | Prospective memory/disk/fan-in/pass bounds                                                                |
 | `ParentRowSource` / `NewSliceParentRows`       | Already-authorized parent stream (no latest lookup)                                                       |
+| `NewPublishedParentRowSource`                  | Bounded pull stream over a verified published snapshot's segments (ordinary builds' parent source)        |
 | `PrepareCurrentStateSource`                    | Validate → stage → READY (no rows until ready)                                                            |
 | `CurrentStateSource.Next`                      | Owned rows in strict bytewise `RelKey` order                                                              |
 | `CurrentStateSource.Close`                     | Idempotent; cleans this attempt under the SpillRoot trust model (below)                                   |
@@ -74,16 +88,20 @@ normalized rows or counters.
 | ----------------- | --------------------------------------------------------------------------------------- |
 | MaxBufferedRows   | 64_000                                                                                  |
 | MaxBufferedBytes  | 64 MiB                                                                                  |
-| MaxRecordBytes    | 1 MiB                                                                                   |
+| MaxRecordBytes    | 16 MiB                                                                                  |
 | MaxJournalSources | 256                                                                                     |
-| MaxWorkspaceBytes | 512 MiB                                                                                 |
+| MaxWorkspaceBytes | 16 GiB                                                                                  |
 | MaxSpillRuns      | 4096                                                                                    |
 | MaxFanIn          | 16 (min **3**; concurrent **spill-run** FDs only — roots/lock/journal sources excluded) |
 | MaxMergePasses    | 64                                                                                      |
 
 Invalid budgets fail before workspace creation. Exact limit succeeds; the next
-encoded byte/row/run/pass refuses with category `budget`. Workspace accounting
-includes headers, footers, and payload; charges are prospective before writes.
+encoded byte/row/run/pass refuses with category `budget`. `MaxRecordBytes`
+counts **encoded record payload bytes, excluding the line terminator** (`\n` or
+`\r\n` is framing, not record bytes) — identically in sealed-journal validation
+and the streaming scan, so a payload of exactly the limit passes both readers
+and one more byte refuses. Workspace accounting includes headers, footers, and
+payload; charges are prospective before writes.
 
 Field RSS evidence remains a later activation gate; hermetic tests use the
 deterministic high-water counters.
@@ -109,7 +127,7 @@ mutate the parent directory namespace.
 Portable Go/POSIX can bind and wipe a directory through an open FD, but the
 final empty-directory unlink is still name-based. A concurrent actor with write
 authority on the parent can still swap an **empty** dentry in that last window.
-**Hostile concurrent namespace mutation is out of scope for this dark primitive.** If a
+**Hostile concurrent namespace mutation is out of scope for this source.** If a
 future product requirement needs adversarial dentry-swap immunity, that is a
 separate OS-specific handle-disposition / authority-boundary slice — not more
 SameFile checks on pathname delete.
@@ -157,18 +175,19 @@ Caller-supplied `RunStartedAt` is validated **before** any `.UTC()` laundering
 or workspace creation. Non-zero zone offsets refuse as invalid config (same
 discipline as lineage write seams).
 
-## Darkness
+## Activation boundary
 
-| Path                        | Behavior                                 |
-| --------------------------- | ---------------------------------------- |
-| `PublishSnapshot`           | Still uses `Compact` / materialize path  |
-| CLI / durable build adapter | No PriorRows load for ordinary builds    |
-| Lineage emission            | Unchanged (schema-only from prior slice) |
-| Streaming segment writer    | Separate dark primitive (see linked doc) |
-| Enrich 2M ceiling           | Unchanged                                |
+| Path                        | Behavior                                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `PublishSnapshot`           | **Active** — drains this source into the streaming writer                                                       |
+| CLI / durable build adapter | **Active** — ordinary builds stream the verified parent's rows through this source (caller `PriorRows` refused) |
+| Lineage emission            | **Active** on the build path — derived from the verified parent capture; this source carries rows only          |
+| Streaming segment writer    | **Active** — the publish sink (see linked doc)                                                                  |
+| Timestamp-scoped builds     | Not activated                                                                                                   |
+| Enrich scale ceiling        | Unchanged (enrich still materializes its prior rows)                                                            |
 
 ## Related
 
-- Lineage schema (dark): `docs/architecture/durable-lineage.md`
+- Lineage contract: `docs/architecture/durable-lineage.md`
 - Materialized oracle: `Compact` in `internal/indexsubstrate`
 - Canonical authority: ADR-0007 (not reopened here)

@@ -29,21 +29,41 @@ const (
 // Count fields that apply to a format are always present (including zero).
 // omitempty is reserved for format-specific optional identity fields only.
 type indexBuildResultRecord struct {
-	Type             string   `json:"type"`
-	SchemaVersion    string   `json:"schema_version"`
-	Status           string   `json:"status"`
-	RequestedFormat  string   `json:"requested_format"`
-	FormatsCommitted []string `json:"formats_committed"`
-	IndexSetID       string   `json:"index_set_id"`
-	RunID            string   `json:"run_id"`
-	ScopeHash        string   `json:"scope_hash,omitempty"`
-	Rows             *int     `json:"rows,omitempty"`
-	ActiveRows       *int     `json:"active_rows,omitempty"`
-	Tombstones       *int     `json:"tombstones,omitempty"`
-	Segments         *int     `json:"segments,omitempty"`
-	ObjectsObserved  *int64   `json:"objects_observed,omitempty"`
-	ObjectsIngested  *int64   `json:"objects_ingested,omitempty"`
-	ManifestSHA256   string   `json:"manifest_sha256,omitempty"`
+	Type             string                            `json:"type"`
+	SchemaVersion    string                            `json:"schema_version"`
+	Status           string                            `json:"status"`
+	RequestedFormat  string                            `json:"requested_format"`
+	FormatsCommitted []string                          `json:"formats_committed"`
+	IndexSetID       string                            `json:"index_set_id"`
+	RunID            string                            `json:"run_id"`
+	ScopeHash        string                            `json:"scope_hash,omitempty"`
+	Rows             *int                              `json:"rows,omitempty"`
+	ActiveRows       *int                              `json:"active_rows,omitempty"`
+	Tombstones       *int                              `json:"tombstones,omitempty"`
+	Segments         *int                              `json:"segments,omitempty"`
+	ObjectsObserved  *int64                            `json:"objects_observed,omitempty"`
+	ObjectsIngested  *int64                            `json:"objects_ingested,omitempty"`
+	ManifestSHA256   string                            `json:"manifest_sha256,omitempty"`
+	Verification     *indexBuildBothVerificationRecord `json:"verification,omitempty"`
+}
+
+// indexBuildBothVerificationRecord reports the run-scoped SQLite
+// parity-verification projection of a --format both build. It is evidence
+// that verification ran and how it concluded — never a claim that a consumer
+// SQLite artifact was committed (formats_committed carries commitment claims).
+type indexBuildBothVerificationRecord struct {
+	ProjectionMaterialized bool   `json:"projection_materialized"`
+	ProjectionClosed       bool   `json:"projection_closed"`
+	ObservationRunID       string `json:"observation_run_id"`
+	ParityPassed           bool   `json:"parity_passed"`
+	ProjectionRows         int64  `json:"projection_rows"`
+	ProjectionSHA256       string `json:"projection_sha256,omitempty"`
+	// ArtifactID and ArtifactLocator bind the receipt to the exact SQLite
+	// database the parity report compared: the opaque per-run attempt ID and a
+	// set-relative locator for canonical builds (never a host-absolute path),
+	// or the caller-provided path for an explicit external --db.
+	ArtifactID      string `json:"artifact_id"`
+	ArtifactLocator string `json:"artifact_locator"`
 }
 
 func intPtr(v int) *int       { return &v }
@@ -82,12 +102,15 @@ func newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status string, obj
 	}
 }
 
-func newBothBuildResultRecord(summary indexbuild.Summary, scopeHash string, objectsIngested int64) indexBuildResultRecord {
+// newBothBuildResultRecord commits durable only: the SQLite side of a `both`
+// build is a run-scoped parity-verification projection, reported in the
+// verification block, never in formats_committed.
+func newBothBuildResultRecord(summary indexbuild.Summary, scopeHash string, objectsIngested int64, verification *indexBuildBothVerificationRecord) indexBuildResultRecord {
 	rec := newDurableBuildResultRecord(summary, scopeHash, "both", []string{
-		string(indexreader.FormatSQLiteV1),
 		string(indexreader.FormatDurableV2),
 	})
 	rec.ObjectsIngested = int64Ptr(objectsIngested)
+	rec.Verification = verification
 	return rec
 }
 
@@ -152,6 +175,32 @@ func validateIndexBuildResultRecord(rec indexBuildResultRecord) error {
 	}
 	if status == "success" && !hasDurable && !hasSQLite {
 		return fmt.Errorf("build result formats_committed must include a known substrate")
+	}
+	if strings.TrimSpace(rec.RequestedFormat) == "both" {
+		// `both` commits durable only; its SQLite side is a run-scoped
+		// verification projection and must never appear as a committed format.
+		if hasSQLite {
+			return fmt.Errorf("build result for requested_format both must not claim a committed sqlite substrate")
+		}
+		if rec.Verification == nil {
+			return fmt.Errorf("build result for requested_format both requires the verification block")
+		}
+		if rec.Verification.ObservationRunID != rec.RunID {
+			return fmt.Errorf("build result verification observation_run_id must bind the receipt run")
+		}
+		if strings.TrimSpace(rec.Verification.ArtifactID) == "" || strings.TrimSpace(rec.Verification.ArtifactLocator) == "" {
+			return fmt.Errorf("build result verification must bind the compared artifact identity")
+		}
+		if status == "success" {
+			if !rec.Verification.ProjectionMaterialized || !rec.Verification.ProjectionClosed {
+				return fmt.Errorf("build result for successful both requires a materialized and closed verification projection")
+			}
+			if !rec.Verification.ParityPassed {
+				return fmt.Errorf("build result for successful both requires passed parity")
+			}
+		}
+	} else if rec.Verification != nil {
+		return fmt.Errorf("build result verification block is only valid for requested_format both")
 	}
 	return nil
 }

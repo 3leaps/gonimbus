@@ -133,10 +133,13 @@ func TestBuildUsesAndPreservesCallerOwnedAuthority(t *testing.T) {
 	require.Nil(t, contender)
 }
 
-func TestRunnerNormalizesProviderCoverageToRelKeyTombstones(t *testing.T) {
-	cfg := testConfig(t, "coverage-relkey")
+// Caller-supplied PriorRows is not an accepted canonical-state channel: durable
+// prior state is loaded from the verified parent under the held lease. Coverage
+// -> tombstone behavior over prior state is proven through the verified-parent
+// continuity fixtures rather than a caller-injected prior row.
+func callerPriorRow(cfg Config) []ObjectState {
 	priorSeen := cfg.RunStartedAt.Add(-24 * time.Hour)
-	cfg.PriorRows = []ObjectState{{
+	return []ObjectState{{
 		IndexSetID:       cfg.IndexSetID,
 		RelKey:           "missing.xml",
 		SizeBytes:        9,
@@ -148,20 +151,146 @@ func TestRunnerNormalizesProviderCoverageToRelKeyTombstones(t *testing.T) {
 		LastSeenRunID:    "run_old",
 		LastSeenAt:       priorSeen,
 	}}
+}
 
-	summary, err := NewRunner(cfg).Build(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int64(2), summary.ObjectsObserved)
-
-	_, rows, err := ReadLatest(cfg.Paths.LatestPath)
-	require.NoError(t, err)
-	require.Len(t, rows, 3)
-	byKey := map[string]ObjectState{}
-	for _, row := range rows {
-		byKey[row.RelKey] = row
+func TestBuildRejectsCallerSuppliedPriorRows(t *testing.T) {
+	// Strict presence: any non-nil slice is refused, including an empty non-nil
+	// slice — the field is not an accepted canonical-state channel.
+	cases := map[string][]ObjectState{
+		"non-empty":     nil, // filled per-case below
+		"empty-non-nil": {},
 	}
-	require.NotNil(t, byKey["missing.xml"].DeletedAt)
-	require.Equal(t, cfg.RunStartedAt, *byKey["missing.xml"].DeletedAt)
+	for name := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t, "reject-priorrows-"+name)
+			if name == "non-empty" {
+				cfg.PriorRows = callerPriorRow(cfg)
+			} else {
+				cfg.PriorRows = []ObjectState{}
+			}
+			require.NotNil(t, cfg.PriorRows)
+
+			_, err := NewRunner(cfg).Build(context.Background())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "PriorRows is not an accepted input")
+			// No crawl/sink/publish side effect: refused during normalization.
+			require.NoDirExists(t, cfg.Paths.SegmentDir)
+			require.NoFileExists(t, cfg.Paths.LatestPath)
+		})
+	}
+}
+
+func TestRetryRejectsCallerSuppliedPriorRows(t *testing.T) {
+	for _, prior := range map[string][]ObjectState{
+		"non-empty":     {{RelKey: "missing.xml"}},
+		"empty-non-nil": {},
+	} {
+		prior := prior
+		cfg := testConfig(t, "reject-priorrows-retry")
+		require.NotNil(t, prior)
+		_, err := Retry(context.Background(), RetryConfig{
+			IndexSetID:   cfg.IndexSetID,
+			RunID:        cfg.RunID,
+			Paths:        cfg.Paths,
+			JournalPaths: []string{filepath.Join(cfg.Paths.JournalDir, "shard-0001.jsonl")},
+			Coverage:     cfg.Coverage,
+			RunStartedAt: cfg.RunStartedAt,
+			PriorRows:    prior,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "PriorRows is not an accepted input")
+		require.NoFileExists(t, cfg.Paths.LatestPath)
+	}
+}
+
+// TestBuildRefusesForeignSetParentLatest proves the verified-parent capture is
+// bound to the requested set: a validly digested latest belonging to another set
+// is refused before any crawl/sink/publish, and that foreign latest is left
+// byte-identical (a build for set B can never adopt or advance set A's latest).
+func TestBuildRefusesForeignSetParentLatest(t *testing.T) {
+	ctx := context.Background()
+
+	// Publish a valid snapshot for set A.
+	cfgA := testConfig(t, "setA")
+	cfgA.IndexSetID = "idx_parent"
+	_, err := NewRunner(cfgA).Build(ctx)
+	require.NoError(t, err)
+	require.FileExists(t, cfgA.Paths.LatestPath)
+	origLatest, err := os.ReadFile(cfgA.Paths.LatestPath)
+	require.NoError(t, err)
+
+	// Build set B whose LatestPath points at A's valid latest; every other path
+	// is B-owned.
+	cfgB := testConfig(t, "setB")
+	cfgB.IndexSetID = "idx_child"
+	cfgB.Paths.LatestPath = cfgA.Paths.LatestPath
+
+	_, err = NewRunner(cfgB).Build(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+	require.Contains(t, err.Error(), "different index set")
+	// B mutated nothing of its own.
+	require.NoDirExists(t, cfgB.Paths.SegmentDir)
+	require.NoDirExists(t, cfgB.Paths.JournalDir)
+	// A's latest is byte-identical.
+	afterLatest, err := os.ReadFile(cfgA.Paths.LatestPath)
+	require.NoError(t, err)
+	require.Equal(t, origLatest, afterLatest)
+}
+
+func TestRetryRefusesForeignSetParentLatest(t *testing.T) {
+	ctx := context.Background()
+
+	cfgA := testConfig(t, "retry-setA")
+	cfgA.IndexSetID = "idx_parent"
+	_, err := NewRunner(cfgA).Build(ctx)
+	require.NoError(t, err)
+	origLatest, err := os.ReadFile(cfgA.Paths.LatestPath)
+	require.NoError(t, err)
+
+	cfgB := testConfig(t, "retry-setB")
+	cfgB.IndexSetID = "idx_child"
+	cfgB.Paths.LatestPath = cfgA.Paths.LatestPath
+
+	_, err = Retry(ctx, RetryConfig{
+		IndexSetID:   cfgB.IndexSetID,
+		RunID:        "run_child",
+		Paths:        cfgB.Paths,
+		JournalPaths: []string{filepath.Join(cfgB.Paths.JournalDir, "shard-0001.jsonl")},
+		Coverage:     cfgB.Coverage,
+		RunStartedAt: cfgB.RunStartedAt,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+	require.Contains(t, err.Error(), "different index set")
+	afterLatest, err := os.ReadFile(cfgA.Paths.LatestPath)
+	require.NoError(t, err)
+	require.Equal(t, origLatest, afterLatest)
+}
+
+// TestRetryWithLeaseRejectsNilPlan proves the typed plan fails closed: a
+// nil verifiedParentPlan must never degrade to a verified first publication.
+func TestRetryWithLeaseRejectsNilPlan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	latestPath := filepath.Join(root, "latest.json")
+	authority, err := indexcoord.Acquire(ctx, root, "idx_nilplan", "holder")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = authority.Release() })
+	lease, err := indexsubstrate.AcquireWriteLease(root, "idx_nilplan", "holder", 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+
+	cfg := RetryConfig{
+		IndexSetID:   "idx_nilplan",
+		RunID:        "run_nilplan",
+		Paths:        PathConfig{LatestPath: latestPath},
+		JournalPaths: []string{filepath.Join(root, "shard-0001.jsonl")},
+	}
+	_, err = retryWithLease(ctx, cfg, nil, authority, lease)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "verified parent plan is required")
+	require.NoFileExists(t, latestPath)
 }
 
 func TestRunnerFansOutOneObservedStreamToExtraSink(t *testing.T) {
@@ -345,6 +474,38 @@ func TestDependencyBoundary(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestBuildRefusesNonUTCRunStartedAtBeforeSideEffects(t *testing.T) {
+	cfg := testConfig(t, "build_nonutc")
+	edt := time.FixedZone("EDT", -4*60*60)
+	// Same instant, non-UTC zone: must refuse before crawl/sink/publish, not
+	// launder through .UTC().
+	cfg.RunStartedAt = cfg.RunStartedAt.In(edt)
+
+	_, err := NewRunner(cfg).Build(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "UTC")
+	require.NoDirExists(t, cfg.Paths.SegmentDir, "no segment dir before a refused run start")
+	require.NoDirExists(t, cfg.Paths.JournalDir, "no journal dir before a refused run start")
+	require.NoFileExists(t, cfg.Paths.LatestPath)
+}
+
+func TestRetryRefusesNonUTCRunStartedAtBeforeSideEffects(t *testing.T) {
+	cfg := testConfig(t, "retry_nonutc")
+	edt := time.FixedZone("EDT", -4*60*60)
+
+	_, err := Retry(context.Background(), RetryConfig{
+		IndexSetID:   cfg.IndexSetID,
+		RunID:        cfg.RunID,
+		Paths:        cfg.Paths,
+		JournalPaths: []string{filepath.Join(cfg.Paths.JournalDir, "shard-0001.jsonl")},
+		Coverage:     cfg.Coverage,
+		RunStartedAt: cfg.RunStartedAt.In(edt),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "UTC")
+	require.NoFileExists(t, cfg.Paths.LatestPath)
 }
 
 func testConfig(t *testing.T, name string) Config {

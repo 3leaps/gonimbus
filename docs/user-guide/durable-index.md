@@ -39,17 +39,18 @@ gonimbus index build --job index.yaml
 
 # SQLite when you still need SQLite-only surfaces (gc, --since-run, …)
 gonimbus index build --job index.yaml --format sqlite
-# Dual-format for migration confidence + SQLite-only consumers
+# Durable publication + per-run SQLite parity verification
 gonimbus index build --job index.yaml --format both
 ```
 
-| Need                                                            | Format choice                                      |
-| --------------------------------------------------------------- | -------------------------------------------------- |
-| Hub-scale export/hydrate, default new builds                    | `durable` (default)                                |
-| Local `index query` / `list` / `stats` / `doctor`               | `durable`, `sqlite`, or `both` (format-aware seam) |
-| Local `enrich-with-head`                                        | `durable`, `sqlite`, or `both` (format-aware)      |
-| Local inventory GC (`index gc --dry-run`)                       | Format-aware immutable plan; execution gated       |
-| Migration confidence (one crawl, two artifacts + parity report) | `both`                                             |
+| Need                                                             | Format choice                                |
+| ---------------------------------------------------------------- | -------------------------------------------- |
+| Hub-scale export/hydrate, default new builds                     | `durable` (default)                          |
+| Local `index query` / `list` / `stats` / `doctor`                | `durable` or `sqlite` (format-aware seam)    |
+| Local `enrich-with-head`                                         | `durable` or `sqlite` (format-aware)         |
+| Local inventory GC (`index gc --dry-run`)                        | Format-aware immutable plan; execution gated |
+| Canonical SQLite consumer artifact (`index.db`)                  | `sqlite` only                                |
+| Migration confidence (durable publication + per-run parity gate) | `both`                                       |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
 first-class compatibility path. Resume printed as
@@ -61,13 +62,17 @@ default when `--format` is omitted (SQLite checkpoint lifecycle).
 ```text
 indexes/idx_<hash>/
   identity.json              # always for the index set
-  index.db                   # only when format is sqlite or both
+  index.db                   # only when format is sqlite (canonical consumer artifact)
 
 cache/segments/<index_set_id>/runs/<run_id>/
   journals/ ...
   segments/ ...
   manifest.json
   complete.json              # (or complete marker for the run)
+
+cache/segments/<index_set_id>/verification/run_<nano>/
+  index.db                   # --format both only: run-scoped parity-verification
+                             # projection; never a reader-selectable consumer DB
 ```
 
 Exact on-disk paths follow the app data root (`GONIMBUS_DATA_DIR` / `data_root`);
@@ -90,18 +95,99 @@ Default target packing is **500,000 rows per segment**. That target is an
 engine packing lever, **not operator-facing configuration** in this cut. Do not
 plan automation around a custom segment-size flag.
 
+### Sizing the merge workspace (successive builds at scale)
+
+A **successive** durable build (a second or later build of the same index set)
+stages the **full prior current-state** into an on-disk scratch workspace before
+merging in the new observations, so its peak workspace scales roughly with corpus
+size, not with the change set. A first build has no prior state to stage, so it
+spills only the run's own observations — its peak is much lower (field first
+builds recorded ~0.46 GiB at ~0.9M and ~2.3 GiB at ~3.6M), and the successive
+path is the one to size for.
+
+The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
+the build **closed** — a typed error, the prior published run and `latest`
+untouched — rather than growing without bound. The default ceiling is **16 GiB**.
+Field peak runs ~1.2–1.35 KiB/row (bounded, flattening with scale), so this
+carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a
+**convenience default ceiling**, **not a guarantee** for larger sets, which must
+raise it explicitly.
+
+A second budget, the **max single journal-record size** (`MaxRecordBytes`,
+default **16 MiB**), bounds one journal line — its encoded payload bytes, with
+the line terminator excluded as framing. The journal header carries the
+crawl-prefix plan, so a very wide/dense scope (tens of thousands of prefixes) can
+push the header past the default and fail the build closed at the journal phase.
+Raise it the same way when a very fine scope needs it.
+
+Size the ceiling (and, if needed, point the scratch at a roomier disk) via — in
+precedence order — the CLI flag, an environment variable, or application config:
+
+```bash
+# CLI flag (foreground builds)
+gonimbus index build --job index.yaml --spill-workspace-max 24GiB --spill-record-max 32MiB --spill-root /mnt/scratch
+
+# Environment (also inherited by --background jobs)
+export GONIMBUS_SPILL_WORKSPACE_MAX=24GiB
+export GONIMBUS_SPILL_RECORD_MAX=32MiB
+export GONIMBUS_SPILL_ROOT=/mnt/scratch
+```
+
+```yaml
+# Application config (XDG config file — never the index job manifest)
+index:
+  spill:
+    workspace_max: 24GiB # 24GiB/16GB/raw bytes; explicit 0/negative/unlimited is refused
+    record_max: 32MiB # max single journal-record size
+    root: /mnt/scratch # absolute, real, non-symlink, operator-exclusive
+```
+
+Notes:
+
+- **Precedence:** CLI flag > environment > application config > built-in default
+  (16 GiB workspace, 16 MiB record).
+- The value is a **ceiling, not a reservation**, and a self-protection control
+  against runaway scratch — keep it a finite positive size; there is no
+  "unlimited" spelling.
+- `--spill-workspace-max` / `--spill-record-max` / `--spill-root` are **not
+  forwarded to `--background` jobs** (the managed child is reconstructed from a
+  fingerprinted invocation). Use the environment or config keys, which the
+  managed child inherits.
+- The scratch **root is host/operator configuration**, never index identity — it
+  never enters manifests, receipts, or committed digests, and is never echoed
+  into artifacts or sanitized errors (diagnostics show its source, not the path).
+- Each durable build prints the effective ceiling and its source on **stderr**.
+
 ## Dual-format parity
 
-`--format both` runs **one crawl** into both SQLite and durable writers, then
-emits a machine-readable `gonimbus.index.compare_result.v1` report (including a
-`projection_semantics` block).
+`--format both` runs **one crawl** and publishes the **durable index as the
+canonical artifact**. The SQLite side is a **run-scoped parity-verification
+projection**: it is written to a fresh per-run path, compared against the
+durable output, and reported — it is never a reader-selectable consumer
+`index.db`, never adopted by a later run, and never a lineage parent. Use
+`--format sqlite` when a consumer needs the canonical `index.db`.
+
+Each run emits a machine-readable `gonimbus.index.compare_result.v1` report
+(including a `projection_semantics` block), and under `--json` a terminal
+`gonimbus.index.build_result.v1` receipt with `formats_committed:
+["durable-v2"]` plus a `verification` block (projection materialized/closed,
+the producing run binding, parity status, projection rows and digest). The
+receipt never claims a committed consumer SQLite artifact; "verification
+succeeded" and "consumer artifact committed" are separate facts.
 
 ```bash
 gonimbus index build --job index.yaml --format both
 ```
 
 Use this as the **migration confidence gate** before switching consumers off
-SQLite for new hub traffic.
+SQLite for new hub traffic. Successive `both` builds of the same set extend
+durable lineage continuously; each run's verification projection starts clean,
+so runs never contend for a shared SQLite path.
+
+If durable publication succeeds but the verification projection or parity
+comparison fails, the durable snapshot stays authoritative and visible, no
+successful `both` receipt is emitted, and the failed projection is never
+selected by readers.
 
 ### What green parity certifies
 
@@ -131,6 +217,13 @@ portable content hash. See
 **fail-closed set-equality** against the crawl prefix plan: every planned
 prefix must be attested, with no silent roll-up. That is what makes a
 date-partitioned cohort safe to dual-build at scale.
+
+Repeated builds of the same scoped identity merge coverage against the
+verified parent: prior rows outside the current run's attested plan are
+retained verbatim (including their first-seen lineage, HEAD enrichment, and
+existing tombstones), and deletes are inferred only for keys inside the
+current confirmed-complete attestation. The published coverage still lists
+exactly the crawled plan — retained rows carry no fresh observation claim.
 
 Some dual-format combinations remain intentionally closed in this cut (for
 example `--format both` with `--since` or non-default match filters).
@@ -206,24 +299,30 @@ gonimbus index compare durable-delta \
 The report summarizes added / changed / tombstoned rows with fail-closed
 coverage attribution. This is a **snapshot-to-snapshot** tool, not a
 replacement for `index query --since-run`. Forward object deltas via
-`--since-run` still require a SQLite-backed index (`--format sqlite` or
-`both`); durable-only snapshots do not support `--since-run` yet.
+`--since-run` still require a canonical SQLite index (`--format sqlite`);
+durable snapshots do not support `--since-run` yet.
 
-### Lineage schema (dark)
+### Lineage and continuity
 
-Durable manifests may carry optional additive fields for a continuous
-lineage contract (`run_started_at`, `state_parent`, `lineage`). See
+Ordinary durable builds emit a continuous lineage contract on the manifest
+(`run_started_at`, digest-bound `state_parent`, `lineage`) and load prior state
+from the verified latest snapshot of the same index set. See
 [durable lineage](../architecture/durable-lineage.md).
 
-- **Legacy manifests** (fields absent) remain readable as a **verified
-  current-state** source.
-- Legacy latest is **not** a trustworthy `--since-run` / forward-delta boundary.
-- When lineage fields are present, `run_started_at` must be a non-zero **UTC**
-  authoritative run start (not `created_at` or journal time).
-- A baseline may optionally name one exact pre-continuity parent as a verified
+- A **first publication** is a baseline (generation 1, no state parent).
+- A build over a **pre-continuity** (no-lineage) parent — for example an
+  enriched snapshot — publishes a baseline bound to that parent as a verified
   state source; that parent is still **not** a delta boundary.
-- Production builds do **not** emit continuity edges or load prior-run state for
-  ordinary durable/`both` builds today.
+- A build over a **continuous** parent extends it (generation + 1) after
+  validating the parent's bounded ancestry; any ancestry defect fails closed
+  without advancing latest.
+- **Legacy manifests** (fields absent) remain readable as a **verified
+  current-state** source. Legacy latest is **not** a trustworthy `--since-run` /
+  forward-delta boundary.
+- `run_started_at` is a non-zero **UTC** authoritative run start (not
+  `created_at` or journal time).
+- Durable `--since` / `--since-run` remains unsupported: forward object deltas
+  still require a SQLite-backed index.
 
 ## Hub export and hydrate
 
@@ -255,10 +354,12 @@ artifacts when needed.
 `index query`, `index list`, `index stats`, and `index doctor` share a
 format-aware local reader seam:
 
-- **sqlite-v1** when `index.db` is present (preferred when both formats exist
-  for the same set)
 - **durable-v2** when a verified latest → complete → manifest chain is present
-  (including durable-only default builds with no `index.db`)
+  (preferred when both formats exist for the same set — a set-root `index.db`
+  beside a verified durable latest may be a stale artifact from an earlier run
+  and is surfaced diagnostically, never silently selected)
+- **sqlite-v1** when `index.db` is present with no verified durable latest
+  (SQLite-only sets keep their existing selection)
 
 `index query` streams verified segment rows on durable (emit-as-arrived;
 later-segment failure returns non-zero). Result order matches SQLite
@@ -334,9 +435,10 @@ work (column suppression, opaque tokens, coverage/statistics redaction) and is
 3. Point hub export/hydrate at format-aware paths; prefer durable for new hub
    traffic.
 4. Default durable builds support format-aware `query`, `list`, `stats`,
-   `doctor`, and `enrich-with-head`. Keep `--format sqlite` or `both` only for
-   **SQLite-only** surfaces: `query --since-run`,
-   `stats --prefixes`, and full `--resume-run` checkpoint recovery.
+   `doctor`, and `enrich-with-head`. Keep `--format sqlite` only for
+   **SQLite-only** surfaces: `query --since-run`, `stats --prefixes`, and full
+   `--resume-run` checkpoint recovery. (`both` no longer produces a canonical
+   `index.db`; its SQLite side is per-run parity verification.)
 5. Treat durable hub artifacts as internal pipeline inputs only until a later
    boundary-render release lands.
 

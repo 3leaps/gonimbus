@@ -10,6 +10,10 @@ type Summary struct {
 	// publish time. Prefer this over re-hashing the manifest path after commit.
 	ManifestSHA256 string
 	Manifest       ManifestSummary
+	// PeakWorkspaceBytes is the high-water live on-disk spill workspace observed
+	// during the durable merge (0 when nothing spilled or on the SQLite path).
+	// Observational capacity evidence for sizing successive builds.
+	PeakWorkspaceBytes int64
 }
 
 type ManifestSummary struct {

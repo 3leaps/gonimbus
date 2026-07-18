@@ -76,6 +76,9 @@ func TestIndexEnrichSQLiteHeldSetGuardRejectsBeforeDBMutation(t *testing.T) {
 
 func TestIndexEnrichSnapshotAuthorityLossStopsBeforeMutation(t *testing.T) {
 	env := seedSQLiteEnrichGCAppData(t)
+	// This test pins the SQLite enrich path; keep the durable latest hidden so
+	// resolution selects the set-root SQLite database.
+	_ = hideDurableLatestForSQLiteSelection(t, env.indexSetID)
 	before := snapshotIndexGCTreeState(t, env.identityDir)
 	segmentRoot, err := indexSubstrateSegmentCacheDir(env.indexSetID)
 	require.NoError(t, err)
@@ -162,6 +165,10 @@ func TestCanonicalSQLiteMissingIdentityRefusesDuringActiveWriter(t *testing.T) {
 	_, err = db.ExecContext(context.Background(), `UPDATE index_sets SET created_at = ? WHERE index_set_id = ?`, time.Now().UTC().Format(time.RFC3339Nano), env.indexSetID)
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(filepath.Join(env.identityDir, "identity.json")))
+	// Hide the durable latest: with a verified durable sibling the full-ID
+	// resolve correctly selects durable despite the missing legacy marker;
+	// this test pins the absent-durable arm where the identity refusal holds.
+	require.NoError(t, os.Remove(filepath.Join(segmentRoot, "latest.json")))
 	before := snapshotIndexGCTreeState(t, env.identityDir)
 
 	reader, err := openIndexReader(context.Background(), "", env.indexSetID, "")
@@ -278,6 +285,9 @@ func TestIndexInitAfterIdentityQuarantineCannotRecreateAndGCRecoveryConverges(t 
 
 func TestSQLiteListAndDoctorUseNonMutatingAuthorityHeldSnapshots(t *testing.T) {
 	env := seedSQLiteEnrichGCAppData(t)
+	// This test pins SQLite read surfaces; keep the durable latest hidden so
+	// format-aware resolution selects the set-root SQLite database.
+	_ = hideDurableLatestForSQLiteSelection(t, env.indexSetID)
 	dbPath := filepath.Join(env.identityDir, "index.db")
 	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: dbPath})
 	require.NoError(t, err)
@@ -339,6 +349,9 @@ func TestActiveSQLiteEnrichPreventsPlannedGCExecution(t *testing.T) {
 	t.Cleanup(func() { newEnrichHeadProvider = oldProvider })
 
 	cmd, out := configureIndexEnrichCommandForGCTest(t)
+	// Hide the durable latest so the enrich resolves the SQLite path, then
+	// restore it: GC planning/execution needs the proven durable root.
+	restoreLatest := hideDurableLatestForSQLiteSelection(t, env.indexSetID)
 	enrichDone := make(chan error, 1)
 	go func() {
 		enrichDone <- runIndexEnrichWithHead(cmd, []string{env.indexSetID})
@@ -348,6 +361,7 @@ func TestActiveSQLiteEnrichPreventsPlannedGCExecution(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("SQLite enrich did not reach HEAD while holding maintenance authority")
 	}
+	restoreLatest()
 
 	store, err := openDefaultOperationCheckpointStore(context.Background())
 	require.NoError(t, err)
@@ -374,8 +388,13 @@ func TestActiveSQLiteReaderPreventsGCBeforeQuarantine(t *testing.T) {
 	require.Len(t, plan.Candidates, 1, "warnings: %#v", plan.Warnings)
 	before := snapshotIndexGCTreeState(t, env.identityDir)
 
+	// Hide the durable latest so the opened reader is the SQLite one, then
+	// restore it: GC execution needs the proven durable root.
+	restoreLatest := hideDurableLatestForSQLiteSelection(t, env.indexSetID)
 	reader, err := openIndexReader(context.Background(), "", env.indexSetID, "")
 	require.NoError(t, err)
+	require.Equal(t, indexreader.FormatSQLiteV1, reader.Meta().Format)
+	restoreLatest()
 	store, err := openDefaultOperationCheckpointStore(context.Background())
 	require.NoError(t, err)
 	_, err = executeIndexGCPlan(context.Background(), store, plan, 0, "", 0, now, indexGCExecutionHooks{})
@@ -479,6 +498,18 @@ func TestRecoveredGCPostQuarantineBlocksPublicLibraryWritersAndConverges(t *test
 	require.NoError(t, err)
 	require.Len(t, checkpoints, 1)
 	require.Equal(t, opcheckpoint.StatusSuccess, checkpoints[0].Status)
+}
+
+// hideDurableLatestForSQLiteSelection temporarily removes the durable latest
+// pointer so format-aware resolution selects the set-root SQLite database
+// (durable outranks SQLite whenever a verified latest exists). The returned
+// restore puts the pointer back for stages that need the proven durable root
+// (e.g. GC planning/execution).
+func hideDurableLatestForSQLiteSelection(t *testing.T, indexSetID string) (restore func()) {
+	t.Helper()
+	latest := filepath.Join(os.Getenv("GONIMBUS_DATA_DIR"), "cache", "segments", indexSetID, "latest.json")
+	require.NoError(t, os.Rename(latest, latest+".bak"))
+	return func() { require.NoError(t, os.Rename(latest+".bak", latest)) }
 }
 
 func seedSQLiteEnrichGCAppData(t *testing.T) durableCLIEnv {

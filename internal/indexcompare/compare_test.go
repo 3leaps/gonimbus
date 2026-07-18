@@ -20,10 +20,10 @@ func TestCompareProjectionParityIgnoresOrdering(t *testing.T) {
 		compareObjectRow(indexSetIDForTest, "b.xml", 20, base.Add(time.Minute), "etag-b", "STANDARD"),
 		compareObjectRow(indexSetIDForTest, "a.xml", 10, base, "etag-a", "STANDARD"),
 	})
-	manifest, segmentDir := setupDurableRows(t, []indexsubstrate.CurrentObjectRow{
+	manifest, segmentDir := setupDurableRows(t, stampDurableRun(runID,
 		compareDurableRow(indexSetIDForTest, "a.xml", 10, base, "etag-a", "STANDARD"),
 		compareDurableRow(indexSetIDForTest, "b.xml", 20, base.Add(time.Minute), "etag-b", "STANDARD"),
-	})
+	))
 
 	report, err := Compare(ctx, Input{
 		SQLiteDB:             db,
@@ -49,9 +49,9 @@ func TestCompareProjectionChecksContentIdentitySeparately(t *testing.T) {
 	db, indexSetID, runID := setupSQLiteRows(t, ctx, []indexstore.ObjectRow{
 		compareObjectRow(indexSetIDForTest, "multipart.bin", 10, base, "abc-2", "STANDARD"),
 	})
-	manifest, segmentDir := setupDurableRows(t, []indexsubstrate.CurrentObjectRow{
+	manifest, segmentDir := setupDurableRows(t, stampDurableRun(runID,
 		compareDurableRow(indexSetIDForTest, "multipart.bin", 10, base, "different-2", "STANDARD"),
-	})
+	))
 
 	report, err := Compare(ctx, Input{SQLiteDB: db, SQLiteIndexSetID: indexSetID, DurableManifest: manifest, DurableSegmentDir: segmentDir, ObservationRunID: runID})
 	require.NoError(t, err)
@@ -82,6 +82,66 @@ func TestDefaultProjectionSemanticsDescribesResultContract(t *testing.T) {
 	require.Equal(t, "temporal-delta comparator", semantics.ExcludedFields[2].OwningGate)
 	require.Equal(t, "physical/format-internal metadata", semantics.ExcludedFields[3].FieldClass)
 	require.Equal(t, "excluded by design (format-specific)", semantics.ExcludedFields[3].OwningGate)
+}
+
+// TestCompareProjectionScopedRunExcludesRetainedOutOfScopeDurableRows proves the
+// durable side applies the same observation-run predicate the SQLite side uses.
+// After a scope-reduced build, durable current-state retains out-of-scope active
+// rows with an older last-seen lineage; those are not part of this run's LIST
+// projection and must be excluded symmetrically, or parity falsely reports them
+// as SQLite-missing. The retained row is neither erased nor re-stamped.
+func TestCompareProjectionScopedRunExcludesRetainedOutOfScopeDurableRows(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+
+	// The scoped run's SQLite projection observes only the in-scope row.
+	db, indexSetID, runID := setupSQLiteRows(t, ctx, []indexstore.ObjectRow{
+		compareObjectRow(indexSetIDForTest, "scope/in.xml", 10, base, "etag-in", "STANDARD"),
+	})
+
+	// Durable current-state after the scope-reduced build: the in-scope row is
+	// observed this run; an out-of-scope active row is retained with its older
+	// last-seen lineage (not re-observed, not tombstoned). Rows are sorted by
+	// rel_key for the segment writer.
+	retained := compareDurableRow(indexSetIDForTest, "other/kept.xml", 99, base, "etag-kept", "STANDARD")
+	retained.FirstSeenRunID = "run_prior"
+	retained.LastChangedRunID = "run_prior"
+	retained.LastSeenRunID = "run_prior"
+	inScope := compareDurableRow(indexSetIDForTest, "scope/in.xml", 10, base, "etag-in", "STANDARD")
+	inScope.FirstSeenRunID = runID
+	inScope.LastChangedRunID = runID
+	inScope.LastSeenRunID = runID
+	manifest, segmentDir := setupDurableRows(t, []indexsubstrate.CurrentObjectRow{retained, inScope})
+
+	report, err := Compare(ctx, Input{
+		SQLiteDB:             db,
+		SQLiteIndexSetID:     indexSetID,
+		DurableManifest:      manifest,
+		DurableSegmentDir:    segmentDir,
+		ObservationRunID:     runID,
+		ObservationStartedAt: base,
+	})
+	require.NoError(t, err)
+	require.True(t, report.ParityPassed, "retained out-of-scope durable rows are outside this run's LIST projection")
+	require.Equal(t, int64(1), report.SQLiteRows)
+	require.Equal(t, int64(1), report.DurableRows, "the retained out-of-scope row is excluded symmetrically")
+	require.Equal(t, int64(0), report.ProjectionMismatches)
+
+	// Negative control: without the observation-run predicate the retained row is
+	// genuinely present in the durable projection and surfaces as a durable-only
+	// row — confirming the predicate, not row absence, is what achieves parity.
+	unfiltered, err := Compare(ctx, Input{
+		SQLiteDB:          db,
+		SQLiteIndexSetID:  indexSetID,
+		DurableManifest:   manifest,
+		DurableSegmentDir: segmentDir,
+	})
+	require.NoError(t, err)
+	require.False(t, unfiltered.ParityPassed)
+	require.Equal(t, int64(2), unfiltered.DurableRows)
+	require.Equal(t, int64(1), unfiltered.ProjectionMismatches)
+	require.Equal(t, "other/kept.xml", unfiltered.Mismatches[0].RelKey)
+	require.Equal(t, "sqlite", unfiltered.Mismatches[0].Side)
 }
 
 func TestCompareProjectionRejectsUnknownVersion(t *testing.T) {
@@ -141,6 +201,20 @@ func compareObjectRow(indexSetID, relKey string, size int64, modified time.Time,
 		ETag:         etag,
 		StorageClass: &storageClass,
 	}
+}
+
+// stampDurableRun sets every row's run lineage to runID, modelling a build in
+// which the durable and SQLite sinks observe the same objects under one run —
+// as a real --format both run does. Without this the durable fixtures carried a
+// different last-seen run than the SQLite side, which the observation-run
+// projection predicate (correctly) treats as out of this run's projection.
+func stampDurableRun(runID string, rows ...indexsubstrate.CurrentObjectRow) []indexsubstrate.CurrentObjectRow {
+	for i := range rows {
+		rows[i].FirstSeenRunID = runID
+		rows[i].LastChangedRunID = runID
+		rows[i].LastSeenRunID = runID
+	}
+	return rows
 }
 
 func compareDurableRow(indexSetID, relKey string, size int64, modified time.Time, etag, storageClass string) indexsubstrate.CurrentObjectRow {

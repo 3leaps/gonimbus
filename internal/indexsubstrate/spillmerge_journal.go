@@ -3,8 +3,10 @@ package indexsubstrate
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"strings"
 )
@@ -21,16 +23,22 @@ func scanJournalStreaming(
 	onHeader func(JournalHeader),
 ) error {
 	sc := bufio.NewScanner(r)
-	maxLine := int(budget.MaxRecordBytes)
-	if maxLine < 64 {
-		maxLine = 64
-	}
-	sc.Buffer(make([]byte, 0, min(maxLine, 64*1024)), maxLine)
+	// MaxRecordBytes bounds record payload bytes; the line terminator is
+	// framing. The canonical capacity translation adds the terminator allowance
+	// so exactly-max tokenizes — the explicit post-trim length check below
+	// remains the payload refusal (exactly-max succeeds, max+1 refuses typed).
+	maxTok := spillRecordScannerCapacity(budget.MaxRecordBytes)
+	sc.Buffer(make([]byte, 0, min(maxTok, 64*1024)), maxTok)
 
 	var header JournalHeader
 	var records uint64
 	var sawHeader bool
 	var sawFooter bool
+	// content recomputes the header+records digest so the compaction reopen is
+	// digest-bound: a journal whose header (including crawl_prefixes) or records
+	// were mutated after sealing fails its footer's ContentSHA256 here too, not
+	// only at ValidateJournal.
+	content := sha256.New()
 	lineNo := 0
 
 	for sc.Scan() {
@@ -73,6 +81,7 @@ func scanJournalStreaming(
 			if h.RunID != cfg.RunID {
 				return spillErr(SpillMergeJournal, "journal", "journal run_id mismatch", "", ErrInvalidJournal)
 			}
+			hashJournalLine(content, line)
 			header = h
 			sawHeader = true
 			if onHeader != nil {
@@ -100,6 +109,7 @@ func scanJournalStreaming(
 				return spillErr(SpillMergeJournal, "journal", fmt.Sprintf("non-monotonic sequence %d", rec.Sequence), "", ErrInvalidJournal)
 			}
 			records++
+			hashJournalLine(content, line)
 			rec = normalizeObjectRecord(rec, rec.JournalID, rec.Sequence)
 			if strings.TrimSpace(rec.RelKey) == "" {
 				return spillErr(SpillMergeJournal, "journal", "record rel_key required", "", ErrInvalidJournal)
@@ -132,6 +142,9 @@ func scanJournalStreaming(
 			if err := validateFooter(header, footer, records); err != nil {
 				return spillErr(SpillMergeJournal, "journal", "invalid footer", "", err)
 			}
+			if err := verifyJournalContentDigest(footer, content); err != nil {
+				return spillErr(SpillMergeJournal, "journal", "content digest mismatch", "", err)
+			}
 			sawFooter = true
 		default:
 			return spillErr(SpillMergeJournal, "journal", "unknown record type", "", ErrInvalidJournal)
@@ -150,6 +163,12 @@ func scanJournalStreaming(
 		return spillErr(SpillMergeJournal, "journal", "missing footer", "", ErrIncompleteJournal)
 	}
 	return nil
+}
+
+// hashJournalLine feeds one on-disk journal line (header or record, no newline)
+// into the running content digest, matching the writer's per-line hashing.
+func hashJournalLine(h hash.Hash, line []byte) {
+	_, _ = h.Write(line)
 }
 
 // estimateEventBytes accounts for the encoded spill event JSON plus fixed

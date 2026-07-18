@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,23 +17,41 @@ import (
 	"time"
 )
 
-// Spill/merge is the dark current-state row source. It does not
-// publish artifacts, advance latest, emit lineage, or replace Compact on the
-// production publish path.
+// Spill/merge is the current-state row source drained by the production publish
+// path (PublishSnapshot) in place of the materialized Compact projection. The
+// source itself does not publish artifacts, advance latest, or emit lineage —
+// PublishSnapshot and the durable build path own those: ordinary builds stream
+// the verified parent's rows through this source and publish continuity
+// metadata derived from that same verified capture.
 
 const (
-	spillMergeWorkspaceDir   = "spillmerge"
-	spillMergeMetaName       = "attempt.json"
-	spillMergeLockName       = "attempt.lock"
-	spillMergeFormatVersion  = 1
-	spillRunKindParent       = "parent"
-	spillRunKindEvents       = "events"
-	spillMagic               = "GNSPILL1"
-	defaultMaxBufferedRows   = 64_000
-	defaultMaxBufferedBytes  = 64 << 20
-	defaultMaxRecordBytes    = 1 << 20
+	spillMergeWorkspaceDir  = "spillmerge"
+	spillMergeMetaName      = "attempt.json"
+	spillMergeLockName      = "attempt.lock"
+	spillMergeFormatVersion = 1
+	spillRunKindParent      = "parent"
+	spillRunKindEvents      = "events"
+	spillMagic              = "GNSPILL1"
+	defaultMaxBufferedRows  = 64_000
+	defaultMaxBufferedBytes = 64 << 20
+	// defaultMaxRecordBytes bounds a single journal line. The journal header line
+	// carries the full crawl-prefix plan, so it grows with scope prefix count; at
+	// a very wide/dense scope (tens of thousands of prefixes) the header exceeds
+	// the old 1 MiB and fails a successive build closed at the journal phase. This
+	// 16 MiB ceiling covers headers up to roughly the scope-prefix cap with
+	// headroom; overridable per build (PublishConfig.SpillBudget.MaxRecordBytes).
+	defaultMaxRecordBytes    = 16 << 20
 	defaultMaxJournalSources = 256
-	defaultMaxWorkspaceBytes = 512 << 20
+	// defaultMaxWorkspaceBytes is the live on-disk spill workspace ceiling. A
+	// successive build stages the full prior current-state into this workspace
+	// before merging, so peak demand scales ~linearly with corpus size; the prior
+	// 512 MiB froze successive builds at the ~single-segment boundary. Field peak
+	// runs ~1.2-1.35 KiB/row (bounded, flattening with scale), so this 16 GiB
+	// ceiling carries to ~13.6M rows — validated with ~20% headroom at ~10.9M.
+	// Larger runs must set an explicit bound. It is overridable per build
+	// (PublishConfig.SpillBudget.MaxWorkspaceBytes); the value is a ceiling, not a
+	// reservation, and not a guarantee beyond ~13.6M rows.
+	defaultMaxWorkspaceBytes = 16 << 30
 	defaultMaxSpillRuns      = 4096
 	defaultMaxFanIn          = 16
 	defaultMaxMergePasses    = 64
@@ -151,7 +170,7 @@ type SpillMergeBudget struct {
 	MaxMergePasses    int
 }
 
-// DefaultSpillMergeBudget returns the frozen dark spill-merge defaults.
+// DefaultSpillMergeBudget returns the frozen spill-merge budget defaults.
 func DefaultSpillMergeBudget() SpillMergeBudget {
 	return SpillMergeBudget{
 		MaxBufferedRows:   defaultMaxBufferedRows,
@@ -163,6 +182,42 @@ func DefaultSpillMergeBudget() SpillMergeBudget {
 		MaxFanIn:          defaultMaxFanIn,
 		MaxMergePasses:    defaultMaxMergePasses,
 	}
+}
+
+// MaxSpillRecordBytes is the largest accepted MaxRecordBytes: the payload
+// ceiling must stay representable as a platform int after the two-byte scanner
+// framing allowance, so an accepted finite budget can never overflow into a
+// runtime panic. Operator/library surfaces refuse larger values with typed
+// SpillMergeInvalidConfig — an explicit value is never silently clamped.
+const MaxSpillRecordBytes = int64(math.MaxInt - 2)
+
+// spillRecordScannerCapacity is the single translation from a validated
+// payload ceiling to a bufio.Scanner max token size, shared by every
+// MaxRecordBytes scanner consumer (journal streaming scan, spill-run reader):
+// the payload bound plus the two-byte "\r\n" framing allowance — ScanLines
+// must buffer the terminator before it can emit the token, so without the
+// allowance an exact-limit payload is refused one byte early — floored for
+// scanner sanity. SpillMergeBudget.validate rejects ceilings above
+// MaxSpillRecordBytes, so the conversion and addition cannot overflow.
+func spillRecordScannerCapacity(maxRecordBytes int64) int {
+	capBytes := int(maxRecordBytes)
+	if capBytes < 64 {
+		capBytes = 64
+	}
+	return capBytes + 2
+}
+
+// ResolveSpillMergeBudget applies the substrate defaults to zero fields and
+// validates the result: zero alone selects a default, while an explicit
+// invalid field (negative or otherwise sub-1) refuses with a typed
+// SpillMergeInvalidConfig. Capacity-sensitive callers (publish, Build, public
+// Retry) resolve through this before any crawl, provenance read, or journal
+// validation so an invalid caller budget can never degrade to unbounded reads.
+func ResolveSpillMergeBudget(b SpillMergeBudget) (SpillMergeBudget, error) {
+	if err := b.validate(); err != nil {
+		return SpillMergeBudget{}, err
+	}
+	return b.withDefaults(), nil
 }
 
 func (b SpillMergeBudget) withDefaults() SpillMergeBudget {
@@ -203,6 +258,10 @@ func (b SpillMergeBudget) validate() error {
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxBufferedBytes must be >= 1", "", nil)
 	case b.MaxRecordBytes < 1:
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxRecordBytes must be >= 1", "", nil)
+	case b.MaxRecordBytes > MaxSpillRecordBytes:
+		// The scanner framing allowance must fit a platform int; refuse rather
+		// than silently clamp an explicit operator/library value.
+		return spillErr(SpillMergeInvalidConfig, "validate", "MaxRecordBytes exceeds the supported maximum", "", nil)
 	case b.MaxJournalSources < 1:
 		return spillErr(SpillMergeInvalidConfig, "validate", "MaxJournalSources must be >= 1", "", nil)
 	case b.MaxWorkspaceBytes < 1:
@@ -918,7 +977,7 @@ func (s *CurrentStateSource) finishOwnedTrash(sm *os.Root, held bool) error {
 // the opened directory FD matches attemptBound, unlinks residual children, then
 // removes an empty directory entry.
 //
-// Trust model (this dark spill/merge primitive): SpillRoot is exclusive operator-controlled space;
+// Trust model (spill/merge source): SpillRoot is exclusive operator-controlled space;
 // concurrent hostile namespace mutation is out of scope. Under that model this
 // refuses live-name / non-empty post-bind substitutes and avoids recursive
 // pathname RemoveAll after a detached identity check. It does NOT claim

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
@@ -57,6 +58,16 @@ type MatchConfig struct {
 // app-data path classes. If IndexDBDir is supplied, the engine rejects journal
 // and segment paths below it so callers cannot silently place v2 working state
 // under the legacy SQLite index directory.
+//
+// Continuity layout contract: multi-run continuity requires the canonical
+// latest-owned set layout — CompletePath at
+// <dir(LatestPath)>/runs/<run_id>/complete.json with ManifestPath and
+// SegmentDir contained in that run directory. A standalone first publication
+// (no published latest) may use any caller-owned layout, but it can only be
+// extended — or serve as the state parent of a later run — when it sits at the
+// canonical locus, because continuity edges are recorded pathlessly and the
+// production ancestry lookup rediscovers parents only under the latest-owned
+// runs/ root. Same-run recovery must target the run's exact recorded locus.
 type PathConfig struct {
 	JournalDir   string
 	SegmentDir   string
@@ -143,7 +154,16 @@ type Config struct {
 	Crawl      crawler.Config
 	// CrawlPrefixes, when supplied, is the exact provider-prefix observation
 	// plan. It lets CLI adapters pass a manifest scope plan into the engine
-	// without making the engine import manifest or command packages.
+	// without making the engine import manifest or command packages. Entries
+	// must be canonical provider-key prefixes (no leading slash or surrounding
+	// whitespace) so the plan compared against coverage is exactly what drives
+	// LIST. Coverage must equal this plan exactly (per-prefix set equality, no
+	// roll-up/extra/missing/duplicate/windowed and confirmed-complete only) or
+	// Build refuses before any side effect. When empty the effective plan is the
+	// full base prefix; either way the plan is sealed into the journal as
+	// recovery provenance and prior rows outside the attested plan are retained.
+	// Any durable build additionally rejects a reducing observation selector
+	// (see Match) so the sealed plan is a truthful record of what was observed.
 	CrawlPrefixes []string
 	// ObservationSinks receive the same observed crawl stream as the durable
 	// journal materializer. This is the library-owned fanout boundary used by
@@ -151,7 +171,12 @@ type Config struct {
 	ObservationSinks []output.Writer
 	Paths            PathConfig
 	Coverage         []CoverageAttestation
-	PriorRows        []ObjectState
+	// PriorRows is retained only for source compatibility and is NOT an accepted
+	// input: public Build rejects any non-nil value (including an empty non-nil
+	// slice) before side effects. Durable prior state is loaded from the verified
+	// parent under the held lease at continuity activation, never from
+	// caller-supplied rows.
+	PriorRows []ObjectState
 	// ExpectedParent, when set, enforces latest-pointer CAS at publish advance.
 	// When nil, Build/Retry capture the current latest (or first-publish) under
 	// the write lease. Malformed latest fails closed (not first-publish).
@@ -167,10 +192,45 @@ type Config struct {
 	CreatedAt            time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
-	Events               EventSink
+	// Spill is host/operator capacity configuration for the durable streaming
+	// merge's scratch workspace. Zero values select the substrate defaults.
+	Spill  SpillConfig
+	Events EventSink
 	// OnSegmentProgress is optional observational progress during segment write
 	// (counts only). Outside artifact bytes; never a publish failure vector.
 	OnSegmentProgress OnSegmentProgressFunc
+}
+
+// SpillConfig is host/operator capacity configuration for the durable streaming
+// merge's scratch workspace. It is never index identity, lineage, or artifact
+// content, and an absolute Root must not enter manifests, receipts, or digests.
+// Zero values select the substrate defaults.
+type SpillConfig struct {
+	// WorkspaceBytes overrides the merge's live on-disk workspace ceiling
+	// (MaxWorkspaceBytes). A successive build stages the full prior current-state
+	// into this workspace before merging, so size it to the corpus. Zero uses the
+	// substrate default; a negative or sub-1 explicit value is rejected at publish.
+	WorkspaceBytes int64
+	// Root overrides the scratch directory (resolved absolute, real, non-symlink,
+	// operator-exclusive at publish). Empty co-locates beside the run journals.
+	Root string
+	// RecordBytes overrides the max single journal-record (line) size
+	// (MaxRecordBytes). The journal header carries the crawl-prefix plan, which
+	// grows with scope prefix count, so very wide/dense scopes need a larger
+	// bound. Zero uses the substrate default; a sub-1 explicit value is rejected.
+	RecordBytes int64
+}
+
+// resolveBudget validates the public capacity overrides and returns the
+// effective substrate budget with defaults applied. An explicit sub-1 value
+// refuses with the substrate's typed invalid-config error; Build and Retry
+// resolve through this before any crawl, provenance read, or publish side
+// effect so an invalid caller value can never reach an unbounded journal read.
+func (s SpillConfig) resolveBudget() (indexsubstrate.SpillMergeBudget, error) {
+	return indexsubstrate.ResolveSpillMergeBudget(indexsubstrate.SpillMergeBudget{
+		MaxWorkspaceBytes: s.WorkspaceBytes,
+		MaxRecordBytes:    s.RecordBytes,
+	})
 }
 
 // SegmentProgress is a sanitized segment-write progress signal (counts only).
@@ -203,8 +263,26 @@ type RetryConfig struct {
 	BaseURI      string
 	Paths        PathConfig
 	JournalPaths []string
-	Coverage     []CoverageAttestation
-	PriorRows    []ObjectState
+	// Coverage is destructive authority over verified-parent rows: a
+	// confirmed-complete scope tombstones unobserved parent keys under it. Public
+	// Retry does not trust this field on its own — it derives the observation
+	// plan from the recorded `crawl_prefixes` journal header and requires Coverage
+	// to match that plan exactly. The footer `content_sha256` is an unkeyed
+	// integrity checksum over header+records (verified at validation and at the
+	// compaction reopen) that detects corruption, truncation, and partial
+	// modification on read; Retry consumes JournalPaths as engine-produced
+	// recovery artifacts in trusted working storage. It is not a cryptographic
+	// authentication mechanism; stronger authentication for untrusted
+	// recovery-artifact storage is a tracked follow-up. Journals without a
+	// recorded plan or checksum, or whose recorded plan is non-canonical, fail
+	// closed.
+	Coverage []CoverageAttestation
+	// PriorRows is retained only for source compatibility and is NOT an accepted
+	// input: public Retry rejects any non-nil value (including an empty non-nil
+	// slice) before side effects. Durable prior state is loaded from the verified
+	// parent under the held lease at continuity activation, never from
+	// caller-supplied rows.
+	PriorRows []ObjectState
 	// ExpectedParent enforces latest CAS when republishing over an existing set.
 	ExpectedParent *ParentToken
 	// Authority follows Config.Authority semantics for public Retry.
@@ -214,8 +292,10 @@ type RetryConfig struct {
 	CreatedAt            time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
-	Events               EventSink
-	OnSegmentProgress    OnSegmentProgressFunc
+	// Spill follows Config.Spill semantics for public Retry.
+	Spill             SpillConfig
+	Events            EventSink
+	OnSegmentProgress OnSegmentProgressFunc
 }
 
 // String returns a redacted retry config summary.

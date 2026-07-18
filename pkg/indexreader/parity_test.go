@@ -349,19 +349,22 @@ func openPairedReaders(t *testing.T, ctx context.Context, env durableTestEnv, se
 	seedSQLite(t, db, indexSet.IndexSetID, run.RunID)
 	require.NoError(t, db.Close())
 
-	sqliteR, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
-	require.NoError(t, err)
-	require.Equal(t, FormatSQLiteV1, sqliteR.Meta().Format)
-
-	require.NoError(t, os.Rename(dbPath, dbPath+".bak"))
+	// Durable is preferred when both formats exist, so resolve it first, then
+	// hide the durable latest pointer to resolve the SQLite reader.
 	durableR, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
 	require.NoError(t, err)
 	require.Equal(t, FormatDurableV2, durableR.Meta().Format)
 
+	latestPath := filepath.Join(env.segmentRoot, "latest.json")
+	require.NoError(t, os.Rename(latestPath, latestPath+".bak"))
+	sqliteR, err = ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID})
+	require.NoError(t, err)
+	require.Equal(t, FormatSQLiteV1, sqliteR.Meta().Format)
+
 	cleanup = func() {
 		_ = sqliteR.Close()
 		_ = durableR.Close()
-		_ = os.Rename(dbPath+".bak", dbPath)
+		_ = os.Rename(latestPath+".bak", latestPath)
 	}
 	return sqliteR, durableR, cleanup
 }

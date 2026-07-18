@@ -956,12 +956,15 @@ func TestOpenPublishedSnapshot_MalformedLineageRefused(t *testing.T) {
 	require.True(t, IsLineageCode(err, LineageCodeUnknownVersion), "got %v", err)
 }
 
-func TestPublishSnapshot_DoesNotEmitLineage(t *testing.T) {
+func TestPublishSnapshot_EmitsRunStartWithoutLineageByDefault(t *testing.T) {
 	t.Parallel()
 	config, _ := publishTestConfig(t)
 	result, err := PublishSnapshot(config)
 	require.NoError(t, err)
-	require.Nil(t, result.Manifest.RunStartedAt)
+	// Authoritative run start is emitted from config; continuity metadata stays
+	// absent unless the caller supplies StateParent/Lineage/ParentManifests.
+	require.NotNil(t, result.Manifest.RunStartedAt)
+	require.Equal(t, config.RunStartedAt.UTC(), result.Manifest.RunStartedAt.UTC())
 	require.Nil(t, result.Manifest.StateParent)
 	require.Nil(t, result.Manifest.Lineage)
 	require.Empty(t, result.Manifest.ParentManifests)

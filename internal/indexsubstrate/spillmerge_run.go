@@ -310,10 +310,11 @@ func newSpillRunReaderFromFile(f *os.File, wantKind, attemptID string, maxRecord
 		maxRecordBytes: maxRecordBytes,
 		expectAttempt:  attemptID,
 	}
-	maxTok := int(maxRecordBytes)
-	if maxTok < 64 {
-		maxTok = 64
-	}
+	// Canonical capacity translation: payload ceiling plus terminator
+	// allowance, so a writer-accepted exact-limit record is accepted on
+	// reopen/attestation too; the explicit payload checks below remain the
+	// refusal for over-budget records.
+	maxTok := spillRecordScannerCapacity(maxRecordBytes)
 	r.sc.Buffer(make([]byte, 0, min(maxTok, 64*1024)), maxTok)
 	if !r.sc.Scan() {
 		if err := r.sc.Err(); err != nil {

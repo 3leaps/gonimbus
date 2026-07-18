@@ -83,7 +83,7 @@ func unlinkChildrenAt(dir *os.File) error {
 	if dir == nil {
 		return fmt.Errorf("nil directory")
 	}
-	// Windows (this dark spill/merge primitive trust model): names come from the no-follow-opened
+	// Windows (spill/merge source trust model): names come from the no-follow-opened
 	// directory handle, but child deletion uses paths derived from dir.Name()
 	// — not FILE_DISPOSITION / exact-handle APIs. This is best-effort under an
 	// exclusive SpillRoot; it is NOT claimed FD-relative against hostile

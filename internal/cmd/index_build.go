@@ -143,6 +143,12 @@ var (
 	indexBuildFormat             string
 	indexBuildExperimentalEngine bool
 	indexBuildJSON               bool
+	indexBuildSpillWorkspaceMax  string
+	indexBuildSpillRecordMax     string
+	indexBuildSpillRoot          string
+	// indexBuildSpillResolved is the spill configuration resolved across CLI flag >
+	// env > config > default, set by resolveIndexBuildSpill before the crawl.
+	indexBuildSpillResolved indexBuildSpillResolution
 )
 
 func init() {
@@ -163,7 +169,7 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildName, "name", "", "Optional job name (recorded in job registry)")
 	indexBuildCmd.Flags().StringVar(&indexBuildResumeRun, "resume-run", "", "Resume a failed-resumable index build run by run id")
 	indexBuildCmd.Flags().StringVar(&indexBuildSince, "since", "", "Incremental build lower bound timestamp or auto (narrows date-partition scope when possible)")
-	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "durable", "Index artifact format to build (durable, sqlite, both)")
+	indexBuildCmd.Flags().StringVar(&indexBuildFormat, "format", "durable", "Index artifact format to build (durable, sqlite, both; both publishes durable and adds run-scoped SQLite parity verification, not a canonical index.db)")
 	indexBuildCmd.Flags().BoolVar(&indexBuildExperimentalEngine, "experimental-engine", false, "(deprecated) alias for --format durable")
 	_ = indexBuildCmd.Flags().MarkHidden("experimental-engine")
 	if flag := indexBuildCmd.Flags().Lookup("since"); flag != nil {
@@ -171,6 +177,9 @@ func init() {
 	}
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeWarnPrefix, "scope-warn-prefixes", 10000, "Warn if build.scope expands to more than N prefixes (0 disables)")
 	indexBuildCmd.Flags().IntVar(&indexBuildScopeMaxPrefix, "scope-max-prefixes", 50000, "Fail build if build.scope expands beyond N prefixes (0 disables)")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillWorkspaceMax, "spill-workspace-max", "", "Max on-disk scratch for the durable merge (e.g. 24GiB, 16GB); empty uses the 16GiB default. Size to the corpus: a successive build stages the full prior index state before merging. Also settable via GONIMBUS_SPILL_WORKSPACE_MAX or the index.spill.workspace_max config key")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillRecordMax, "spill-record-max", "", "Max single journal-record size for the durable merge (e.g. 32MiB); empty uses the 16MiB default. Very wide/dense scopes need a larger bound (the journal header carries the crawl-prefix plan). Also settable via GONIMBUS_SPILL_RECORD_MAX or the index.spill.record_max config key")
+	indexBuildCmd.Flags().StringVar(&indexBuildSpillRoot, "spill-root", "", "Directory for the durable merge's scratch workspace (default: beside the run journals). Point at a disk with room for --spill-workspace-max. Also settable via GONIMBUS_SPILL_ROOT or the index.spill.root config key")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
 	indexBuildCmd.Flags().StringVar(&indexBuildStorageProv, "storage-provider", "", "Storage provider (aws_s3, cloudflare_r2, wasabi, gcs, azure_blob, generic_s3)")
@@ -225,6 +234,11 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	if err := validateIndexBuildFormatFlags(""); err != nil {
 		return err
 	}
+	spillResolution, err := resolveIndexBuildSpill()
+	if err != nil {
+		return err
+	}
+	indexBuildSpillResolved = spillResolution
 	if strings.TrimSpace(indexBuildJobPath) == "" {
 		return fmt.Errorf("--job is required")
 	}
@@ -501,12 +515,51 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		return nil
 	}
 
-	// Canonical SQLite builds use one library-owned validation/binding/open
-	// operation. Explicit external paths retain the caller-owned indexstore
-	// behavior and are never given canonical trust by this adapter.
+	// SQLite target selection depends on format. Canonical `sqlite` builds use
+	// one library-owned validation/binding/open. Canonical `both` publishes
+	// canonical identity through the residue-safe publication guard — never
+	// adopting the shared canonical index.db — and routes its SQLite projection
+	// to a run-scoped verification database, so successive runs never contend
+	// for canonical index.db residue. Explicit external paths (any format)
+	// retain the caller-owned indexstore behavior and are never given canonical
+	// trust.
+	buildFormat := selectedIndexBuildFormat()
 	var db *sql.DB
 	var canonicalTarget *indexreader.SQLiteWriteTarget
-	if resolvedDB.Canonical {
+	var verificationTarget *indexreader.SQLiteVerificationTarget
+	if buildFormat == "both" && resolvedDB.Canonical {
+		guard, err := indexreader.OpenSQLiteIdentityPublicationGuard(ctx, indexreader.SQLiteWriteTargetOptions{
+			Path:           resolvedDB.Path,
+			IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
+			SegmentSetRoot: segmentSetRoot,
+			IndexSetID:     identityResult.IndexSetID,
+			Authority:      maintenance.Authority(),
+			MaxMarkerBytes: int64(maxHubMarkerBytes),
+		})
+		if err != nil {
+			return err
+		}
+		if err := guard.PublishIdentity(identityResult); err != nil {
+			return errors.Join(err, guard.Close())
+		}
+		if err := guard.PublishManifest(m); err != nil {
+			return errors.Join(err, guard.Close())
+		}
+		if err := guard.Close(); err != nil {
+			return err
+		}
+		verificationTarget, err = openIndexBuildVerificationTarget(ctx, indexreader.SQLiteVerificationTargetOptions{
+			SegmentSetRoot: segmentSetRoot,
+			IndexSetID:     identityResult.IndexSetID,
+			Authority:      maintenance.Authority(),
+			AttemptName:    fmt.Sprintf("run_%d", time.Now().UnixNano()),
+		})
+		if err != nil {
+			return err
+		}
+		db = verificationTarget.DB()
+		defer func() { _ = verificationTarget.Close() }()
+	} else if resolvedDB.Canonical {
 		canonicalTarget, err = indexreader.OpenSQLiteWriteTarget(ctx, indexreader.SQLiteWriteTargetOptions{
 			Path:           resolvedDB.Path,
 			IdentityPath:   filepath.Join(resolvedDB.IdentityDir, "identity.json"),
@@ -539,7 +592,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		cfg.Path = resolvedDB.Path
 	}
 
-	if resolvedDB.WriteIdentity {
+	// `both` already published canonical identity through the residue-safe guard
+	// above; the run-scoped verification database carries no canonical trust.
+	if resolvedDB.WriteIdentity && buildFormat != "both" {
 		if canonicalTarget == nil {
 			return fmt.Errorf("canonical metadata publication requires the library-owned SQLite write target")
 		}
@@ -630,7 +685,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	var bothSummary indexbuild.Summary
 	var bothSummaryOK bool
 	if selectedIndexBuildFormat() == "both" {
-		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters, maintenance.Authority())
+		bothResult, err := runIndexBuildBothFormats(ctx, m, db, indexSet, run, identityResult, buildFilters, maintenance.Authority(), verificationTarget)
 		result = bothResult.Result
 		crawlErr = err
 		if err == nil {
@@ -752,7 +807,52 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		canonicalTarget = nil
 	}
 
-	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested)
+	// The verification-projection close is part of the `both` terminal boundary:
+	// the parity claim binds the exact compared projection, so a failed close
+	// or binding revalidation (durable already authoritative and visible)
+	// emits no successful receipt.
+	var bothVerification *indexBuildBothVerificationRecord
+	if buildFormat == "both" && result.FinalStatus == indexstore.RunStatusSuccess {
+		if compareReport == nil {
+			return fmt.Errorf("both-format parity report missing after success")
+		}
+		// The receipt repeats the report's artifact identity only after it is
+		// verified against the actually opened target: a mismatch between
+		// opened target, report identity, and receipt identity refuses
+		// terminal success.
+		if verificationTarget != nil {
+			if compareReport.SQLiteArtifact.ID != verificationTarget.AttemptName() || compareReport.SQLiteArtifact.Path != verificationTarget.Locator() {
+				return fmt.Errorf("both-format verification artifact identity mismatch between parity report and opened target")
+			}
+		}
+		var closeErr error
+		if verificationTarget != nil {
+			closeErr = verificationTarget.Close()
+		} else {
+			closeErr = db.Close()
+		}
+		if closeErr != nil {
+			if store != nil && job != nil {
+				job.State = jobregistry.JobStateFailed
+				ended := time.Now().UTC()
+				job.EndedAt = &ended
+				_ = store.Write(job)
+			}
+			return fmt.Errorf("close both-format verification database: %w", closeErr)
+		}
+		bothVerification = &indexBuildBothVerificationRecord{
+			ProjectionMaterialized: compareReport.SQLiteMaterialized,
+			ProjectionClosed:       true,
+			ObservationRunID:       compareReport.ObservationRunID,
+			ParityPassed:           compareReport.ParityPassed,
+			ProjectionRows:         compareReport.SQLiteRows,
+			ProjectionSHA256:       compareReport.SQLiteProjectionSHA256,
+			ArtifactID:             compareReport.SQLiteArtifact.ID,
+			ArtifactLocator:        compareReport.SQLiteArtifact.Path,
+		}
+	}
+
+	terminalReceipt, receiptOK, receiptErr := committedIndexBuildResultRecord(selectedIndexBuildFormat(), result.FinalStatus, bothSummary, bothSummaryOK, indexSet.IndexSetID, run.RunID, scopeHash, result.ObjectsIngested, bothVerification)
 	if receiptErr != nil {
 		return receiptErr
 	}
@@ -821,7 +921,7 @@ func emitCommittedIndexBuildJSON(
 	indexSetID, runID, scopeHash string,
 	objectsIngested int64,
 ) error {
-	rec, ok, err := committedIndexBuildResultRecord(format, finalStatus, bothSummary, bothSummaryOK, indexSetID, runID, scopeHash, objectsIngested)
+	rec, ok, err := committedIndexBuildResultRecord(format, finalStatus, bothSummary, bothSummaryOK, indexSetID, runID, scopeHash, objectsIngested, nil)
 	if err != nil || !ok {
 		return err
 	}
@@ -835,6 +935,7 @@ func committedIndexBuildResultRecord(
 	bothSummaryOK bool,
 	indexSetID, runID, scopeHash string,
 	objectsIngested int64,
+	verification *indexBuildBothVerificationRecord,
 ) (indexBuildResultRecord, bool, error) {
 	switch format {
 	case "both":
@@ -844,7 +945,10 @@ func committedIndexBuildResultRecord(
 		if !bothSummaryOK {
 			return indexBuildResultRecord{}, false, fmt.Errorf("build result: both-format summary missing after success")
 		}
-		return newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested), true, nil
+		if verification == nil {
+			return indexBuildResultRecord{}, false, fmt.Errorf("build result: both-format verification evidence missing after success")
+		}
+		return newBothBuildResultRecord(bothSummary, scopeHash, objectsIngested, verification), true, nil
 	case "sqlite":
 		switch finalStatus {
 		case indexstore.RunStatusSuccess, indexstore.RunStatusPartial:
@@ -1246,6 +1350,14 @@ func validateIndexBuildBackgroundFlags() error {
 	}
 	if indexBuildSummary {
 		return fmt.Errorf("--background is not compatible with --summary")
+	}
+	// The managed executor reconstructs the child argv from the fingerprinted
+	// invocation, so the spill CLI flags are not forwarded. The env and config
+	// surfaces ARE inherited by the managed child (env via the process
+	// environment, config via the forwarded --config), so point operators there
+	// rather than let a flag silently fall back to the default workspace budget.
+	if strings.TrimSpace(indexBuildSpillWorkspaceMax) != "" || strings.TrimSpace(indexBuildSpillRecordMax) != "" || strings.TrimSpace(indexBuildSpillRoot) != "" {
+		return fmt.Errorf("the --spill-workspace-max/--spill-record-max/--spill-root flags are not forwarded to --background jobs; set the GONIMBUS_SPILL_* env vars (or the index.spill.* config keys) instead — the managed child inherits those")
 	}
 	return nil
 }
@@ -1994,8 +2106,9 @@ func runCrawlForIndex(
 	crawlPrefixesOverride []string,
 	deltaReport bool,
 ) (*indexBuildResult, error) {
-	// Create provider.
-	prov, err := providerdispatch.NewSource(ctx, &uri.ObjectURI{
+	// Create provider through the shared build-source seam so every index
+	// build format constructs its source identically.
+	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
 		Provider: m.Connection.Provider,
 		Bucket:   m.Connection.Bucket,
 	}, providerdispatch.SourceOptions{

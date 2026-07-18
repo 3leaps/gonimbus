@@ -168,17 +168,20 @@ func TestIndexQuery_StreamingJSONLParity(t *testing.T) {
 		IndexesRoot:      filepath.Join(dataRoot, "indexes"),
 		SegmentCacheRoot: filepath.Join(dataRoot, "cache", "segments"),
 	}
-	sqliteReader, err := indexreader.ResolveIndexReader(ctx, opts, indexreader.ResolveTarget{IndexSetID: env.indexSetID})
-	require.NoError(t, err)
-	require.Equal(t, indexreader.FormatSQLiteV1, sqliteReader.Meta().Format)
-	defer func() { _ = sqliteReader.Close() }()
-
-	require.NoError(t, os.Rename(dbPath, dbPath+".bak"))
-	t.Cleanup(func() { _ = os.Rename(dbPath+".bak", dbPath) })
+	// Durable is preferred when both formats exist, so resolve it first, then
+	// hide the durable latest pointer to resolve the SQLite reader.
 	durableReader, err := indexreader.ResolveIndexReader(ctx, opts, indexreader.ResolveTarget{IndexSetID: env.indexSetID})
 	require.NoError(t, err)
 	require.Equal(t, indexreader.FormatDurableV2, durableReader.Meta().Format)
 	defer func() { _ = durableReader.Close() }()
+
+	latestPath := filepath.Join(dataRoot, "cache", "segments", env.indexSetID, "latest.json")
+	require.NoError(t, os.Rename(latestPath, latestPath+".bak"))
+	t.Cleanup(func() { _ = os.Rename(latestPath+".bak", latestPath) })
+	sqliteReader, err := indexreader.ResolveIndexReader(ctx, opts, indexreader.ResolveTarget{IndexSetID: env.indexSetID})
+	require.NoError(t, err)
+	require.Equal(t, indexreader.FormatSQLiteV1, sqliteReader.Meta().Format)
+	defer func() { _ = sqliteReader.Close() }()
 
 	fixedTS := "2025-01-01T00:00:00Z"
 	params := indexstore.QueryParams{IndexSetID: env.indexSetID}

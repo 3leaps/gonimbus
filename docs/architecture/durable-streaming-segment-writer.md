@@ -1,11 +1,17 @@
-# Durable streaming segment writer (dark)
+# Durable streaming segment writer
 
-**Status**: internal library primitive only
+**Status**: active — the production publish sink
 
-**Does not**: activate continuous-state publication, rewrite `PublishSnapshot`,
-advance complete/latest, load prior-run state for ordinary builds, raise enrich
-scale ceilings, or claim exclusive adversarial isolation over the segment
-directory
+`PublishSnapshot` writes segments by draining the spill/merge current-state
+source through this writer, producing the same committed `InternalManifest` /
+parquet segment / digest contract as batch `WriteSegmentSet` without
+materializing a full-set `[]CurrentObjectRow`.
+
+**Does not** (true boundaries): enable timestamp-scoped incremental builds,
+raise enrich scale ceilings, or claim exclusive adversarial isolation over the
+segment directory. Ordinary builds stream verified parent state and emit
+lineage, but those are owned by the publish/build path — this writer persists
+only the rows and lineage metadata handed to it and derives neither.
 
 ## Purpose
 
@@ -21,9 +27,10 @@ OrderedRowSource (strict increasing RelKey)
   → InternalManifest (counts + descriptors)
 ```
 
-Production publication still uses `Compact` → `WriteSegmentSet`. This primitive
-exists so a later activation path can stream from the spill/merge row source
-into segments without holding the full state map.
+Production publication streams from the spill/merge row source into segments
+through this writer instead of holding the full state map, and is
+differential-tested against `WriteSegmentSet` so the committed artifacts are
+provably identical.
 
 ## API (`internal/indexsubstrate`)
 
@@ -82,8 +89,8 @@ It does **not** hold a full-set `[]CurrentObjectRow` or a second full-set Parque
 row slice. After each seal, the open buffer is cleared so prior segment pointer
 fields are not retained.
 
-Field RSS / multi-million scale evidence remains an activation gate, not this
-dark slice.
+Field RSS / multi-million scale evidence remains a gate for the continuity/scale
+activation, not something proven by this writer alone.
 
 ### Progress
 
@@ -107,7 +114,7 @@ may roll back a segment already reported.
 This call assumes **single-writer mutation authority** over `config.Dir` for the
 duration of the call. Concurrent writers into the same directory are unsupported
 and can create create/reuse/cleanup races. Activation under a write lease is
-expected to satisfy exclusivity; this dark primitive does not invent locking.
+expected to satisfy exclusivity; this writer does not invent locking.
 
 ### Error disclosure
 
@@ -137,14 +144,14 @@ attempt even if subsequent temp-unlink or final-stat steps fail. Ownership is
 recorded before the seal error is returned so outer rollback can remove the
 final.
 
-### Darkness
+### Activation boundary
 
-| Surface            | Status                                    |
-| ------------------ | ----------------------------------------- |
-| `PublishSnapshot`  | Unchanged (`Compact` → `WriteSegmentSet`) |
-| complete / latest  | Not written by this primitive             |
-| CLI / flags / env  | No activation                             |
-| Production callers | None (library + tests only)               |
+| Surface                  | Status                                                                                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PublishSnapshot`        | **Active** — this writer is the publish sink                                                                                                        |
+| complete / latest        | Written by `PublishSnapshot`, not this writer                                                                                                       |
+| Prior-run load / lineage | **Active** on the durable build path — parent rows arrive through the row source and lineage through the publish config; the writer derives neither |
+| Production callers       | `PublishSnapshot` (durable build + enrich publish)                                                                                                  |
 
 ## Compatibility
 
@@ -156,5 +163,5 @@ rows via `WalkManifestRows` / verified segment readers.
 
 - [Durable spill/merge row source](durable-spill-merge.md) — sorted current-state
   iterator that can feed this writer
-- [Durable lineage schema](durable-lineage.md) — optional dark lineage fields
-  accepted on the segment writer config
+- [Durable lineage](durable-lineage.md) — lineage fields carried on the
+  segment writer config

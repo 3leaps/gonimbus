@@ -279,14 +279,47 @@ Embedding contract highlights:
 - **Providers are injected.** The package does not import concrete provider
   packages, command packages, cobra/viper, or SQLite-backed `pkg/indexstore`.
   Callers construct a `pkg/provider` handle and pass it as `Config.Source`.
-- **Plan input is explicit.** Optional `Config.CrawlPrefixes` is the exact
-  provider-prefix observation plan (the library form of a compiled
-  `build.scope`). Faithful-coverage publication expects coverage attestations
-  to match that plan.
-- **Paths are caller-owned.** `PathConfig` points at journal/segment/manifest
-  locations resolved by the adapter. The engine rejects journal/segment paths
-  under a supplied `IndexDBDir` so v2 working state is not silently nested
-  under a legacy SQLite directory.
+- **The observation plan is faithful and integrity-bound.** Optional
+  `Config.CrawlPrefixes` is the exact provider-prefix observation plan (the
+  library form of a compiled `build.scope`); an unscoped build's plan is the
+  full base prefix. `Build` refuses — before any crawl or sink side effect — a
+  plan/coverage pair that does not faithfully describe the observation universe:
+  non-canonical plan entries (leading slash / surrounding whitespace, so the
+  bytes compared are the bytes crawled); a coverage attestation that is not
+  exactly the plan and confirmed-complete (set equality — no roll-up, extra,
+  missing, duplicate, windowed, inferred, incomplete, or gapped entries — so an
+  unscoped build must attest exactly full-base coverage); and, for every durable
+  build, an observation selector that would reduce below the plan (non-default
+  `Match.Includes`, any `Excludes`, `IncludeHidden`, or a `Filter`). Restrictive
+  match/filter selection is intentionally **not** a durable-build surface in this
+  Experimental API — the plan alone defines what is observed. Coverage is
+  destructive authority over the verified-parent rows, so the plan is recorded in
+  each journal header (`crawl_prefixes`) and the journal footer carries a
+  writer-generated integrity checksum (`content_sha256`) over the header and
+  records. A later `Retry` derives the plan from the journals (never a caller
+  field), rejects a journal that lacks the checksum or records a non-canonical
+  plan, requires all journals to agree, and requires its `Coverage` to match that
+  plan; prior rows outside the attested plan are retained verbatim, and journals
+  without a recorded plan or checksum fail closed. Trust model: `Retry` consumes
+  `JournalPaths` as **engine-produced recovery artifacts** in the engine's
+  working storage, which is assumed trusted. The `content_sha256` is an unkeyed
+  integrity checksum that detects corruption, truncation, and partial
+  modification of a journal on read (at both validation and the
+  streaming-compaction reopen); it is not a cryptographic authentication
+  mechanism. Stronger authentication for deployments where recovery artifacts are
+  not trusted storage is a tracked follow-up.
+- **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
+  journal/segment/manifest locations resolved by the adapter. The engine
+  rejects journal/segment paths under a supplied `IndexDBDir` so v2 working
+  state is not silently nested under a legacy SQLite directory. Multi-run
+  continuity additionally requires the canonical latest-owned layout
+  (`<dir(LatestPath)>/runs/<run_id>/complete.json`, manifest/segments contained
+  in the run directory): a build that records a state parent refuses — before
+  any crawl or sink — a parent or target outside that layout, because
+  continuity edges are pathless and the production ancestry lookup rediscovers
+  parents only under the latest-owned `runs/` root. A standalone first
+  publication may use any layout but cannot be extended until canonical.
+  Same-run recovery must target the run's exact recorded locus.
 - **Whole-set mutation authority is shared.** `pkg/indexbuild` and
   `pkg/indexenrich` acquire an OS-backed `pkg/indexcoord` lease before opening
   or creating set state. Its lock lives in the stable sibling

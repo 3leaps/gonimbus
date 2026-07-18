@@ -66,7 +66,7 @@ func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	restore := withIndexBuildExperimentalEngineTestState(t)
 	restore()
 	indexBuildJobPath = manifestA
-	indexBuildFormat = "both"
+	indexBuildFormat = "sqlite"
 	cmdA := &cobra.Command{Use: "build"}
 	cmdA.SetContext(context.Background())
 	var outA strings.Builder
@@ -118,7 +118,7 @@ func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	// Legacy SQLite-only discovery still sees only A (trap for list-based rediscovery).
 	legacy, err := loadIndexEntriesWithPaths(context.Background())
 	require.NoError(t, err)
-	require.Len(t, legacy, 1, "SQLite-only discovery must still see only both/SQLite set A")
+	require.Len(t, legacy, 1, "SQLite-only discovery must still see only canonical-SQLite set A")
 	require.Equal(t, idA, legacy[0].Info.IndexSetID)
 
 	// Format-aware list surfaces durable-only B as well.
@@ -320,12 +320,21 @@ build:
 	require.Equal(t, indexBuildResultType, rec.Type)
 	require.Equal(t, "success", rec.Status)
 	require.Equal(t, "both", rec.RequestedFormat)
-	require.Equal(t, []string{"sqlite-v1", "durable-v2"}, rec.FormatsCommitted)
+	// `both` commits durable only; the SQLite side is run-scoped verification
+	// evidence and must never appear as a committed substrate.
+	require.Equal(t, []string{"durable-v2"}, rec.FormatsCommitted)
 	require.NotEmpty(t, rec.ManifestSHA256)
 	require.NotNil(t, rec.Rows)
 	require.Equal(t, 2, *rec.Rows)
 	require.NotNil(t, rec.ObjectsIngested)
-	assertRawJSONHasKeys(t, lines[1], "rows", "objects_ingested", "objects_observed", "manifest_sha256")
+	require.NotNil(t, rec.Verification)
+	require.True(t, rec.Verification.ProjectionMaterialized)
+	require.True(t, rec.Verification.ProjectionClosed)
+	require.True(t, rec.Verification.ParityPassed)
+	require.Equal(t, rec.RunID, rec.Verification.ObservationRunID)
+	require.EqualValues(t, 2, rec.Verification.ProjectionRows)
+	require.NotEmpty(t, rec.Verification.ProjectionSHA256)
+	assertRawJSONHasKeys(t, lines[1], "rows", "objects_ingested", "objects_observed", "manifest_sha256", "verification")
 }
 
 func TestBuildJSONReceiptSQLitePartialAndFailedSemantics(t *testing.T) {

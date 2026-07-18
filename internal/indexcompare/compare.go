@@ -179,7 +179,7 @@ func Compare(ctx context.Context, input Input) (Report, error) {
 		return Report{}, err
 	}
 	defer func() { _ = sqlRows.Close() }()
-	durableRows := newDurableIterator(ctx, input.DurableSegmentDir, input.DurableManifest)
+	durableRows := newDurableIterator(ctx, input.DurableSegmentDir, input.DurableManifest, report.ObservationRunID)
 
 	sqlHash := sha256.New()
 	durableHash := sha256.New()

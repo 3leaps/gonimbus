@@ -72,12 +72,22 @@ type durableRowResult struct {
 	err error
 }
 
-func newDurableIterator(ctx context.Context, segmentDir string, manifest indexsubstrate.InternalManifest) *durableIterator {
+// newDurableIterator yields the durable current-state projection for one crawl.
+// When observationRunID is set it applies the same observation-run predicate the
+// SQLite side uses (last_seen_run_id == observationRunID): a scope-reduced build
+// retains out-of-scope active rows whose last-seen lineage is an older run, and
+// those rows are not part of this run's LIST projection. Filtering them here
+// keeps parity symmetric without erasing or re-stamping retained durable state.
+func newDurableIterator(ctx context.Context, segmentDir string, manifest indexsubstrate.InternalManifest, observationRunID string) *durableIterator {
+	observationRunID = strings.TrimSpace(observationRunID)
 	out := make(chan durableRowResult, 1)
 	go func() {
 		defer close(out)
 		err := indexsubstrate.WalkManifestRows(segmentDir, manifest, func(current indexsubstrate.CurrentObjectRow) error {
 			if current.DeletedAt != nil {
+				return nil
+			}
+			if observationRunID != "" && strings.TrimSpace(current.LastSeenRunID) != observationRunID {
 				return nil
 			}
 			row, err := projectionFromDurable(current)

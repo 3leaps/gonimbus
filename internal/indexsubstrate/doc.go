@@ -2,8 +2,9 @@
 //
 // The package is internal while the journal, segment, and manifest formats are
 // still evolving. The package owns append-only observation journals,
-// compaction-derived rows, a dark spill/merge current-state row source,
-// immutable segment manifests, and fail-closed boundary render contracts for
+// compaction-derived rows, the streaming spill/merge current-state row source
+// drained by the production publish path, immutable segment manifests, and
+// fail-closed boundary render contracts for
 // the durable snapshot format. Segment reachability is modeled from retained
 // manifests, parent chains, and latest pointers; refcounts are derived audit
 // data for future compact/GC planning, not mutable truth.
