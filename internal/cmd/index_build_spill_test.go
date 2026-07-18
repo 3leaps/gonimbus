@@ -193,6 +193,47 @@ func TestResolveIndexBuildSpill_Root(t *testing.T) {
 	require.Equal(t, spillRootSourceFlag, res.RootSource)
 }
 
+// TestResolveIndexBuildSpill_RootRejectsRelative proves a non-absolute root is
+// refused in the pre-crawl resolver (resolveIndexBuildSpill runs before the
+// provider crawl in runIndexBuild), from every operator surface — so a bad path
+// fails fast instead of only tripping resolveProtectedSpillRoot after the crawl.
+func TestResolveIndexBuildSpill_RootRejectsRelative(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		withSpillSurfaces(t, "", "relative/scratch")
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "absolute")
+	})
+	t.Run("env", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		t.Setenv(spillRootEnv, "relative/scratch")
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "absolute")
+	})
+	t.Run("config", func(t *testing.T) {
+		withSpillSurfaces(t, "", "")
+		setSpillConfig(t, spillRootConfig, "relative/scratch")
+		_, err := resolveIndexBuildSpill()
+		require.ErrorContains(t, err, "absolute")
+	})
+}
+
+// TestResolveIndexBuildSpill_RootPrecedence proves root flag > env > config.
+func TestResolveIndexBuildSpill_RootPrecedence(t *testing.T) {
+	withSpillSurfaces(t, "", "/mnt/flag")
+	t.Setenv(spillRootEnv, "/mnt/env")
+	setSpillConfig(t, spillRootConfig, "/mnt/config")
+	res, err := resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, "/mnt/flag", res.Root)
+	require.Equal(t, spillRootSourceFlag, res.RootSource)
+
+	indexBuildSpillRoot = ""
+	res, err = resolveIndexBuildSpill()
+	require.NoError(t, err)
+	require.Equal(t, "/mnt/env", res.Root)
+	require.Equal(t, spillRootSourceEnv, res.RootSource)
+}
+
 // TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath proves the operator
 // diagnostic shows the effective ceiling and source but never the host path.
 func TestEmitIndexBuildSpillDiagnostics_NeverEchoesRootPath(t *testing.T) {

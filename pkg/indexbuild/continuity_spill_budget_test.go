@@ -124,3 +124,83 @@ func TestRetrySpillWorkspaceOverridePropagates(t *testing.T) {
 	_, err = Retry(ctx, rcOK)
 	require.NoError(t, err)
 }
+
+// TestBuildSpillRecordBudgetConstrainsJournalValidation proves the Spill.RecordBytes
+// override reaches the sealed-journal validation pass through public Build: an
+// undersized record budget fails a successive build closed (typed MaxRecordBytes,
+// latest unchanged) and a sufficient budget completes it.
+func TestBuildSpillRecordBudgetConstrainsJournalValidation(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	run1Objs := []provider.ObjectSummary{obj("data/a.xml", `"a1"`, 1, base)}
+	run2Objs := []provider.ObjectSummary{obj("data/a.xml", `"a2"`, 9, base.Add(time.Hour))}
+
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	_, err := NewRunner(contConfig(setRoot, "run1", run1Objs, base)).Build(ctx)
+	require.NoError(t, err)
+	snap1, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+
+	// Record budget of 1 byte is below any journal line (the header); Build seals
+	// the journal then refuses at the validation pass, latest untouched.
+	tiny := contConfig(setRoot, "run2", run2Objs, base.Add(time.Hour))
+	tiny.Spill.RecordBytes = 1
+	_, err = NewRunner(tiny).Build(ctx)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "MaxRecordBytes exceeded")
+	snapAfter, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, snap1.Complete.ManifestSHA256, snapAfter.Complete.ManifestSHA256, "refused build must not advance latest")
+
+	// A sufficient record budget completes the same successive build.
+	ok := contConfig(setRoot, "run2", run2Objs, base.Add(time.Hour))
+	ok.Spill.RecordBytes = 1 << 20
+	_, err = NewRunner(ok).Build(ctx)
+	require.NoError(t, err)
+	snap2, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, 2, snap2.Manifest.Lineage.Generation)
+}
+
+// TestRetrySpillRecordBudgetPropagates proves Spill.RecordBytes also reaches the
+// validation pass through public Retry: an undersized budget refuses the
+// re-publish fail-closed (latest byte-identical), a sufficient budget completes.
+func TestRetrySpillRecordBudgetPropagates(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	_, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+		obj("data/b.xml", `"b1"`, 2, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	run2Start := base.Add(time.Hour)
+	cfg2 := contConfig(setRoot, "run2", []provider.ObjectSummary{
+		obj("data/a.xml", `"a2"`, 9, run2Start),
+		obj("data/b.xml", `"b1"`, 2, base),
+	}, run2Start)
+	sum2, err := NewRunner(cfg2).Build(ctx)
+	require.NoError(t, err)
+
+	latestBefore, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+
+	rcTiny := retryConfigFor(cfg2, sum2)
+	rcTiny.Spill.RecordBytes = 1
+	_, err = Retry(ctx, rcTiny)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "MaxRecordBytes exceeded")
+	latestAfter, err := os.ReadFile(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, latestBefore, latestAfter, "refused Retry must not advance latest")
+
+	rcOK := retryConfigFor(cfg2, sum2)
+	rcOK.Spill.RecordBytes = 1 << 20
+	_, err = Retry(ctx, rcOK)
+	require.NoError(t, err)
+}

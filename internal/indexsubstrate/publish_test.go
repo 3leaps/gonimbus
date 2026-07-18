@@ -561,3 +561,42 @@ func failAfterStep(target PublishStep) func(PublishStep) error {
 		return nil
 	}
 }
+
+// TestPublishRefusesOverBudgetJournalRecordBeforeValidation proves MaxRecordBytes
+// bounds the sealed-journal validation pass (not only the later streaming scan):
+// an over-budget record fails closed with a typed SpillMergeBudgetExhausted before
+// the journal is declared validated or coverage is validated, and latest never
+// advances.
+func TestPublishRefusesOverBudgetJournalRecordBeforeValidation(t *testing.T) {
+	cfg, _ := publishTestConfig(t)
+	var steps []PublishStep
+	cfg.AfterStep = func(s PublishStep) error { steps = append(steps, s); return nil }
+	cfg.SpillBudget.MaxRecordBytes = 1 // below any real journal line (the header)
+
+	_, err := PublishSnapshot(cfg)
+	require.Error(t, err)
+	var sme *SpillMergeError
+	require.True(t, errors.As(err, &sme), "expected typed spill-merge error, got %v", err)
+	require.Equal(t, SpillMergeBudgetExhausted, sme.Category)
+	require.Contains(t, err.Error(), "MaxRecordBytes exceeded")
+	require.NotContains(t, steps, PublishStepJournalsValidated, "must refuse before journals are declared validated")
+	require.NotContains(t, steps, PublishStepCoverageValidated)
+
+	// First publication refused: no latest advanced.
+	_, err = OpenLatestPublishedSnapshot(cfg.LatestPath)
+	require.Error(t, err)
+}
+
+// TestPublishSufficientRecordBudgetValidates is the exact-limit companion: a
+// budget above the journal's largest line validates and publishes normally.
+func TestPublishSufficientRecordBudgetValidates(t *testing.T) {
+	cfg, _ := publishTestConfig(t)
+	var steps []PublishStep
+	cfg.AfterStep = func(s PublishStep) error { steps = append(steps, s); return nil }
+	cfg.SpillBudget.MaxRecordBytes = 1 << 20 // comfortably above the journal lines
+
+	result, err := PublishSnapshot(cfg)
+	require.NoError(t, err)
+	require.True(t, result.LatestAdvanced)
+	require.Contains(t, steps, PublishStepJournalsValidated)
+}

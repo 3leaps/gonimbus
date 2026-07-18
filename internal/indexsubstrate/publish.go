@@ -596,6 +596,11 @@ func normalizePublishConfig(config PublishConfig) PublishConfig {
 	if config.TargetRowsPerSegment <= 0 {
 		config.TargetRowsPerSegment = DefaultTargetRowsPerSegment
 	}
+	// Resolve the spill budget now so MaxRecordBytes is the effective (default or
+	// override) bound applied by sealed-journal validation, not just the later
+	// streaming scan. withDefaults is idempotent; PrepareCurrentStateSource
+	// re-normalizes and validates it downstream.
+	config.SpillBudget = config.SpillBudget.withDefaults()
 	return config
 }
 
@@ -667,8 +672,14 @@ func validatePublishConfig(config PublishConfig) error {
 func validateSealedJournalFiles(config PublishConfig) ([]JournalSummary, error) {
 	summaries := make([]JournalSummary, 0, len(config.JournalPaths))
 	for _, path := range config.JournalPaths {
-		summary, err := ValidateJournal(path)
+		summary, err := validateJournalFile(path, config.SpillBudget.MaxRecordBytes)
 		if err != nil {
+			// An over-budget record is a capacity refusal — surface the same typed
+			// SpillMergeBudgetExhausted as the streaming scan, before this journal
+			// is declared validated or any authority advances.
+			if errors.Is(err, errJournalRecordTooLong) {
+				return nil, spillErr(SpillMergeBudgetExhausted, "journal", "MaxRecordBytes exceeded", "", nil)
+			}
 			return nil, err
 		}
 		if summary.Header.IndexSetID != config.IndexSetID {

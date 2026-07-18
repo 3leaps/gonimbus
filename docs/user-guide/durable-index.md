@@ -99,17 +99,19 @@ plan automation around a custom segment-size flag.
 
 A **successive** durable build (a second or later build of the same index set)
 stages the **full prior current-state** into an on-disk scratch workspace before
-merging in the new observations. Peak workspace therefore scales roughly with
-corpus size, not with the change set. A first build has no prior state to stage
-and is unaffected.
+merging in the new observations, so its peak workspace scales roughly with corpus
+size, not with the change set. A first build has no prior state to stage, so it
+spills only the run's own observations — its peak is much lower (field first
+builds recorded ~0.46 GiB at ~0.9M and ~2.3 GiB at ~3.6M), and the successive
+path is the one to size for.
 
 The workspace has a **finite ceiling** (`MaxWorkspaceBytes`). Crossing it fails
 the build **closed** — a typed error, the prior published run and `latest`
 untouched — rather than growing without bound. The default ceiling is **16 GiB**.
 Field peak runs ~1.2–1.35 KiB/row (bounded, flattening with scale), so this
-carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a floor
-for convenience, **not a guarantee** for larger sets, which must raise it
-explicitly.
+carries to ~13.6M objects — validated with ~20% headroom at ~10.9M. It is a
+**convenience default ceiling**, **not a guarantee** for larger sets, which must
+raise it explicitly.
 
 A second budget, the **max single journal-record size** (`MaxRecordBytes`,
 default **16 MiB**), bounds one journal line. The journal header carries the
@@ -141,13 +143,15 @@ index:
 
 Notes:
 
-- **Precedence:** CLI flag > environment > application config > 8 GiB default.
+- **Precedence:** CLI flag > environment > application config > built-in default
+  (16 GiB workspace, 16 MiB record).
 - The value is a **ceiling, not a reservation**, and a self-protection control
   against runaway scratch — keep it a finite positive size; there is no
   "unlimited" spelling.
-- `--spill-workspace-max` / `--spill-root` are **not forwarded to `--background`
-  jobs** (the managed child is reconstructed from a fingerprinted invocation).
-  Use the environment or config keys, which the managed child inherits.
+- `--spill-workspace-max` / `--spill-record-max` / `--spill-root` are **not
+  forwarded to `--background` jobs** (the managed child is reconstructed from a
+  fingerprinted invocation). Use the environment or config keys, which the
+  managed child inherits.
 - The scratch **root is host/operator configuration**, never index identity — it
   never enters manifests, receipts, or committed digests, and is never echoed
   into artifacts or sanitized errors (diagnostics show its source, not the path).

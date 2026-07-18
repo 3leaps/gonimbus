@@ -88,9 +88,9 @@ normalized rows or counters.
 | ----------------- | --------------------------------------------------------------------------------------- |
 | MaxBufferedRows   | 64_000                                                                                  |
 | MaxBufferedBytes  | 64 MiB                                                                                  |
-| MaxRecordBytes    | 1 MiB                                                                                   |
+| MaxRecordBytes    | 16 MiB                                                                                  |
 | MaxJournalSources | 256                                                                                     |
-| MaxWorkspaceBytes | 512 MiB                                                                                 |
+| MaxWorkspaceBytes | 16 GiB                                                                                  |
 | MaxSpillRuns      | 4096                                                                                    |
 | MaxFanIn          | 16 (min **3**; concurrent **spill-run** FDs only — roots/lock/journal sources excluded) |
 | MaxMergePasses    | 64                                                                                      |

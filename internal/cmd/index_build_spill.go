@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -145,6 +146,14 @@ func resolveIndexBuildSpill() (indexBuildSpillResolution, error) {
 		spillRootEnv, spillRootSourceEnv,
 		spillRootConfig, spillRootSourceConfig,
 	); ok {
+		// Fail fast on a non-absolute root here, before the crawl — a relative
+		// root otherwise only trips resolveProtectedSpillRoot at publish, after a
+		// multi-million-object crawl is already spent. The real/non-symlink/dir
+		// checks remain the publish-time security boundary (resolveProtectedSpillRoot);
+		// the error never echoes the configured path.
+		if !filepath.IsAbs(raw) {
+			return indexBuildSpillResolution{}, fmt.Errorf("spill scratch root (%s) must be an absolute path", source)
+		}
 		res.Root = raw
 		res.RootSource = source
 	}

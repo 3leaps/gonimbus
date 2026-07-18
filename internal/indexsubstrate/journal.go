@@ -254,6 +254,14 @@ func (w *JournalWriter) Close() error {
 }
 
 func ValidateJournal(path string) (JournalSummary, error) {
+	return validateJournalFile(path, 0)
+}
+
+// validateJournalFile validates a sealed journal, bounding each line read by
+// maxRecordBytes (0 = unbounded). The publish path passes the resolved
+// MaxRecordBytes so an oversized record is refused before the journal is declared
+// validated; errJournalRecordTooLong propagates for the caller to classify.
+func validateJournalFile(path string, maxRecordBytes int64) (JournalSummary, error) {
 	dir, name, err := splitJournalPath(path)
 	if err != nil {
 		return JournalSummary{}, err
@@ -268,7 +276,7 @@ func ValidateJournal(path string) (JournalSummary, error) {
 		return JournalSummary{}, fmt.Errorf("open journal: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	journal, records, err := readJournalReader(file, false)
+	journal, records, err := readJournalReader(file, false, maxRecordBytes)
 	if err != nil {
 		return JournalSummary{}, err
 	}
@@ -295,7 +303,7 @@ func ReadJournal(path string) (Journal, error) {
 		return Journal{}, fmt.Errorf("open journal: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	journal, _, err := readJournalReader(file, true)
+	journal, _, err := readJournalReader(file, true, 0)
 	return journal, err
 }
 
@@ -369,7 +377,39 @@ func splitJournalPath(path string) (string, string, error) {
 	return dir, name, nil
 }
 
-func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error) {
+// errJournalRecordTooLong is returned by the bounded read when a single journal
+// line exceeds the configured MaxRecordBytes. The publish validation path maps it
+// to a typed SpillMergeBudgetExhausted; unbounded callers (maxRecordBytes <= 0)
+// never see it.
+var errJournalRecordTooLong = errors.New("journal record exceeds max record bytes")
+
+// readJournalLineBounded reads one '\n'-terminated line. When max > 0 it refuses
+// a line longer than max bytes instead of accumulating unbounded, so an oversized
+// header/record cannot allocate past the budget before enforcement. The returned
+// line includes the trailing '\n' (matching bufio.Reader.ReadString) so the
+// caller's newline trimming and partial-trailing-line detection are unchanged.
+func readJournalLineBounded(reader *bufio.Reader, max int64) (string, error) {
+	if max <= 0 {
+		return reader.ReadString('\n')
+	}
+	var b []byte
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if int64(len(b))+int64(len(chunk)) > max {
+			return "", errJournalRecordTooLong
+		}
+		b = append(b, chunk...)
+		if err == nil {
+			return string(b), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return string(b), err
+	}
+}
+
+func readJournalReader(r io.Reader, collectRecords bool, maxRecordBytes int64) (Journal, uint64, error) {
 	reader := bufio.NewReader(r)
 	var journal Journal
 	var records uint64
@@ -382,13 +422,16 @@ func readJournalReader(r io.Reader, collectRecords bool) (Journal, uint64, error
 	content := sha256.New()
 	lineNo := 0
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readJournalLineBounded(reader, maxRecordBytes)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if line != "" {
 					return Journal{}, 0, fmt.Errorf("%w: partial trailing line", ErrIncompleteJournal)
 				}
 				break
+			}
+			if errors.Is(err, errJournalRecordTooLong) {
+				return Journal{}, 0, errJournalRecordTooLong
 			}
 			return Journal{}, 0, fmt.Errorf("read journal line: %w", err)
 		}
