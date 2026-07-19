@@ -145,7 +145,7 @@ func TestResolveReflowConcurrencyResourceCapFailLow(t *testing.T) {
 
 	require.Equal(t, 1000, cfg.RequestedCeiling)
 	require.Equal(t, 16, cfg.EffectiveCeiling)
-	require.Equal(t, "resource_capped:memory:conservative_default", cfg.CeilingReason)
+	require.Equal(t, "resource_capped:memory:detection_unavailable", cfg.CeilingReason)
 	require.Equal(t, 16, cfg.Initial)
 	require.True(t, cfg.AdaptiveEnabled)
 }

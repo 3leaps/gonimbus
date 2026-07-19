@@ -26,6 +26,15 @@ const (
 	resourceMaxCap                = int(^uint(0) >> 1)
 )
 
+// Memory-limit source labels reported in concurrency_ceiling_reason and the
+// run-record memory fields. Platform probes additionally report cgroup_v2 /
+// cgroup_v1.
+const (
+	memorySourceRuntime              = "runtime"
+	memorySourcePhysicalRAM          = "physical_ram"
+	memorySourceDetectionUnavailable = "detection_unavailable"
+)
+
 // ResourceProbe supplies host resource limits used to clamp requested transfer
 // concurrency before any worker pools, queues, or retry buffers are created.
 type ResourceProbe struct {
@@ -85,14 +94,33 @@ func DefaultResourceProbe() ResourceProbe {
 }
 
 func defaultMemoryLimitBytes() (int64, string, error) {
-	if limit, source, err := defaultPlatformMemoryLimitBytes(); err == nil && limit > 0 {
-		return limit, source, nil
-	}
+	return memoryLimitFromChain(defaultPlatformMemoryLimitBytes, runtimeMemoryLimitBytes, defaultPhysicalMemoryBytes)
+}
+
+func runtimeMemoryLimitBytes() int64 {
 	limit := debug.SetMemoryLimit(-1)
 	if limit > 0 && limit < math.MaxInt64 {
-		return limit, "runtime", nil
+		return limit
 	}
-	return resourceDefaultMemoryLimit, "conservative_default", nil
+	return 0
+}
+
+// memoryLimitFromChain resolves the memory limit that derives the transfer
+// concurrency budget: the container/cgroup hard limit wins (it is enforced),
+// then an explicit runtime limit (GOMEMLIMIT), then detected physical RAM. The
+// conservative default applies only when detection is genuinely unavailable —
+// a probe failure never silently assumes host capacity.
+func memoryLimitFromChain(platform func() (int64, string, error), runtimeLimit func() int64, physical func() (int64, error)) (int64, string, error) {
+	if limit, source, err := platform(); err == nil && limit > 0 {
+		return limit, source, nil
+	}
+	if limit := runtimeLimit(); limit > 0 {
+		return limit, memorySourceRuntime, nil
+	}
+	if limit, err := physical(); err == nil && limit > 0 {
+		return limit, memorySourcePhysicalRAM, nil
+	}
+	return resourceDefaultMemoryLimit, memorySourceDetectionUnavailable, nil
 }
 
 // ResolveConcurrency clamps the requested ceiling by memory and FD limits before
@@ -111,7 +139,7 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 	memoryLimit, memorySource, memoryErr := probe.MemoryLimitBytes()
 	if memoryLimit <= 0 || memoryErr != nil {
 		memoryLimit = resourceDefaultMemoryLimit
-		memorySource = "conservative_default"
+		memorySource = memorySourceDetectionUnavailable
 	}
 	memoryBudget := int64(float64(memoryLimit) * resourceMemoryFraction)
 	if memoryBudget < transfer.DefaultRetryBufferMaxMemoryBytes {

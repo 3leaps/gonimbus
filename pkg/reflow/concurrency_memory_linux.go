@@ -32,3 +32,34 @@ func defaultPlatformMemoryLimitBytes() (int64, string, error) {
 	}
 	return 0, "", nil
 }
+
+func defaultPhysicalMemoryBytes() (int64, error) {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	return parseMemInfoTotalBytes(raw), nil
+}
+
+// parseMemInfoTotalBytes extracts MemTotal from /proc/meminfo content
+// ("MemTotal:       65536000 kB"). Returns 0 when absent or malformed.
+func parseMemInfoTotalBytes(raw []byte) int64 {
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "MemTotal:"))
+		if len(fields) < 1 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || kb <= 0 || kb >= (1<<60)/1024 {
+			return 0
+		}
+		if len(fields) > 1 && fields[1] != "kB" {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
+}

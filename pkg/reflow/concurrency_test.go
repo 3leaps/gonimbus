@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -27,9 +28,107 @@ func TestResolveConcurrencyResourceCapFailLow(t *testing.T) {
 
 	require.Equal(t, 1000, cfg.RequestedCeiling)
 	require.Equal(t, 16, cfg.EffectiveCeiling)
-	require.Equal(t, "resource_capped:memory:conservative_default", cfg.CeilingReason)
+	require.Equal(t, "resource_capped:memory:detection_unavailable", cfg.CeilingReason)
 	require.Equal(t, 16, cfg.Initial)
 	require.True(t, cfg.AdaptiveEnabled)
+}
+
+func TestMemoryLimitFromChainPrecedence(t *testing.T) {
+	const gib = int64(1 << 30)
+	platform := func(limit int64, source string, err error) func() (int64, string, error) {
+		return func() (int64, string, error) { return limit, source, err }
+	}
+	physical := func(limit int64, err error) func() (int64, error) {
+		return func() (int64, error) { return limit, err }
+	}
+	cases := []struct {
+		name       string
+		platform   func() (int64, string, error)
+		runtime    func() int64
+		physical   func() (int64, error)
+		wantLimit  int64
+		wantSource string
+	}{
+		{
+			name:       "cgroup limit wins over runtime and physical",
+			platform:   platform(2*gib, "cgroup_v2", nil),
+			runtime:    func() int64 { return 8 * gib },
+			physical:   physical(64*gib, nil),
+			wantLimit:  2 * gib,
+			wantSource: "cgroup_v2",
+		},
+		{
+			name:       "platform error falls through to runtime",
+			platform:   platform(0, "", errors.New("unreadable")),
+			runtime:    func() int64 { return 8 * gib },
+			physical:   physical(64*gib, nil),
+			wantLimit:  8 * gib,
+			wantSource: "runtime",
+		},
+		{
+			name:       "platform absent falls through to runtime",
+			platform:   platform(0, "", nil),
+			runtime:    func() int64 { return 8 * gib },
+			physical:   physical(64*gib, nil),
+			wantLimit:  8 * gib,
+			wantSource: "runtime",
+		},
+		{
+			name:       "no runtime limit falls through to physical RAM",
+			platform:   platform(0, "", nil),
+			runtime:    func() int64 { return 0 },
+			physical:   physical(64*gib, nil),
+			wantLimit:  64 * gib,
+			wantSource: "physical_ram",
+		},
+		{
+			name:       "physical probe error falls back to conservative default",
+			platform:   platform(0, "", nil),
+			runtime:    func() int64 { return 0 },
+			physical:   physical(0, errors.New("probe failed")),
+			wantLimit:  resourceDefaultMemoryLimit,
+			wantSource: "detection_unavailable",
+		},
+		{
+			name:       "physical probe absent falls back to conservative default",
+			platform:   platform(0, "", nil),
+			runtime:    func() int64 { return 0 },
+			physical:   physical(0, nil),
+			wantLimit:  resourceDefaultMemoryLimit,
+			wantSource: "detection_unavailable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limit, source, err := memoryLimitFromChain(tc.platform, tc.runtime, tc.physical)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantLimit, limit)
+			require.Equal(t, tc.wantSource, source)
+		})
+	}
+}
+
+func TestDefaultMemoryLimitDetectionSmoke(t *testing.T) {
+	limit, source, err := defaultMemoryLimitBytes()
+	require.NoError(t, err)
+	require.Positive(t, limit)
+	require.Contains(t, []string{
+		"cgroup_v2", "cgroup_v1", "runtime", "physical_ram", "detection_unavailable",
+	}, source)
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		require.NotEqual(t, "detection_unavailable", source,
+			"memory detection must succeed on %s: physical RAM is always probeable", runtime.GOOS)
+	}
+}
+
+func TestPhysicalMemoryProbeSmoke(t *testing.T) {
+	limit, err := defaultPhysicalMemoryBytes()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		require.Zero(t, limit)
+		return
+	}
+	require.NoError(t, err)
+	require.Positive(t, limit)
 }
 
 func TestConcurrencyLimiterThrottleAndConnectionFreeze(t *testing.T) {
