@@ -31,8 +31,9 @@ changes.
 - **Dispatch transparency.** Run and summary records carry `execution_path`
   (`engine` | `cli-pool`) on both paths; requested (`parallel`), resolved
   (`concurrency_ceiling_effective`), and observed (`concurrency_max_active`)
-  concurrency remain separate fields, and no run reports a requested value the
-  selected path does not honor.
+  concurrency remain separate fields. Requested is reported as operator
+  intent; both paths execute under, and truthfully report, the normalized
+  effective ceiling and the observed maximum.
 
 ### Changed
 

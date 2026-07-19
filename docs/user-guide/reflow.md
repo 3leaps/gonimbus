@@ -275,12 +275,15 @@ Path selection is **observable evidence, never an implementation detail**:
   (`engine` | `cli-pool`).
 - Requested, resolved, and observed concurrency stay separate fields —
   `parallel` (requested), `concurrency_ceiling_effective` (resolved),
-  `concurrency_max_active` (observed peak) — and no run reports a requested
-  value the selected path does not honor.
+  `concurrency_max_active` (observed peak). Requested is reported as operator
+  intent; the execution contract is the normalized **effective** ceiling,
+  which both paths execute under and truthfully report alongside the observed
+  maximum.
 - Both paths are held to a standing behavioral parity gate in the test suite:
   a same-input dual-path harness (output records, checkpoint state, and
-  destination sets must be equivalent; both paths must actually overlap work
-  to their resolved ceiling, on copy-heavy and skip-heavy fixtures), and a
+  destination sets must be equivalent; both paths must prove genuine
+  concurrent overlap to a deterministic lower bound while remaining at or
+  below the effective ceiling, on copy-heavy and skip-heavy fixtures), and a
   flag-coverage matrix in which every flag declares and _proves_ its
   disposition on each path — honored, routes to the CLI pool, refused loudly,
   or pinned not-applicable. Silently ignored options are not a legal state.
