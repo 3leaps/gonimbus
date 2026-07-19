@@ -35,6 +35,14 @@ const (
 	memorySourceDetectionUnavailable = "detection_unavailable"
 )
 
+// Memory-budget source labels reported in the run-record memory fields.
+const (
+	memoryBudgetSourceDerived         = "derived"
+	memoryBudgetSourceOperator        = "operator"
+	memoryBudgetSourceOperatorClamped = "operator_clamped_to_limit"
+	memoryBudgetReasonLabel           = "operator_budget"
+)
+
 // ResourceProbe supplies host resource limits used to clamp requested transfer
 // concurrency before any worker pools, queues, or retry buffers are created.
 type ResourceProbe struct {
@@ -44,6 +52,12 @@ type ResourceProbe struct {
 
 // ConcurrencyConfig is the resolved GON-048 concurrency contract. RequestedCeiling
 // is the user/operator ceiling; EffectiveCeiling is the resource-safe hard cap.
+//
+// The Memory* fields record the arithmetic behind a memory-derived ceiling:
+// the detected limit, and the budget (either derived as a fraction of the
+// limit or operator-supplied). Configs constructed directly with an explicit
+// EffectiveCeiling and no probe report zero memory fields — the ceiling was
+// not memory-resolved and the records say so.
 type ConcurrencyConfig struct {
 	RequestedCeiling int
 	EffectiveCeiling int
@@ -51,6 +65,12 @@ type ConcurrencyConfig struct {
 	AdaptiveEnabled  bool
 	Floor            int
 	Initial          int
+
+	MemoryLimitBytes           int64
+	MemoryLimitSource          string
+	MemoryBudgetRequestedBytes int64
+	MemoryBudgetEffectiveBytes int64
+	MemoryBudgetSource         string
 }
 
 // ConcurrencyStats is embedded in reflow run and summary records.
@@ -66,6 +86,14 @@ type ConcurrencyStats struct {
 	ConcurrencyAdditiveIncreases      int64  `json:"concurrency_additive_increases"`
 	ConcurrencyConnectionErrorFreezes int64  `json:"concurrency_connection_error_freezes"`
 	ConcurrencyMaxActive              int    `json:"concurrency_max_active"`
+	// Memory fields are omitted when the ceiling was not memory-resolved
+	// (configs constructed directly with an explicit EffectiveCeiling and no
+	// probe); probe-resolved runs always populate limit, budget, and sources.
+	MemoryLimitBytes           int64  `json:"memory_limit_bytes,omitempty"`
+	MemoryLimitSource          string `json:"memory_limit_source,omitempty"`
+	MemoryBudgetRequestedBytes int64  `json:"memory_budget_requested_bytes,omitempty"`
+	MemoryBudgetEffectiveBytes int64  `json:"memory_budget_effective_bytes,omitempty"`
+	MemoryBudgetSource         string `json:"memory_budget_source,omitempty"`
 }
 
 // ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
@@ -124,8 +152,21 @@ func memoryLimitFromChain(platform func() (int64, string, error), runtimeLimit f
 }
 
 // ResolveConcurrency clamps the requested ceiling by memory and FD limits before
-// the caller allocates concurrency-sized resources.
+// the caller allocates concurrency-sized resources. The memory budget is derived
+// as a fraction of the detected limit; use ResolveConcurrencyWithBudget to
+// supply an operator budget instead.
 func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe) ConcurrencyConfig {
+	return ResolveConcurrencyWithBudget(requested, adaptiveEnabled, probe, 0)
+}
+
+// ResolveConcurrencyWithBudget resolves like ResolveConcurrency with an
+// explicit operator memory budget (bytes) replacing the fraction-derived
+// budget. The operator budget is bounded above by the detected memory limit
+// (recorded as operator_clamped_to_limit); when detection is unavailable the
+// operator value is authoritative. operatorBudgetBytes <= 0 means no override.
+// Callers own rejecting invalid operator values before resolution — this
+// function never refuses; it clamps and records.
+func ResolveConcurrencyWithBudget(requested int, adaptiveEnabled bool, probe ResourceProbe, operatorBudgetBytes int64) ConcurrencyConfig {
 	if requested < 1 {
 		requested = 1
 	}
@@ -141,7 +182,19 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 		memoryLimit = resourceDefaultMemoryLimit
 		memorySource = memorySourceDetectionUnavailable
 	}
+
+	budgetRequested := int64(0)
+	budgetSource := memoryBudgetSourceDerived
 	memoryBudget := int64(float64(memoryLimit) * resourceMemoryFraction)
+	if operatorBudgetBytes > 0 {
+		budgetRequested = operatorBudgetBytes
+		budgetSource = memoryBudgetSourceOperator
+		memoryBudget = operatorBudgetBytes
+		if memorySource != memorySourceDetectionUnavailable && memoryBudget > memoryLimit {
+			memoryBudget = memoryLimit
+			budgetSource = memoryBudgetSourceOperatorClamped
+		}
+	}
 	if memoryBudget < transfer.DefaultRetryBufferMaxMemoryBytes {
 		memoryBudget = transfer.DefaultRetryBufferMaxMemoryBytes
 	}
@@ -163,7 +216,11 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 	var reasons []string
 	if memoryCap < effective {
 		effective = memoryCap
-		reasons = append(reasons, "memory:"+memorySource)
+		memoryReasonLabel := memorySource
+		if budgetSource != memoryBudgetSourceDerived {
+			memoryReasonLabel = memoryBudgetReasonLabel
+		}
+		reasons = append(reasons, "memory:"+memoryReasonLabel)
 	}
 	if fdCap < effective {
 		effective = fdCap
@@ -183,12 +240,17 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 	}
 
 	return ConcurrencyConfig{
-		RequestedCeiling: requested,
-		EffectiveCeiling: effective,
-		CeilingReason:    reason,
-		AdaptiveEnabled:  adaptiveEnabled,
-		Floor:            concurrencyFloor,
-		Initial:          initial,
+		RequestedCeiling:           requested,
+		EffectiveCeiling:           effective,
+		CeilingReason:              reason,
+		AdaptiveEnabled:            adaptiveEnabled,
+		Floor:                      concurrencyFloor,
+		Initial:                    initial,
+		MemoryLimitBytes:           memoryLimit,
+		MemoryLimitSource:          memorySource,
+		MemoryBudgetRequestedBytes: budgetRequested,
+		MemoryBudgetEffectiveBytes: memoryBudget,
+		MemoryBudgetSource:         budgetSource,
 	}
 }
 
@@ -367,6 +429,11 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 		ConcurrencyAdditiveIncreases:      l.additiveIncreases,
 		ConcurrencyConnectionErrorFreezes: l.connectionFreezes,
 		ConcurrencyMaxActive:              l.maxActive,
+		MemoryLimitBytes:                  l.cfg.MemoryLimitBytes,
+		MemoryLimitSource:                 l.cfg.MemoryLimitSource,
+		MemoryBudgetRequestedBytes:        l.cfg.MemoryBudgetRequestedBytes,
+		MemoryBudgetEffectiveBytes:        l.cfg.MemoryBudgetEffectiveBytes,
+		MemoryBudgetSource:                l.cfg.MemoryBudgetSource,
 	}
 }
 

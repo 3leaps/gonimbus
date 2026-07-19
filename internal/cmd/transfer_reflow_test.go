@@ -3426,6 +3426,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowRewriteTo, "rewrite-to", "", "")
 	cmd.Flags().IntVar(&reflowParallel, "parallel", 16, "")
 	cmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "")
+	cmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "")
 	cmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "")
 	cmd.Flags().BoolVar(&reflowResume, "resume", false, "")
 	cmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "")

@@ -33,6 +33,70 @@ func TestResolveConcurrencyResourceCapFailLow(t *testing.T) {
 	require.True(t, cfg.AdaptiveEnabled)
 }
 
+func TestResolveConcurrencyWithBudgetArithmetic(t *testing.T) {
+	const gib = int64(1 << 30)
+	const mib = int64(1 << 20)
+	fdOK := func() (int64, error) { return 4096, nil }
+	probeWith := func(limit int64, source string, err error) ResourceProbe {
+		return ResourceProbe{
+			MemoryLimitBytes: func() (int64, string, error) { return limit, source, err },
+			FDSoftLimit:      fdOK,
+		}
+	}
+
+	t.Run("operator budget sizes the ceiling and is recorded", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(32, true, probeWith(gib, "cgroup_v2", nil), 128*mib)
+		require.Equal(t, 8, cfg.EffectiveCeiling, "128MiB / 16MiB per-worker = 8")
+		require.Equal(t, "resource_capped:memory:operator_budget", cfg.CeilingReason)
+		require.Equal(t, gib, cfg.MemoryLimitBytes)
+		require.Equal(t, "cgroup_v2", cfg.MemoryLimitSource)
+		require.Equal(t, 128*mib, cfg.MemoryBudgetRequestedBytes)
+		require.Equal(t, 128*mib, cfg.MemoryBudgetEffectiveBytes)
+		require.Equal(t, "operator", cfg.MemoryBudgetSource)
+	})
+
+	t.Run("operator budget above detected limit clamps to the limit", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(128, true, probeWith(gib, "cgroup_v2", nil), 2*gib)
+		require.Equal(t, 64, cfg.EffectiveCeiling, "clamped budget 1GiB / 16MiB = 64")
+		require.Equal(t, "resource_capped:memory:operator_budget", cfg.CeilingReason)
+		require.Equal(t, 2*gib, cfg.MemoryBudgetRequestedBytes)
+		require.Equal(t, gib, cfg.MemoryBudgetEffectiveBytes)
+		require.Equal(t, "operator_clamped_to_limit", cfg.MemoryBudgetSource)
+	})
+
+	t.Run("operator budget authoritative when detection unavailable", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(64, true, probeWith(0, "", errors.New("probe failed")), 2*gib)
+		require.Equal(t, 64, cfg.EffectiveCeiling, "2GiB / 16MiB = 128 caps nothing at requested 64")
+		require.Equal(t, "requested", cfg.CeilingReason)
+		require.Equal(t, "detection_unavailable", cfg.MemoryLimitSource)
+		require.Equal(t, 2*gib, cfg.MemoryBudgetRequestedBytes)
+		require.Equal(t, 2*gib, cfg.MemoryBudgetEffectiveBytes)
+		require.Equal(t, "operator", cfg.MemoryBudgetSource,
+			"no detected limit means the operator value applies unclamped")
+	})
+
+	t.Run("derived budget records fraction arithmetic", func(t *testing.T) {
+		cfg := ResolveConcurrency(1000, true, probeWith(gib, "physical_ram", nil))
+		require.Equal(t, 16, cfg.EffectiveCeiling, "25% of 1GiB / 16MiB = 16")
+		require.Equal(t, "resource_capped:memory:physical_ram", cfg.CeilingReason)
+		require.Equal(t, gib, cfg.MemoryLimitBytes)
+		require.Equal(t, "physical_ram", cfg.MemoryLimitSource)
+		require.Zero(t, cfg.MemoryBudgetRequestedBytes)
+		require.Equal(t, gib/4, cfg.MemoryBudgetEffectiveBytes)
+		require.Equal(t, "derived", cfg.MemoryBudgetSource)
+	})
+
+	t.Run("limiter snapshot carries the memory fields", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(32, true, probeWith(gib, "cgroup_v2", nil), 128*mib)
+		stats := NewConcurrencyLimiter(cfg).Snapshot()
+		require.Equal(t, gib, stats.MemoryLimitBytes)
+		require.Equal(t, "cgroup_v2", stats.MemoryLimitSource)
+		require.Equal(t, 128*mib, stats.MemoryBudgetRequestedBytes)
+		require.Equal(t, 128*mib, stats.MemoryBudgetEffectiveBytes)
+		require.Equal(t, "operator", stats.MemoryBudgetSource)
+	})
+}
+
 func TestMemoryLimitFromChainPrecedence(t *testing.T) {
 	const gib = int64(1 << 30)
 	platform := func(limit int64, source string, err error) func() (int64, string, error) {

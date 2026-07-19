@@ -334,6 +334,48 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 			require.Contains(t, string(run.Data), `"adaptive_enabled":false`)
 		}},
 	},
+	"memory-budget": {
+		note: "operator budget replaces the fraction-derived memory budget; resolved before dispatch, shared by both paths; invalid values refuse before any provider work; values above the detected limit clamp to it with recorded source",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// Rejected-value subcase: below the 64MiB floor refuses loudly
+			// before any destination mutation.
+			envRefuse := newFlagProbeEnv(t)
+			_, refuseErr := envRefuse.run(t, "--memory-budget", "1MiB")
+			require.Error(t, refuseErr, "--memory-budget below the floor must refuse")
+			require.Contains(t, refuseErr.Error(), "64MiB floor")
+			require.False(t, envRefuse.dst.hasObject("data/source/file.xml"),
+				"refused memory budget must not mutate the destination")
+
+			// Honored: 128MiB budget / 16MiB per-worker reservation = ceiling 8,
+			// below the requested 32 — the budget visibly sizes the ceiling.
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--memory-budget", "128MiB", "--parallel", "32")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":8`)
+			require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+			require.Contains(t, string(run.Data), `"memory_budget_effective_bytes":134217728`)
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_reason":"resource_capped:memory:operator_budget"`)
+		}},
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// Honored on the pool path with the same resolved shape.
+			env := newFlagProbeEnv(t)
+			stdout, err := env.runPool(t, "--memory-budget", "128MiB", "--parallel", "32")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":8`)
+			require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+
+			// Clamp subcase: a budget above the detected limit applies the
+			// limit and records the clamp — never silently exceeds detection.
+			envClamp := newFlagProbeEnv(t)
+			stdoutClamp, errClamp := envClamp.runPool(t, "--memory-budget", "2TiB")
+			requireProbeComplete(t, stdoutClamp, errClamp, reflowpkg.ExecutionPathCLIPool)
+			runClamp := requireRecord(t, stdoutClamp, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runClamp.Data), `"memory_budget_source":"operator_clamped_to_limit"`)
+			require.Contains(t, string(runClamp.Data), `"memory_budget_effective_bytes":1073741824`)
+		}},
+	},
 	"dry-run": {
 		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
