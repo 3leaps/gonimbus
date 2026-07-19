@@ -578,6 +578,92 @@ func TestRunnerZeroConcurrencyConfigResolves(t *testing.T) {
 	require.LessOrEqual(t, got.Initial, got.EffectiveCeiling)
 }
 
+// TestNormalizeConcurrencyInvariants pins the normalized-config post-condition
+// 1 <= Floor <= Initial <= EffectiveCeiling <= RequestedCeiling on partial and
+// inconsistent public configs.
+func TestNormalizeConcurrencyInvariants(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ConcurrencyConfig
+	}{
+		{name: "overlarge floor", in: ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 4, Initial: 4, Floor: 8, AdaptiveEnabled: true}},
+		{name: "fixed partial no initial", in: ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 8, AdaptiveEnabled: false}},
+		{name: "adaptive partial no initial", in: ConcurrencyConfig{RequestedCeiling: 64, EffectiveCeiling: 64, AdaptiveEnabled: true}},
+		{name: "effective above requested", in: ConcurrencyConfig{RequestedCeiling: 2, EffectiveCeiling: 9, AdaptiveEnabled: true}},
+		{name: "requested only", in: ConcurrencyConfig{RequestedCeiling: 4, AdaptiveEnabled: true}},
+		{name: "zero value", in: ConcurrencyConfig{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeConcurrency(tc.in)
+			require.GreaterOrEqual(t, got.Floor, 1)
+			require.LessOrEqual(t, got.Floor, got.Initial)
+			require.LessOrEqual(t, got.Initial, got.EffectiveCeiling)
+			require.LessOrEqual(t, got.EffectiveCeiling, got.RequestedCeiling)
+			require.NotEmpty(t, got.CeilingReason)
+			if !got.AdaptiveEnabled {
+				require.Equal(t, got.EffectiveCeiling, got.Initial,
+					"fixed mode has no ramp: Initial must equal the effective ceiling")
+			}
+		})
+	}
+
+	// Fixed partial config specifically: reported effective must be executed.
+	fixed := normalizeConcurrency(ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 8, AdaptiveEnabled: false})
+	require.Equal(t, 8, fixed.Initial)
+}
+
+// TestLimiterThrottleNeverExceedsEffectiveAfterNormalize is the AIMD half of
+// the invariant: with an over-large floor normalized down, multiplicative
+// decrease can never recover observed concurrency above the effective ceiling.
+func TestLimiterThrottleNeverExceedsEffectiveAfterNormalize(t *testing.T) {
+	cfg := normalizeConcurrency(ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 4, Initial: 4, Floor: 8, AdaptiveEnabled: true})
+	require.LessOrEqual(t, cfg.Floor, cfg.EffectiveCeiling)
+
+	limiter := NewConcurrencyLimiter(cfg)
+	for i := 0; i < 32; i++ {
+		limiter.ObserveThrottle()
+		limiter.ObserveSuccess()
+		snap := limiter.Snapshot()
+		require.LessOrEqual(t, snap.ConcurrencyFinal, snap.ConcurrencyCeilingEffective,
+			"post-throttle concurrency must never exceed the resolved effective ceiling")
+	}
+}
+
+// TestRunnerFixedPartialConfigExecutesReportedCeiling is the behavioral gate
+// for the fixed-mode normalization: a partial non-adaptive config that reports
+// effective=8 must actually overlap to that ceiling, proven by the barrier.
+func TestRunnerFixedPartialConfigExecutesReportedCeiling(t *testing.T) {
+	const (
+		objects      = 16
+		barrierFloor = 4
+	)
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, objects)
+	src := newBarrierGetProvider(srcBase, barrierFloor, 2*time.Second)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	// Partial fixed config: no Initial, no Floor — pre-normalization this
+	// executed serially (Initial floored to 1) while reporting 8.
+	cfg.Concurrency = ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 8, CeilingReason: "requested", AdaptiveEnabled: false}
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), RecordStreamSource{
+		Records: strings.NewReader(poolInputLines(objects)),
+		Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, src.maxInFlight.Load(), int64(barrierFloor),
+		"fixed partial config must execute at its reported ceiling, not serially")
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+	require.LessOrEqual(t, summary.ConcurrencyMaxActive, summary.ConcurrencyCeilingEffective)
+	require.Equal(t, 8, summary.ConcurrencyCeilingEffective)
+	require.Equal(t, 8, summary.ConcurrencyInitial, "normalized fixed config reports the initial it executes")
+}
+
 // TestRunnerRecordStreamPoolCancellation proves a canceled context aborts the
 // pooled run with the context error and without emitting a terminal summary.
 func TestRunnerRecordStreamPoolCancellation(t *testing.T) {

@@ -407,11 +407,6 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return transferReflowEngineTerminalError(runErr)
 		}
 	}
-	// Emit only the live-copy CLI-pool fallback reason (static, product-safe).
-	// Do not log arbitrary plan.reason values — prepare errors may contain raw detail.
-	if enginePlan.reason == transferReflowLiveCopyCLIPoolReason && verbose {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "execution_path=cli-pool reason=%s\n", transferReflowLiveCopyCLIPoolReason)
-	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
 		return exitError(foundry.ExitFileWriteError, "Failed to write IfAbsent fallback warning", err)
@@ -896,7 +891,16 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 									continue
 								}
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.duplicate"}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									// Terminal UpsertItem is the resume authority (matching
+									// the engine path): a collision-skip is never
+									// acknowledged on a store that could not record it.
+									errorCount.Add(1)
+									_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+									rec.Reason = "checkpoint.write_failed"
+									rec.Provenance = sidecarRef
+									writeReflowRecord(ctx, recordWithCollision(rec, collision))
+									continue
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.duplicate"

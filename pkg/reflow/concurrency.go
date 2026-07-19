@@ -189,15 +189,33 @@ func normalizeConcurrency(cfg ConcurrencyConfig) ConcurrencyConfig {
 	if cfg.Floor < 1 {
 		cfg.Floor = concurrencyFloor
 	}
-	if cfg.Initial < cfg.Floor {
-		cfg.Initial = cfg.Floor
+	// The floor may never exceed the effective ceiling: AIMD multiplicative
+	// decrease recovers to max(Floor, current/2), so an over-large floor would
+	// push observed concurrency above the resolved ceiling the records report.
+	if cfg.Floor > cfg.EffectiveCeiling {
+		cfg.Floor = cfg.EffectiveCeiling
 	}
-	if cfg.Initial > cfg.EffectiveCeiling {
+	if cfg.AdaptiveEnabled {
+		if cfg.Initial < 1 {
+			cfg.Initial = minInt(concurrencyDefaultInitial, cfg.EffectiveCeiling)
+		}
+		if cfg.Initial < cfg.Floor {
+			cfg.Initial = cfg.Floor
+		}
+		if cfg.Initial > cfg.EffectiveCeiling {
+			cfg.Initial = cfg.EffectiveCeiling
+		}
+	} else {
+		// Fixed (non-adaptive) mode has no ramp: the limiter runs at Initial
+		// forever, so Initial IS the effective ceiling (ResolveConcurrency's
+		// canon). A partial fixed config must not execute below what its
+		// records report.
 		cfg.Initial = cfg.EffectiveCeiling
 	}
 	if cfg.CeilingReason == "" {
 		cfg.CeilingReason = "requested"
 	}
+	// Post-conditions: 1 <= Floor <= Initial <= EffectiveCeiling <= RequestedCeiling.
 	return cfg
 }
 

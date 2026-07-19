@@ -143,18 +143,24 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 	}
 }
 
-func TestPlanTransferReflowEngineAdapter_ForcedCLIPoolFallsBack(t *testing.T) {
+func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *testing.T) {
 	withTransferReflowTestState(t)
 	reflowStdin = true
 	reflowDryRun = false
-	transferReflowForceCLIPool = true
-	t.Cleanup(func() { transferReflowForceCLIPool = false })
+	reflowSrcFailure = reflowSourceFailFail
 
+	dst := newReflowMemoryProvider()
+	dest := &reflowDestSpec{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "dest-bucket",
+		Prefix:   "data/",
+		BaseURI:  "s3://dest-bucket/data/",
+	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), nil, nil, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
-	require.False(t, plan.enabled)
-	require.Equal(t, transferReflowLiveCopyCLIPoolReason, plan.reason)
+	require.False(t, plan.enabled, "non-migrated source-failure policy must route to the CLI pool")
+	require.Equal(t, "source-failure policy not migrated", plan.reason)
 
 	// Replay reader must still yield the original stdin bytes for the CLI path.
 	got, err := io.ReadAll(plan.input)
@@ -198,8 +204,13 @@ type reflowDualPathArm struct {
 
 // runTransferReflowBarrierArm executes one dual-path arm through the real
 // command with fresh, identically-seeded providers and a barrier source that
-// records max in-flight GetObject calls.
-func runTransferReflowBarrierArm(t *testing.T, forcePool bool, objectCount, parallel, barrierFloor int) reflowDualPathArm {
+// records max in-flight GetObject calls. preseedDest makes the fixture
+// skip-heavy: every destination key already holds an identical object (same
+// etag and size), so both paths resolve collision-duplicate skips instead of
+// copies. The CLI-pool arm is selected by genuine dispatch routing (extraArgs
+// carries a non-migrated policy such as --on-source-failure fail, which
+// changes nothing on a success fixture) — not by any test hook.
+func runTransferReflowBarrierArm(t *testing.T, objectCount, parallel, barrierFloor int, preseedDest bool, extraArgs ...string) reflowDualPathArm {
 	t.Helper()
 
 	srcBase := newReflowMemoryProvider()
@@ -212,6 +223,9 @@ func runTransferReflowBarrierArm(t *testing.T, forcePool bool, objectCount, para
 		key := fmt.Sprintf("source/obj-%02d.xml", i)
 		body := fmt.Sprintf("payload-%02d", i)
 		srcBase.putFixture(key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		if preseedDest {
+			dst.putFixture("data/"+key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 10, 8, 0, 0, 0, time.UTC))
+		}
 		lines = append(lines, reflowInputLine(key, fmt.Sprintf("etag-%02d", i), int64(len(body)), "", ""))
 	}
 	input := strings.Join(lines, "\n") + "\n"
@@ -239,24 +253,21 @@ func runTransferReflowBarrierArm(t *testing.T, forcePool bool, objectCount, para
 		},
 	})
 
-	if forcePool {
-		transferReflowForceCLIPool = true
-		defer func() { transferReflowForceCLIPool = false }()
-	}
-
 	checkpointPath := filepath.Join(t.TempDir(), "state.db")
 	var stdout, stderr bytes.Buffer
 	cmd := newTransferReflowTestCommand()
 	cmd.SetIn(strings.NewReader(input))
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{
+	args := []string{
 		"--stdin",
 		"--dest", "s3://dest-bucket/data/",
 		"--parallel", fmt.Sprintf("%d", parallel),
 		"--checkpoint", checkpointPath,
 		// default skip-if-duplicate collision mode
-	})
+	}
+	args = append(args, extraArgs...)
+	cmd.SetArgs(args)
 	require.NoError(t, cmd.Execute(), "stderr=%s\nstdout=%s", stderr.String(), stdout.String())
 
 	return reflowDualPathArm{stdout: stdout.String(), stderr: stderr.String(), src: src, dst: dst, checkpointPath: checkpointPath}
@@ -332,21 +343,20 @@ func TestTransferReflowCommand_LiveStdinEngineMaxInFlight(t *testing.T) {
 	verbose = true
 	t.Cleanup(func() { verbose = oldVerbose })
 
-	arm := runTransferReflowBarrierArm(t, false, 32, 8, 4)
+	arm := runTransferReflowBarrierArm(t, 32, 8, 4, false)
 	assertBarrierArmBehavior(t, arm, 32, 4, reflowpkg.ExecutionPathEngine)
 }
 
-func TestTransferReflowCommand_LiveStdinForcedCLIPoolMaxInFlight(t *testing.T) {
+func TestTransferReflowCommand_LiveStdinCLIPoolMaxInFlight(t *testing.T) {
 	withTransferReflowTestState(t)
 	oldVerbose := verbose
 	verbose = true
 	t.Cleanup(func() { verbose = oldVerbose })
 
-	arm := runTransferReflowBarrierArm(t, true, 32, 8, 4)
+	// Genuine dispatch routing: a non-migrated source-failure policy selects
+	// the CLI pool while changing nothing on this success fixture.
+	arm := runTransferReflowBarrierArm(t, 32, 8, 4, false, "--on-source-failure", "fail")
 	assertBarrierArmBehavior(t, arm, 32, 4, reflowpkg.ExecutionPathCLIPool)
-	// Forced-pool diagnostic: exact static reason, no URI/key material.
-	require.Contains(t, arm.stderr, "execution_path=cli-pool")
-	require.Contains(t, arm.stderr, "reason="+transferReflowLiveCopyCLIPoolReason)
 }
 
 // failKeysProvider wraps a source provider and fails GetObject for the listed
@@ -466,6 +476,244 @@ func TestTransferReflowCommand_EngineResumeAfterInterruptedRunRealStore(t *testi
 	}
 }
 
+// TestTransferReflowDualPathSkipHeavyParity is the skip-heavy companion of the
+// behavioral parity harness: with every destination key preseeded identically,
+// both genuine paths must resolve the same collision-duplicate skips with
+// equivalent normalized outputs, checkpoint rows, and untouched destinations.
+func TestTransferReflowDualPathSkipHeavyParity(t *testing.T) {
+	const (
+		objectCount = 24
+		parallel    = 8
+	)
+	withTransferReflowTestState(t)
+
+	engine := runTransferReflowBarrierArm(t, objectCount, parallel, 1, true)
+	pool := runTransferReflowBarrierArm(t, objectCount, parallel, 1, true, "--on-source-failure", "fail")
+
+	for _, arm := range []struct {
+		name string
+		arm  reflowDualPathArm
+		path string
+	}{
+		{name: "engine", arm: engine, path: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", arm: pool, path: reflowpkg.ExecutionPathCLIPool},
+	} {
+		run := requireRecord(t, arm.arm.stdout, reflowpkg.RunRecordType, "")
+		require.Contains(t, string(run.Data), fmt.Sprintf(`"execution_path":%q`, arm.path), arm.name)
+
+		records := requireReflowRecords(t, arm.arm.stdout)
+		requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", objectCount)
+		requireReflowStatusReasonCount(t, records, "complete", "", 0)
+
+		sum := requireRecord(t, arm.arm.stdout, reflowpkg.SummaryRecordType, "")
+		var sumFields struct {
+			MaxActive int `json:"concurrency_max_active"`
+			Effective int `json:"concurrency_ceiling_effective"`
+		}
+		require.NoError(t, json.Unmarshal(sum.Data, &sumFields))
+		require.LessOrEqual(t, sumFields.MaxActive, sumFields.Effective, arm.name)
+
+		// Destinations untouched: preseeded content and etag survive.
+		for i := 0; i < objectCount; i++ {
+			key := fmt.Sprintf("data/source/obj-%02d.xml", i)
+			require.Equal(t, fmt.Sprintf("payload-%02d", i), string(arm.arm.dst.mustObject(key)))
+			require.Equal(t, fmt.Sprintf("etag-%02d", i), arm.arm.dst.metaSnapshot(key).ETag,
+				"%s: preseeded destination must not be overwritten", arm.name)
+		}
+	}
+
+	// Cross-path parity: normalized outputs and checkpoint rows.
+	engineEvents := dropVolatileConcurrencyObservations(normalizeReflowStdout(t, engine.stdout))
+	poolEvents := dropVolatileConcurrencyObservations(normalizeReflowStdout(t, pool.stdout))
+	require.Equal(t, poolEvents, engineEvents, "skip-heavy normalized event parity")
+
+	ctx := context.Background()
+	engineState, err := reflowstate.Open(ctx, reflowstate.Config{Path: engine.checkpointPath})
+	require.NoError(t, err)
+	defer func() { _ = engineState.Close() }()
+	poolState, err := reflowstate.Open(ctx, reflowstate.Config{Path: pool.checkpointPath})
+	require.NoError(t, err)
+	defer func() { _ = poolState.Close() }()
+	for i := 0; i < objectCount; i++ {
+		srcURI := fmt.Sprintf("s3://source-bucket/source/obj-%02d.xml", i)
+		dstURI := fmt.Sprintf("s3://dest-bucket/data/source/obj-%02d.xml", i)
+		eDone, eStatus, err := engineState.ItemDone(ctx, srcURI, dstURI)
+		require.NoError(t, err)
+		pDone, pStatus, err := poolState.ItemDone(ctx, srcURI, dstURI)
+		require.NoError(t, err)
+		require.Equal(t, pDone, eDone, "skip-heavy ItemDone parity for %s", srcURI)
+		require.Equal(t, pStatus, eStatus, "skip-heavy ItemDone status parity for %s", srcURI)
+	}
+}
+
+// gateAfterProvider passes the first passCount GetObject calls through, then
+// blocks every subsequent call until released (or the call's context ends),
+// signalling on blocked once at least one worker is held mid-pool.
+type gateAfterProvider struct {
+	*reflowMemoryProvider
+	mu          sync.Mutex
+	passed      int
+	passCount   int
+	blocked     chan struct{}
+	blockedOnce sync.Once
+	release     chan struct{}
+}
+
+func newGateAfterProvider(base *reflowMemoryProvider, passCount int) *gateAfterProvider {
+	return &gateAfterProvider{
+		reflowMemoryProvider: base,
+		passCount:            passCount,
+		blocked:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+}
+
+func (p *gateAfterProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	p.mu.Lock()
+	if p.passed < p.passCount {
+		p.passed++
+		p.mu.Unlock()
+		return p.reflowMemoryProvider.GetObject(ctx, key)
+	}
+	p.mu.Unlock()
+	p.blockedOnce.Do(func() { close(p.blocked) })
+	select {
+	case <-p.release:
+		return p.reflowMemoryProvider.GetObject(ctx, key)
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+}
+
+// TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore is the genuine
+// interruption gate: the run is context-canceled while workers are blocked
+// mid-pool with in-flight copies, emits no terminal summary, and leaves a mixed
+// real sqlite checkpoint. Every complete record emitted before the cancel is
+// durably recorded (no false completes). Reopening the same store and resuming
+// with a healthy provider converges: durable completes skip as resume,
+// landed-but-unrecorded objects skip as collision duplicates, never-landed
+// objects copy — and no object is ever landed twice.
+func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	const (
+		objectCount = 12
+		passCount   = 4
+	)
+	srcBase := newReflowMemoryProvider()
+	src := newGateAfterProvider(srcBase, passCount)
+	dst := newReflowMemoryProvider()
+	lines := make([]string, 0, objectCount)
+	for i := 0; i < objectCount; i++ {
+		key := fmt.Sprintf("source/obj-%02d.xml", i)
+		body := fmt.Sprintf("payload-%02d", i)
+		srcBase.putFixture(key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		lines = append(lines, reflowInputLine(key, fmt.Sprintf("etag-%02d", i), int64(len(body)), "", ""))
+	}
+	input := strings.Join(lines, "\n") + "\n"
+
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+		},
+		FDSoftLimit: func() (int64, error) { return 100000, nil },
+	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			switch cfg.Bucket {
+			case "source-bucket":
+				return src, nil
+			case "dest-bucket":
+				return dst, nil
+			default:
+				return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+			}
+		},
+	})
+
+	checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+	// Run 1: cancel while at least one worker is blocked mid-pool.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	var stdout1 bytes.Buffer
+	cmd1 := newTransferReflowTestCommand()
+	cmd1.SetIn(strings.NewReader(input))
+	cmd1.SetOut(&stdout1)
+	cmd1.SetErr(&bytes.Buffer{})
+	cmd1.SetArgs([]string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "4", "--checkpoint", checkpointPath})
+	done := make(chan error, 1)
+	go func() { done <- cmd1.ExecuteContext(runCtx) }()
+	select {
+	case <-src.blocked:
+	case err := <-done:
+		t.Fatalf("run finished before any worker blocked mid-pool: %v", err)
+	}
+	cancelRun()
+	select {
+	case err := <-done:
+		require.Error(t, err, "interrupted run must not succeed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled run did not return")
+	}
+
+	// No terminal summary; every emitted complete is durably recorded.
+	requireNoRecordType(t, stdout1.String(), reflowpkg.SummaryRecordType)
+	records1 := requireReflowRecords(t, stdout1.String())
+	ctx := context.Background()
+	store, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
+	require.NoError(t, err)
+	completesEmitted := 0
+	for _, rec := range records1 {
+		if rec.Status != "complete" {
+			continue
+		}
+		completesEmitted++
+		srcURI := "s3://source-bucket/" + rec.SourceKey
+		dstURI := "s3://dest-bucket/data/" + rec.SourceKey
+		recorded, status, err := store.ItemDone(ctx, srcURI, dstURI)
+		require.NoError(t, err)
+		require.True(t, recorded, "emitted complete for %s must be durably recorded (no false completes)", rec.SourceKey)
+		require.Equal(t, "complete", status)
+	}
+	require.Less(t, completesEmitted, objectCount, "interruption must leave unfinished work")
+	require.NoError(t, store.Close())
+
+	// Heal and resume against the SAME store: convergence with no second land.
+	close(src.release)
+	var stdout2 bytes.Buffer
+	cmd2 := newTransferReflowTestCommand()
+	cmd2.SetIn(strings.NewReader(input))
+	cmd2.SetOut(&stdout2)
+	cmd2.SetErr(&bytes.Buffer{})
+	cmd2.SetArgs([]string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "4", "--checkpoint", checkpointPath, "--resume"})
+	require.NoError(t, cmd2.Execute(), "resume after interruption must converge")
+
+	records2 := requireReflowRecords(t, stdout2.String())
+	terminal2 := map[string]int{}
+	for _, rec := range records2 {
+		if rec.Status == "in_progress" {
+			continue
+		}
+		switch {
+		case rec.Status == "complete",
+			rec.Status == "skipped" && rec.Reason == "resume.complete",
+			rec.Status == "skipped" && rec.Reason == "collision.duplicate":
+			terminal2[rec.SourceKey]++
+		default:
+			t.Fatalf("unexpected resume terminal status=%q reason=%q key=%q", rec.Status, rec.Reason, rec.SourceKey)
+		}
+	}
+	require.Len(t, terminal2, objectCount, "every object reaches a convergent terminal on resume")
+	for key, n := range terminal2 {
+		require.Equal(t, 1, n, "exactly one terminal for %s on resume", key)
+	}
+	for i := 0; i < objectCount; i++ {
+		key := fmt.Sprintf("source/obj-%02d.xml", i)
+		require.True(t, dst.hasObject("data/"+key), "missing dest object for %s", key)
+		require.Equal(t, fmt.Sprintf("payload-%02d", i), string(dst.mustObject("data/"+key)), "dest content intact for %s", key)
+	}
+}
+
 // upsertFailingReflowState fails terminal item upserts while passing all other
 // store operations through, for the dual-path checkpoint-failure disposition.
 type upsertFailingReflowState struct {
@@ -477,80 +725,120 @@ func (s upsertFailingReflowState) UpsertItem(context.Context, reflowstate.Upsert
 	return s.err
 }
 
-// TestTransferReflowDualPathTerminalUpsertFailureNeverAcksComplete pins the
-// strict terminal disposition on BOTH execution paths: when the store cannot
-// record the terminal item, neither path acknowledges complete — the object
-// reports failed (reason checkpoint.write_failed) and the run exits non-zero.
-func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksComplete(t *testing.T) {
-	for _, arm := range []struct {
+// TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal pins the
+// strict terminal disposition on BOTH execution paths for BOTH terminal
+// outcomes: when the store cannot record the terminal item, neither path
+// acknowledges complete OR collision-skipped — the object reports failed
+// (reason checkpoint.write_failed) and the run exits non-zero. After the store
+// heals, a resume converges without a second object land.
+func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing.T) {
+	arms := []struct {
 		name      string
-		forcePool bool
+		routeArgs []string
 		path      string
 	}{
-		{name: "engine", forcePool: false, path: reflowpkg.ExecutionPathEngine},
-		{name: "cli-pool", forcePool: true, path: reflowpkg.ExecutionPathCLIPool},
-	} {
-		t.Run(arm.name, func(t *testing.T) {
-			withTransferReflowTestState(t)
+		{name: "engine", path: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", routeArgs: []string{"--on-source-failure", "fail"}, path: reflowpkg.ExecutionPathCLIPool},
+	}
+	scenarios := []struct {
+		name       string
+		preseed    bool // identical object already at the destination -> collision skip
+		ackStatus  string
+		resumeWant string
+	}{
+		{name: "fresh complete", preseed: false, ackStatus: "complete", resumeWant: "skipped"},
+		{name: "collision skip", preseed: true, ackStatus: "skipped", resumeWant: "skipped"},
+	}
+	for _, arm := range arms {
+		for _, sc := range scenarios {
+			t.Run(arm.name+"/"+sc.name, func(t *testing.T) {
+				withTransferReflowTestState(t)
 
-			oldStateStore := newReflowStateStore
-			newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
-				store, err := oldStateStore(ctx, cfg)
-				if err != nil {
-					return nil, err
-				}
-				return upsertFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected terminal upsert failure")}, nil
-			}
-			t.Cleanup(func() { newReflowStateStore = oldStateStore })
-
-			src := newReflowMemoryProvider()
-			src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
-			dst := newReflowMemoryProvider()
-
-			reflowResourceProbeForRun = reflowpkg.ResourceProbe{
-				MemoryLimitBytes: func() (int64, string, error) {
-					return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
-				},
-				FDSoftLimit: func() (int64, error) { return 100000, nil },
-			}
-			useTransferReflowProviderFactories(t, providerdispatch.Factories{
-				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-					switch cfg.Bucket {
-					case "source-bucket":
-						return src, nil
-					case "dest-bucket":
-						return dst, nil
-					default:
-						return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+				injecting := true
+				oldStateStore := newReflowStateStore
+				newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+					store, err := oldStateStore(ctx, cfg)
+					if err != nil {
+						return nil, err
 					}
-				},
+					if injecting {
+						return upsertFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected terminal upsert failure")}, nil
+					}
+					return store, nil
+				}
+				t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
+				dst := newReflowMemoryProvider()
+				if sc.preseed {
+					dst.putFixture("data/source/file.xml", "payload", "src-etag", time.Time{})
+				}
+
+				reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+					MemoryLimitBytes: func() (int64, string, error) {
+						return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+					},
+					FDSoftLimit: func() (int64, error) { return 100000, nil },
+				}
+				useTransferReflowProviderFactories(t, providerdispatch.Factories{
+					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+						switch cfg.Bucket {
+						case "source-bucket":
+							return src, nil
+						case "dest-bucket":
+							return dst, nil
+						default:
+							return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+						}
+					},
+				})
+
+				checkpointPath := filepath.Join(t.TempDir(), "state.db")
+				runOnce := func(resume bool) (string, error) {
+					var stdout, stderr bytes.Buffer
+					cmd := newTransferReflowTestCommand()
+					cmd.SetIn(strings.NewReader(reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", "") + "\n"))
+					cmd.SetOut(&stdout)
+					cmd.SetErr(&stderr)
+					args := append([]string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "2", "--checkpoint", checkpointPath}, arm.routeArgs...)
+					if resume {
+						args = append(args, "--resume")
+					}
+					cmd.SetArgs(args)
+					execErr := cmd.Execute()
+					return stdout.String(), execErr
+				}
+
+				stdout1, err := runOnce(false)
+				require.Error(t, err, "terminal upsert failure must exit non-zero")
+				run := requireRecord(t, stdout1, reflowpkg.RunRecordType, "")
+				require.Contains(t, string(run.Data), fmt.Sprintf(`"execution_path":%q`, arm.path))
+				records1 := requireReflowRecords(t, stdout1)
+				requireReflowStatusReasonCount(t, records1, sc.ackStatus, "", 0)
+				requireReflowStatusReasonCount(t, records1, "failed", "checkpoint.write_failed", 1)
+				require.True(t, dst.hasObject("data/source/file.xml"))
+				objectPutsAfterRun1 := len(dst.conditionalPutCallsSnapshot())
+
+				// Healed store: resume converges without a second object land.
+				injecting = false
+				stdout2, err := runOnce(true)
+				require.NoError(t, err, "healthy-store resume must converge")
+				records2 := requireReflowRecords(t, stdout2)
+				statusSeen := 0
+				for _, rec := range records2 {
+					if rec.Status == sc.resumeWant {
+						statusSeen++
+					}
+				}
+				require.Equal(t, 1, statusSeen, "resume terminal is %s", sc.resumeWant)
+				require.True(t, dst.hasObject("data/source/file.xml"))
+				// No new object-level conditional PUT beyond run 2's capability
+				// preflight pair: the object never lands twice.
+				require.LessOrEqual(t, len(dst.conditionalPutCallsSnapshot()), objectPutsAfterRun1+2,
+					"no second object conditional PUT on convergence")
 			})
-
-			if arm.forcePool {
-				transferReflowForceCLIPool = true
-				t.Cleanup(func() { transferReflowForceCLIPool = false })
-			}
-
-			var stdout, stderr bytes.Buffer
-			cmd := newTransferReflowTestCommand()
-			cmd.SetIn(strings.NewReader(reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", "") + "\n"))
-			cmd.SetOut(&stdout)
-			cmd.SetErr(&stderr)
-			cmd.SetArgs([]string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "2"})
-
-			err := cmd.Execute()
-			require.Error(t, err, "terminal upsert failure must exit non-zero")
-
-			run := requireRecord(t, stdout.String(), reflowpkg.RunRecordType, "")
-			require.Contains(t, string(run.Data), fmt.Sprintf(`"execution_path":%q`, arm.path))
-
-			records := requireReflowRecords(t, stdout.String())
-			requireReflowStatusReasonCount(t, records, "complete", "", 0)
-			requireReflowStatusReasonCount(t, records, "failed", "checkpoint.write_failed", 1)
-			// The destination mutation itself happened; only the acknowledgement
-			// is withheld. Resume convergence is proven at the library level.
-			require.True(t, dst.hasObject("data/source/file.xml"))
-		})
+		}
 	}
 }
 
@@ -654,8 +942,8 @@ func TestTransferReflowDualPathBehavioralParity(t *testing.T) {
 	)
 	withTransferReflowTestState(t)
 
-	engine := runTransferReflowBarrierArm(t, false, objectCount, parallel, barrierFloor)
-	pool := runTransferReflowBarrierArm(t, true, objectCount, parallel, barrierFloor)
+	engine := runTransferReflowBarrierArm(t, objectCount, parallel, barrierFloor, false)
+	pool := runTransferReflowBarrierArm(t, objectCount, parallel, barrierFloor, false, "--on-source-failure", "fail")
 
 	// (b) both paths overlap to the floor.
 	require.GreaterOrEqual(t, engine.src.maxInFlight.Load(), int64(barrierFloor), "engine arm in-flight floor")
@@ -751,9 +1039,9 @@ func TestTransferReflowCommand_DryRunStdinKeepsEnginePath(t *testing.T) {
 
 	require.NoError(t, cmd.Execute(), "stderr=%s\nstdout=%s", stderr.String(), stdout.String())
 
-	// Dry-run remains on the engine: no CLI-pool fallback diagnostic.
-	require.NotContains(t, stderr.String(), "execution_path=cli-pool")
-	require.NotContains(t, stderr.String(), transferReflowLiveCopyCLIPoolReason)
+	// Dry-run remains on the engine.
+	run := requireRecord(t, stdout.String(), reflowpkg.RunRecordType, "")
+	require.Contains(t, string(run.Data), `"execution_path":"engine"`)
 
 	// Engine dry-run emits planned object records; destination objects are not landed
 	// (object-store dry-run may still run a write/delete preflight probe).
