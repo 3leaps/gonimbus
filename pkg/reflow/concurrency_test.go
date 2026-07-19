@@ -299,7 +299,7 @@ func TestDefaultMemoryLimitDetectionSmoke(t *testing.T) {
 	require.Contains(t, []string{
 		"cgroup_v2", "cgroup_v1", "runtime", "physical_ram", "detection_unavailable",
 	}, source)
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows" {
 		require.NotEqual(t, "detection_unavailable", source,
 			"memory detection must succeed on %s: physical RAM is always probeable", runtime.GOOS)
 	}
@@ -307,12 +307,13 @@ func TestDefaultMemoryLimitDetectionSmoke(t *testing.T) {
 
 func TestPhysicalMemoryProbeSmoke(t *testing.T) {
 	limit, err := defaultPhysicalMemoryBytes()
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "darwin", "linux", "windows":
+		require.NoError(t, err)
+		require.Positive(t, limit)
+	default:
 		require.Zero(t, limit)
-		return
 	}
-	require.NoError(t, err)
-	require.Positive(t, limit)
 }
 
 func TestConcurrencyLimiterThrottleAndConnectionFreeze(t *testing.T) {
