@@ -81,7 +81,32 @@ summary (below) so you can right-size future runs.
 `--no-adaptive` disables the controller and runs at a fixed concurrency. That
 fixed value is still the **effective** (resource-capped) ceiling — a fixed
 `--parallel 9385` is clamped the same way — so fixed mode is deterministic
-without being a footgun.
+without being a footgun. Fixed mode has no ramp: it runs _at_ the effective
+ceiling, never below it.
+
+### The configuration invariant
+
+Every resolved concurrency configuration — whether it comes from the CLI, the
+embedded library's `Config.Concurrency` (including the zero value, which
+resolves to resource-derived defaults), or direct `NewConcurrencyLimiter`
+construction — is normalized to one invariant before any work starts:
+
+```
+1 ≤ floor ≤ initial ≤ effective_ceiling ≤ requested_ceiling
+```
+
+The consequences worth knowing:
+
+- **No run executes different concurrency than its records report.** Pool
+  size, limiter behavior, and the run/summary fields all derive from the same
+  normalized configuration.
+- **Throttle recovery can never exceed the effective ceiling.** Multiplicative
+  decrease recovers to `max(floor, current/2)`; because the floor is clamped
+  to the effective ceiling, backoff recovery cannot push observed concurrency
+  above what the records claim.
+- **Partial configurations resolve safely.** A library configuration missing
+  its initial value runs at `min(16, effective)` when adaptive, or at the
+  effective ceiling when fixed — never silently serial.
 
 ## Provider Transport Interaction
 
@@ -114,19 +139,20 @@ effective ceiling. S3 is the reference implementation of that contract; GCS
 `transfer reflow` run and summary records carry additive concurrency fields for
 operator audit (all backwards-compatible; existing consumers are unaffected):
 
-| Field                                  | Meaning                                                                   |
-| -------------------------------------- | ------------------------------------------------------------------------- |
-| `adaptive_enabled`                     | Whether adaptive control was active (`false` under `--no-adaptive`).      |
-| `concurrency_floor`                    | The minimum active concurrency (1).                                       |
-| `concurrency_initial`                  | Active concurrency at run start (`min(16, effective_ceiling)`).           |
-| `concurrency_ceiling_requested`        | The `--parallel` value requested.                                         |
-| `concurrency_ceiling_effective`        | The resource-capped ceiling actually used.                                |
-| `concurrency_ceiling_reason`           | `requested`, or `resource_capped:memory:<source>` / `resource_capped:fd`. |
-| `concurrency_final`                    | Active concurrency when the run ended.                                    |
-| `concurrency_max_active`               | The peak active concurrency reached.                                      |
-| `concurrency_throttle_backoffs`        | Count of multiplicative decreases (throttle events).                      |
-| `concurrency_additive_increases`       | Count of step-up increases.                                               |
-| `concurrency_connection_error_freezes` | Count of increase-freezes from connection-error streaks.                  |
+| Field                                  | Meaning                                                                                                                    |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `execution_path`                       | Which execution path ran the transfer: `engine` (library engine) or `cli-pool`. See "Execution paths" in the reflow guide. |
+| `adaptive_enabled`                     | Whether adaptive control was active (`false` under `--no-adaptive`).                                                       |
+| `concurrency_floor`                    | The minimum active concurrency (1).                                                                                        |
+| `concurrency_initial`                  | Active concurrency at run start (`min(16, effective_ceiling)`).                                                            |
+| `concurrency_ceiling_requested`        | The `--parallel` value requested.                                                                                          |
+| `concurrency_ceiling_effective`        | The resource-capped ceiling actually used.                                                                                 |
+| `concurrency_ceiling_reason`           | `requested`, or `resource_capped:memory:<source>` / `resource_capped:fd`.                                                  |
+| `concurrency_final`                    | Active concurrency when the run ended.                                                                                     |
+| `concurrency_max_active`               | The peak active concurrency reached.                                                                                       |
+| `concurrency_throttle_backoffs`        | Count of multiplicative decreases (throttle events).                                                                       |
+| `concurrency_additive_increases`       | Count of step-up increases.                                                                                                |
+| `concurrency_connection_error_freezes` | Count of increase-freezes from connection-error streaks.                                                                   |
 
 Reading these together — e.g. _requested 256 → effective 256 → final 48, 6
 throttle backoffs_ — tells you the endpoint's sustainable rate and whether the

@@ -471,12 +471,30 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 	},
 	"provenance-sidecar-root": {
-		note: "companion of --provenance; validation refuses it without --provenance sidecar (path-independent, pre-dispatch)",
-		engine: flagPathCell{disposition: flagRejectedLoud, probe: func(t *testing.T) {
+		note: "companion of --provenance: the valid combination routes with provenance and selects mirrored-root placement on the pool; the root without sidecar mode refuses loudly (rejected-value subcase)",
+		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
+			// Valid combination: provenance routes, root rides along.
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+
+			// Rejected-value subcase: the root without sidecar mode refuses
+			// loudly before any destination mutation.
 			probeSidecarRootRejected(t)
 		}},
-		cliPool: flagPathCell{disposition: flagRejectedLoud, probe: func(t *testing.T) {
-			probeSidecarRootRejected(t)
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/run-01/")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			// The root binds: the sidecar lands under the REQUESTED root (a
+			// dropped binding would fall back to adjacent placement and fail
+			// both assertions), and the run record reports mirrored-root.
+			require.True(t, env.dst.hasObject("prov/run-01/source/file.xml"+provenanceSuffix),
+				"sidecar must be written under the requested mirrored root")
+			require.False(t, env.dst.hasObject("data/source/file.xml"+provenanceSuffix),
+				"sidecar must not fall back to adjacent placement")
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"placement":{"mode":"mirrored-root","sidecar_root":"s3://dest-bucket/prov/run-01/"}`)
 		}},
 	},
 	"provenance-suffix": {
@@ -765,11 +783,20 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 	},
 	"on-source-failure": {
-		note: "engine executes skip (default); fail routes to the pool; skip-vs-fail differential proven on a real source failure",
-		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+		note: "the default skip executes on the engine (every engine baseline probe carries it); the non-default fail value routes to the pool — this routing is also the matrix's pool vehicle, so its dispatch condition is exercised by every runPool probe; skip-vs-fail differential proven on a real source failure",
+		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
+			// The non-default value must route: this probe is the direct
+			// negative assertion on the adapter's source-failure dispatch
+			// condition — removing it leaves the run on the engine and fails.
 			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t)
-			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			stdout, err := env.run(t, "--on-source-failure", "fail")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+
+			// Default-value contrast: without the flag the same fixture stays
+			// on the engine.
+			env2 := newFlagProbeEnv(t)
+			stdout2, err := env2.run(t)
+			requireProbeComplete(t, stdout2, err, reflowpkg.ExecutionPathEngine)
 		}},
 		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			seed := func(srcDir string) {
