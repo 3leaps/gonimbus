@@ -630,6 +630,40 @@ func TestLimiterThrottleNeverExceedsEffectiveAfterNormalize(t *testing.T) {
 	}
 }
 
+// TestNewConcurrencyLimiterEnforcesInvariantDirectly proves the PUBLIC
+// constructor holds the invariant without any prior normalization: an
+// inconsistent config passed straight to NewConcurrencyLimiter can never
+// snapshot — including after throttle recovery — a concurrency above the
+// effective ceiling it reports.
+func TestNewConcurrencyLimiterEnforcesInvariantDirectly(t *testing.T) {
+	cases := []ConcurrencyConfig{
+		{RequestedCeiling: 8, EffectiveCeiling: 4, Initial: 4, Floor: 8, AdaptiveEnabled: true},
+		{RequestedCeiling: 8, EffectiveCeiling: 4, Initial: 9, Floor: 8, AdaptiveEnabled: true},
+		{RequestedCeiling: 2, EffectiveCeiling: 9, Floor: 5, AdaptiveEnabled: true},
+		{RequestedCeiling: 8, EffectiveCeiling: 8, Initial: 1, AdaptiveEnabled: false},
+		{},
+	}
+	for i, in := range cases {
+		limiter := NewConcurrencyLimiter(in)
+		snap := limiter.Snapshot()
+		require.GreaterOrEqual(t, snap.ConcurrencyFloor, 1, "case %d", i)
+		require.LessOrEqual(t, snap.ConcurrencyFloor, snap.ConcurrencyInitial, "case %d", i)
+		require.LessOrEqual(t, snap.ConcurrencyInitial, snap.ConcurrencyCeilingEffective, "case %d", i)
+		require.LessOrEqual(t, snap.ConcurrencyCeilingEffective, snap.ConcurrencyCeilingRequested, "case %d", i)
+		if !in.AdaptiveEnabled && in.EffectiveCeiling >= 1 {
+			require.Equal(t, snap.ConcurrencyCeilingEffective, snap.ConcurrencyInitial,
+				"case %d: fixed mode must run at the ceiling it reports", i)
+		}
+		for j := 0; j < 16; j++ {
+			limiter.ObserveThrottle()
+			limiter.ObserveSuccess()
+			after := limiter.Snapshot()
+			require.LessOrEqual(t, after.ConcurrencyFinal, after.ConcurrencyCeilingEffective,
+				"case %d: throttle recovery must never exceed the reported effective ceiling", i)
+		}
+	}
+}
+
 // TestRunnerFixedPartialConfigExecutesReportedCeiling is the behavioral gate
 // for the fixed-mode normalization: a partial non-adaptive config that reports
 // effective=8 must actually overlap to that ceiling, proven by the barrier.

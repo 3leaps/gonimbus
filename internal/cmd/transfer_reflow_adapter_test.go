@@ -193,7 +193,8 @@ func TestPlanTransferReflowEngineAdapter_DryRunKeepsEngine(t *testing.T) {
 
 // reflowDualPathArm captures one arm of the dual-path behavioral harness: the
 // same live stdin input executed through the real command dispatch, on either
-// the engine path (default) or the CLI worker pool (force hook).
+// the engine path (default) or the CLI worker pool (selected by genuine
+// dispatch routing via a non-migrated policy flag).
 type reflowDualPathArm struct {
 	stdout         string
 	stderr         string
@@ -476,23 +477,133 @@ func TestTransferReflowCommand_EngineResumeAfterInterruptedRunRealStore(t *testi
 	}
 }
 
+// headBarrierDest wraps a destination provider and records max concurrent
+// object-key Head calls (capability-preflight keys pass through uncounted).
+// The first floor entrants wait until floor calls are in flight, with a
+// bounded fail-open deadline so a serial skip path fails the in-flight
+// assertion instead of hanging — the skip-path analog of the GetObject
+// barrier, since collision-duplicate resolution Heads the destination and
+// never fetches source bodies.
+type headBarrierDest struct {
+	*reflowMemoryProvider
+	floor    int64
+	deadline time.Duration
+
+	entered     atomic.Int64
+	inFlight    atomic.Int64
+	maxInFlight atomic.Int64
+	release     chan struct{}
+	releaseOnce sync.Once
+	failOpen    <-chan struct{}
+	startOnce   sync.Once
+}
+
+func newHeadBarrierDest(base *reflowMemoryProvider, floor int, deadline time.Duration) *headBarrierDest {
+	return &headBarrierDest{reflowMemoryProvider: base, floor: int64(floor), deadline: deadline, release: make(chan struct{})}
+}
+
+func (p *headBarrierDest) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	if isPreflightKey(key) {
+		return p.reflowMemoryProvider.Head(ctx, key)
+	}
+	p.startOnce.Do(func() {
+		ch := make(chan struct{})
+		timer := time.NewTimer(p.deadline)
+		go func() {
+			<-timer.C
+			close(ch)
+		}()
+		p.failOpen = ch
+	})
+	cur := p.inFlight.Add(1)
+	for {
+		max := p.maxInFlight.Load()
+		if cur <= max || p.maxInFlight.CompareAndSwap(max, cur) {
+			break
+		}
+	}
+	defer p.inFlight.Add(-1)
+	if p.entered.Add(1) == p.floor {
+		p.releaseOnce.Do(func() { close(p.release) })
+	}
+	select {
+	case <-p.release:
+	case <-p.failOpen:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return p.reflowMemoryProvider.Head(ctx, key)
+}
+
 // TestTransferReflowDualPathSkipHeavyParity is the skip-heavy companion of the
 // behavioral parity harness: with every destination key preseeded identically,
 // both genuine paths must resolve the same collision-duplicate skips with
-// equivalent normalized outputs, checkpoint rows, and untouched destinations.
+// equivalent normalized outputs, checkpoint rows, and untouched destinations —
+// AND overlap the skip path itself, proven by a destination-Head barrier.
 func TestTransferReflowDualPathSkipHeavyParity(t *testing.T) {
 	const (
-		objectCount = 24
-		parallel    = 8
+		objectCount  = 24
+		parallel     = 8
+		barrierFloor = 4
 	)
 	withTransferReflowTestState(t)
 
-	engine := runTransferReflowBarrierArm(t, objectCount, parallel, 1, true)
-	pool := runTransferReflowBarrierArm(t, objectCount, parallel, 1, true, "--on-source-failure", "fail")
+	type skipHeavyArm struct {
+		stdout         string
+		dstBase        *reflowMemoryProvider
+		dstBarrier     *headBarrierDest
+		checkpointPath string
+	}
+	runArm := func(extraArgs ...string) skipHeavyArm {
+		srcBase := newReflowMemoryProvider()
+		dstBase := newReflowMemoryProvider()
+		dstBarrier := newHeadBarrierDest(dstBase, barrierFloor, 2*time.Second)
+		lines := []string{"", ""}
+		for i := 0; i < objectCount; i++ {
+			key := fmt.Sprintf("source/obj-%02d.xml", i)
+			body := fmt.Sprintf("payload-%02d", i)
+			srcBase.putFixture(key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+			dstBase.putFixture("data/"+key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 10, 8, 0, 0, 0, time.UTC))
+			lines = append(lines, reflowInputLine(key, fmt.Sprintf("etag-%02d", i), int64(len(body)), "", ""))
+		}
+		input := strings.Join(lines, "\n") + "\n"
+
+		reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+			MemoryLimitBytes: func() (int64, string, error) {
+				return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+			},
+			FDSoftLimit: func() (int64, error) { return 100000, nil },
+		}
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				switch cfg.Bucket {
+				case "source-bucket":
+					return srcBase, nil
+				case "dest-bucket":
+					return dstBarrier, nil
+				default:
+					return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+				}
+			},
+		})
+
+		checkpointPath := filepath.Join(t.TempDir(), "state.db")
+		var stdout, stderr bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetIn(strings.NewReader(input))
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(append([]string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", fmt.Sprintf("%d", parallel), "--checkpoint", checkpointPath}, extraArgs...))
+		require.NoError(t, cmd.Execute(), "stderr=%s\nstdout=%s", stderr.String(), stdout.String())
+		return skipHeavyArm{stdout: stdout.String(), dstBase: dstBase, dstBarrier: dstBarrier, checkpointPath: checkpointPath}
+	}
+
+	engine := runArm()
+	pool := runArm("--on-source-failure", "fail")
 
 	for _, arm := range []struct {
 		name string
-		arm  reflowDualPathArm
+		arm  skipHeavyArm
 		path string
 	}{
 		{name: "engine", arm: engine, path: reflowpkg.ExecutionPathEngine},
@@ -513,11 +624,19 @@ func TestTransferReflowDualPathSkipHeavyParity(t *testing.T) {
 		require.NoError(t, json.Unmarshal(sum.Data, &sumFields))
 		require.LessOrEqual(t, sumFields.MaxActive, sumFields.Effective, arm.name)
 
+		// Skip-path fan-out lower bound: collision resolution must overlap on
+		// the operation skips actually execute (destination Head), bounded
+		// above by the effective ceiling.
+		require.GreaterOrEqual(t, arm.arm.dstBarrier.maxInFlight.Load(), int64(barrierFloor),
+			"%s: skip-heavy path must overlap destination Heads (>= %d)", arm.name, barrierFloor)
+		require.LessOrEqual(t, arm.arm.dstBarrier.maxInFlight.Load(), int64(parallel),
+			"%s: skip-heavy in-flight must respect the effective ceiling", arm.name)
+
 		// Destinations untouched: preseeded content and etag survive.
 		for i := 0; i < objectCount; i++ {
 			key := fmt.Sprintf("data/source/obj-%02d.xml", i)
-			require.Equal(t, fmt.Sprintf("payload-%02d", i), string(arm.arm.dst.mustObject(key)))
-			require.Equal(t, fmt.Sprintf("etag-%02d", i), arm.arm.dst.metaSnapshot(key).ETag,
+			require.Equal(t, fmt.Sprintf("payload-%02d", i), string(arm.arm.dstBase.mustObject(key)))
+			require.Equal(t, fmt.Sprintf("etag-%02d", i), arm.arm.dstBase.metaSnapshot(key).ETag,
 				"%s: preseeded destination must not be overwritten", arm.name)
 		}
 	}
@@ -544,6 +663,93 @@ func TestTransferReflowDualPathSkipHeavyParity(t *testing.T) {
 		require.Equal(t, pDone, eDone, "skip-heavy ItemDone parity for %s", srcURI)
 		require.Equal(t, pStatus, eStatus, "skip-heavy ItemDone status parity for %s", srcURI)
 	}
+}
+
+// landCountingDest wraps a destination provider and counts SUCCESSFUL
+// object-level lands per key (conditional creates that returned nil), records
+// any non-IfAbsent conditional attempt, and any unconditional write. Capability
+// preflight keys are excluded. This distinguishes "landed exactly once" from
+// attempt-count heuristics: an IfAbsent-refused re-drive is an attempt, never a
+// land.
+type landCountingDest struct {
+	*reflowMemoryProvider
+	mu               sync.Mutex
+	lands            map[string]int
+	nonIfAbsent      int
+	unconditionalPut int
+}
+
+func newLandCountingDest(base *reflowMemoryProvider) *landCountingDest {
+	return &landCountingDest{reflowMemoryProvider: base, lands: map[string]int{}}
+}
+
+func isPreflightKey(key string) bool { return strings.Contains(key, ".gonimbus-preflight/") }
+
+func (p *landCountingDest) recordConditional(key string, precond provider.PutPrecondition, err error) {
+	if isPreflightKey(key) {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !precond.IfAbsent {
+		p.nonIfAbsent++
+	}
+	if err == nil {
+		p.lands[key]++
+	}
+}
+
+func (p *landCountingDest) PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error {
+	if !isPreflightKey(key) {
+		p.mu.Lock()
+		p.unconditionalPut++
+		p.mu.Unlock()
+	}
+	return p.reflowMemoryProvider.PutObject(ctx, key, body, contentLength)
+}
+
+func (p *landCountingDest) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	if !isPreflightKey(key) {
+		p.mu.Lock()
+		p.unconditionalPut++
+		p.mu.Unlock()
+	}
+	return p.reflowMemoryProvider.PutObjectWithOptions(ctx, key, body, contentLength, opts)
+}
+
+func (p *landCountingDest) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	result, err := p.reflowMemoryProvider.PutObjectConditional(ctx, key, body, contentLength, precond)
+	p.recordConditional(key, precond, err)
+	return result, err
+}
+
+func (p *landCountingDest) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
+	result, err := p.reflowMemoryProvider.PutObjectConditionalWithOptions(ctx, key, body, contentLength, precond, opts)
+	p.recordConditional(key, precond, err)
+	return result, err
+}
+
+func (p *landCountingDest) landsSnapshot() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]int, len(p.lands))
+	for k, v := range p.lands {
+		out[k] = v
+	}
+	return out
+}
+
+func (p *landCountingDest) requireExactlyOneLandPerKey(t *testing.T, keys []string) {
+	t.Helper()
+	lands := p.landsSnapshot()
+	for _, key := range keys {
+		require.Equal(t, 1, lands[key], "destination key %s must land exactly once", key)
+	}
+	require.Len(t, lands, len(keys), "no destination key outside the expected set may land")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Zero(t, p.nonIfAbsent, "every object-level conditional attempt must carry IfAbsent")
+	require.Zero(t, p.unconditionalPut, "no unconditional object-level write may occur")
 }
 
 // gateAfterProvider passes the first passCount GetObject calls through, then
@@ -602,7 +808,7 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	)
 	srcBase := newReflowMemoryProvider()
 	src := newGateAfterProvider(srcBase, passCount)
-	dst := newReflowMemoryProvider()
+	dst := newLandCountingDest(newReflowMemoryProvider())
 	lines := make([]string, 0, objectCount)
 	for i := 0; i < objectCount; i++ {
 		key := fmt.Sprintf("source/obj-%02d.xml", i)
@@ -648,6 +854,28 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	case err := <-done:
 		t.Fatalf("run finished before any worker blocked mid-pool: %v", err)
 	}
+	// Cancel only after at least one completion is durable in the real store,
+	// so the resume arm deterministically observes a resume.complete skip.
+	pollCtx := context.Background()
+	pollStore, err := reflowstate.Open(pollCtx, reflowstate.Config{Path: checkpointPath})
+	require.NoError(t, err)
+	durableBeforeCancel := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := 0; i < passCount; i++ {
+			srcURI := fmt.Sprintf("s3://source-bucket/source/obj-%02d.xml", i)
+			dstURI := fmt.Sprintf("s3://dest-bucket/data/source/obj-%02d.xml", i)
+			if recorded, status, itemErr := pollStore.ItemDone(pollCtx, srcURI, dstURI); itemErr == nil && recorded && status == "complete" {
+				durableBeforeCancel = true
+			}
+		}
+		if durableBeforeCancel {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.NoError(t, pollStore.Close())
+	require.True(t, durableBeforeCancel, "at least one completion must be durable before cancellation")
 	cancelRun()
 	select {
 	case err := <-done:
@@ -707,11 +935,26 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	for key, n := range terminal2 {
 		require.Equal(t, 1, n, "exactly one terminal for %s on resume", key)
 	}
+	resumeCompletes := 0
+	for _, rec := range records2 {
+		if rec.Status == "skipped" && rec.Reason == "resume.complete" {
+			resumeCompletes++
+		}
+	}
+	require.GreaterOrEqual(t, resumeCompletes, 1,
+		"the durable pre-cancel completion must be observed as a resume.complete skip")
+
+	expectedKeys := make([]string, 0, objectCount)
 	for i := 0; i < objectCount; i++ {
 		key := fmt.Sprintf("source/obj-%02d.xml", i)
 		require.True(t, dst.hasObject("data/"+key), "missing dest object for %s", key)
 		require.Equal(t, fmt.Sprintf("payload-%02d", i), string(dst.mustObject("data/"+key)), "dest content intact for %s", key)
+		expectedKeys = append(expectedKeys, "data/"+key)
 	}
+	// The claimed property, measured directly: exactly one SUCCESSFUL
+	// object-level conditional land per destination key across cancel + resume,
+	// all attempts IfAbsent, no unconditional writes.
+	dst.requireExactlyOneLandPerKey(t, expectedKeys)
 }
 
 // upsertFailingReflowState fails terminal item upserts while passing all other
@@ -770,7 +1013,7 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 
 				src := newReflowMemoryProvider()
 				src.putFixture("source/file.xml", "payload", "src-etag", time.Time{})
-				dst := newReflowMemoryProvider()
+				dst := newLandCountingDest(newReflowMemoryProvider())
 				if sc.preseed {
 					dst.putFixture("data/source/file.xml", "payload", "src-etag", time.Time{})
 				}
@@ -818,7 +1061,6 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 				requireReflowStatusReasonCount(t, records1, sc.ackStatus, "", 0)
 				requireReflowStatusReasonCount(t, records1, "failed", "checkpoint.write_failed", 1)
 				require.True(t, dst.hasObject("data/source/file.xml"))
-				objectPutsAfterRun1 := len(dst.conditionalPutCallsSnapshot())
 
 				// Healed store: resume converges without a second object land.
 				injecting = false
@@ -833,10 +1075,14 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 				}
 				require.Equal(t, 1, statusSeen, "resume terminal is %s", sc.resumeWant)
 				require.True(t, dst.hasObject("data/source/file.xml"))
-				// No new object-level conditional PUT beyond run 2's capability
-				// preflight pair: the object never lands twice.
-				require.LessOrEqual(t, len(dst.conditionalPutCallsSnapshot()), objectPutsAfterRun1+2,
-					"no second object conditional PUT on convergence")
+				// Measured directly, per key: a fresh object lands exactly once
+				// across failure + resume; a preseeded object never lands at all.
+				wantLands := 1
+				if sc.preseed {
+					wantLands = 0
+				}
+				require.Equal(t, wantLands, dst.landsSnapshot()["data/source/file.xml"],
+					"successful object-level lands across failure + resume")
 			})
 		}
 	}
