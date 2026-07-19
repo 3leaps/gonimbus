@@ -1097,7 +1097,19 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					continue
 				}
 				if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "complete", Bytes: bytes}); werr != nil {
-					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+					// The terminal UpsertItem is the resume authority: a completed
+					// copy is never acknowledged as complete on a store that could
+					// not record it. The object is reported failed (typed); resume
+					// against a healthy store converges via the collision path
+					// without a second land. Matches the engine path disposition.
+					errorCount.Add(1)
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+					rec.Reason = "checkpoint.write_failed"
+					rec.Bytes = bytes
+					rec.Provenance = sidecarRef
+					writeReflowRecord(ctx, recordWithCollision(rec, collision))
+					continue
 				}
 				rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "complete")
 				rec.Bytes = bytes

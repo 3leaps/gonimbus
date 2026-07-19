@@ -387,7 +387,16 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			}
 		}
 		if err := r.checkpointItem(ctx, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, status, reason, bytes, "", ""); err != nil {
-			return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "checkpoint write failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, collision)
+			stats.recordError()
+			if e := r.emitError(ctx, ErrorEvent{Code: reflowErrCode(err), Key: in.SourceKey, Message: FormatErrorMessage("checkpoint write failed", err), Details: map[string]any{"source_uri": sourceURI, "dest_uri": destURI, "mode": "transfer_reflow", "reason": "checkpoint.write_failed"}, Collision: collision}); e != nil {
+				return e
+			}
+			rec := in.withSourceMeta(sourceETag, sourceSize).record(destURI, destKey, "failed")
+			rec.Reason = "checkpoint.write_failed"
+			rec.Bytes = bytes
+			rec = recordWithCollision(rec, collision)
+			stats.record(rec)
+			return r.emitRecord(ctx, rec)
 		}
 	}
 	_ = putResult

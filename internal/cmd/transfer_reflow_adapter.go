@@ -19,10 +19,17 @@ import (
 )
 
 // transferReflowLiveCopyCLIPoolReason is the product-safe plan.reason used when a
-// live stdin reflow.input.v1 stream is intentionally routed to the CLI worker pool
-// instead of the library record-stream engine (which still executes serially).
-// Dry-run keeps the engine path. This string is a public surface (verbose/debug).
+// live stdin reflow.input.v1 stream is routed to the CLI worker pool instead of
+// the library record-stream engine. Since the engine gained its concurrent
+// worker pool this routing occurs only via transferReflowForceCLIPool (the
+// dual-path parity harness). This string is a public surface (verbose/debug).
 const transferReflowLiveCopyCLIPoolReason = "live copy requires pooled execution"
+
+// transferReflowForceCLIPool routes otherwise-engine-eligible live runs to the
+// CLI worker pool. Test-only: the dual-path behavioral parity harness sets it to
+// drive the genuine CLI-pool arm with engine-eligible input. It is not wired to
+// any flag, env var, or config surface, and production code never sets it.
+var transferReflowForceCLIPool = false
 
 type transferReflowEnginePlan struct {
 	enabled bool
@@ -53,10 +60,13 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, destS
 		plan.reason = "stdin record stream not migrated"
 		return plan
 	}
-	// Live copies fall back to the CLI worker pool until the library engine has
-	// concurrent object execution. Preserve plan.input (replay MultiReader) so
-	// the CLI path still sees the sniffed first record. Dry-run stays on engine.
-	if !reflowDryRun {
+	// The v0.4.1 live-copy dispatch narrowing (#159) is removed: the engine
+	// record-stream runner executes live copies on its concurrent worker pool
+	// behind the standing behavioral parity gate (dispatch-transparency record,
+	// dual-path harness, flag matrix). The force hook below preserves a genuine
+	// CLI-pool arm for that harness; plan.input (replay MultiReader) still
+	// carries the sniffed first record for any CLI fallback.
+	if transferReflowForceCLIPool && !reflowDryRun {
 		plan.reason = transferReflowLiveCopyCLIPoolReason
 		return plan
 	}
