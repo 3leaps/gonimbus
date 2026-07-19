@@ -259,6 +259,60 @@ gonimbus transfer reflow --stdin \
 See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
 provider-generalized model (resource cap, AIMD control, transport tuning).
 
+### Execution Paths and Dispatch Transparency
+
+`transfer reflow` has two execution paths for the same verb: the **library
+engine** (the embeddable `pkg/reflow` runner, which executes live stdin
+record-stream copies with a concurrent worker pool) and the **CLI worker pool**
+(the command-layer pool that carries run shapes the engine has not migrated:
+positional sources, provenance sidecars, overwrite/quarantine/source-newer
+collision modes, file destinations, non-default source-failure policy, and
+run-id resume). Dispatch selects the path per run shape.
+
+Path selection is **observable evidence, never an implementation detail**:
+
+- Every run and summary record names its path in `execution_path`
+  (`engine` | `cli-pool`).
+- Requested, resolved, and observed concurrency stay separate fields —
+  `parallel` (requested), `concurrency_ceiling_effective` (resolved),
+  `concurrency_max_active` (observed peak). Requested is reported as operator
+  intent; the execution contract is the normalized **effective** ceiling,
+  which both paths execute under and truthfully report alongside the observed
+  maximum.
+- Both paths are held to a standing behavioral parity gate in the test suite:
+  a same-input dual-path harness (output records, checkpoint state, and
+  destination sets must be equivalent; both paths must prove genuine
+  concurrent overlap to a deterministic lower bound while remaining at or
+  below the effective ceiling, on copy-heavy and skip-heavy fixtures), and a
+  flag-coverage matrix in which every flag declares and _proves_ its
+  disposition on each path — honored, routes to the CLI pool, refused loudly,
+  or pinned not-applicable. Silently ignored options are not a legal state.
+
+Checkpoint acknowledgement discipline is shared by both paths: a completed
+copy (or a collision-skip decision) is never acknowledged with its success
+status if the checkpoint store could not durably record it — the object
+reports `failed` with reason `checkpoint.write_failed` and the run exits
+non-zero; a later resume against a healthy store converges without landing
+any object twice.
+
+**Stated limits of the current guarantees** (tracked, not claimed):
+
+- Interruption/resume guarantees are proven for in-process cancellation with
+  in-flight work and real checkpoint state; hard process-kill (SIGKILL)
+  crash-window behavior is not claimed yet.
+- Concurrent multi-process runs sharing one checkpoint root are not claimed;
+  run one transfer per checkpoint at a time.
+- The resume pre-check (`ItemDone`) is a best-effort skip; per-destination-key
+  arbitration plus conditional creates remain the correctness authority for
+  duplicate input lines.
+- The CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`)
+  retain their historical warn-and-continue behavior on checkpoint write
+  failure of a successful terminal; they adopt the strict discipline when
+  those modes migrate to the engine.
+- `--src-gcp-project` has no reachable `transfer reflow` shape today
+  (record streams accept `s3://` sources and positional `gs://` sources are
+  refused); it becomes meaningful when GCS sources land.
+
 ### Large-Object Writes and Multipart Upload
 
 For S3-compatible destinations, `transfer reflow` automatically uses multipart

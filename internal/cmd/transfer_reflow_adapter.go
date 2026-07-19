@@ -18,12 +18,6 @@ import (
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
-// transferReflowLiveCopyCLIPoolReason is the product-safe plan.reason used when a
-// live stdin reflow.input.v1 stream is intentionally routed to the CLI worker pool
-// instead of the library record-stream engine (which still executes serially).
-// Dry-run keeps the engine path. This string is a public surface (verbose/debug).
-const transferReflowLiveCopyCLIPoolReason = "live copy requires pooled execution"
-
 type transferReflowEnginePlan struct {
 	enabled bool
 	reason  string
@@ -53,13 +47,11 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, destS
 		plan.reason = "stdin record stream not migrated"
 		return plan
 	}
-	// Live copies fall back to the CLI worker pool until the library engine has
-	// concurrent object execution. Preserve plan.input (replay MultiReader) so
-	// the CLI path still sees the sniffed first record. Dry-run stays on engine.
-	if !reflowDryRun {
-		plan.reason = transferReflowLiveCopyCLIPoolReason
-		return plan
-	}
+	// The v0.4.1 live-copy dispatch narrowing (#159) is removed: the engine
+	// record-stream runner executes live copies on its concurrent worker pool
+	// behind the standing behavioral parity gate (dispatch-transparency record,
+	// dual-path harness, flag matrix). plan.input (replay MultiReader) still
+	// carries the sniffed first record for any CLI fallback below.
 	if destSpec == nil || dst == nil {
 		plan.reason = "destination provider unavailable"
 		return plan

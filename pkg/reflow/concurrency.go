@@ -15,6 +15,7 @@ import (
 const (
 	concurrencyFloor              = 1
 	concurrencyDefaultInitial     = 16
+	concurrencyDefaultRequested   = 16
 	concurrencyCleanIncreaseEvery = 8
 	concurrencyThrottleCooldown   = 4
 	resourceDefaultMemoryLimit    = int64(1 << 30)
@@ -163,20 +164,76 @@ func ResolveConcurrency(requested int, adaptiveEnabled bool, probe ResourceProbe
 	}
 }
 
-// NewConcurrencyLimiter returns an AIMD limiter initialized from cfg.
-func NewConcurrencyLimiter(cfg ConcurrencyConfig) *ConcurrencyLimiter {
+// normalizeConcurrency resolves the documented zero-value Config.Concurrency to
+// resource-resolved defaults and floors partial configs into internal
+// consistency, so pool size, limiter configuration, and run-record fields all
+// derive from one normalized config. An unresolved effective ceiling (zero)
+// always goes through ResolveConcurrency — a run never executes with more (or
+// different) concurrency than its records report.
+func normalizeConcurrency(cfg ConcurrencyConfig) ConcurrencyConfig {
+	if cfg.EffectiveCeiling < 1 {
+		requested := cfg.RequestedCeiling
+		adaptive := cfg.AdaptiveEnabled
+		if requested < 1 {
+			requested = concurrencyDefaultRequested
+			adaptive = true
+		}
+		return clampConcurrencyInvariants(ResolveConcurrency(requested, adaptive, DefaultResourceProbe()))
+	}
+	return clampConcurrencyInvariants(cfg)
+}
+
+// clampConcurrencyInvariants floors a config with a resolved effective ceiling
+// into the invariant 1 <= Floor <= Initial <= EffectiveCeiling <=
+// RequestedCeiling. The floor may never exceed the effective ceiling: AIMD
+// multiplicative decrease recovers to max(Floor, current/2), so an over-large
+// floor would push observed concurrency above the resolved ceiling the records
+// report. Fixed (non-adaptive) mode has no ramp — the limiter runs at Initial
+// forever — so Initial IS the effective ceiling (ResolveConcurrency's canon)
+// and a partial fixed config must not execute below what its records report.
+func clampConcurrencyInvariants(cfg ConcurrencyConfig) ConcurrencyConfig {
 	if cfg.EffectiveCeiling < 1 {
 		cfg.EffectiveCeiling = 1
 	}
+	if cfg.RequestedCeiling < 1 {
+		cfg.RequestedCeiling = cfg.EffectiveCeiling
+	}
+	if cfg.EffectiveCeiling > cfg.RequestedCeiling {
+		cfg.EffectiveCeiling = cfg.RequestedCeiling
+	}
 	if cfg.Floor < 1 {
-		cfg.Floor = 1
+		cfg.Floor = concurrencyFloor
 	}
-	if cfg.Initial < cfg.Floor {
-		cfg.Initial = cfg.Floor
+	if cfg.Floor > cfg.EffectiveCeiling {
+		cfg.Floor = cfg.EffectiveCeiling
 	}
-	if cfg.Initial > cfg.EffectiveCeiling {
+	if cfg.AdaptiveEnabled {
+		if cfg.Initial < 1 {
+			cfg.Initial = minInt(concurrencyDefaultInitial, cfg.EffectiveCeiling)
+		}
+		if cfg.Initial < cfg.Floor {
+			cfg.Initial = cfg.Floor
+		}
+		if cfg.Initial > cfg.EffectiveCeiling {
+			cfg.Initial = cfg.EffectiveCeiling
+		}
+	} else {
 		cfg.Initial = cfg.EffectiveCeiling
 	}
+	if cfg.CeilingReason == "" {
+		cfg.CeilingReason = "requested"
+	}
+	// Post-conditions: 1 <= Floor <= Initial <= EffectiveCeiling <= RequestedCeiling.
+	return cfg
+}
+
+// NewConcurrencyLimiter returns an AIMD limiter initialized from cfg. The
+// constructor enforces the same invariant as the runner's config
+// normalization, so a directly-constructed limiter can never observe (or
+// recover to, via throttle) a concurrency above the effective ceiling its
+// snapshots report.
+func NewConcurrencyLimiter(cfg ConcurrencyConfig) *ConcurrencyLimiter {
+	cfg = clampConcurrencyInvariants(cfg)
 	return &ConcurrencyLimiter{cfg: cfg, current: cfg.Initial}
 }
 

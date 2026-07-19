@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // ErrNotImplemented is returned by Runner.Run for source forms or scenarios that
@@ -14,6 +15,10 @@ var ErrNotImplemented = errors.New("reflow: runner execution not yet implemented
 // Construct one with NewRunner. Experimental.
 type Runner struct {
 	cfg Config
+
+	// emitMu serializes EventSink delivery: engine workers execute objects
+	// concurrently, but a sink implementation never observes concurrent calls.
+	emitMu sync.Mutex
 }
 
 // NewRunner validates cfg and returns a Runner. It performs no I/O.
@@ -27,6 +32,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.Collision.Mode == "" {
 		cfg.Collision.Mode = CollisionSkipIfDuplicate
 	}
+	// Config.Concurrency documents that the zero value resolves to defaults;
+	// normalize here so pool size, limiter, and run records share one config.
+	cfg.Concurrency = normalizeConcurrency(cfg.Concurrency)
 	if cfg.Metadata.Policy == "" {
 		cfg.Metadata.Policy = MetadataPolicyClear
 	}

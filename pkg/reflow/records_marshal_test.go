@@ -64,6 +64,7 @@ func TestRunRecordMarshalCompatibility(t *testing.T) {
 		DryRun:         true,
 		Resume:         true,
 		Parallel:       8,
+		ExecutionPath:  ExecutionPathEngine,
 		ConcurrencyStats: ConcurrencyStats{
 			AdaptiveEnabled:                   true,
 			ConcurrencyFloor:                  1,
@@ -94,14 +95,15 @@ func TestRunRecordMarshalCompatibility(t *testing.T) {
 			MetadataSidecarSuffix:   ".metadata.json",
 			Set:                     map[string]string{"owner": "example"},
 		},
-	}, `{"dest_uri":"s3://dest-bucket/out/","checkpoint_path":"/tmp/reflow.db","dry_run":true,"resume":true,"parallel":8,"adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"provenance":{"mode":"sidecar","suffix":".gnb.json","on_write_error":"warn","placement":{"mode":"mirrored-root","sidecar_root":"s3://audit-root/prov/"}},"metadata":{"policy":"merge","set_keys":["owner","team"],"source_key_rule_keys":["source-owner"],"derived_rule_keys":["site"],"on_missing_source":"empty","preserve_content_type":true,"destination_storage_class":"STANDARD","metadata_sidecar_suffix":".metadata.json","set":{"owner":"example"}}}`)
+	}, `{"dest_uri":"s3://dest-bucket/out/","checkpoint_path":"/tmp/reflow.db","dry_run":true,"resume":true,"parallel":8,"execution_path":"engine","adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"provenance":{"mode":"sidecar","suffix":".gnb.json","on_write_error":"warn","placement":{"mode":"mirrored-root","sidecar_root":"s3://audit-root/prov/"}},"metadata":{"policy":"merge","set_keys":["owner","team"],"source_key_rule_keys":["source-owner"],"derived_rule_keys":["site"],"on_missing_source":"empty","preserve_content_type":true,"destination_storage_class":"STANDARD","metadata_sidecar_suffix":".metadata.json","set":{"owner":"example"}}}`)
 }
 
 func TestSummaryRecordMarshalCompatibility(t *testing.T) {
 	assertExactJSON(t, SummaryRecord{
-		DestURI:     "s3://dest-bucket/out/",
-		DryRun:      true,
-		OnCollision: "skip-if-duplicate",
+		DestURI:       "s3://dest-bucket/out/",
+		DryRun:        true,
+		OnCollision:   "skip-if-duplicate",
+		ExecutionPath: ExecutionPathCLIPool,
 		ConcurrencyStats: ConcurrencyStats{
 			AdaptiveEnabled:                   true,
 			ConcurrencyFloor:                  1,
@@ -121,7 +123,7 @@ func TestSummaryRecordMarshalCompatibility(t *testing.T) {
 		Collisions:              map[string]int64{"duplicate": 1},
 		InvalidInputs:           2,
 		Errors:                  1,
-	}, `{"dest_uri":"s3://dest-bucket/out/","dry_run":true,"on_collision":"skip-if-duplicate","adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"dest_ifabsent_honored":null,"fallback_active":true,"ifabsent_fallback_objects":7,"statuses":{"complete":3,"skipped":1},"collisions":{"duplicate":1},"invalid_inputs":2,"errors":1}`)
+	}, `{"dest_uri":"s3://dest-bucket/out/","dry_run":true,"on_collision":"skip-if-duplicate","execution_path":"cli-pool","adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"dest_ifabsent_honored":null,"fallback_active":true,"ifabsent_fallback_objects":7,"statuses":{"complete":3,"skipped":1},"collisions":{"duplicate":1},"invalid_inputs":2,"errors":1}`)
 
 	honored := false
 	assertExactJSON(t, SummaryRecord{
@@ -132,7 +134,7 @@ func TestSummaryRecordMarshalCompatibility(t *testing.T) {
 		DestIfAbsentProbeStatus: "fallback_head_compare",
 		Statuses:                map[string]int64{},
 		Collisions:              map[string]int64{},
-	}, `{"dest_uri":"s3://dest-bucket/out/","dry_run":false,"on_collision":"fail","adaptive_enabled":false,"concurrency_floor":0,"concurrency_initial":0,"concurrency_ceiling_requested":0,"concurrency_ceiling_effective":0,"concurrency_ceiling_reason":"","concurrency_final":0,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"dest_ifabsent_honored":false,"dest_ifabsent_probe_status":"fallback_head_compare","fallback_active":false,"ifabsent_fallback_objects":0}`)
+	}, `{"dest_uri":"s3://dest-bucket/out/","dry_run":false,"on_collision":"fail","execution_path":"","adaptive_enabled":false,"concurrency_floor":0,"concurrency_initial":0,"concurrency_ceiling_requested":0,"concurrency_ceiling_effective":0,"concurrency_ceiling_reason":"","concurrency_final":0,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"dest_ifabsent_honored":false,"dest_ifabsent_probe_status":"fallback_head_compare","fallback_active":false,"ifabsent_fallback_objects":0}`)
 }
 
 func TestSourceRunRecordMarshalCompatibility(t *testing.T) {

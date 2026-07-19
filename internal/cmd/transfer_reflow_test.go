@@ -3454,9 +3454,11 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&reflowSrcRegion, "src-region", "", "")
 	cmd.Flags().StringVar(&reflowSrcProfile, "src-profile", "", "")
 	cmd.Flags().StringVar(&reflowSrcEndpoint, "src-endpoint", "", "")
+	cmd.Flags().StringVar(&reflowSrcGCPProject, "src-gcp-project", "", "")
 	cmd.Flags().StringVar(&reflowDstRegion, "dest-region", "", "")
 	cmd.Flags().StringVar(&reflowDstProfile, "dest-profile", "", "")
 	cmd.Flags().StringVar(&reflowDstEndpoint, "dest-endpoint", "", "")
+	cmd.Flags().StringVar(&reflowDstGCPProject, "dest-gcp-project", "", "")
 	return cmd
 }
 

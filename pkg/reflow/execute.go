@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -72,6 +73,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		DestURI:          layout.BaseURI,
 		DryRun:           r.cfg.DryRun,
 		Parallel:         r.cfg.Concurrency.RequestedCeiling,
+		ExecutionPath:    ExecutionPathEngine,
 		ConcurrencyStats: runConcurrency,
 	}); err != nil {
 		return Summary{}, err
@@ -83,26 +85,122 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	}
 
 	stats := newRunStats()
+	arbiter := newDestKeyArbiter()
+
+	// Worker pool honoring the resolved concurrency ceiling. The reader stage
+	// (this goroutine) parses, validates, and plans records serially so
+	// INVALID_INPUT events keep input order; plannable live copies fan out to
+	// EffectiveCeiling workers. The AIMD limiter remains the per-operation
+	// concurrency authority — workers still acquire per provider op. Contract:
+	// per-object transitions stay ordered, exactly one terminal record is
+	// emitted per accepted input, the summary follows worker join, and global
+	// input order is not promised.
+	poolCtx, cancelPool := context.WithCancel(ctx)
+	defer cancelPool()
+	workers := r.cfg.Concurrency.EffectiveCeiling
+	if workers < 1 {
+		workers = 1
+	}
+	var (
+		fatalMu  sync.Mutex
+		fatalErr error
+	)
+	recordFatal := func(err error) {
+		fatalMu.Lock()
+		if fatalErr == nil {
+			fatalErr = err
+		}
+		fatalMu.Unlock()
+		cancelPool()
+	}
+
+	tasks := make(chan plannedRecord, workers*2)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				if poolCtx.Err() != nil {
+					continue // drain remaining tasks after cancellation
+				}
+				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, capability, limiter, arbiter, task.in, task.destKey, task.destURI); err != nil {
+					recordFatal(err)
+				}
+			}
+		}()
+	}
+
 	sourceIdentity := ""
 	scanner := bufio.NewScanner(src.Records)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	var readerErr error
 	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return Summary{}, ctx.Err()
+		if poolCtx.Err() != nil {
+			break
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		if err := r.executeInputLine(ctx, src, layout, rewrite, stats, capability, limiter, &sourceIdentity, line); err != nil {
-			return Summary{}, err
+		task, ok, err := r.planInputLine(ctx, layout, rewrite, stats, &sourceIdentity, line)
+		if err != nil {
+			readerErr = err
+			break
+		}
+		if !ok {
+			continue
+		}
+		if r.cfg.DryRun {
+			rec := task.in.record(task.destURI, task.destKey, "planned")
+			stats.record(rec)
+			if err := r.emitRecord(ctx, rec); err != nil {
+				readerErr = err
+				break
+			}
+			continue
+		}
+		// Source resolution stays on the serial reader stage: SourceResolver
+		// implementations are never invoked concurrently, so the adapter's lazy
+		// provider cache needs no synchronization and library resolvers carry no
+		// hidden concurrency requirement. Identity validation (planInputLine)
+		// precedes resolution, so a divergent source root never resolves.
+		sourceProvider, resolveErr := src.Resolve(ctx, task.in.SourceURI)
+		if resolveErr != nil {
+			if err := r.recordObjectError(ctx, stats, task.in, task.destURI, task.destKey, "failed to connect to provider", resolveErr, map[string]any{"source_uri": sanitizeSourceURI(task.in.SourceURI), "dest_uri": task.destURI}, nil); err != nil {
+				readerErr = err
+				break
+			}
+			continue
+		}
+		task.src = sourceProvider
+		select {
+		case tasks <- task:
+		case <-poolCtx.Done():
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	scanErr := scanner.Err()
+	close(tasks)
+	wg.Wait()
+
+	fatalMu.Lock()
+	firstErr := fatalErr
+	fatalMu.Unlock()
+	if firstErr == nil {
+		firstErr = readerErr
+	}
+	if firstErr != nil {
+		return Summary{}, firstErr
+	}
+	if err := ctx.Err(); err != nil {
 		return Summary{}, err
+	}
+	if scanErr != nil {
+		return Summary{}, scanErr
 	}
 
 	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, capability, limiter.Snapshot())
+	summary.ExecutionPath = ExecutionPathEngine
 	if err := r.emitSummary(ctx, summary); err != nil {
 		return Summary{}, err
 	}
@@ -150,29 +248,36 @@ func (e *ObjectErrorsError) Error() string {
 	return fmt.Sprintf("reflow: completed with %d object error(s)", e.Count)
 }
 
-func (r *Runner) executeInputLine(ctx context.Context, src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, sourceIdentity *string, line string) error {
+// plannedRecord is a reader-stage-planned input ready for worker execution. The
+// source provider handle is resolved in the serial reader stage (SourceResolver
+// implementations are never invoked concurrently) and carried to the worker.
+type plannedRecord struct {
+	in      reflowInput
+	destKey string
+	destURI string
+	src     provider.Provider
+}
+
+// planInputLine parses, validates, and plans one input line in the reader
+// stage. ok is false when the line was consumed as an INVALID_INPUT event; a
+// non-nil error is an infrastructure (sink) failure that aborts the run.
+func (r *Runner) planInputLine(ctx context.Context, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, sourceIdentity *string, line string) (plannedRecord, bool, error) {
 	in, err := parseReflowInputLine(line)
 	if err != nil {
 		stats.recordInvalidInput()
-		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Message: FormatErrorMessage("invalid reflow input", err), Details: map[string]any{"error": err.Error()}})
+		return plannedRecord{}, false, r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Message: FormatErrorMessage("invalid reflow input", err), Details: map[string]any{"error": err.Error()}})
 	}
 	if err := validateSourceIdentity(sourceIdentity, in); err != nil {
 		stats.recordInvalidInput()
-		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("invalid input", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
+		return plannedRecord{}, false, r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("invalid input", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
 	}
 	destRel, err := planDestRel(in, rewrite)
 	if err != nil {
 		stats.recordInvalidInput()
-		return r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("destination mapping unavailable", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
+		return plannedRecord{}, false, r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("destination mapping unavailable", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
 	}
 	destKey := layout.DestKey(destRel)
-	destURI := layout.DestURI(destKey)
-	if r.cfg.DryRun {
-		rec := in.record(destURI, destKey, "planned")
-		stats.record(rec)
-		return r.emitRecord(ctx, rec)
-	}
-	return r.copyAndEmit(ctx, src, layout, stats, capability, limiter, in, destKey, destURI)
+	return plannedRecord{in: in, destKey: destKey, destURI: layout.DestURI(destKey)}, true, nil
 }
 
 func validateSourceIdentity(current *string, in reflowInput) error {
@@ -193,12 +298,8 @@ func validateSourceIdentity(current *string, in reflowInput) error {
 	return nil
 }
 
-func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, in reflowInput, destKey, destURI string) error {
+func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey, destURI string) error {
 	sourceURI := sanitizeSourceURI(in.SourceURI)
-	sourceProvider, err := src.Resolve(ctx, in.SourceURI)
-	if err != nil {
-		return r.recordObjectError(ctx, stats, in, destURI, destKey, "failed to connect to provider", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
-	}
 
 	if r.cfg.Checkpoint != nil {
 		done, status, err := r.cfg.Checkpoint.ItemDone(ctx, sourceURI, destURI)
@@ -209,8 +310,13 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 			rec := in.record(destURI, destKey, "skipped")
 			rec.Reason = "resume." + status
 			stats.record(rec)
+			// The item's terminal state is already durable from the prior run;
+			// failing to refresh it as a resume-skip warns rather than failing
+			// an object whose destination state is settled.
 			if err := r.checkpointItem(ctx, in, destURI, destKey, "skipped", rec.Reason, 0, "", ""); err != nil {
-				return err
+				if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, err); werr != nil {
+					return werr
+				}
 			}
 			return r.emitRecord(ctx, rec)
 		}
@@ -256,7 +362,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "destination metadata options failed", err, details, nil)
 	}
 
-	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, in.withSourceMeta(sourceETag, sourceSize), destKey, putOptions)
+	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, in.withSourceMeta(sourceETag, sourceSize), destKey, putOptions)
 	if err != nil {
 		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
 		msg := "copy failed"
@@ -267,14 +373,30 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 	}
 
 	if r.cfg.Checkpoint != nil {
-		if err := r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey); err != nil {
-			return err
-		}
+		// The durable destination-observed mark is written inside the arbiter
+		// gate (copyWithCollision); writing it again here would double a
+		// serialized state-store operation per successful object.
+		//
+		// NoteDestKeySource is auxiliary audit state: failure warns (typed) and
+		// continues. The terminal UpsertItem is the resume authority: failure is
+		// strict — the object is reported failed, never acknowledged with its
+		// success status on a store that could not record it.
 		if err := r.cfg.Checkpoint.NoteDestKeySource(ctx, destKey, sourceURI, sourceETag, sourceSize); err != nil {
-			return err
+			if werr := r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, destURI, err); werr != nil {
+				return werr
+			}
 		}
 		if err := r.checkpointItem(ctx, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, status, reason, bytes, "", ""); err != nil {
-			return err
+			stats.recordError()
+			if e := r.emitError(ctx, ErrorEvent{Code: reflowErrCode(err), Key: in.SourceKey, Message: FormatErrorMessage("checkpoint write failed", err), Details: map[string]any{"source_uri": sourceURI, "dest_uri": destURI, "mode": "transfer_reflow", "reason": "checkpoint.write_failed"}, Collision: collision}); e != nil {
+				return e
+			}
+			rec := in.withSourceMeta(sourceETag, sourceSize).record(destURI, destKey, "failed")
+			rec.Reason = "checkpoint.write_failed"
+			rec.Bytes = bytes
+			rec = recordWithCollision(rec, collision)
+			stats.record(rec)
+			return r.emitRecord(ctx, rec)
 		}
 	}
 	_ = putResult
@@ -286,24 +408,61 @@ func (r *Runner) copyAndEmit(ctx context.Context, src RecordStreamSource, layout
 	return r.emitRecord(ctx, rec)
 }
 
-func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	dst := r.cfg.Destination.Provider
 	if r.cfg.Collision.Mode == CollisionOverwrite {
 		bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
 		return bytes, provider.PutResult{}, nil, "complete", "", err
 	}
-	if r.cfg.Checkpoint != nil {
+
+	// Per-dest-key gate: concurrent workers targeting the same destination key
+	// serialize through the observed-check/copy critical section so a
+	// conditional PUT never races another in-process worker for the same key.
+	// Collision resolution (head + duplicate compare) runs outside the gate —
+	// it is read-only against an existing destination object.
+	gate, release := arbiter.acquire(destKey)
+	known := gate.observed
+	if !known && r.cfg.Checkpoint != nil {
 		observed, err := r.cfg.Checkpoint.DestKeyObserved(ctx, destKey)
 		if err != nil {
+			release()
 			return 0, provider.PutResult{}, nil, "", "", err
 		}
 		if observed {
-			dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
-			if headErr != nil {
-				return 0, provider.PutResult{}, nil, "", "", headErr
-			}
-			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
+			gate.observed = true
+			known = true
 		}
+	}
+	if known {
+		release()
+		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+		if headErr != nil {
+			return 0, provider.PutResult{}, nil, "", "", headErr
+		}
+		return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
+	}
+
+	// markObserved records the key as observed on the in-process gate AND in the
+	// durable checkpoint store while the gate is still held. The gate entry is
+	// deleted once idle, so only the durable mark prevents a later same-key
+	// worker from re-attempting a conditional PUT (mirroring the CLI pool, whose
+	// durable per-run destination observations live in the checkpoint DB).
+	//
+	// The mark is auxiliary arbitration state, not the terminal resume
+	// authority: on store failure it warns (typed, same code as the CLI pool)
+	// and continues. Correctness holds — the in-process gate memo still covers
+	// concurrent same-key workers, and a later worker at worst re-drives a
+	// conditional PUT the provider (or head fallback) refuses. A returned error
+	// is an event-sink infrastructure failure only.
+	markObserved := func() error {
+		gate.observed = true
+		if r.cfg.Checkpoint == nil {
+			return nil
+		}
+		if err := r.cfg.Checkpoint.MarkDestKeyObserved(ctx, destKey); err != nil {
+			return r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, "", err)
+		}
+		return nil
 	}
 
 	if capability.FallbackActive {
@@ -311,21 +470,42 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
 		switch {
 		case headErr == nil:
+			markErr := markObserved()
+			release()
+			if markErr != nil {
+				return 0, provider.PutResult{}, nil, "", "", markErr
+			}
 			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback)
 		case provider.IsNotFound(headErr):
 			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+			if err == nil {
+				err = markObserved()
+			}
+			release()
 			return bytes, provider.PutResult{}, nil, "complete", "", err
 		default:
+			release()
 			return 0, provider.PutResult{}, nil, "", "", headErr
 		}
 	}
 
 	bytes, result, err := limitedCopyConditional(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts)
 	if err == nil {
+		markErr := markObserved()
+		release()
+		if markErr != nil {
+			return 0, provider.PutResult{}, nil, "", "", markErr
+		}
 		return bytes, result, nil, "complete", "", nil
 	}
 	if !isConditionalExists(err) {
+		release()
 		return 0, provider.PutResult{}, nil, "", "", err
+	}
+	markErr := markObserved()
+	release()
+	if markErr != nil {
+		return 0, provider.PutResult{}, nil, "", "", markErr
 	}
 	dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
 	if headErr != nil {
@@ -377,14 +557,42 @@ func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in refl
 	if err := r.emitError(ctx, ErrorEvent{Code: code, Key: in.SourceKey, Message: FormatErrorMessage(msg, err), Details: details, Collision: collision}); err != nil {
 		return err
 	}
-	if err := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); err != nil {
-		return err
+	// Recording the failure in the checkpoint store is best-effort: the object
+	// is already being reported failed, so a store write failure here warns
+	// (typed) rather than escalating — an unrecorded failed item is simply
+	// re-driven on resume.
+	if cperr := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); cperr != nil {
+		if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, cperr); werr != nil {
+			return werr
+		}
 	}
 	rec := in.record(destURI, destKey, "failed")
 	rec.Reason = failedRecordReason(code, collision)
 	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
+}
+
+// Checkpoint-write warning codes. warningCodeArbitrationStateWrite matches the
+// CLI pool's code for the same condition (auxiliary arbitration/audit state
+// write failed; run continues); warningCodeCheckpointWrite covers best-effort
+// item writes whose failure does not change the object's reported outcome.
+const (
+	warningCodeArbitrationStateWrite = "REFLOW_ARBITRATION_STATE_WRITE_FAILED"
+	warningCodeCheckpointWrite       = "REFLOW_CHECKPOINT_WRITE_FAILED"
+)
+
+func (r *Runner) emitCheckpointWriteWarning(ctx context.Context, code, destKey, destURI string, cause error) error {
+	details := map[string]any{}
+	if destURI != "" {
+		details["dest_uri"] = destURI
+	}
+	return r.emitWarning(ctx, Warning{
+		Code:    code,
+		Message: "checkpoint state write failed: " + SanitizeOperationCauseMessage(cause),
+		Key:     destKey,
+		Details: details,
+	})
 }
 
 func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Provider, key string) (*provider.ObjectMeta, error) {
@@ -503,12 +711,16 @@ func (r *Runner) compileRewrite() (*transfer.ReflowRewrite, error) {
 
 // Event-emission helpers apply the engine's redaction boundary before delivery:
 // every Details map is per-field sanitized, and Record source URIs are sanitized
-// at construction. A nil EventSink disables delivery.
+// at construction. A nil EventSink disables delivery. Delivery is serialized
+// (emitMu) so sink implementations never observe concurrent calls even though
+// engine workers execute objects concurrently.
 
 func (r *Runner) emitRun(ctx context.Context, rec RunRecord) error {
 	if r.cfg.Events == nil {
 		return nil
 	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnRun(ctx, rec)
 }
 
@@ -517,6 +729,8 @@ func (r *Runner) emitRecord(ctx context.Context, rec Record) error {
 		return nil
 	}
 	rec.Details = sanitizeDetails(rec.Details)
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnRecord(ctx, rec)
 }
 
@@ -525,6 +739,8 @@ func (r *Runner) emitWarning(ctx context.Context, w Warning) error {
 		return nil
 	}
 	w.Details = sanitizeDetails(w.Details)
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnWarning(ctx, w)
 }
 
@@ -533,6 +749,8 @@ func (r *Runner) emitError(ctx context.Context, e ErrorEvent) error {
 		return nil
 	}
 	e.Details = sanitizeDetails(e.Details)
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnError(ctx, e)
 }
 
@@ -540,5 +758,7 @@ func (r *Runner) emitSummary(ctx context.Context, rec SummaryRecord) error {
 	if r.cfg.Events == nil {
 		return nil
 	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnSummary(ctx, rec)
 }

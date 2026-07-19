@@ -15,6 +15,52 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Concurrent execution in the library reflow engine.** The `pkg/reflow`
+  record-stream runner now executes objects on a bounded worker pool honoring
+  the resolved concurrency ceiling, with per-destination-key arbitration moved
+  into the engine (concurrent same-key workers serialize; each established
+  destination key gets exactly one durable observed-mark and one conditional
+  create). Live stdin record-stream copies dispatch to the engine again — the
+  v0.4.1 dispatch narrowing (#159) is removed, behind a standing behavioral
+  parity gate: a same-input dual-path harness (copy-heavy and skip-heavy),
+  interruption/resume evidence measuring exactly-one-land per object against a
+  real checkpoint store, and a flag-coverage matrix proving every flag's
+  disposition on each execution path.
+- **Dispatch transparency.** Run and summary records carry `execution_path`
+  (`engine` | `cli-pool`) on both paths; requested (`parallel`), resolved
+  (`concurrency_ceiling_effective`), and observed (`concurrency_max_active`)
+  concurrency remain separate fields. Requested is reported as operator
+  intent; both paths execute under, and truthfully report, the normalized
+  effective ceiling and the observed maximum.
+
+### Changed
+
+- **Concurrency configurations normalize to one invariant**
+  (`1 ≤ floor ≤ initial ≤ effective ≤ requested`) across the CLI, the library
+  runner (including the documented zero-value config), and direct limiter
+  construction: pool size, limiter behavior, and records derive from the same
+  normalized config; throttle recovery can never exceed the reported effective
+  ceiling; fixed (non-adaptive) partial configs run at the ceiling they report.
+- **Strict terminal checkpoint acknowledgement on both execution paths.** A
+  completed copy or collision-skip decision is never acknowledged with its
+  success status when the checkpoint store cannot durably record it: the
+  object reports `failed` (reason `checkpoint.write_failed`) and the run exits
+  non-zero; resume against a healthy store converges without double-landing.
+  Auxiliary arbitration-state write failures warn (typed
+  `REFLOW_ARBITRATION_STATE_WRITE_FAILED`) and continue on both paths. The
+  CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
+  their historical warn-and-continue terminal behavior until they migrate to
+  the engine.
+
+### Known limits (stated, not claimed)
+
+- Reflow interruption guarantees cover in-process cancellation with in-flight
+  work; hard process-kill crash windows and concurrent multi-process runs
+  sharing one checkpoint root are not claimed (run one transfer per checkpoint
+  at a time).
+
 ## [0.4.1] - 2026-07-18
 
 **SQLite independence for the durable index, and memory-bounded streaming

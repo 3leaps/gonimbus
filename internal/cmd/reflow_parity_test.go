@@ -36,6 +36,10 @@ import (
 // kept. The set grows as needed when the runner begins emitting events.
 var presentationDropKeys = map[string]bool{
 	"checkpoint_path": true,
+	// execution_path names the path that ran — it differs between the two sides
+	// of this harness by definition. Output parity ignores it; the behavioral
+	// dual-path harness asserts each side reports its own path truthfully.
+	"execution_path": true,
 }
 
 // normalizedEvent is the presentation-stripped form of a reflow event, comparable
