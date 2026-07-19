@@ -116,6 +116,47 @@ func TestResolveConcurrencyWithBudgetArithmetic(t *testing.T) {
 		require.Equal(t, "derived", cfg.MemoryBudgetSource)
 	})
 
+	t.Run("resolved retry cap shares the budget bound", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(32, true, probeWith(gib, "cgroup_v2", nil), 128*mib)
+		require.Equal(t, int64(16)*mib, cfg.RetryBufferCapBytes,
+			"budget above the transfer default keeps the 16MiB per-copy cap")
+	})
+
+	t.Run("sub-16MiB detected limit is never exceeded (derived)", func(t *testing.T) {
+		cfg := ResolveConcurrency(64, true, probeWith(8*mib, "cgroup_v2", nil))
+		require.Equal(t, 2*mib, cfg.MemoryBudgetEffectiveBytes, "25% of 8MiB")
+		require.LessOrEqual(t, cfg.MemoryBudgetEffectiveBytes, cfg.MemoryLimitBytes)
+		require.Equal(t, 2*mib, cfg.RetryBufferCapBytes, "per-copy cap shrinks to the budget")
+		require.Equal(t, 1, cfg.EffectiveCeiling)
+	})
+
+	t.Run("sub-16MiB detected limit is never exceeded (operator clamp)", func(t *testing.T) {
+		cfg := ResolveConcurrencyWithBudget(4, true, probeWith(mib, "cgroup_v2", nil), 64*mib)
+		require.Equal(t, "operator_clamped_to_limit", cfg.MemoryBudgetSource)
+		require.Equal(t, mib, cfg.MemoryBudgetEffectiveBytes,
+			"a record claiming clamped-to-limit must not admit above the limit")
+		require.LessOrEqual(t, cfg.MemoryBudgetEffectiveBytes, cfg.MemoryLimitBytes)
+		require.Equal(t, mib, cfg.RetryBufferCapBytes)
+		require.Equal(t, 1, cfg.EffectiveCeiling)
+	})
+
+	t.Run("budget never exceeds any detected limit", func(t *testing.T) {
+		for _, limit := range []int64{mib, 8 * mib, 64 * mib, gib, 64 * gib} {
+			for _, operator := range []int64{0, 64 * mib, 2 * gib} {
+				cfg := ResolveConcurrencyWithBudget(256, true, probeWith(limit, "cgroup_v2", nil), operator)
+				require.LessOrEqual(t, cfg.MemoryBudgetEffectiveBytes, cfg.MemoryLimitBytes,
+					"limit=%d operator=%d", limit, operator)
+				require.LessOrEqual(t, cfg.RetryBufferCapBytes, cfg.MemoryBudgetEffectiveBytes,
+					"limit=%d operator=%d", limit, operator)
+			}
+		}
+	})
+
+	t.Run("direct construction falls back to the transfer default cap", func(t *testing.T) {
+		limiter := NewConcurrencyLimiter(ConcurrencyConfig{RequestedCeiling: 4, EffectiveCeiling: 4})
+		require.Equal(t, transfer.DefaultRetryBufferMaxMemoryBytes, limiter.RetryBufferCap())
+	})
+
 	t.Run("limiter snapshot carries the memory fields", func(t *testing.T) {
 		cfg := ResolveConcurrencyWithBudget(32, true, probeWith(gib, "cgroup_v2", nil), 128*mib)
 		stats := NewConcurrencyLimiter(cfg).Snapshot()
@@ -144,7 +185,7 @@ func TestMemoryLimitFromChainPrecedence(t *testing.T) {
 		wantSource string
 	}{
 		{
-			name:       "cgroup limit wins over runtime and physical",
+			name:       "cgroup binds when it is the lowest candidate",
 			platform:   platform(2*gib, "cgroup_v2", nil),
 			runtime:    func() int64 { return 8 * gib },
 			physical:   physical(64*gib, nil),
@@ -152,7 +193,31 @@ func TestMemoryLimitFromChainPrecedence(t *testing.T) {
 			wantSource: "cgroup_v2",
 		},
 		{
-			name:       "platform error falls through to runtime",
+			name:       "physical RAM binds below a higher runtime limit",
+			platform:   platform(0, "", nil),
+			runtime:    func() int64 { return 64 * gib },
+			physical:   physical(8*gib, nil),
+			wantLimit:  8 * gib,
+			wantSource: "physical_ram",
+		},
+		{
+			name:       "physical RAM binds below a higher cgroup limit",
+			platform:   platform(32*gib, "cgroup_v2", nil),
+			runtime:    func() int64 { return 0 },
+			physical:   physical(8*gib, nil),
+			wantLimit:  8 * gib,
+			wantSource: "physical_ram",
+		},
+		{
+			name:       "runtime binds when it is the lowest of all three",
+			platform:   platform(2*gib, "cgroup_v2", nil),
+			runtime:    func() int64 { return 1 * gib },
+			physical:   physical(8*gib, nil),
+			wantLimit:  1 * gib,
+			wantSource: "runtime",
+		},
+		{
+			name:       "platform error still considers remaining candidates",
 			platform:   platform(0, "", errors.New("unreadable")),
 			runtime:    func() int64 { return 8 * gib },
 			physical:   physical(64*gib, nil),
@@ -160,31 +225,23 @@ func TestMemoryLimitFromChainPrecedence(t *testing.T) {
 			wantSource: "runtime",
 		},
 		{
-			name:       "platform absent falls through to runtime",
+			name:       "physical probe error still considers remaining candidates",
 			platform:   platform(0, "", nil),
 			runtime:    func() int64 { return 8 * gib },
-			physical:   physical(64*gib, nil),
+			physical:   physical(0, errors.New("probe failed")),
 			wantLimit:  8 * gib,
 			wantSource: "runtime",
 		},
 		{
-			name:       "no runtime limit falls through to physical RAM",
-			platform:   platform(0, "", nil),
-			runtime:    func() int64 { return 0 },
-			physical:   physical(64*gib, nil),
-			wantLimit:  64 * gib,
-			wantSource: "physical_ram",
-		},
-		{
-			name:       "physical probe error falls back to conservative default",
-			platform:   platform(0, "", nil),
+			name:       "no candidate falls back to conservative default",
+			platform:   platform(0, "", errors.New("unreadable")),
 			runtime:    func() int64 { return 0 },
 			physical:   physical(0, errors.New("probe failed")),
 			wantLimit:  resourceDefaultMemoryLimit,
 			wantSource: "detection_unavailable",
 		},
 		{
-			name:       "physical probe absent falls back to conservative default",
+			name:       "absent candidates fall back to conservative default",
 			platform:   platform(0, "", nil),
 			runtime:    func() int64 { return 0 },
 			physical:   physical(0, nil),

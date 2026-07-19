@@ -607,7 +607,7 @@ func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.
 		return 0, err
 	}
 	defer release()
-	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
+	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts)
 	limiter.ObserveProviderResult(err)
 	return bytes, err
 }
@@ -618,7 +618,7 @@ func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, sr
 		return 0, provider.PutResult{}, err
 	}
 	defer release()
-	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
+	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts)
 	limiter.ObserveProviderResult(err)
 	return bytes, result, err
 }

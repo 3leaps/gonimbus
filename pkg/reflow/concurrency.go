@@ -71,6 +71,11 @@ type ConcurrencyConfig struct {
 	MemoryBudgetRequestedBytes int64
 	MemoryBudgetEffectiveBytes int64
 	MemoryBudgetSource         string
+	// RetryBufferCapBytes is the resolved per-copy in-memory retry-buffer
+	// bound (min of the transfer default and the effective budget); the copy
+	// paths must allocate against this value, spooling above it. Zero means
+	// not memory-resolved — consumers fall back to the transfer default.
+	RetryBufferCapBytes int64
 }
 
 // ConcurrencyStats is embedded in reflow run and summary records.
@@ -99,6 +104,7 @@ type ConcurrencyStats struct {
 	MemoryBudgetRequestedBytes int64  `json:"memory_budget_requested_bytes,omitempty"`
 	MemoryBudgetEffectiveBytes int64  `json:"memory_budget_effective_bytes,omitempty"`
 	MemoryBudgetSource         string `json:"memory_budget_source,omitempty"`
+	RetryBufferCapBytes        int64  `json:"retry_buffer_cap_bytes,omitempty"`
 }
 
 // ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
@@ -148,21 +154,31 @@ func runtimeMemoryLimitBytes() int64 {
 }
 
 // memoryLimitFromChain resolves the memory limit that derives the transfer
-// concurrency budget: the container/cgroup hard limit wins (it is enforced),
-// then an explicit runtime limit (GOMEMLIMIT), then detected physical RAM. The
-// conservative default applies only when detection is genuinely unavailable —
-// a probe failure never silently assumes host capacity.
+// concurrency budget. All viable candidates are probed — container/cgroup hard
+// limit, explicit runtime limit (GOMEMLIMIT), detected physical RAM — and the
+// LOWEST positive value binds, with its source recorded. An explicit runtime
+// limit may tighten ambient capacity but never authorizes exceeding a lower
+// known bound. The conservative default applies only when no candidate
+// succeeds — a probe failure never silently assumes host capacity.
 func memoryLimitFromChain(platform func() (int64, string, error), runtimeLimit func() int64, physical func() (int64, error)) (int64, string, error) {
-	if limit, source, err := platform(); err == nil && limit > 0 {
-		return limit, source, nil
+	binding := int64(0)
+	bindingSource := ""
+	consider := func(limit int64, source string) {
+		if limit > 0 && (binding == 0 || limit < binding) {
+			binding, bindingSource = limit, source
+		}
 	}
-	if limit := runtimeLimit(); limit > 0 {
-		return limit, memorySourceRuntime, nil
+	if limit, source, err := platform(); err == nil {
+		consider(limit, source)
 	}
-	if limit, err := physical(); err == nil && limit > 0 {
-		return limit, memorySourcePhysicalRAM, nil
+	consider(runtimeLimit(), memorySourceRuntime)
+	if limit, err := physical(); err == nil {
+		consider(limit, memorySourcePhysicalRAM)
 	}
-	return resourceDefaultMemoryLimit, memorySourceDetectionUnavailable, nil
+	if binding <= 0 {
+		return resourceDefaultMemoryLimit, memorySourceDetectionUnavailable, nil
+	}
+	return binding, bindingSource, nil
 }
 
 // ResolveConcurrency clamps the requested ceiling by memory and FD limits before
@@ -209,13 +225,18 @@ func ResolveConcurrencyWithBudget(requested int, adaptiveEnabled bool, probe Res
 			budgetSource = memoryBudgetSourceOperatorClamped
 		}
 	}
-	if memoryBudget < transfer.DefaultRetryBufferMaxMemoryBytes {
-		memoryBudget = transfer.DefaultRetryBufferMaxMemoryBytes
+	if memoryBudget < 1 {
+		memoryBudget = 1
 	}
-	memoryCap := int(memoryBudget / transfer.DefaultRetryBufferMaxMemoryBytes)
-	if memoryCap < resourceMinCap {
-		memoryCap = resourceMinCap
+	// The per-copy retry-buffer cap shrinks to the budget rather than the
+	// budget rising to the cap: a detected hard limit is never exceeded — the
+	// records and the copy-path allocator share this one resolved bound, and
+	// objects above it spool instead of buffering.
+	retryBufferCap := transfer.DefaultRetryBufferMaxMemoryBytes
+	if memoryBudget < retryBufferCap {
+		retryBufferCap = memoryBudget
 	}
+	memoryCap := int(memoryBudget / retryBufferCap)
 
 	fdLimit, fdErr := probe.FDSoftLimit()
 	if fdLimit <= 0 || fdErr != nil {
@@ -265,6 +286,7 @@ func ResolveConcurrencyWithBudget(requested int, adaptiveEnabled bool, probe Res
 		MemoryBudgetRequestedBytes: budgetRequested,
 		MemoryBudgetEffectiveBytes: memoryBudget,
 		MemoryBudgetSource:         budgetSource,
+		RetryBufferCapBytes:        retryBufferCap,
 	}
 }
 
@@ -445,6 +467,18 @@ func (l *ConcurrencyLimiter) ObserveProviderResult(err error) {
 	}
 }
 
+// RetryBufferCap returns the resolved per-copy in-memory retry-buffer bound
+// the copy paths must allocate against, falling back to the transfer default
+// for configs that were not memory-resolved.
+func (l *ConcurrencyLimiter) RetryBufferCap() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cfg.RetryBufferCapBytes > 0 {
+		return l.cfg.RetryBufferCapBytes
+	}
+	return transfer.DefaultRetryBufferMaxMemoryBytes
+}
+
 // Snapshot returns a stable stats view for run and summary records.
 func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 	l.mu.Lock()
@@ -472,6 +506,7 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 		MemoryBudgetRequestedBytes:        l.cfg.MemoryBudgetRequestedBytes,
 		MemoryBudgetEffectiveBytes:        l.cfg.MemoryBudgetEffectiveBytes,
 		MemoryBudgetSource:                l.cfg.MemoryBudgetSource,
+		RetryBufferCapBytes:               l.cfg.RetryBufferCapBytes,
 	}
 }
 

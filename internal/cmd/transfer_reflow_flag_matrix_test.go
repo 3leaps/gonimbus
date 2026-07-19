@@ -1135,3 +1135,49 @@ func TestTransferReflowFlagMatrixSentinelSensitivity(t *testing.T) {
 	requireProbeComplete(t, stdout2, err, reflowpkg.ExecutionPathEngine)
 	require.Empty(t, env2.dst.metaSnapshot("data/source/file.xml").Metadata["owner"])
 }
+
+// TestTransferReflowDetectedSubLimitBudgetBothPaths pins the bounded-resource
+// contract for detected hard limits below the 16MiB transfer default: the
+// derived budget and the actual per-copy retry buffer share one resolved
+// bound at or below the limit, an object above that bound spools and
+// completes on both execution paths, and the records never admit more bytes
+// than the detected limit.
+func TestTransferReflowDetectedSubLimitBudgetBothPaths(t *testing.T) {
+	const detectedLimit = int64(8) << 20 // derived budget 2MiB, retry cap 2MiB
+	largeBody := strings.Repeat("x", 3<<20)
+
+	cases := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			env.src.putFixture("source/large.xml", largeBody, "large-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+			reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+				MemoryLimitBytes: func() (int64, string, error) { return detectedLimit, "cgroup_v2", nil },
+				FDSoftLimit:      func() (int64, error) { return 100000, nil },
+			}
+
+			input := reflowInputLine("source/large.xml", "large-etag", int64(len(largeBody)), "", "") + "\n"
+			stdout, err := env.runInput(t, input, tc.extra...)
+			require.NoError(t, err)
+
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+			require.Contains(t, string(run.Data), `"memory_limit_bytes":8388608`)
+			require.Contains(t, string(run.Data), `"memory_limit_source":"cgroup_v2"`)
+			require.Contains(t, string(run.Data), `"memory_budget_effective_bytes":2097152`)
+			require.Contains(t, string(run.Data), `"retry_buffer_cap_bytes":2097152`)
+
+			records := requireReflowRecords(t, stdout)
+			requireReflowStatusReasonCount(t, records, "complete", "", 1)
+			require.Equal(t, largeBody, string(env.dst.mustObject("data/source/large.xml")),
+				"object above the resolved retry cap must spool and land byte-identical")
+		})
+	}
+}

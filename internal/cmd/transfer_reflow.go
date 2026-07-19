@@ -510,7 +510,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return 0, err
 		}
 		defer release()
-		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
+		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), opts)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, err
 	}
@@ -520,7 +520,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return 0, provider.PutResult{}, err
 		}
 		defer release()
-		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
+		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), precond, opts)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, result, err
 	}
