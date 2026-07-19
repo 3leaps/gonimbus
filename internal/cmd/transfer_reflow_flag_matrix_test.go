@@ -1179,6 +1179,12 @@ func TestTransferReflowDetectedSubLimitBudgetBothPaths(t *testing.T) {
 			requireReflowStatusReasonCount(t, records, "complete", "", 1)
 			require.Equal(t, largeBody, string(env.dst.mustObject("data/source/large.xml")),
 				"object above the resolved retry cap must spool and land byte-identical")
+
+			// Ledger wiring proof (mutation-sensitive): the copy reserved
+			// min(size, cap)=2MiB through the admission ledger on this path —
+			// removing the reservation call zeroes (omits) the peak field.
+			sum := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
+			require.Contains(t, string(sum.Data), `"memory_reserved_peak_bytes":2097152`)
 		})
 	}
 }

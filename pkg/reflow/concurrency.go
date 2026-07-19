@@ -109,6 +109,12 @@ type ConcurrencyStats struct {
 	MemoryBudgetEffectiveBytes int64  `json:"memory_budget_effective_bytes,omitempty"`
 	MemoryBudgetSource         string `json:"memory_budget_source,omitempty"`
 	RetryBufferCapBytes        int64  `json:"retry_buffer_cap_bytes,omitempty"`
+	// Ledger pressure telemetry: peak outstanding copy-buffer reservation and
+	// admission-wait evidence. Read together with occupancy — waits with peak
+	// near the budget indicate memory admission, not a starved producer.
+	MemoryReservedPeakBytes int64 `json:"memory_reserved_peak_bytes,omitempty"`
+	MemoryReservationWaits  int64 `json:"memory_reservation_waits,omitempty"`
+	MemoryReservationWaitMS int64 `json:"memory_reservation_wait_ms,omitempty"`
 }
 
 // ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
@@ -135,6 +141,10 @@ type ConcurrencyLimiter struct {
 	startedAt      time.Time
 	lastTransition time.Time
 	activeIntegral float64
+
+	// ledger admits copy buffer bytes under the effective memory budget; nil
+	// for configs that were not memory-resolved (no budget to govern).
+	ledger *memoryLedger
 }
 
 // DefaultResourceProbe returns the platform probes used by transfer reflow.
@@ -365,13 +375,30 @@ func clampConcurrencyInvariants(cfg ConcurrencyConfig) ConcurrencyConfig {
 func NewConcurrencyLimiter(cfg ConcurrencyConfig) *ConcurrencyLimiter {
 	cfg = clampConcurrencyInvariants(cfg)
 	now := time.Now()
-	return &ConcurrencyLimiter{
+	limiter := &ConcurrencyLimiter{
 		cfg:            cfg,
 		current:        cfg.Initial,
 		clock:          time.Now,
 		startedAt:      now,
 		lastTransition: now,
 	}
+	if cfg.MemoryBudgetEffectiveBytes > 0 {
+		limiter.ledger = newMemoryLedger(cfg.MemoryBudgetEffectiveBytes)
+	}
+	return limiter
+}
+
+// ReserveCopyMemory admits a copy's bounded buffer bytes under the effective
+// memory budget before any limiter token or provider action, using the
+// allocator-identical arithmetic (min of known size and the resolved retry
+// cap; unknown sizes reserve the cap). The returned release is exactly-once
+// safe and must run on every terminal path. Configs without a resolved
+// budget return a no-op release.
+func (l *ConcurrencyLimiter) ReserveCopyMemory(ctx context.Context, sourceSize int64) (func(), error) {
+	if l.ledger == nil {
+		return func() {}, nil
+	}
+	return l.ledger.Reserve(ctx, copyReservationBytes(sourceSize, l.RetryBufferCap()))
 }
 
 // accrueActiveLocked folds the elapsed interval at the current active count
@@ -507,7 +534,7 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 	if elapsed := l.lastTransition.Sub(l.startedAt).Seconds(); elapsed > 0 {
 		timeAvg = math.Round(l.activeIntegral/elapsed*1000) / 1000
 	}
-	return ConcurrencyStats{
+	stats := ConcurrencyStats{
 		AdaptiveEnabled:                   l.cfg.AdaptiveEnabled,
 		ConcurrencyFloor:                  l.cfg.Floor,
 		ConcurrencyInitial:                l.cfg.Initial,
@@ -527,6 +554,13 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 		MemoryBudgetSource:                l.cfg.MemoryBudgetSource,
 		RetryBufferCapBytes:               l.cfg.RetryBufferCapBytes,
 	}
+	if l.ledger != nil {
+		ledgerStats := l.ledger.Stats()
+		stats.MemoryReservedPeakBytes = ledgerStats.PeakReservedBytes
+		stats.MemoryReservationWaits = ledgerStats.Waits
+		stats.MemoryReservationWaitMS = ledgerStats.WaitTotal.Milliseconds()
+	}
+	return stats
 }
 
 // ConcurrencyConnectionError reports provider/transport failures that freeze

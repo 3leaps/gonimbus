@@ -162,7 +162,7 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowRewriteTo, "rewrite-to", "", "Rewrite destination template (segment renders)")
 	transferReflowCmd.Flags().IntVar(&reflowParallel, "parallel", 16, "Requested concurrent copy ceiling")
 	transferReflowCmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "Disable adaptive concurrency and run fixed at the resource-capped --parallel ceiling")
-	transferReflowCmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "Transfer memory budget sizing the concurrency ceiling (e.g. 8GiB; min 64MiB, max 4TiB; values above the detected memory limit are clamped to it; default: 25% of the detected limit)")
+	transferReflowCmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "Memory budget governing transfer retry buffering and concurrency sizing — not total process or provider-SDK memory (e.g. 8GiB; min 64MiB, max 4TiB; values above the detected memory limit are clamped to it; omitted: 25% of the detected limit)")
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
 	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume a failed-resumable transfer reflow run by run id")
@@ -506,6 +506,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		_ = w.WriteAny(ctx, reflowpkg.RecordType, rec)
 	}
 	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions) (int64, error) {
+		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
+		if err != nil {
+			return 0, err
+		}
+		defer releaseMem()
 		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, err
@@ -516,6 +521,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		return bytes, err
 	}
 	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
+		if err != nil {
+			return 0, provider.PutResult{}, err
+		}
+		defer releaseMem()
 		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, provider.PutResult{}, err

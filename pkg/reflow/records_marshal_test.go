@@ -83,6 +83,9 @@ func TestRunRecordMarshalCompatibility(t *testing.T) {
 			MemoryBudgetRequestedBytes:        128 << 20,
 			MemoryBudgetEffectiveBytes:        128 << 20,
 			MemoryBudgetSource:                "operator",
+			MemoryReservedPeakBytes:           96 << 20,
+			MemoryReservationWaits:            3,
+			MemoryReservationWaitMS:           41,
 		},
 		Provenance: &ProvenanceRunConfig{
 			Mode:         "sidecar",
@@ -101,7 +104,7 @@ func TestRunRecordMarshalCompatibility(t *testing.T) {
 			MetadataSidecarSuffix:   ".metadata.json",
 			Set:                     map[string]string{"owner": "example"},
 		},
-	}, `{"dest_uri":"s3://dest-bucket/out/","checkpoint_path":"/tmp/reflow.db","dry_run":true,"resume":true,"parallel":8,"execution_path":"engine","adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"concurrency_time_avg_active":2.5,"memory_limit_bytes":1073741824,"memory_limit_source":"physical_ram","memory_budget_requested_bytes":134217728,"memory_budget_effective_bytes":134217728,"memory_budget_source":"operator","provenance":{"mode":"sidecar","suffix":".gnb.json","on_write_error":"warn","placement":{"mode":"mirrored-root","sidecar_root":"s3://audit-root/prov/"}},"metadata":{"policy":"merge","set_keys":["owner","team"],"source_key_rule_keys":["source-owner"],"derived_rule_keys":["site"],"on_missing_source":"empty","preserve_content_type":true,"destination_storage_class":"STANDARD","metadata_sidecar_suffix":".metadata.json","set":{"owner":"example"}}}`)
+	}, `{"dest_uri":"s3://dest-bucket/out/","checkpoint_path":"/tmp/reflow.db","dry_run":true,"resume":true,"parallel":8,"execution_path":"engine","adaptive_enabled":true,"concurrency_floor":1,"concurrency_initial":4,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":4,"concurrency_ceiling_reason":"resource_capped:fd","concurrency_final":3,"concurrency_throttle_backoffs":2,"concurrency_additive_increases":1,"concurrency_connection_error_freezes":1,"concurrency_max_active":4,"concurrency_time_avg_active":2.5,"memory_limit_bytes":1073741824,"memory_limit_source":"physical_ram","memory_budget_requested_bytes":134217728,"memory_budget_effective_bytes":134217728,"memory_budget_source":"operator","memory_reserved_peak_bytes":100663296,"memory_reservation_waits":3,"memory_reservation_wait_ms":41,"provenance":{"mode":"sidecar","suffix":".gnb.json","on_write_error":"warn","placement":{"mode":"mirrored-root","sidecar_root":"s3://audit-root/prov/"}},"metadata":{"policy":"merge","set_keys":["owner","team"],"source_key_rule_keys":["source-owner"],"derived_rule_keys":["site"],"on_missing_source":"empty","preserve_content_type":true,"destination_storage_class":"STANDARD","metadata_sidecar_suffix":".metadata.json","set":{"owner":"example"}}}`)
 }
 
 func TestSummaryRecordMarshalCompatibility(t *testing.T) {

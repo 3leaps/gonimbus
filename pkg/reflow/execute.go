@@ -603,6 +603,11 @@ func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Pr
 }
 
 func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions) (int64, error) {
+	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
+	if err != nil {
+		return 0, err
+	}
+	defer releaseMem()
 	release, err := limiter.Acquire(ctx)
 	if err != nil {
 		return 0, err
@@ -614,6 +619,11 @@ func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.
 }
 
 func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+	defer releaseMem()
 	release, err := limiter.Acquire(ctx)
 	if err != nil {
 		return 0, provider.PutResult{}, err
