@@ -33,6 +33,36 @@ func TestResolveConcurrencyResourceCapFailLow(t *testing.T) {
 	require.True(t, cfg.AdaptiveEnabled)
 }
 
+func TestConcurrencyLimiterTimeAvgActiveDeterministic(t *testing.T) {
+	limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+		RequestedCeiling: 4,
+		EffectiveCeiling: 4,
+		AdaptiveEnabled:  false,
+	})
+	base := time.Unix(1000, 0)
+	step := 0
+	steps := []time.Duration{0, time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second}
+	limiter.clock = func() time.Time {
+		d := steps[step]
+		step++
+		return base.Add(d)
+	}
+	limiter.startedAt = base
+	limiter.lastTransition = base
+
+	releaseA, err := limiter.Acquire(context.Background()) // t=0s: active 0->1
+	require.NoError(t, err)
+	releaseB, err := limiter.Acquire(context.Background()) // t=1s: active 1->2
+	require.NoError(t, err)
+	releaseA() // t=2s: active 2->1
+	releaseB() // t=3s: active 1->0
+
+	// Integral: 1s@1 + 1s@2 + 1s@1 + 1s@0 = 4 worker-seconds over 4 seconds.
+	stats := limiter.Snapshot() // t=4s
+	require.Equal(t, 1.0, stats.ConcurrencyTimeAvgActive)
+	require.Equal(t, 2, stats.ConcurrencyMaxActive)
+}
+
 func TestResolveConcurrencyWithBudgetArithmetic(t *testing.T) {
 	const gib = int64(1 << 30)
 	const mib = int64(1 << 20)

@@ -86,6 +86,11 @@ type ConcurrencyStats struct {
 	ConcurrencyAdditiveIncreases      int64  `json:"concurrency_additive_increases"`
 	ConcurrencyConnectionErrorFreezes int64  `json:"concurrency_connection_error_freezes"`
 	ConcurrencyMaxActive              int    `json:"concurrency_max_active"`
+	// ConcurrencyTimeAvgActive is the time-averaged active concurrency over
+	// the run (worker-seconds / wall-clock seconds, rounded to 3 decimals). A
+	// low time-average under a high effective ceiling indicates a bound
+	// producer rather than a limiter-capped run.
+	ConcurrencyTimeAvgActive float64 `json:"concurrency_time_avg_active,omitempty"`
 	// Memory fields are omitted when the ceiling was not memory-resolved
 	// (configs constructed directly with an explicit EffectiveCeiling and no
 	// probe); probe-resolved runs always populate limit, budget, and sources.
@@ -111,6 +116,15 @@ type ConcurrencyLimiter struct {
 	throttleBackoffs  int64
 	additiveIncreases int64
 	connectionFreezes int64
+
+	// Time-averaged occupancy accounting: activeIntegral accumulates
+	// worker-seconds at every active-count transition, so Snapshot can report
+	// the run's time-averaged active concurrency — a bound producer shows a
+	// low time-average under a high ceiling.
+	clock          func() time.Time
+	startedAt      time.Time
+	lastTransition time.Time
+	activeIntegral float64
 }
 
 // DefaultResourceProbe returns the platform probes used by transfer reflow.
@@ -324,7 +338,23 @@ func clampConcurrencyInvariants(cfg ConcurrencyConfig) ConcurrencyConfig {
 // snapshots report.
 func NewConcurrencyLimiter(cfg ConcurrencyConfig) *ConcurrencyLimiter {
 	cfg = clampConcurrencyInvariants(cfg)
-	return &ConcurrencyLimiter{cfg: cfg, current: cfg.Initial}
+	now := time.Now()
+	return &ConcurrencyLimiter{
+		cfg:            cfg,
+		current:        cfg.Initial,
+		clock:          time.Now,
+		startedAt:      now,
+		lastTransition: now,
+	}
+}
+
+// accrueActiveLocked folds the elapsed interval at the current active count
+// into the occupancy integral. Callers must hold l.mu.
+func (l *ConcurrencyLimiter) accrueActiveLocked(now time.Time) {
+	if elapsed := now.Sub(l.lastTransition); elapsed > 0 {
+		l.activeIntegral += float64(l.active) * elapsed.Seconds()
+	}
+	l.lastTransition = now
 }
 
 // Acquire waits until the current adaptive concurrency permits another active
@@ -333,6 +363,7 @@ func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
 	for {
 		l.mu.Lock()
 		if l.active < l.current {
+			l.accrueActiveLocked(l.clock())
 			l.active++
 			if l.active > l.maxActive {
 				l.maxActive = l.active
@@ -340,6 +371,7 @@ func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
 			l.mu.Unlock()
 			return func() {
 				l.mu.Lock()
+				l.accrueActiveLocked(l.clock())
 				l.active--
 				l.mu.Unlock()
 			}, nil
@@ -417,6 +449,11 @@ func (l *ConcurrencyLimiter) ObserveProviderResult(err error) {
 func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.accrueActiveLocked(l.clock())
+	timeAvg := 0.0
+	if elapsed := l.lastTransition.Sub(l.startedAt).Seconds(); elapsed > 0 {
+		timeAvg = math.Round(l.activeIntegral/elapsed*1000) / 1000
+	}
 	return ConcurrencyStats{
 		AdaptiveEnabled:                   l.cfg.AdaptiveEnabled,
 		ConcurrencyFloor:                  l.cfg.Floor,
@@ -429,6 +466,7 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 		ConcurrencyAdditiveIncreases:      l.additiveIncreases,
 		ConcurrencyConnectionErrorFreezes: l.connectionFreezes,
 		ConcurrencyMaxActive:              l.maxActive,
+		ConcurrencyTimeAvgActive:          timeAvg,
 		MemoryLimitBytes:                  l.cfg.MemoryLimitBytes,
 		MemoryLimitSource:                 l.cfg.MemoryLimitSource,
 		MemoryBudgetRequestedBytes:        l.cfg.MemoryBudgetRequestedBytes,
