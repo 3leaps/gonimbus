@@ -63,6 +63,39 @@ func TestConcurrencyLimiterTimeAvgActiveDeterministic(t *testing.T) {
 	require.Equal(t, 2, stats.ConcurrencyMaxActive)
 }
 
+func TestConcurrencyLimiterOccupancyWindowExcludesSetup(t *testing.T) {
+	limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+		RequestedCeiling: 4,
+		EffectiveCeiling: 4,
+		AdaptiveEnabled:  false,
+	})
+	base := time.Unix(2000, 0)
+	step := 0
+	steps := []time.Duration{
+		10 * time.Second, // ResetOccupancyWindow: 10s of setup elapsed before the window opens
+		10 * time.Second, // Acquire
+		12 * time.Second, // release
+		12 * time.Second, // Snapshot
+	}
+	limiter.clock = func() time.Time {
+		d := steps[step]
+		step++
+		return base.Add(d)
+	}
+	limiter.startedAt = base
+	limiter.lastTransition = base
+
+	limiter.ResetOccupancyWindow()
+	release, err := limiter.Acquire(context.Background())
+	require.NoError(t, err)
+	release()
+
+	// 2s at one active worker over a 2s window: setup before the reset must
+	// not dilute the average (unreset it would read 2/12 ≈ 0.167).
+	stats := limiter.Snapshot()
+	require.Equal(t, 1.0, stats.ConcurrencyTimeAvgActive)
+}
+
 func TestResolveConcurrencyWithBudgetArithmetic(t *testing.T) {
 	const gib = int64(1 << 30)
 	const mib = int64(1 << 20)

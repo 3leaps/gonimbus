@@ -65,6 +65,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		capability = liveIfAbsentCapability(ctx, r.cfg.Destination.Provider, layout, r.cfg.Collision.Mode, r.cfg.ReadOnly)
 	}
 	limiter := NewConcurrencyLimiter(r.cfg.Concurrency)
+	limiter.ResetOccupancyWindow()
 	runConcurrency := limiter.Snapshot()
 
 	// Event order is irrelevant: an EventSink consumer is event-based, and the

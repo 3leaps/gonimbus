@@ -419,6 +419,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		return exitError(foundry.ExitFileWriteError, "Failed to write IfAbsent fallback warning", err)
 	}
 
+	concurrencyLimiter.ResetOccupancyWindow()
 	_ = w.WriteAny(ctx, reflowpkg.RunRecordType, reflowpkg.RunRecord{
 		DestURI:          destURI,
 		CheckpointPath:   checkpointPath,

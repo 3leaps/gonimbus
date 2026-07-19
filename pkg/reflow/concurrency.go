@@ -91,11 +91,15 @@ type ConcurrencyStats struct {
 	ConcurrencyAdditiveIncreases      int64  `json:"concurrency_additive_increases"`
 	ConcurrencyConnectionErrorFreezes int64  `json:"concurrency_connection_error_freezes"`
 	ConcurrencyMaxActive              int    `json:"concurrency_max_active"`
-	// ConcurrencyTimeAvgActive is the time-averaged active concurrency over
-	// the run (worker-seconds / wall-clock seconds, rounded to 3 decimals). A
-	// low time-average under a high effective ceiling indicates a bound
-	// producer rather than a limiter-capped run.
-	ConcurrencyTimeAvgActive float64 `json:"concurrency_time_avg_active,omitempty"`
+	// ConcurrencyTimeAvgActive is limiter-active provider-operation-seconds
+	// divided by the common execution window (rounded to 3 decimals) — the
+	// window starts when the run record is emitted on either path, so setup
+	// and preflight are excluded identically. The run record's startup sample
+	// is always 0; the summary value is the completed-run diagnostic. Low
+	// time-average under a high effective ceiling is a signal to read
+	// together with throttle/freeze counters and memory-pressure evidence,
+	// not standalone proof of a starved producer.
+	ConcurrencyTimeAvgActive float64 `json:"concurrency_time_avg_active"`
 	// Memory fields are omitted when the ceiling was not memory-resolved
 	// (configs constructed directly with an explicit EffectiveCeiling and no
 	// probe); probe-resolved runs always populate limit, budget, and sources.
@@ -465,6 +469,21 @@ func (l *ConcurrencyLimiter) ObserveProviderResult(err error) {
 	case ConcurrencyConnectionError(err):
 		l.ObserveConnectionError()
 	}
+}
+
+// ResetOccupancyWindow restarts the time-averaged occupancy interval. Both
+// execution paths call this immediately before emitting the run record, so
+// the occupancy denominator is the common execution window — setup, preflight,
+// and provider construction are excluded identically on both paths. The run
+// record's startup sample therefore reports zero; the summary value is the
+// completed-run diagnostic.
+func (l *ConcurrencyLimiter) ResetOccupancyWindow() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+	l.startedAt = now
+	l.lastTransition = now
+	l.activeIntegral = 0
 }
 
 // RetryBufferCap returns the resolved per-copy in-memory retry-buffer bound
