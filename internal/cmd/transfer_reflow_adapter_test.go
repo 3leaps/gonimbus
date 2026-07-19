@@ -349,6 +349,123 @@ func TestTransferReflowCommand_LiveStdinForcedCLIPoolMaxInFlight(t *testing.T) {
 	require.Contains(t, arm.stderr, "reason="+transferReflowLiveCopyCLIPoolReason)
 }
 
+// failKeysProvider wraps a source provider and fails GetObject for the listed
+// keys until healed, simulating an interrupted first run.
+type failKeysProvider struct {
+	*reflowMemoryProvider
+	mu       sync.Mutex
+	failKeys map[string]bool
+}
+
+func (p *failKeysProvider) heal() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failKeys = nil
+}
+
+func (p *failKeysProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	p.mu.Lock()
+	failing := p.failKeys[key]
+	p.mu.Unlock()
+	if failing {
+		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderS3, Key: key, Err: provider.ErrAccessDenied}
+	}
+	return p.reflowMemoryProvider.GetObject(ctx, key)
+}
+
+// TestTransferReflowCommand_EngineResumeAfterInterruptedRunRealStore is the
+// constraint-10 real-store evidence for the engine path: an interrupted run
+// leaves a mixed real sqlite checkpoint; a --resume rerun converges — done
+// items skip with resume reasons, failed items re-drive, and no destination
+// key lands twice.
+func TestTransferReflowCommand_EngineResumeAfterInterruptedRunRealStore(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	const objectCount = 8
+	srcBase := newReflowMemoryProvider()
+	src := &failKeysProvider{reflowMemoryProvider: srcBase, failKeys: map[string]bool{}}
+	dst := newReflowMemoryProvider()
+	lines := make([]string, 0, objectCount)
+	for i := 0; i < objectCount; i++ {
+		key := fmt.Sprintf("source/obj-%02d.xml", i)
+		body := fmt.Sprintf("payload-%02d", i)
+		srcBase.putFixture(key, body, fmt.Sprintf("etag-%02d", i), time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		if i%2 == 1 {
+			src.failKeys[key] = true
+		}
+		lines = append(lines, reflowInputLine(key, fmt.Sprintf("etag-%02d", i), int64(len(body)), "", ""))
+	}
+	input := strings.Join(lines, "\n") + "\n"
+
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+		},
+		FDSoftLimit: func() (int64, error) { return 100000, nil },
+	}
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			switch cfg.Bucket {
+			case "source-bucket":
+				return src, nil
+			case "dest-bucket":
+				return dst, nil
+			default:
+				return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+			}
+		},
+	})
+
+	checkpointPath := filepath.Join(t.TempDir(), "state.db")
+	runOnce := func(resume bool) (string, error) {
+		var stdout, stderr bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetIn(strings.NewReader(input))
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "4", "--checkpoint", checkpointPath}
+		if resume {
+			args = append(args, "--resume")
+		}
+		cmd.SetArgs(args)
+		execErr := cmd.Execute()
+		return stdout.String(), execErr
+	}
+
+	// Interrupted first run: half the objects fail typed, half complete.
+	stdout1, err := runOnce(false)
+	require.Error(t, err, "interrupted run must exit non-zero")
+	records1 := requireReflowRecords(t, stdout1)
+	requireReflowStatusReasonCount(t, records1, "complete", "", objectCount/2)
+	run1 := requireRecord(t, stdout1, reflowpkg.RunRecordType, "")
+	require.Contains(t, string(run1.Data), `"execution_path":"engine"`)
+
+	// Healed resume converges: done items skip, failed items re-drive.
+	src.heal()
+	stdout2, err := runOnce(true)
+	require.NoError(t, err, "resume run must converge")
+	records2 := requireReflowRecords(t, stdout2)
+	requireReflowStatusReasonCount(t, records2, "complete", "", objectCount/2)
+	requireReflowStatusReasonCount(t, records2, "skipped", "resume.complete", objectCount/2)
+
+	// Every object landed exactly once across both runs (capability-preflight
+	// probe keys excluded).
+	objectPuts := map[string]int{}
+	for _, key := range dst.conditionalPutCallsSnapshot() {
+		if strings.Contains(key, ".gonimbus-preflight/") {
+			continue
+		}
+		objectPuts[key]++
+	}
+	require.Len(t, objectPuts, objectCount)
+	for i := 0; i < objectCount; i++ {
+		key := fmt.Sprintf("data/source/obj-%02d.xml", i)
+		require.True(t, dst.hasObject(key), "missing dest object for %s", key)
+		require.Equal(t, 1, objectPuts[key],
+			"each object lands via exactly one conditional PUT across interrupt + resume")
+	}
+}
+
 // upsertFailingReflowState fails terminal item upserts while passing all other
 // store operations through, for the dual-path checkpoint-failure disposition.
 type upsertFailingReflowState struct {
