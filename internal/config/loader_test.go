@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fulmenhq/gofulmen/schema"
 )
 
 func findRepoRootForTest(t *testing.T) string {
@@ -399,5 +401,40 @@ func TestEnvSpecsPrefixHandling(t *testing.T) {
 	// Verify path structure
 	for _, spec := range specs {
 		assert.NotEmpty(t, spec.Path, "env var %s should have a path", spec.Name)
+	}
+}
+
+// TestConfigSchemaMemoryBudgetContract pins the transfer memory-budget config
+// surface against the strict canonical schema (additionalProperties:false):
+// the advertised key validates with SI/IEC/raw-byte values, wrong types and
+// malformed shapes are rejected, and unknown keys remain rejected.
+func TestConfigSchemaMemoryBudgetContract(t *testing.T) {
+	root := findRepoRootForTest(t)
+	catalog := schema.NewCatalog(filepath.Join(root, "schemas"))
+	validator, err := catalog.ValidatorByID("gonimbus/v1.0.0/config")
+	require.NoError(t, err)
+
+	valid := []string{
+		`{"memory_budget":"128MiB"}`,
+		`{"memory_budget":"8GiB"}`,
+		`{"memory_budget":"500MB"}`,
+		`{"memory_budget":"134217728"}`,
+	}
+	for _, doc := range valid {
+		diags, err := validator.ValidateJSON([]byte(doc))
+		require.NoError(t, err, doc)
+		require.Empty(t, diags, "expected %s to validate", doc)
+	}
+
+	invalid := []string{
+		`{"memory_budget":134217728}`,
+		`{"memory_budget":"lots"}`,
+		`{"memory_budget":"MiB128"}`,
+		`{"memory_budget_bytes":"128MiB"}`,
+	}
+	for _, doc := range invalid {
+		diags, err := validator.ValidateJSON([]byte(doc))
+		require.NoError(t, err, doc)
+		require.NotEmpty(t, diags, "expected %s to be rejected", doc)
 	}
 }

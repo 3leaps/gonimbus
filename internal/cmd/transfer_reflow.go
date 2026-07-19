@@ -346,7 +346,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if strings.TrimSpace(reflowCheckpoint) != "" {
 		checkpointPath = reflowCheckpoint
 	}
-	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg)
+	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg, memoryBudgetBytes)
 
 	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {

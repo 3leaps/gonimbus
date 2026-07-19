@@ -97,6 +97,11 @@
       "type": "string",
       "description": "Compatibility alias for data_root."
     },
+    "memory_budget": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?\\s*([KMGT]i?B?|[kmgt]i?b?|B|b)?$",
+      "description": "Transfer memory budget sizing the reflow concurrency ceiling, as a size string with SI or IEC units (e.g. 512MiB, 8GiB) or raw bytes. Minimum 64MiB, maximum 4TiB; values above the detected memory limit are clamped to it. Empty derives 25% of the detected limit."
+    },
     "on_collision": {
       "type": "string",
       "description": "Default collision behavior for transfer reflow. log is a deprecated alias for skip-if-duplicate.",

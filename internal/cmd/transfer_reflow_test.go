@@ -3473,6 +3473,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldRewriteTo := reflowRewriteTo
 	oldParallel := reflowParallel
 	oldNoAdaptive := reflowNoAdaptive
+	oldMemoryBudget := reflowMemoryBudget
 	oldDryRun := reflowDryRun
 	oldResume := reflowResume
 	oldResumeRun := reflowResumeRun
@@ -3518,6 +3519,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowRewriteTo = ""
 	reflowParallel = 16
 	reflowNoAdaptive = false
+	reflowMemoryBudget = ""
 	reflowDryRun = false
 	reflowResume = false
 	reflowResumeRun = ""
@@ -3559,6 +3561,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowRewriteTo = oldRewriteTo
 		reflowParallel = oldParallel
 		reflowNoAdaptive = oldNoAdaptive
+		reflowMemoryBudget = oldMemoryBudget
 		reflowDryRun = oldDryRun
 		reflowResume = oldResume
 		reflowResumeRun = oldResumeRun
@@ -4778,4 +4781,128 @@ func (p *reflowNoConditionalProvider) PutObject(ctx context.Context, key string,
 
 func (p *reflowNoConditionalProvider) Close() error {
 	return nil
+}
+
+// TestTransferReflowCheckpointMemoryBudgetFingerprint pins the identity
+// contract for the operator memory budget: an unset override omits the field
+// so pre-A2 checkpoints re-fingerprint identically, while distinct nonzero
+// budgets are distinct checkpoint identities.
+func TestTransferReflowCheckpointMemoryBudgetFingerprint(t *testing.T) {
+	base := transferReflowCheckpointConfig{
+		SourceURI:               "s3://source-bucket/a.txt",
+		Dest:                    "file:///tmp/out/",
+		RewriteFrom:             "{key}",
+		RewriteTo:               "{key}",
+		Parallel:                16,
+		OnCollision:             reflowCollisionSkip,
+		Provenance:              provenanceModeNone,
+		ProvenanceSuffix:        provenanceSuffix,
+		ProvenanceOnWriteError:  provenanceErrorWarn,
+		MetadataPolicy:          metadataPolicyClear,
+		MetadataOnMissingSource: metadataMissingSkip,
+		MetadataSidecarSuffix:   providerfile.DefaultMetadataSidecarSuffix,
+		Symlinks:                reflowSymlinkSkip,
+		Hidden:                  reflowHiddenSkip,
+		OnSourceFailure:         reflowSourceFailSkip,
+	}
+
+	raw, err := json.Marshal(base)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "memory_budget_bytes",
+		"no-override config must omit the field so earlier-release checkpoints re-fingerprint identically")
+
+	var earlier map[string]any
+	require.NoError(t, json.Unmarshal(raw, &earlier))
+	fpNew, err := checkpointFingerprint(base)
+	require.NoError(t, err)
+	fpEarlier, err := checkpointFingerprint(earlier)
+	require.NoError(t, err)
+	require.Equal(t, fpEarlier, fpNew)
+
+	budget128 := base
+	budget128.MemoryBudgetBytes = 128 << 20
+	fp128, err := checkpointFingerprint(budget128)
+	require.NoError(t, err)
+	require.NotEqual(t, fpNew, fp128, "an operator budget is identity-bearing")
+	raw128, err := json.Marshal(budget128)
+	require.NoError(t, err)
+	require.Contains(t, string(raw128), `"memory_budget_bytes":134217728`)
+
+	budget256 := base
+	budget256.MemoryBudgetBytes = 256 << 20
+	fp256, err := checkpointFingerprint(budget256)
+	require.NoError(t, err)
+	require.NotEqual(t, fp128, fp256, "different budgets are different identities")
+}
+
+// TestTransferReflowResumeRunRestoresMemoryBudget is the end-to-end proof that
+// operator resource intent survives durable resume: a budgeted run fails
+// resumable, the checkpoint payload carries the canonical bytes, and a fresh
+// process resuming with only --resume-run re-resolves and reports the same
+// requested budget and operator source.
+func TestTransferReflowResumeRunRestoresMemoryBudget(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("a.txt", "payload", "etag-a", time.Now().UTC())
+	failing := true
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) {
+			if failing {
+				return refreshFailingGetProvider{Provider: src}, nil
+			}
+			return src, nil
+		},
+	})
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+		},
+		FDSoftLimit: func() (int64, error) { return 100000, nil },
+	}
+
+	destDir := t.TempDir()
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--dest", fileURI(destDir),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--memory-budget", "128MiB",
+		"s3://source-bucket/a.txt",
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow failed resumable")
+
+	record := requireRecord(t, stdout.String(), opcheckpoint.ErrorRecordType, "")
+	var opErr opcheckpoint.ErrorRecordData
+	require.NoError(t, json.Unmarshal(record.Data, &opErr))
+	require.NotEmpty(t, opErr.RunID)
+
+	opStore, err := openDefaultOperationCheckpointStore(context.Background())
+	require.NoError(t, err)
+	env, err := opStore.ReadCheckpoint(context.Background(), operationTransferReflow, opErr.RunID)
+	require.NoError(t, err)
+	var payload transferReflowCheckpointPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &payload))
+	require.Equal(t, int64(128)<<20, payload.Config.MemoryBudgetBytes,
+		"checkpoint payload must carry the canonical resolved budget")
+
+	failing = false
+	var resumeOut bytes.Buffer
+	resumeCmd := newTransferReflowTestCommand()
+	resumeCmd.SetOut(&resumeOut)
+	resumeCmd.SetErr(io.Discard)
+	resumeCmd.SetArgs([]string{"--resume-run", opErr.RunID})
+	require.NoError(t, resumeCmd.Execute())
+
+	run := requireRecord(t, resumeOut.String(), reflowpkg.RunRecordType, "")
+	require.Contains(t, string(run.Data), `"memory_budget_requested_bytes":134217728`)
+	require.Contains(t, string(run.Data), `"memory_budget_effective_bytes":134217728`)
+	require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+	require.FileExists(t, filepath.Join(destDir, "a.txt"))
 }
