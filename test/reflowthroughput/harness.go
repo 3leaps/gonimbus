@@ -65,8 +65,9 @@ type Options struct {
 }
 
 // applyRecipeOverrides scales a profile's recipe by the operator overrides.
-// A zero override keeps the profile default; the result is validated by the
-// caller so out-of-bounds values fail closed.
+// A zero override keeps the profile default. Negative values are neither applied
+// here nor treated as "unset" — resolveRecipe rejects them first so they cannot
+// silently fall through to the default.
 func applyRecipeOverrides(r Recipe, opts Options) Recipe {
 	if opts.RecipeObjectCount > 0 {
 		r.ObjectCount = opts.RecipeObjectCount
@@ -78,6 +79,30 @@ func applyRecipeOverrides(r Recipe, opts Options) Recipe {
 		r.Partitions = opts.RecipePartitions
 	}
 	return r
+}
+
+// resolveRecipe is the resolved override path: it rejects negative overrides
+// (fail closed — a set-negative value is an error, never a silent revert to the
+// profile default), applies positive overrides, and validates the result so
+// out-of-bounds and oversized-aggregate corpora are rejected before generation.
+func resolveRecipe(base Recipe, opts Options) (Recipe, error) {
+	for _, o := range []struct {
+		name string
+		val  int
+	}{
+		{"OBJECT_COUNT", opts.RecipeObjectCount},
+		{"SIZE_BYTES", opts.RecipeSizeBytes},
+		{"PARTITIONS", opts.RecipePartitions},
+	} {
+		if o.val < 0 {
+			return Recipe{}, fmt.Errorf("%s override %d must be >= 0 (0 = profile default)", o.name, o.val)
+		}
+	}
+	r := applyRecipeOverrides(base, opts)
+	if err := r.Validate(); err != nil {
+		return Recipe{}, err
+	}
+	return r, nil
 }
 
 // pointRun declares one measured point. Named fields rather than positional
@@ -151,8 +176,8 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	spec.Recipe = applyRecipeOverrides(spec.Recipe, opts)
-	if err := spec.Recipe.Validate(); err != nil {
+	spec.Recipe, err = resolveRecipe(spec.Recipe, opts)
+	if err != nil {
 		return Report{}, fmt.Errorf("recipe override: %w", err)
 	}
 	if err := requireMemoryArmInputs(spec, opts); err != nil {

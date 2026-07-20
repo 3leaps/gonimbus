@@ -66,10 +66,14 @@ const (
 
 // Recipe override bounds. Overrides fail closed on absurd values rather than
 // silently materializing a corpus that would exhaust local disk or memory.
+// The per-dimension maxima are not independently sufficient — their product is
+// astronomically large — so an aggregate byte bound caps the materialized
+// corpus regardless of how the dimensions combine.
 const (
-	MaxRecipeObjectCount int = 5_000_000
-	MaxRecipeSizeBytes   int = 64 << 20 // 64 MiB
-	MaxRecipePartitions  int = 4096
+	MaxRecipeObjectCount int   = 5_000_000
+	MaxRecipeSizeBytes   int   = 64 << 20 // 64 MiB
+	MaxRecipePartitions  int   = 4096
+	MaxTotalCorpusBytes  int64 = 64 << 30 // 64 GiB: aggregate cap on materialized source corpus
 )
 
 // ScaleRecipe returns the checkpoint-scale corpus (see the scale defaults above).
@@ -103,6 +107,12 @@ func (r Recipe) Validate() error {
 	}
 	if r.Partitions > MaxRecipePartitions {
 		return fmt.Errorf("partitions %d exceeds maximum %d", r.Partitions, MaxRecipePartitions)
+	}
+	// Aggregate bound: the per-dimension maxima above already hold, so the
+	// int64 product cannot overflow. This rejects combinations where each
+	// dimension is individually legal but the materialized corpus is not.
+	if total := int64(r.ObjectCount) * int64(r.SizeBytes); total > MaxTotalCorpusBytes {
+		return fmt.Errorf("total corpus %d objects × %d bytes = %d bytes exceeds maximum %d", r.ObjectCount, r.SizeBytes, total, MaxTotalCorpusBytes)
 	}
 	if r.FixedDate == "" {
 		return fmt.Errorf("fixed_date is required")

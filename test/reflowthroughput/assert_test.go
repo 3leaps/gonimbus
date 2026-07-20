@@ -123,6 +123,44 @@ func TestApplyRecipeOverrides(t *testing.T) {
 	}
 }
 
+// TestResolveRecipe covers the resolved override path (DR-A3-F1): negative
+// overrides fail closed rather than silently reverting to the profile default,
+// zero keeps the default, and positive values apply and validate.
+func TestResolveRecipe(t *testing.T) {
+	t.Parallel()
+	base := ScaleRecipe()
+
+	// Every negative override, through the resolved path, is rejected — never
+	// treated as unset. A reviewer negative control at exact head reached the
+	// binary-path check instead of a rejection.
+	for name, opts := range map[string]Options{
+		"negative object_count": {RecipeObjectCount: -1},
+		"negative size_bytes":   {RecipeSizeBytes: -1},
+		"negative partitions":   {RecipePartitions: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolveRecipe(base, opts); err == nil {
+				t.Fatalf("%s: expected rejection, got nil", name)
+			}
+		})
+	}
+
+	// Zero keeps the default.
+	got, err := resolveRecipe(base, Options{})
+	if err != nil || got != base {
+		t.Fatalf("zero overrides: recipe=%+v err=%v", got, err)
+	}
+
+	// Positive overrides apply and validate.
+	got, err = resolveRecipe(base, Options{RecipeObjectCount: 1000, RecipeSizeBytes: 128, RecipePartitions: 3})
+	if err != nil {
+		t.Fatalf("positive overrides: %v", err)
+	}
+	if got.ObjectCount != 1000 || got.SizeBytes != 128 || got.Partitions != 3 {
+		t.Fatalf("positive overrides not applied: %+v", got)
+	}
+}
+
 func TestRecipeValidateBounds(t *testing.T) {
 	t.Parallel()
 	// Absurd overrides fail closed rather than materializing an oversized corpus.
@@ -134,6 +172,65 @@ func TestRecipeValidateBounds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := mutate(ScaleRecipe()).Validate(); err == nil {
 				t.Fatalf("%s: expected validation error", name)
+			}
+		})
+	}
+
+	// DR-A3-F3: each dimension individually legal but the aggregate corpus is
+	// not — must fail closed before materialization.
+	aggregate := ScaleRecipe()
+	aggregate.ObjectCount = MaxRecipeObjectCount // legal
+	aggregate.SizeBytes = MaxRecipeSizeBytes     // legal
+	if err := aggregate.Validate(); err == nil {
+		t.Fatal("aggregate corpus over the byte cap must be rejected")
+	}
+
+	// Boundary-accept: a corpus exactly at the aggregate cap validates.
+	boundary := ScaleRecipe()
+	boundary.SizeBytes = 1 << 20                                // 1 MiB objects
+	boundary.ObjectCount = int(MaxTotalCorpusBytes / (1 << 20)) // exactly the cap
+	boundary.Partitions = 1
+	if int64(boundary.ObjectCount)*int64(boundary.SizeBytes) != MaxTotalCorpusBytes {
+		t.Fatalf("boundary setup wrong: %d", int64(boundary.ObjectCount)*int64(boundary.SizeBytes))
+	}
+	if err := boundary.Validate(); err != nil {
+		t.Fatalf("corpus exactly at the aggregate cap should validate: %v", err)
+	}
+}
+
+// TestManifestRecordsResolvedCorpus covers DR-A3-F2: the resolved size_bytes and
+// partitions must reach the sanitized report so a reader can name the corpus
+// shape that produced the evidence — partitions in particular cannot be
+// reconstructed from the entry digest. Mutating each knob moves the recorded value.
+func TestManifestRecordsResolvedCorpus(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		size       int
+		partitions int
+		count      int
+	}{
+		{"partitions=3", 200, 3, 6},
+		{"partitions=1 size=512", 512, 1, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := DefaultSmokeRecipe()
+			r.ObjectCount = tc.count
+			r.SizeBytes = tc.size
+			r.Partitions = tc.partitions
+			corpus, err := Generate(GenerateOptions{Recipe: r, RunRoot: t.TempDir()})
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			c := corpus.Manifest.Compact()
+			if c.Partitions != tc.partitions {
+				t.Fatalf("report partitions = %d, want %d", c.Partitions, tc.partitions)
+			}
+			if c.SizeBytes != tc.size {
+				t.Fatalf("report size_bytes = %d, want %d", c.SizeBytes, tc.size)
+			}
+			if c.ObjectCount != tc.count {
+				t.Fatalf("report object_count = %d, want %d", c.ObjectCount, tc.count)
 			}
 		})
 	}
