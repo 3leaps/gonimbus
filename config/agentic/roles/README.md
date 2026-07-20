@@ -2,7 +2,15 @@
 
 Baseline role prompts for AI agent sessions.
 
-Sourced from [3leaps/crucible](https://github.com/3leaps/crucible/tree/main/config/agentic/roles) with gonimbus-specific adaptations.
+Forked from [fulmenhq/crucible](https://github.com/fulmenhq/crucible/tree/main/config/agentic/roles)
+with gonimbus-specific adaptations. These files are an intentional fork, not an
+auto-synced mirror: they carry local content and their own version line, and
+upstream changes are adopted deliberately rather than pulled.
+
+The `version` field is the only provenance handle the role schema provides
+(`additionalProperties: false`, and the version pattern admits no build
+metadata), so a gonimbus version is not comparable to an upstream version of
+the same slug.
 
 **Schema**: [`role-prompt.schema.json`](https://schemas.3leaps.dev/agentic/v0/role-prompt.schema.json)
 
@@ -55,5 +63,6 @@ The `dataeng` role in gonimbus is extended with pipeline-operations context (man
 
 ## References
 
-- [3leaps baseline roles](https://github.com/3leaps/crucible/tree/main/config/agentic/roles) - Upstream baseline
+- [fulmenhq/crucible roles](https://github.com/fulmenhq/crucible/tree/main/config/agentic/roles) - Fork origin for the baseline roles
+- [3leaps/crucible roles](https://github.com/3leaps/crucible/tree/main/config/agentic/roles) - 3leaps collection roles (org-spanning roles live here)
 - [crucible agent-identity standard](https://crucible.3leaps.dev/repository/agent-identity) - Operating modes and attribution

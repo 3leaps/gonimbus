@@ -214,5 +214,5 @@ Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
 
 ### Upstream
 
-- [crucible/config/agentic/roles/](https://github.com/3leaps/crucible/tree/main/config/agentic/roles) - Baseline role definitions
+- [fulmenhq/crucible roles](https://github.com/fulmenhq/crucible/tree/main/config/agentic/roles) - Fork origin for the baseline role definitions (intentional fork; not auto-synced)
 - [crucible agent-identity standard](https://crucible.3leaps.dev/repository/agent-identity) - Operating modes and attribution

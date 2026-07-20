@@ -2,9 +2,9 @@
 slug: secrev
 name: Security Review
 description: Security analysis, vulnerability review, and infosec assessment
-version: 1.0.0
+version: 1.0.1
 author: entarch
-status: approved
+status: review
 category: review
 domains:
   - development
@@ -105,3 +105,4 @@ checklists:
     - "Secrets not hardcoded"
     - "Sensitive local data: repo content complies with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md"
     - "No known vulnerable dependencies"
+    - "Refusal integrity: does each fail-closed refusal actually fire? A refusal proven only by inspection is configured, not enforced (missing test: a probe that must be refused)"
