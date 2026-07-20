@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
@@ -114,6 +115,39 @@ func metadataDerivedRuleDestKeys(rules []metadataDerivedRule) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+const (
+	reflowMemoryBudgetFloorBytes = int64(64) << 20 // 64 MiB — below this a budget cannot hold even a few retry buffers
+	reflowMemoryBudgetMaxBytes   = int64(4) << 40  // 4 TiB — sanity bound on operator values, documented in help
+)
+
+// resolveReflowMemoryBudgetBytes resolves the operator transfer memory budget
+// (flag --memory-budget, config key memory_budget). Returns 0 when unset (the
+// resolver derives the budget from the detected limit). Invalid values are
+// refused here, before any provider construction or destination mutation.
+func resolveReflowMemoryBudgetBytes(cmd *cobra.Command) (int64, error) {
+	raw := ""
+	if cmd != nil && cmd.Flags().Changed("memory-budget") {
+		raw = reflowMemoryBudget
+	} else if viper.IsSet("memory_budget") {
+		raw = viper.GetString("memory_budget")
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	bytes, err := match.ParseSize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory budget %q: %w", raw, err)
+	}
+	if bytes < reflowMemoryBudgetFloorBytes {
+		return 0, fmt.Errorf("memory budget %q is below the 64MiB floor", raw)
+	}
+	if bytes > reflowMemoryBudgetMaxBytes {
+		return 0, fmt.Errorf("memory budget %q exceeds the 4TiB sanity bound", raw)
+	}
+	return bytes, nil
 }
 
 func resolveCollisionConfig(cmd *cobra.Command) (collisionConfig, error) {

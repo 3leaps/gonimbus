@@ -247,14 +247,21 @@ gonimbus transfer reflow --stdin \
 
 - **Clamp is visible, never silent.** If the requested ceiling is reduced by the
   resource cap, the run reports it via `concurrency_ceiling_reason` (e.g.
-  `resource_capped:memory:cgroup` or `resource_capped:fd`) plus a stderr notice —
+  `resource_capped:memory:cgroup_v2` or `resource_capped:fd`) plus a stderr notice —
   so a lower-than-requested concurrency is explained, not guessed at.
 - **`--no-adaptive`** runs fixed at the **effective** ceiling (still resource-capped —
   a fixed `--parallel 9385` is clamped too), for deterministic runs.
 - **The run summary carries the concurrency audit** — `concurrency_ceiling_requested`,
   `concurrency_ceiling_effective`, `concurrency_ceiling_reason`, `concurrency_final`,
-  `concurrency_max_active`, and throttle/increase/freeze counters — so you can read the
-  settled concurrency and right-size the next run.
+  `concurrency_max_active`, `concurrency_time_avg_active` (average, not peak), and
+  throttle/increase/freeze counters — so you can read the settled concurrency and
+  right-size the next run.
+- **`--memory-budget` states the transfer's governed memory** (e.g. `8GiB`; config
+  key `memory_budget`) instead of deriving it from the detected limit. It governs
+  retry buffering and concurrency sizing, not total process memory; invalid values
+  are refused before any destination mutation, and values above the detected limit
+  are clamped to it. The summary records the limit, budget, sources, resolved retry
+  cap, and admission-wait pressure.
 
 See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
 provider-generalized model (resource cap, AIMD control, transport tuning).
@@ -309,6 +316,12 @@ any object twice.
   retain their historical warn-and-continue behavior on checkpoint write
   failure of a successful terminal; they adopt the strict discipline when
   those modes migrate to the engine.
+- On Windows the file-descriptor probe reports a soft limit that leaves no
+  usable headroom, so the FD cap binds at 1 and serializes copies regardless of
+  `--parallel` or the memory budget. The clamp is still reported truthfully
+  (`resource_capped:fd`), so the behavior is visible rather than silent, but a
+  Windows-representative descriptor probe is not delivered yet; it is tracked
+  for the next transfer-concurrency slice.
 - `--src-gcp-project` has no reachable `transfer reflow` shape today
   (record streams accept `s3://` sources and positional `gs://` sources are
   refused); it becomes meaningful when GCS sources land.

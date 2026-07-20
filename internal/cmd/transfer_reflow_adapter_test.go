@@ -323,13 +323,18 @@ func assertBarrierArmBehavior(t *testing.T, arm reflowDualPathArm, objectCount, 
 	sum := requireRecord(t, arm.stdout, reflowpkg.SummaryRecordType, "")
 	require.Contains(t, string(sum.Data), fmt.Sprintf(`"execution_path":%q`, expectedPath))
 	var sumFields struct {
-		MaxActive int `json:"concurrency_max_active"`
-		Effective int `json:"concurrency_ceiling_effective"`
-		Requested int `json:"concurrency_ceiling_requested"`
+		MaxActive     int     `json:"concurrency_max_active"`
+		Effective     int     `json:"concurrency_ceiling_effective"`
+		Requested     int     `json:"concurrency_ceiling_requested"`
+		TimeAvgActive float64 `json:"concurrency_time_avg_active"`
 	}
 	require.NoError(t, json.Unmarshal(sum.Data, &sumFields))
 	require.LessOrEqual(t, sumFields.MaxActive, sumFields.Effective)
 	require.LessOrEqual(t, sumFields.Effective, sumFields.Requested)
+	require.Greater(t, sumFields.TimeAvgActive, 0.0,
+		"a run that moved objects must report positive time-averaged occupancy")
+	require.LessOrEqual(t, sumFields.TimeAvgActive, float64(sumFields.Effective),
+		"time-averaged occupancy can never exceed the effective ceiling")
 
 	// Sterility: no URI/key material in stderr diagnostics.
 	require.NotContains(t, arm.stderr, "s3://source-bucket")
@@ -1163,6 +1168,7 @@ func dropVolatileConcurrencyObservations(events []normalizedEvent) []normalizedE
 	volatile := []string{
 		"concurrency_final",
 		"concurrency_max_active",
+		"concurrency_time_avg_active",
 		"concurrency_additive_increases",
 		"concurrency_throttle_backoffs",
 		"concurrency_connection_error_freezes",

@@ -33,13 +33,16 @@ type PointResult struct {
 	Parallel         int
 	ProbeConcurrency int
 	GOMEMLIMIT       string
-	CheckpointClass  string // disk | tmpfs — never the path
-	ProviderClass    string // file | moto | s3-compatible | gcs
-	Stages           map[string]StageResult
-	Tap              TapStats
-	Stdout           []byte // small in-memory only; prefer StdoutPath for scale
-	StdoutPath       string // external run artifact for reflow JSONL
-	Elapsed          time.Duration
+	// MemoryBudget is the operator --memory-budget value passed to the child
+	// (empty when the arm let the product derive the budget).
+	MemoryBudget    string
+	CheckpointClass string // disk | tmpfs — never the path
+	ProviderClass   string // file | moto | s3-compatible | gcs
+	Stages          map[string]StageResult
+	Tap             TapStats
+	Stdout          []byte // small in-memory only; prefer StdoutPath for scale
+	StdoutPath      string // external run artifact for reflow JSONL
+	Elapsed         time.Duration
 	// CompletedObjects is derived from summary/object counts when available.
 	CompletedObjects int64
 	WallRate         float64 // objects / elapsed seconds (0 if incomplete)
@@ -92,10 +95,13 @@ type StageRunOpts struct {
 	Parallel       int
 	CheckpointPath string
 	GOMEMLIMIT     string
-	NoAdaptive     bool
-	ProviderClass  string
-	ExtraArgs      []string
-	ChildExtraEnv  []string
+	// MemoryBudget is the operator --memory-budget size string. Empty omits the
+	// flag entirely, so the product derives the budget from the detected limit.
+	MemoryBudget  string
+	NoAdaptive    bool
+	ProviderClass string
+	ExtraArgs     []string
+	ChildExtraEnv []string
 	// StdoutPath streams reflow JSONL to a file (bounded memory). Required for scale.
 	StdoutPath string
 	// RewriteFrom/To map probe output without dest_rel_key onto destinations.
@@ -111,6 +117,7 @@ func RunReflowOnly(ctx context.Context, opts StageRunOpts) (PointResult, error) 
 	pr := PointResult{
 		Parallel:        opts.Parallel,
 		GOMEMLIMIT:      opts.GOMEMLIMIT,
+		MemoryBudget:    opts.MemoryBudget,
 		ProviderClass:   opts.ProviderClass,
 		Stages:          map[string]StageResult{},
 		CheckpointClass: "disk",
@@ -127,6 +134,9 @@ func RunReflowOnly(ctx context.Context, opts StageRunOpts) (PointResult, error) 
 	}
 	if opts.NoAdaptive {
 		args = append(args, "--no-adaptive")
+	}
+	if strings.TrimSpace(opts.MemoryBudget) != "" {
+		args = append(args, "--memory-budget", strings.TrimSpace(opts.MemoryBudget))
 	}
 	if opts.RewriteFrom != "" {
 		args = append(args, "--rewrite-from", opts.RewriteFrom, "--rewrite-to", opts.RewriteTo)
@@ -203,14 +213,43 @@ func openStdoutSink(path string) (io.Writer, string, error) {
 	return f, path, nil
 }
 
+// FullPipeOpts configures a supervised probe | tap | reflow point. Named
+// fields rather than positional arguments: the several adjacent string
+// parameters (checkpoint path, GOMEMLIMIT, memory budget, stdout path) are
+// otherwise trivially transposable at the call site.
+type FullPipeOpts struct {
+	Binary         string
+	SourcePrefix   string
+	ProbeConfig    string
+	DestURI        string
+	ProbeConc      int
+	ReflowParallel int
+	CheckpointPath string
+	GOMEMLIMIT     string
+	// MemoryBudget is the operator --memory-budget size string; empty omits
+	// the flag so the product derives the budget from the detected limit.
+	MemoryBudget string
+	StdoutPath   string
+}
+
 // RunFullPipe supervises probe | tap | reflow without a shell.
 // Shared cancel on any stage/tap failure; rewrite templates supply dest mapping
 // for probe-emitted reflow.input (no dest_rel_key).
-func RunFullPipe(ctx context.Context, binary string, sourcePrefix string, probeConfig string, destURI string, probeConc, reflowParallel int, checkpointPath string, gomemlimit string, stdoutPath string) (PointResult, error) {
+func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
+	binary := opts.Binary
+	sourcePrefix := opts.SourcePrefix
+	probeConfig := opts.ProbeConfig
+	destURI := opts.DestURI
+	probeConc := opts.ProbeConc
+	reflowParallel := opts.ReflowParallel
+	checkpointPath := opts.CheckpointPath
+	gomemlimit := opts.GOMEMLIMIT
+	stdoutPath := opts.StdoutPath
 	pr := PointResult{
 		Parallel:         reflowParallel,
 		ProbeConcurrency: probeConc,
 		GOMEMLIMIT:       gomemlimit,
+		MemoryBudget:     opts.MemoryBudget,
 		ProviderClass:    ProviderFile,
 		Stages:           map[string]StageResult{},
 		CheckpointClass:  "disk",
@@ -245,6 +284,9 @@ func RunFullPipe(ctx context.Context, binary string, sourcePrefix string, probeC
 	}
 	if checkpointPath != "" {
 		reflowArgs = append(reflowArgs, "--checkpoint", checkpointPath)
+	}
+	if strings.TrimSpace(opts.MemoryBudget) != "" {
+		reflowArgs = append(reflowArgs, "--memory-budget", strings.TrimSpace(opts.MemoryBudget))
 	}
 	reflowCmd := exec.CommandContext(ctx, binary, reflowArgs...)
 	reflowCmd.Env = ChildEnv(nil, gomemlimit)

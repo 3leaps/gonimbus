@@ -15,6 +15,34 @@ const (
 	ProfileProbeSaturation  = "probe-saturation"
 )
 
+// Memory-arm labels. These name which lever bounds the run's memory, not a
+// direction of change: the product binds the LOWEST detected limit, so an
+// operator GOMEMLIMIT constrains the envelope and the absence of any override
+// lets the physical-memory probe bind it.
+const (
+	// MemoryArmProbeBound applies no memory override — the product's detection
+	// chain binds the limit (cgroup / physical RAM), and the budget is derived.
+	MemoryArmProbeBound = "probe_bound"
+	// MemoryArmGOMEMLIMIT constrains the limit with an operator GOMEMLIMIT,
+	// which the chain selects when it is the lowest candidate.
+	MemoryArmGOMEMLIMIT = "gomemlimit_constrained"
+	// MemoryArmOperatorBudget sets the budget directly with --memory-budget,
+	// leaving limit detection alone.
+	MemoryArmOperatorBudget = "operator_budget"
+)
+
+// MemoryArm declares one memory envelope for a profile's points. The concrete
+// GOMEMLIMIT / budget values are operator-supplied at invocation; the harness
+// never invents them.
+type MemoryArm struct {
+	// Label is the reported memory_envelope value.
+	Label string
+	// UseGOMEMLIMIT sources the arm's GOMEMLIMIT from operator options.
+	UseGOMEMLIMIT bool
+	// UseMemoryBudget sources the arm's --memory-budget from operator options.
+	UseMemoryBudget bool
+}
+
 // ProfileSpec declares a named measurement profile.
 type ProfileSpec struct {
 	Name   string
@@ -31,8 +59,9 @@ type ProfileSpec struct {
 	RequireOccupancy bool
 	// NoAdaptive forces --no-adaptive.
 	NoAdaptive bool
-	// RequireGOMEMLIMIT when true requires operator GOMEMLIMIT (never auto-set).
-	RequireGOMEMLIMIT bool
+	// MemoryArms declares the memory envelopes each parallel point is run
+	// under. Empty means a single arm with no memory override. See MemoryArm.
+	MemoryArms []MemoryArm
 	// CheckpointClasses lists disk and/or tmpfs discriminators.
 	CheckpointClasses []string
 	// Description is operator-facing sterile help.
@@ -70,25 +99,38 @@ func ResolveProfile(name string) (ProfileSpec, error) {
 			Description:       "Reflow-saturation sweep on pre-frozen input (serial-dispatch / clamp detector).",
 		}, nil
 	case ProfileCeilingLift:
+		// Three memory envelopes over the same sweep, so the effect of each
+		// lever is read as a ratio against the others rather than in absolute
+		// terms: constrained by GOMEMLIMIT, bound by the product's own
+		// detection chain, and set directly by --memory-budget. Both operator
+		// values are supplied at invocation; the harness never invents them.
 		return ProfileSpec{
-			Name:              ProfileCeilingLift,
-			Recipe:            SaturationRecipe(),
-			ExecutionShape:    "reflow_only",
-			ParallelPoints:    []int{8, 32, 64, 128, 256, 512},
-			NoAdaptive:        true,
-			RequireGOMEMLIMIT: true,
+			Name:           ProfileCeilingLift,
+			Recipe:         SaturationRecipe(),
+			ExecutionShape: "reflow_only",
+			ParallelPoints: []int{8, 32, 64, 128, 256, 512},
+			NoAdaptive:     true,
+			MemoryArms: []MemoryArm{
+				{Label: MemoryArmGOMEMLIMIT, UseGOMEMLIMIT: true},
+				{Label: MemoryArmProbeBound},
+				{Label: MemoryArmOperatorBudget, UseMemoryBudget: true},
+			},
 			CheckpointClasses: []string{"disk"},
-			Description:       "Ceiling-lift sweep; requires operator-supplied GOMEMLIMIT (never auto-raised).",
+			Description:       "Ceiling-lift sweep across three memory envelopes: GOMEMLIMIT-constrained, detection-bound, and --memory-budget.",
 		}, nil
 	case ProfileCheckpoint:
 		return ProfileSpec{
-			Name:              ProfileCheckpoint,
-			Recipe:            SaturationRecipe(),
-			ExecutionShape:    "reflow_only",
-			ParallelPoints:    []int{64, 256},
-			NoAdaptive:        true,
+			Name:           ProfileCheckpoint,
+			Recipe:         SaturationRecipe(),
+			ExecutionShape: "reflow_only",
+			ParallelPoints: []int{64, 256},
+			NoAdaptive:     true,
+			MemoryArms: []MemoryArm{
+				{Label: MemoryArmGOMEMLIMIT, UseGOMEMLIMIT: true},
+				{Label: MemoryArmProbeBound},
+			},
 			CheckpointClasses: []string{"disk", "tmpfs"},
-			Description:       "Checkpoint discriminator: disk vs tmpfs class (paths never reported).",
+			Description:       "Checkpoint discriminator: disk vs tmpfs class (paths never reported), under constrained and detection-bound memory.",
 		}, nil
 	case ProfileFullPipe:
 		return ProfileSpec{

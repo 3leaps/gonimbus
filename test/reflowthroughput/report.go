@@ -59,11 +59,23 @@ type PointReport struct {
 	AdaptiveMode    string `json:"adaptive_mode,omitempty"`
 	GOMEMLIMITSet   bool   `json:"gomemlimit_set"`
 	GOMEMLIMITValue string `json:"gomemlimit_value,omitempty"`
+	// MemoryBudgetRequested is the operator --memory-budget passed to the child
+	// (empty when the arm let the product derive the budget).
+	MemoryBudgetRequested string `json:"memory_budget_requested,omitempty"`
 	// MemoryLimitSource is product memory-limit provenance when reflow ran; omit for probe_drain.
 	MemoryLimitSource string `json:"memory_limit_source,omitempty"`
-	// MemoryEnvelope labels checkpoint dual-envelope arms: clamped|raised|"" .
-	MemoryEnvelope  string `json:"memory_envelope,omitempty"`
-	CheckpointClass string `json:"checkpoint_class,omitempty"`
+	// MemoryBudgetSource is product budget provenance: derived|operator|operator_clamped_to_limit.
+	MemoryBudgetSource string `json:"memory_budget_source,omitempty"`
+	// Resolved memory arithmetic as the product reported it (aggregate bytes only).
+	MemoryLimitBytes           int64 `json:"memory_limit_bytes,omitempty"`
+	MemoryBudgetEffectiveBytes int64 `json:"memory_budget_effective_bytes,omitempty"`
+	RetryBufferCapBytes        int64 `json:"retry_buffer_cap_bytes,omitempty"`
+	// MemoryEnvelope names which lever bound this arm's memory:
+	// gomemlimit_constrained | probe_bound | operator_budget | "".
+	MemoryEnvelope string `json:"memory_envelope,omitempty"`
+	// ConcurrencyTimeAvgActive is the completed-run occupancy diagnostic.
+	ConcurrencyTimeAvgActive float64 `json:"concurrency_time_avg_active,omitempty"`
+	CheckpointClass          string  `json:"checkpoint_class,omitempty"`
 
 	// Product reflow concurrency telemetry (omit when not applicable).
 	ConcurrencyRequested *int    `json:"concurrency_ceiling_requested,omitempty"`
@@ -183,12 +195,202 @@ func ValidateReportEnvelope(r Report) error {
 			if p.MemoryLimitSource != "" {
 				return fmt.Errorf("point %d: probe_drain must omit memory_limit_source", i)
 			}
+			if p.MemoryBudgetSource != "" || p.MemoryBudgetEffectiveBytes != 0 || p.RetryBufferCapBytes != 0 || p.MemoryLimitBytes != 0 {
+				return fmt.Errorf("point %d: probe_drain must omit memory resolution fields", i)
+			}
+			if p.MemoryEnvelope != "" || p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: probe_drain must omit memory envelope fields", i)
+			}
 			if p.HonestyOK != nil {
 				return fmt.Errorf("point %d: probe_drain must omit honesty_ok (not applicable)", i)
 			}
 			if p.Parallel != 0 {
 				return fmt.Errorf("point %d: probe_drain must omit reflow_parallel_requested", i)
 			}
+			continue
+		}
+		// Baseline integrity, independent of arm semantics: every point that
+		// actually ran a reflow must carry real resolution evidence. This is
+		// separate from the label rules below — an unlabeled singleton profile
+		// declares no envelope, but it still executed under a resolved one.
+		if err := validateResolvedMemoryProvenance(i, p); err != nil {
+			return err
+		}
+		// A labeled arm must additionally match the candidate that actually
+		// BOUND the run, not merely the lever that was passed to it. Under
+		// minimum-selection an operator value can lose to a lower candidate,
+		// so validating the request alone would accept exactly the class of
+		// mislabeling that motivated these arms.
+		switch p.MemoryEnvelope {
+		case MemoryArmGOMEMLIMIT:
+			if !p.GOMEMLIMITSet {
+				return fmt.Errorf("point %d: envelope %s but no GOMEMLIMIT was set", i, p.MemoryEnvelope)
+			}
+			if p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: envelope %s must not also set a memory budget", i, p.MemoryEnvelope)
+			}
+			if p.MemoryLimitSource != memorySourceRuntime {
+				return fmt.Errorf("point %d: envelope %s but the binding limit was %q — the supplied GOMEMLIMIT did not constrain this run", i, p.MemoryEnvelope, p.MemoryLimitSource)
+			}
+			if p.MemoryBudgetSource != memoryBudgetSourceDerived {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q, want %s", i, p.MemoryEnvelope, p.MemoryBudgetSource, memoryBudgetSourceDerived)
+			}
+		case MemoryArmProbeBound:
+			if p.GOMEMLIMITSet || p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: envelope %s must run without memory overrides", i, p.MemoryEnvelope)
+			}
+			if p.MemoryLimitSource == memorySourceRuntime {
+				return fmt.Errorf("point %d: envelope %s but the binding limit was %q — that is a runtime bound, not a detected one", i, p.MemoryEnvelope, p.MemoryLimitSource)
+			}
+			if p.MemoryBudgetSource != memoryBudgetSourceDerived {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q, want %s", i, p.MemoryEnvelope, p.MemoryBudgetSource, memoryBudgetSourceDerived)
+			}
+		case MemoryArmOperatorBudget:
+			if p.MemoryBudgetRequested == "" {
+				return fmt.Errorf("point %d: envelope %s but no memory budget was passed", i, p.MemoryEnvelope)
+			}
+			if p.GOMEMLIMITSet {
+				return fmt.Errorf("point %d: envelope %s must not also constrain GOMEMLIMIT", i, p.MemoryEnvelope)
+			}
+			if p.MemoryBudgetSource != memoryBudgetSourceOperator && p.MemoryBudgetSource != memoryBudgetSourceOperatorClamped {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q — the operator budget did not govern this run", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+			}
+		case "":
+			// Unlabeled single-arm profiles (smoke, saturation) declare nothing.
+		default:
+			return fmt.Errorf("point %d: unknown memory_envelope %q", i, p.MemoryEnvelope)
+		}
+	}
+	return nil
+}
+
+// Product memory provenance labels, mirrored here so the harness validates
+// against the vocabulary the product actually emits rather than free text.
+const (
+	memorySourceCgroupV2             = "cgroup_v2"
+	memorySourceCgroupV1             = "cgroup_v1"
+	memorySourceRuntime              = "runtime"
+	memorySourcePhysicalRAM          = "physical_ram"
+	memorySourceDetectionUnavailable = "detection_unavailable"
+
+	memoryBudgetSourceDerived         = "derived"
+	memoryBudgetSourceOperator        = "operator"
+	memoryBudgetSourceOperatorClamped = "operator_clamped_to_limit"
+)
+
+func recognizedMemoryLimitSource(s string) bool {
+	switch s {
+	case memorySourceCgroupV2, memorySourceCgroupV1, memorySourceRuntime,
+		memorySourcePhysicalRAM, memorySourceDetectionUnavailable:
+		return true
+	}
+	return false
+}
+
+func recognizedMemoryBudgetSource(s string) bool {
+	switch s {
+	case memoryBudgetSourceDerived, memoryBudgetSourceOperator, memoryBudgetSourceOperatorClamped:
+		return true
+	}
+	return false
+}
+
+// validateResolvedMemoryProvenance fails closed on any executed reflow point
+// that carries no usable resolution evidence. A placeholder or absent source
+// cannot support a report claim of any kind — labeled or not — so it must not
+// reach a published report.
+func validateResolvedMemoryProvenance(i int, p PointReport) error {
+	where := "unlabeled point"
+	if p.MemoryEnvelope != "" {
+		where = "envelope " + p.MemoryEnvelope
+	}
+	if !recognizedMemoryLimitSource(p.MemoryLimitSource) {
+		return fmt.Errorf("point %d: %s has unrecognized memory_limit_source %q", i, where, p.MemoryLimitSource)
+	}
+	if !recognizedMemoryBudgetSource(p.MemoryBudgetSource) {
+		return fmt.Errorf("point %d: %s has unrecognized memory_budget_source %q", i, where, p.MemoryBudgetSource)
+	}
+	if p.MemoryLimitBytes <= 0 || p.MemoryBudgetEffectiveBytes <= 0 || p.RetryBufferCapBytes <= 0 {
+		return fmt.Errorf("point %d: %s has non-positive resolved memory arithmetic (limit=%d budget=%d cap=%d)",
+			i, where, p.MemoryLimitBytes, p.MemoryBudgetEffectiveBytes, p.RetryBufferCapBytes)
+	}
+	return nil
+}
+
+// matrixCell identifies one declared sweep point. Counting per-arm totals is
+// not enough: equal totals can hide a duplicated cell standing in for a missing
+// one, so the identity of each cell is what has to be pinned.
+type matrixCell struct {
+	Envelope        string
+	ExecutionShape  string
+	Parallel        int
+	CheckpointClass string
+}
+
+func (c matrixCell) String() string {
+	return fmt.Sprintf("(arm=%s shape=%s parallel=%d checkpoint=%s)", c.Envelope, c.ExecutionShape, c.Parallel, c.CheckpointClass)
+}
+
+// ValidateArmMatrix checks that a report contains exactly the arm × execution
+// shape × parallel × checkpoint cells its profile declares — each one once.
+// Per-point validation cannot see a whole cell that went missing, and "a
+// declared arm is never silently dropped" is precisely what these profiles
+// promise.
+func ValidateArmMatrix(spec ProfileSpec, r Report) error {
+	if len(spec.MemoryArms) == 0 {
+		// Profiles without declared arms are not matrix-constrained: they
+		// legitimately append points the matrix does not describe (occupancy
+		// samples, full-pipe A/B repeats).
+		return nil
+	}
+	if spec.ExecutionShape != "reflow_only" {
+		// A declared-arm profile that repeats points per cell (full-pipe A/B)
+		// would need declared per-cell multiplicity. Refuse rather than
+		// validate it under a rule that does not describe it.
+		return fmt.Errorf("profile %s declares memory arms with execution shape %q; the arm matrix gate covers reflow_only sweeps only", spec.Name, spec.ExecutionShape)
+	}
+	classes := spec.CheckpointClasses
+	if len(classes) == 0 {
+		classes = []string{"disk"}
+	}
+	expected := map[matrixCell]bool{}
+	for _, arm := range spec.MemoryArms {
+		for _, parallel := range spec.ParallelPoints {
+			for _, class := range classes {
+				expected[matrixCell{
+					Envelope:        arm.Label,
+					ExecutionShape:  spec.ExecutionShape,
+					Parallel:        parallel,
+					CheckpointClass: class,
+				}] = false
+			}
+		}
+	}
+	// Every point must resolve to a declared cell — including probe_drain.
+	// The no-arm early return above already exempts the profiles that
+	// legitimately carry points no matrix describes, so a shape-wide bypass
+	// here would only let a foreign point into a report claiming to contain
+	// exactly its profile's matrix. A declared-arm profile that ever needs
+	// auxiliary points must declare their shape and multiplicity.
+	for i, p := range r.Points {
+		cell := matrixCell{
+			Envelope:        p.MemoryEnvelope,
+			ExecutionShape:  p.ExecutionShape,
+			Parallel:        p.Parallel,
+			CheckpointClass: p.CheckpointClass,
+		}
+		seen, declared := expected[cell]
+		if !declared {
+			return fmt.Errorf("profile %s point %d reported undeclared cell %s", spec.Name, i, cell)
+		}
+		if seen {
+			return fmt.Errorf("profile %s point %d duplicates cell %s", spec.Name, i, cell)
+		}
+		expected[cell] = true
+	}
+	for cell, seen := range expected {
+		if !seen {
+			return fmt.Errorf("profile %s is missing declared cell %s", spec.Name, cell)
 		}
 	}
 	return nil

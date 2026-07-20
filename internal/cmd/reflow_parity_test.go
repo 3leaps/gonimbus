@@ -40,6 +40,9 @@ var presentationDropKeys = map[string]bool{
 	// of this harness by definition. Output parity ignores it; the behavioral
 	// dual-path harness asserts each side reports its own path truthfully.
 	"execution_path": true,
+	// Wall-clock-derived occupancy varies run-to-run; its relations are
+	// asserted by the behavioral harness, not output parity.
+	"concurrency_time_avg_active": true,
 }
 
 // normalizedEvent is the presentation-stripped form of a reflow event, comparable

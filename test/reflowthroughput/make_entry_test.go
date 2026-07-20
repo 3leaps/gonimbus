@@ -28,9 +28,22 @@ func TestHarnessMakeEntry(t *testing.T) {
 	if tmpfsRoot == "" {
 		tmpfsRoot = os.Getenv("TMPFS_CHECKPOINT_ROOT")
 	}
-	raised := os.Getenv("GONIMBUS_THROUGHPUT_CEILING_LIFT_GOMEMLIMIT")
-	if raised == "" {
-		raised = os.Getenv("CEILING_LIFT_GOMEMLIMIT")
+	// The constraining envelope: a GOMEMLIMIT binds only when it is the lowest
+	// candidate in the product's limit chain. CEILING_LIFT_GOMEMLIMIT remains
+	// accepted as the older spelling of the same operator value.
+	constrained := os.Getenv("GONIMBUS_THROUGHPUT_CONSTRAINED_GOMEMLIMIT")
+	if constrained == "" {
+		constrained = os.Getenv("CONSTRAINED_GOMEMLIMIT")
+	}
+	if constrained == "" {
+		constrained = os.Getenv("GONIMBUS_THROUGHPUT_CEILING_LIFT_GOMEMLIMIT")
+	}
+	if constrained == "" {
+		constrained = os.Getenv("CEILING_LIFT_GOMEMLIMIT")
+	}
+	memoryBudget := os.Getenv("GONIMBUS_THROUGHPUT_MEMORY_BUDGET")
+	if memoryBudget == "" {
+		memoryBudget = os.Getenv("MEMORY_BUDGET")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
@@ -41,7 +54,8 @@ func TestHarnessMakeEntry(t *testing.T) {
 		Provider:              provider,
 		RunRoot:               runRoot,
 		GOMEMLIMIT:            gomem,
-		CeilingLiftGOMEMLIMIT: raised,
+		ConstrainedGOMEMLIMIT: constrained,
+		MemoryBudget:          memoryBudget,
 		TmpfsCheckpointRoot:   tmpfsRoot,
 		Keep:                  keep,
 		PointTimeout:          10 * time.Minute,

@@ -65,6 +65,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		capability = liveIfAbsentCapability(ctx, r.cfg.Destination.Provider, layout, r.cfg.Collision.Mode, r.cfg.ReadOnly)
 	}
 	limiter := NewConcurrencyLimiter(r.cfg.Concurrency)
+	limiter.ResetOccupancyWindow()
 	runConcurrency := limiter.Snapshot()
 
 	// Event order is irrelevant: an EventSink consumer is event-based, and the
@@ -602,23 +603,33 @@ func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Pr
 }
 
 func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions) (int64, error) {
+	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
+	if err != nil {
+		return 0, err
+	}
+	defer releaseMem()
 	release, err := limiter.Acquire(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer release()
-	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
+	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts)
 	limiter.ObserveProviderResult(err)
 	return bytes, err
 }
 
 func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
+	if err != nil {
+		return 0, provider.PutResult{}, err
+	}
+	defer releaseMem()
 	release, err := limiter.Acquire(ctx)
 	if err != nil {
 		return 0, provider.PutResult{}, err
 	}
 	defer release()
-	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
+	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts)
 	limiter.ObserveProviderResult(err)
 	return bytes, result, err
 }

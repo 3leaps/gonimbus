@@ -29,8 +29,14 @@ type Options struct {
 	Provider string
 	// RunRoot is the operator-supplied external test root (created if needed).
 	RunRoot string
-	// GOMEMLIMIT is operator-supplied only; never auto-raised by the harness.
+	// GOMEMLIMIT is operator-supplied only; never auto-set by the harness.
+	// Under the product's minimum-selection limit chain a GOMEMLIMIT binds
+	// only when it is the lowest candidate, so this constrains an envelope
+	// rather than raising one.
 	GOMEMLIMIT string
+	// MemoryBudget is the operator --memory-budget value for arms that set the
+	// budget directly. Operator-supplied only; never invented by the harness.
+	MemoryBudget string
 	// TmpfsCheckpointRoot when set is used for checkpoint_class=tmpfs points.
 	// The path itself is never written into the report.
 	// Also accepted via env TMPFS_CHECKPOINT_ROOT / GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT.
@@ -39,14 +45,79 @@ type Options struct {
 	Keep bool
 	// PointTimeout bounds each measured point.
 	PointTimeout time.Duration
-	// CeilingLiftGOMEMLIMIT is the raised envelope for checkpoint dual-envelope
-	// and ceiling-lift profiles. When empty, falls back to GOMEMLIMIT for
-	// ceiling-lift only; checkpoint requires an explicit raised value via
-	// GOMEMLIMIT / CEILING_LIFT_GOMEMLIMIT for the raised arms.
-	CeilingLiftGOMEMLIMIT string
+	// ConstrainedGOMEMLIMIT is the GOMEMLIMIT used by constrained-envelope arms
+	// of the ceiling-lift and checkpoint profiles. When empty it falls back to
+	// GOMEMLIMIT. Accepted via CONSTRAINED_GOMEMLIMIT, or the older
+	// CEILING_LIFT_GOMEMLIMIT spelling.
+	ConstrainedGOMEMLIMIT string
 	// WorktreeCommit is optional fallback commit identity when the binary
 	// reports "unknown" (plain go test builds without ldflags).
 	WorktreeCommit string
+}
+
+// pointRun declares one measured point. Named fields rather than positional
+// arguments: the run carries four independently meaningful strings (shape,
+// checkpoint class, GOMEMLIMIT, memory budget) that are otherwise easy to
+// transpose silently.
+type pointRun struct {
+	Parallel         int
+	ProbeConcurrency int
+	CheckpointClass  string
+	Shape            string
+	GOMEMLIMIT       string
+	MemoryBudget     string
+	MemoryEnvelope   string
+}
+
+// resolvedArm is a MemoryArm with its operator-supplied values filled in.
+type resolvedArm struct {
+	Label        string
+	GOMEMLIMIT   string
+	MemoryBudget string
+}
+
+// resolveMemoryArms binds each declared arm to operator-supplied values. A
+// profile that declares no arms runs one unlabeled arm that still carries any
+// generic GOMEMLIMIT / memory budget the operator supplied: dropping them
+// would run a different envelope than the caller asked for, which is the same
+// evidence failure the labeled arms exist to prevent.
+func resolveMemoryArms(spec ProfileSpec, opts Options) []resolvedArm {
+	if len(spec.MemoryArms) == 0 {
+		return []resolvedArm{{
+			Label:        "",
+			GOMEMLIMIT:   opts.GOMEMLIMIT,
+			MemoryBudget: opts.MemoryBudget,
+		}}
+	}
+	constrained := firstNonEmpty(opts.ConstrainedGOMEMLIMIT, opts.GOMEMLIMIT)
+	out := make([]resolvedArm, 0, len(spec.MemoryArms))
+	for _, arm := range spec.MemoryArms {
+		r := resolvedArm{Label: arm.Label}
+		if arm.UseGOMEMLIMIT {
+			r.GOMEMLIMIT = constrained
+		}
+		if arm.UseMemoryBudget {
+			r.MemoryBudget = opts.MemoryBudget
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// requireMemoryArmInputs refuses a profile whose declared arms need operator
+// values that were not supplied. The harness never invents a memory envelope:
+// silently dropping an arm would publish a report whose arm set does not match
+// its profile.
+func requireMemoryArmInputs(spec ProfileSpec, opts Options) error {
+	for _, arm := range spec.MemoryArms {
+		if arm.UseGOMEMLIMIT && strings.TrimSpace(firstNonEmpty(opts.ConstrainedGOMEMLIMIT, opts.GOMEMLIMIT)) == "" {
+			return fmt.Errorf("profile %s arm %s requires operator-supplied GOMEMLIMIT or CONSTRAINED_GOMEMLIMIT (the harness never sets one)", spec.Name, arm.Label)
+		}
+		if arm.UseMemoryBudget && strings.TrimSpace(opts.MemoryBudget) == "" {
+			return fmt.Errorf("profile %s arm %s requires operator-supplied MEMORY_BUDGET (the harness never sets one)", spec.Name, arm.Label)
+		}
+	}
+	return nil
 }
 
 // Run executes the named profile and returns a sanitized report.
@@ -55,8 +126,8 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if spec.RequireGOMEMLIMIT && strings.TrimSpace(opts.GOMEMLIMIT) == "" {
-		return Report{}, fmt.Errorf("profile %s requires operator-supplied GOMEMLIMIT (harness never auto-raises it)", spec.Name)
+	if err := requireMemoryArmInputs(spec, opts); err != nil {
+		return Report{}, err
 	}
 	if opts.Binary == "" {
 		return Report{}, fmt.Errorf("binary path is required")
@@ -265,7 +336,13 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	// lastDestDir is the local destination of the most recent reflow/full_pipe point
 	// (for content-parity snapshots).
 	var lastDestDir string
-	runPoint := func(parallel, probeConc int, ckClass, shape, gomem, memEnvelope string) error {
+	runPoint := func(rp pointRun) error {
+		parallel := rp.Parallel
+		probeConc := rp.ProbeConcurrency
+		ckClass := rp.CheckpointClass
+		shape := rp.Shape
+		gomem := rp.GOMEMLIMIT
+		memEnvelope := rp.MemoryEnvelope
 		pointOrdinal++
 		pointID := fmt.Sprintf("%s-p%02d-%s", spec.Name, pointOrdinal, invID[:8])
 		lastDestDir = ""
@@ -333,7 +410,18 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		switch shape {
 		case "full_pipe":
 			srcPrefix := fileURIFromAbs(corpus.Root) + "/"
-			pr, runErr = RunFullPipe(pctx, absBin, srcPrefix, corpus.ProbeConfigPath, destURI, probeConc, parallel, ckPath, gomem, stdoutPath)
+			pr, runErr = RunFullPipe(pctx, FullPipeOpts{
+				Binary:         absBin,
+				SourcePrefix:   srcPrefix,
+				ProbeConfig:    corpus.ProbeConfigPath,
+				DestURI:        destURI,
+				ProbeConc:      probeConc,
+				ReflowParallel: parallel,
+				CheckpointPath: ckPath,
+				GOMEMLIMIT:     gomem,
+				MemoryBudget:   rp.MemoryBudget,
+				StdoutPath:     stdoutPath,
+			})
 		case "probe_drain":
 			srcPrefix := fileURIFromAbs(corpus.Root) + "/"
 			pr, runErr = RunProbeDrain(pctx, absBin, srcPrefix, corpus.ProbeConfigPath, probeConc, gomem)
@@ -346,6 +434,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 				Parallel:       parallel,
 				CheckpointPath: ckPath,
 				GOMEMLIMIT:     gomem,
+				MemoryBudget:   rp.MemoryBudget,
 				NoAdaptive:     spec.NoAdaptive,
 				ProviderClass:  providerClass,
 				ExtraArgs:      extraArgs,
@@ -471,6 +560,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			ProbeConcurrency:       probeConc,
 			GOMEMLIMITSet:          gomem != "",
 			GOMEMLIMITValue:        gomem,
+			MemoryBudgetRequested:  rp.MemoryBudget,
 			MemoryEnvelope:         memEnvelope,
 			ElapsedSeconds:         elapsedSec,
 			CompletedObjects:       fileCount,
@@ -486,7 +576,15 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if shape != "probe_drain" {
 			pt.Parallel = parallel
 			pt.CheckpointClass = ckClass
-			pt.MemoryLimitSource = "unknown/not_reported"
+			// Memory provenance exactly as the product reported it. A missing
+			// source is a failure the report validator must catch, not
+			// something to paper over with a placeholder label.
+			pt.MemoryLimitSource = parsed.MemoryLimitSource
+			pt.MemoryBudgetSource = parsed.MemoryBudgetSource
+			pt.MemoryLimitBytes = parsed.MemoryLimitBytes
+			pt.MemoryBudgetEffectiveBytes = parsed.MemoryBudgetEffectiveBytes
+			pt.RetryBufferCapBytes = parsed.RetryBufferCapBytes
+			pt.ConcurrencyTimeAvgActive = parsed.SummaryTimeAvgActive
 			adaptiveMode := "adaptive"
 			if spec.NoAdaptive {
 				adaptiveMode = "fixed"
@@ -504,11 +602,24 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	// Drive points from profile.
-	switch {
-	case spec.ExecutionShape == "full_pipe":
+	arms := resolveMemoryArms(spec, opts)
+	switch spec.ExecutionShape {
+	case "full_pipe":
 		// Methodology: A/B canary — each pair runs twice; landed key+size+digest must match.
+		// Both arms of a pair share one memory envelope so the comparison
+		// isolates run-to-run variation, not the envelope.
+		fullPipeArm := arms[0]
 		for _, pair := range spec.FullPipePairs {
-			if err := runPoint(pair[1], pair[0], "disk", "full_pipe", opts.GOMEMLIMIT, ""); err != nil {
+			armRun := pointRun{
+				Parallel:         pair[1],
+				ProbeConcurrency: pair[0],
+				CheckpointClass:  "disk",
+				Shape:            "full_pipe",
+				GOMEMLIMIT:       fullPipeArm.GOMEMLIMIT,
+				MemoryBudget:     fullPipeArm.MemoryBudget,
+				MemoryEnvelope:   fullPipeArm.Label,
+			}
+			if err := runPoint(armRun); err != nil {
 				return report, err
 			}
 			destA := lastDestDir
@@ -516,7 +627,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			if err != nil {
 				return report, fmt.Errorf("fullpipe arm A snapshot: %w", err)
 			}
-			if err := runPoint(pair[1], pair[0], "disk", "full_pipe", opts.GOMEMLIMIT, ""); err != nil {
+			if err := runPoint(armRun); err != nil {
 				return report, err
 			}
 			snapB, err := SnapshotDestTree(lastDestDir)
@@ -530,45 +641,32 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			report.Points[len(report.Points)-1].ContentParityOK = &ok
 			report.Points[len(report.Points)-2].ContentParityOK = &ok
 		}
-	case spec.ExecutionShape == "probe_drain":
+	case "probe_drain":
 		for _, pc := range spec.ProbeConcurrencyPoints {
-			if err := runPoint(0, pc, "disk", "probe_drain", "", ""); err != nil {
+			if err := runPoint(pointRun{ProbeConcurrency: pc, CheckpointClass: "disk", Shape: "probe_drain"}); err != nil {
 				return report, err
 			}
 		}
-	case spec.Name == ProfileCheckpoint:
-		classes := spec.CheckpointClasses
-		// Dual-envelope: clamped (no GOMEMLIMIT) then raised (operator GOMEMLIMIT).
-		raised := firstNonEmpty(opts.CeilingLiftGOMEMLIMIT, opts.GOMEMLIMIT)
-		if raised == "" {
-			return report, fmt.Errorf("profile checkpoint requires GOMEMLIMIT or CEILING_LIFT_GOMEMLIMIT for the raised envelope (clamped arms run without it)")
-		}
-		for _, ck := range classes {
-			for _, p := range spec.ParallelPoints {
-				if err := runPoint(p, 0, ck, "reflow_only", "", "clamped"); err != nil {
-					return report, err
-				}
-			}
-			for _, p := range spec.ParallelPoints {
-				if err := runPoint(p, 0, ck, "reflow_only", raised, "raised"); err != nil {
-					return report, err
-				}
-			}
-		}
 	default:
-		// reflow-saturation, ceiling-lift, smoke, etc.
+		// reflow-only sweeps: every declared memory envelope over every
+		// checkpoint class and parallel point.
 		classes := spec.CheckpointClasses
 		if len(classes) == 0 {
 			classes = []string{"disk"}
 		}
-		gomem := opts.GOMEMLIMIT
-		if spec.RequireGOMEMLIMIT || spec.Name == ProfileCeilingLift {
-			gomem = firstNonEmpty(opts.CeilingLiftGOMEMLIMIT, opts.GOMEMLIMIT)
-		}
 		for _, ck := range classes {
-			for _, p := range spec.ParallelPoints {
-				if err := runPoint(p, 0, ck, "reflow_only", gomem, ""); err != nil {
-					return report, err
+			for _, arm := range arms {
+				for _, p := range spec.ParallelPoints {
+					if err := runPoint(pointRun{
+						Parallel:        p,
+						CheckpointClass: ck,
+						Shape:           "reflow_only",
+						GOMEMLIMIT:      arm.GOMEMLIMIT,
+						MemoryBudget:    arm.MemoryBudget,
+						MemoryEnvelope:  arm.Label,
+					}); err != nil {
+						return report, err
+					}
 				}
 			}
 		}
@@ -583,8 +681,19 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			baseEffective = *base.ConcurrencyEffective
 		}
 		samples := make([]int, 0, 3)
+		// Samples reuse the base point's memory envelope so occupancy is not
+		// compared across differently bound runs.
+		baseArm := arms[0]
+		occupancyRun := pointRun{
+			Parallel:        baseParallel,
+			CheckpointClass: "disk",
+			Shape:           "reflow_only",
+			GOMEMLIMIT:      baseArm.GOMEMLIMIT,
+			MemoryBudget:    baseArm.MemoryBudget,
+			MemoryEnvelope:  baseArm.Label,
+		}
 		beforeWarm := len(report.Points)
-		if err := runPoint(baseParallel, 0, "disk", "reflow_only", opts.GOMEMLIMIT, ""); err != nil {
+		if err := runPoint(occupancyRun); err != nil {
 			return report, fmt.Errorf("occupancy warm-up: %w", err)
 		}
 		if len(report.Points) != beforeWarm+1 {
@@ -593,7 +702,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		report.Points = report.Points[:beforeWarm]
 		for i := 0; i < 3; i++ {
 			before := len(report.Points)
-			if err := runPoint(baseParallel, 0, "disk", "reflow_only", opts.GOMEMLIMIT, ""); err != nil {
+			if err := runPoint(occupancyRun); err != nil {
 				return report, err
 			}
 			if len(report.Points) != before+1 {
@@ -632,6 +741,9 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	if err := ValidateReportEnvelope(report); err != nil {
+		return report, err
+	}
+	if err := ValidateArmMatrix(spec, report); err != nil {
 		return report, err
 	}
 

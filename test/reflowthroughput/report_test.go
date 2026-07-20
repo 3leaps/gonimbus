@@ -17,18 +17,24 @@ func TestReportSterilitySentinel(t *testing.T) {
 	}, false)
 	r.OS = "darwin"
 	r.Arch = "arm64"
+	// Sterility is about what a report must not leak, not a licence to publish
+	// fabricated provenance: this point carries a real resolved tuple.
 	r.Points = []PointReport{{
-		PointID:              "smoke-p01-deadbeef",
-		ExecutionShape:       "reflow_only",
-		Parallel:             2,
-		AdaptiveMode:         "fixed",
-		MemoryLimitSource:    "unknown/not_reported",
-		CheckpointClass:      "disk",
-		ConcurrencyRequested: intPtr(2),
-		ConcurrencyEffective: intPtr(2),
-		ConcurrencyReason:    strPtr("requested"),
-		HonestyOK:            boolPtrVal(true),
-		StageExitCodes:       map[string]int{"reflow": 0},
+		PointID:                    "smoke-p01-deadbeef",
+		ExecutionShape:             "reflow_only",
+		Parallel:                   2,
+		AdaptiveMode:               "fixed",
+		MemoryLimitSource:          memorySourcePhysicalRAM,
+		MemoryBudgetSource:         memoryBudgetSourceDerived,
+		MemoryLimitBytes:           1 << 30,
+		MemoryBudgetEffectiveBytes: 256 << 20,
+		RetryBufferCapBytes:        16 << 20,
+		CheckpointClass:            "disk",
+		ConcurrencyRequested:       intPtr(2),
+		ConcurrencyEffective:       intPtr(2),
+		ConcurrencyReason:          strPtr("requested"),
+		HonestyOK:                  boolPtrVal(true),
+		StageExitCodes:             map[string]int{"reflow": 0},
 	}}
 	// Inject would-be sensitive fields incorrectly — ensure our marshal path
 	// does not include them by construction. Serialize and check forbidden.

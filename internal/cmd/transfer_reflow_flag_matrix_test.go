@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
@@ -332,6 +333,48 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
 			require.Contains(t, string(run.Data), `"adaptive_enabled":false`)
+		}},
+	},
+	"memory-budget": {
+		note: "operator budget replaces the fraction-derived memory budget; resolved before dispatch, shared by both paths; invalid values refuse before any provider work; values above the detected limit clamp to it with recorded source",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// Rejected-value subcase: below the 64MiB floor refuses loudly
+			// before any destination mutation.
+			envRefuse := newFlagProbeEnv(t)
+			_, refuseErr := envRefuse.run(t, "--memory-budget", "1MiB")
+			require.Error(t, refuseErr, "--memory-budget below the floor must refuse")
+			require.Contains(t, refuseErr.Error(), "64MiB floor")
+			require.False(t, envRefuse.dst.hasObject("data/source/file.xml"),
+				"refused memory budget must not mutate the destination")
+
+			// Honored: 128MiB budget / 16MiB per-worker reservation = ceiling 8,
+			// below the requested 32 — the budget visibly sizes the ceiling.
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--memory-budget", "128MiB", "--parallel", "32")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":8`)
+			require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+			require.Contains(t, string(run.Data), `"memory_budget_effective_bytes":134217728`)
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_reason":"resource_capped:memory:operator_budget"`)
+		}},
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// Honored on the pool path with the same resolved shape.
+			env := newFlagProbeEnv(t)
+			stdout, err := env.runPool(t, "--memory-budget", "128MiB", "--parallel", "32")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":8`)
+			require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+
+			// Clamp subcase: a budget above the detected limit applies the
+			// limit and records the clamp — never silently exceeds detection.
+			envClamp := newFlagProbeEnv(t)
+			stdoutClamp, errClamp := envClamp.runPool(t, "--memory-budget", "2TiB")
+			requireProbeComplete(t, stdoutClamp, errClamp, reflowpkg.ExecutionPathCLIPool)
+			runClamp := requireRecord(t, stdoutClamp, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runClamp.Data), `"memory_budget_source":"operator_clamped_to_limit"`)
+			require.Contains(t, string(runClamp.Data), `"memory_budget_effective_bytes":1073741824`)
 		}},
 	},
 	"dry-run": {
@@ -1092,4 +1135,111 @@ func TestTransferReflowFlagMatrixSentinelSensitivity(t *testing.T) {
 	stdout2, err := env2.run(t) // engine arm, also without the flag
 	requireProbeComplete(t, stdout2, err, reflowpkg.ExecutionPathEngine)
 	require.Empty(t, env2.dst.metaSnapshot("data/source/file.xml").Metadata["owner"])
+}
+
+// TestTransferReflowDetectedSubLimitBudgetBothPaths pins the bounded-resource
+// contract for detected hard limits below the 16MiB transfer default: the
+// derived budget and the actual per-copy retry buffer share one resolved
+// bound at or below the limit, an object above that bound spools and
+// completes on both execution paths, and the records never admit more bytes
+// than the detected limit.
+func TestTransferReflowDetectedSubLimitBudgetBothPaths(t *testing.T) {
+	const detectedLimit = int64(8) << 20 // derived budget 2MiB, retry cap 2MiB
+	largeBody := strings.Repeat("x", 3<<20)
+
+	cases := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			env.src.putFixture("source/large.xml", largeBody, "large-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+			reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+				MemoryLimitBytes: func() (int64, string, error) { return detectedLimit, "cgroup_v2", nil },
+				FDSoftLimit:      func() (int64, error) { return 100000, nil },
+			}
+
+			input := reflowInputLine("source/large.xml", "large-etag", int64(len(largeBody)), "", "") + "\n"
+			stdout, err := env.runInput(t, input, tc.extra...)
+			require.NoError(t, err)
+
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+			require.Contains(t, string(run.Data), `"memory_limit_bytes":8388608`)
+			require.Contains(t, string(run.Data), `"memory_limit_source":"cgroup_v2"`)
+			require.Contains(t, string(run.Data), `"memory_budget_effective_bytes":2097152`)
+			require.Contains(t, string(run.Data), `"retry_buffer_cap_bytes":2097152`)
+
+			records := requireReflowRecords(t, stdout)
+			requireReflowStatusReasonCount(t, records, "complete", "", 1)
+			require.Equal(t, largeBody, string(env.dst.mustObject("data/source/large.xml")),
+				"object above the resolved retry cap must spool and land byte-identical")
+
+			// Ledger wiring proof (mutation-sensitive): the copy reserved
+			// min(size, cap)=2MiB through the admission ledger on this path —
+			// removing the reservation call zeroes (omits) the peak field.
+			sum := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
+			require.Contains(t, string(sum.Data), `"memory_reserved_peak_bytes":2097152`)
+		})
+	}
+}
+
+// TestTransferReflowMemoryBudgetConfigKey proves the advertised config surface
+// end-to-end: config-only memory_budget reaches both genuine execution paths
+// with the same canonical bytes and records as the flag, an explicit flag
+// overrides config, and an invalid config value refuses before any provider
+// construction or destination mutation.
+func TestTransferReflowMemoryBudgetConfigKey(t *testing.T) {
+	setConfigBudget := func(t *testing.T, value string) {
+		t.Helper()
+		viper.Set("memory_budget", value)
+		t.Cleanup(func() { viper.Set("memory_budget", "") })
+	}
+
+	cases := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+	for _, tc := range cases {
+		t.Run("config-only/"+tc.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			setConfigBudget(t, "128MiB")
+			args := append([]string{"--parallel", "32"}, tc.extra...)
+			stdout, err := env.run(t, args...)
+			requireProbeComplete(t, stdout, err, tc.wantPath)
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"concurrency_ceiling_effective":8`)
+			require.Contains(t, string(run.Data), `"memory_budget_requested_bytes":134217728`)
+			require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
+		})
+	}
+
+	t.Run("flag overrides config", func(t *testing.T) {
+		env := newFlagProbeEnv(t)
+		setConfigBudget(t, "256MiB")
+		stdout, err := env.run(t, "--memory-budget", "128MiB", "--parallel", "32")
+		requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+		run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+		require.Contains(t, string(run.Data), `"memory_budget_requested_bytes":134217728`,
+			"explicit flag must win over the config key")
+	})
+
+	t.Run("invalid config refuses before provider work", func(t *testing.T) {
+		env := newFlagProbeEnv(t)
+		setConfigBudget(t, "banana")
+		_, err := env.run(t)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "memory budget")
+		require.False(t, env.dst.hasObject("data/source/file.xml"),
+			"invalid config value must not mutate the destination")
+	})
 }

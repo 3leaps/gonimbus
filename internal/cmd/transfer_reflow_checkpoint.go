@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +68,12 @@ type transferReflowCheckpointConfig struct {
 	// checkpoint written by an earlier release (v0.3.0–v0.3.2), where the field did
 	// not exist. Without it, v0.3.3 injected "no_adaptive":false and broke
 	// --resume-run across the upgrade boundary (ErrIdentityMismatch).
-	NoAdaptive                bool     `json:"no_adaptive,omitempty"`
+	NoAdaptive bool `json:"no_adaptive,omitempty"`
+	// Canonical resolved operator memory budget in bytes; zero (omitted) when
+	// no override was set. omitempty for the same fingerprint-compatibility
+	// reason as no_adaptive: checkpoints from releases without the field must
+	// re-fingerprint identically when no override is in play.
+	MemoryBudgetBytes         int64    `json:"memory_budget_bytes,omitempty"`
 	DryRun                    bool     `json:"dry_run"`
 	CheckpointPath            string   `json:"checkpoint_path"`
 	Overwrite                 bool     `json:"overwrite"`
@@ -108,6 +114,7 @@ func transferReflowCheckpointConfigFromEffective(
 	metaCfg reflowMetadataConfig,
 	srcCfg reflowSourceConfig,
 	provCfg provenanceConfig,
+	memoryBudgetBytes int64,
 ) transferReflowCheckpointConfig {
 	sourceURI := ""
 	if len(args) == 1 {
@@ -121,6 +128,7 @@ func transferReflowCheckpointConfigFromEffective(
 		RewriteTo:                 reflowRewriteTo,
 		Parallel:                  reflowParallel,
 		NoAdaptive:                reflowNoAdaptive,
+		MemoryBudgetBytes:         memoryBudgetBytes,
 		DryRun:                    reflowDryRun,
 		CheckpointPath:            checkpointPath,
 		Overwrite:                 reflowOverwrite,
@@ -153,6 +161,17 @@ func transferReflowCheckpointConfigFromEffective(
 		DstEndpoint:               reflowDstEndpoint,
 		DstGCPProject:             reflowDstGCPProject,
 	}
+}
+
+// checkpointMemoryBudgetFlagValue renders the checkpointed canonical budget
+// back into the flag surface: raw bytes (the typed parser accepts them), empty
+// when no override was stored. The restored request re-resolves against the
+// CURRENT host limit, so a lower present-day hard bound may still clamp it.
+func checkpointMemoryBudgetFlagValue(bytes int64) string {
+	if bytes <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(bytes, 10)
 }
 
 func transferReflowCheckpointEligible(cfg transferReflowCheckpointConfig) bool {
@@ -310,6 +329,7 @@ func applyTransferReflowCheckpointConfig(cmd *cobra.Command, cfg transferReflowC
 		{"rewrite-from", cfg.RewriteFrom},
 		{"rewrite-to", cfg.RewriteTo},
 		{"checkpoint", cfg.CheckpointPath},
+		{"memory-budget", checkpointMemoryBudgetFlagValue(cfg.MemoryBudgetBytes)},
 		{"on-collision", cfg.OnCollision},
 		{"collision-quarantine-prefix", cfg.CollisionQuarantinePrefix},
 		{"provenance", cfg.Provenance},

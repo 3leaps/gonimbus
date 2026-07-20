@@ -109,6 +109,7 @@ var (
 	reflowRewriteTo           string
 	reflowParallel            int
 	reflowNoAdaptive          bool
+	reflowMemoryBudget        string
 	reflowResourceProbeForRun = reflowpkg.DefaultResourceProbe()
 	reflowDryRun              bool
 	reflowResume              bool
@@ -161,6 +162,7 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowRewriteTo, "rewrite-to", "", "Rewrite destination template (segment renders)")
 	transferReflowCmd.Flags().IntVar(&reflowParallel, "parallel", 16, "Requested concurrent copy ceiling")
 	transferReflowCmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "Disable adaptive concurrency and run fixed at the resource-capped --parallel ceiling")
+	transferReflowCmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "Memory budget governing transfer retry buffering and concurrency sizing — not total process or provider-SDK memory (e.g. 8GiB; min 64MiB, max 4TiB; values above the detected memory limit are clamped to it; omitted: 25% of the detected limit)")
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
 	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume a failed-resumable transfer reflow run by run id")
@@ -196,6 +198,7 @@ func init() {
 	transferReflowCmd.Flags().StringVar(&reflowDstEndpoint, "dest-endpoint", "", "Destination custom S3 endpoint")
 	transferReflowCmd.Flags().StringVar(&reflowDstGCPProject, "dest-gcp-project", "", "Destination GCP project hint for GCS")
 
+	_ = viper.BindPFlag("memory_budget", transferReflowCmd.Flags().Lookup("memory-budget"))
 	_ = viper.BindPFlag("on_collision", transferReflowCmd.Flags().Lookup("on-collision"))
 	_ = viper.BindPFlag("collision_quarantine_prefix", transferReflowCmd.Flags().Lookup("collision-quarantine-prefix"))
 	_ = viper.BindPFlag("provenance.mode", transferReflowCmd.Flags().Lookup("provenance"))
@@ -255,6 +258,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if reflowParallel < 1 {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --parallel value", fmt.Errorf("parallel must be >= 1"))
 	}
+	memoryBudgetBytes, err := resolveReflowMemoryBudgetBytes(cmd)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --memory-budget value", err)
+	}
 	if reflowResume && strings.TrimSpace(reflowCheckpoint) == "" {
 		return exitError(foundry.ExitInvalidArgument, "Invalid --resume usage", fmt.Errorf("--resume requires --checkpoint"))
 	}
@@ -295,7 +302,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		destSpec.GCPProject = strings.TrimSpace(reflowDstGCPProject)
 	}
 	destURI := destSpec.BaseURI
-	concurrencyCfg := reflowpkg.ResolveConcurrency(reflowParallel, !reflowNoAdaptive, reflowResourceProbeForRun)
+	concurrencyCfg := reflowpkg.ResolveConcurrencyWithBudget(reflowParallel, !reflowNoAdaptive, reflowResourceProbeForRun, memoryBudgetBytes)
 	concurrencyLimiter := reflowpkg.NewConcurrencyLimiter(concurrencyCfg)
 
 	metaCfg, err := resolveMetadataConfig(cmd)
@@ -339,7 +346,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if strings.TrimSpace(reflowCheckpoint) != "" {
 		checkpointPath = reflowCheckpoint
 	}
-	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg)
+	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg, memoryBudgetBytes)
 
 	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {
@@ -412,6 +419,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		return exitError(foundry.ExitFileWriteError, "Failed to write IfAbsent fallback warning", err)
 	}
 
+	concurrencyLimiter.ResetOccupancyWindow()
 	_ = w.WriteAny(ctx, reflowpkg.RunRecordType, reflowpkg.RunRecord{
 		DestURI:          destURI,
 		CheckpointPath:   checkpointPath,
@@ -498,22 +506,32 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		_ = w.WriteAny(ctx, reflowpkg.RecordType, rec)
 	}
 	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions) (int64, error) {
+		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
+		if err != nil {
+			return 0, err
+		}
+		defer releaseMem()
 		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, err
 		}
 		defer release()
-		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, opts)
+		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), opts)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, err
 	}
 	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
+		if err != nil {
+			return 0, provider.PutResult{}, err
+		}
+		defer releaseMem()
 		release, err := concurrencyLimiter.Acquire(ctx)
 		if err != nil {
 			return 0, provider.PutResult{}, err
 		}
 		defer release()
-		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.DefaultRetryBufferMaxMemoryBytes, precond, opts)
+		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), precond, opts)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, result, err
 	}
