@@ -40,6 +40,22 @@ type ParsedReflowOutput struct {
 	SummaryFinal     int
 	SummaryAdaptive  bool
 
+	// Memory resolution as the product reported it. Run and summary derive from
+	// the same resolved config, so disagreement is a hard failure. Values stay
+	// aggregate (bytes and source labels) — no host identity is retained.
+	RunMemoryLimitSource       string
+	SummaryMemoryLimitSource   string
+	RunMemoryBudgetSource      string
+	SummaryMemoryBudgetSource  string
+	MemoryLimitBytes           int64
+	MemoryLimitSource          string
+	MemoryBudgetEffectiveBytes int64
+	MemoryBudgetSource         string
+	RetryBufferCapBytes        int64
+	// SummaryTimeAvgActive is the completed-run occupancy diagnostic. The run
+	// record's startup sample is always zero by contract and is not retained.
+	SummaryTimeAvgActive float64
+
 	// Consensus fields after agreement check (filled by Finalize).
 	Requested       int
 	Effective       int
@@ -122,6 +138,11 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.ThrottleBackoffs = rr.ConcurrencyThrottleBackoffs
 			out.AdditiveIncreases = rr.ConcurrencyAdditiveIncreases
 			out.ConnectionFreezes = rr.ConcurrencyConnectionErrorFreezes
+			out.RunMemoryLimitSource = rr.MemoryLimitSource
+			out.RunMemoryBudgetSource = rr.MemoryBudgetSource
+			out.MemoryLimitBytes = rr.MemoryLimitBytes
+			out.MemoryBudgetEffectiveBytes = rr.MemoryBudgetEffectiveBytes
+			out.RetryBufferCapBytes = rr.RetryBufferCapBytes
 		case reflow.SummaryRecordType:
 			out.SummaryCount++
 			var sr reflow.SummaryRecord
@@ -134,6 +155,9 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.SummaryMaxActive = sr.ConcurrencyMaxActive
 			out.SummaryFinal = sr.ConcurrencyFinal
 			out.SummaryAdaptive = sr.AdaptiveEnabled
+			out.SummaryMemoryLimitSource = sr.MemoryLimitSource
+			out.SummaryMemoryBudgetSource = sr.MemoryBudgetSource
+			out.SummaryTimeAvgActive = sr.ConcurrencyTimeAvgActive
 			out.InvalidInputs = sr.InvalidInputs
 			out.SummaryErrors = sr.Errors
 			if sr.Statuses != nil {
@@ -266,6 +290,17 @@ func (p *ParsedReflowOutput) agreeRunSummary() error {
 	if p.RunAdaptive != p.SummaryAdaptive {
 		return fmt.Errorf("run/summary adaptive mismatch: %v vs %v", p.RunAdaptive, p.SummaryAdaptive)
 	}
+	// Memory resolution is fixed at startup, so both records must report the
+	// same provenance. A divergence means the run did not execute under the
+	// configuration it published.
+	if p.RunMemoryLimitSource != p.SummaryMemoryLimitSource {
+		return fmt.Errorf("run/summary memory_limit_source mismatch: %q vs %q", p.RunMemoryLimitSource, p.SummaryMemoryLimitSource)
+	}
+	if p.RunMemoryBudgetSource != p.SummaryMemoryBudgetSource {
+		return fmt.Errorf("run/summary memory_budget_source mismatch: %q vs %q", p.RunMemoryBudgetSource, p.SummaryMemoryBudgetSource)
+	}
+	p.MemoryLimitSource = p.RunMemoryLimitSource
+	p.MemoryBudgetSource = p.RunMemoryBudgetSource
 	// max_active is a progressive peak: run may still be 0 when emitted at start;
 	// summary holds the authoritative peak. Require summary >= run.
 	if p.SummaryMaxActive < p.RunMaxActive {

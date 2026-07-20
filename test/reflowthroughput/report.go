@@ -59,11 +59,23 @@ type PointReport struct {
 	AdaptiveMode    string `json:"adaptive_mode,omitempty"`
 	GOMEMLIMITSet   bool   `json:"gomemlimit_set"`
 	GOMEMLIMITValue string `json:"gomemlimit_value,omitempty"`
+	// MemoryBudgetRequested is the operator --memory-budget passed to the child
+	// (empty when the arm let the product derive the budget).
+	MemoryBudgetRequested string `json:"memory_budget_requested,omitempty"`
 	// MemoryLimitSource is product memory-limit provenance when reflow ran; omit for probe_drain.
 	MemoryLimitSource string `json:"memory_limit_source,omitempty"`
-	// MemoryEnvelope labels checkpoint dual-envelope arms: clamped|raised|"" .
-	MemoryEnvelope  string `json:"memory_envelope,omitempty"`
-	CheckpointClass string `json:"checkpoint_class,omitempty"`
+	// MemoryBudgetSource is product budget provenance: derived|operator|operator_clamped_to_limit.
+	MemoryBudgetSource string `json:"memory_budget_source,omitempty"`
+	// Resolved memory arithmetic as the product reported it (aggregate bytes only).
+	MemoryLimitBytes           int64 `json:"memory_limit_bytes,omitempty"`
+	MemoryBudgetEffectiveBytes int64 `json:"memory_budget_effective_bytes,omitempty"`
+	RetryBufferCapBytes        int64 `json:"retry_buffer_cap_bytes,omitempty"`
+	// MemoryEnvelope names which lever bound this arm's memory:
+	// gomemlimit_constrained | probe_bound | operator_budget | "".
+	MemoryEnvelope string `json:"memory_envelope,omitempty"`
+	// ConcurrencyTimeAvgActive is the completed-run occupancy diagnostic.
+	ConcurrencyTimeAvgActive float64 `json:"concurrency_time_avg_active,omitempty"`
+	CheckpointClass          string  `json:"checkpoint_class,omitempty"`
 
 	// Product reflow concurrency telemetry (omit when not applicable).
 	ConcurrencyRequested *int    `json:"concurrency_ceiling_requested,omitempty"`
@@ -183,12 +195,51 @@ func ValidateReportEnvelope(r Report) error {
 			if p.MemoryLimitSource != "" {
 				return fmt.Errorf("point %d: probe_drain must omit memory_limit_source", i)
 			}
+			if p.MemoryBudgetSource != "" || p.MemoryBudgetEffectiveBytes != 0 || p.RetryBufferCapBytes != 0 || p.MemoryLimitBytes != 0 {
+				return fmt.Errorf("point %d: probe_drain must omit memory resolution fields", i)
+			}
+			if p.MemoryEnvelope != "" || p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: probe_drain must omit memory envelope fields", i)
+			}
 			if p.HonestyOK != nil {
 				return fmt.Errorf("point %d: probe_drain must omit honesty_ok (not applicable)", i)
 			}
 			if p.Parallel != 0 {
 				return fmt.Errorf("point %d: probe_drain must omit reflow_parallel_requested", i)
 			}
+			continue
+		}
+		// An arm label must match what the point actually ran under, so a
+		// report can never describe an envelope the child was not given.
+		switch p.MemoryEnvelope {
+		case MemoryArmGOMEMLIMIT:
+			if !p.GOMEMLIMITSet {
+				return fmt.Errorf("point %d: envelope %s but no GOMEMLIMIT was set", i, p.MemoryEnvelope)
+			}
+			if p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: envelope %s must not also set a memory budget", i, p.MemoryEnvelope)
+			}
+		case MemoryArmProbeBound:
+			if p.GOMEMLIMITSet || p.MemoryBudgetRequested != "" {
+				return fmt.Errorf("point %d: envelope %s must run without memory overrides", i, p.MemoryEnvelope)
+			}
+			if p.MemoryBudgetSource != "" && p.MemoryBudgetSource != "derived" {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+			}
+		case MemoryArmOperatorBudget:
+			if p.MemoryBudgetRequested == "" {
+				return fmt.Errorf("point %d: envelope %s but no memory budget was passed", i, p.MemoryEnvelope)
+			}
+			if p.GOMEMLIMITSet {
+				return fmt.Errorf("point %d: envelope %s must not also constrain GOMEMLIMIT", i, p.MemoryEnvelope)
+			}
+			if p.MemoryBudgetSource != "operator" && p.MemoryBudgetSource != "operator_clamped_to_limit" {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+			}
+		case "":
+			// Unlabeled single-arm profiles (smoke, saturation) declare nothing.
+		default:
+			return fmt.Errorf("point %d: unknown memory_envelope %q", i, p.MemoryEnvelope)
 		}
 	}
 	return nil

@@ -353,7 +353,11 @@ MOTO_ENDPOINT ?= http://localhost:$(MOTO_PORT)
 
 # On-demand reflow throughput harness (non-CI). PROFILE defaults to smoke.
 # Known: smoke, reflow-saturation, ceiling-lift, checkpoint, fullpipe-ab, probe-saturation.
-# Optional: GOMEMLIMIT (operator-supplied; required by ceiling-lift), KEEP=1, RUN_ROOT=<dir>
+# Optional: GOMEMLIMIT / CONSTRAINED_GOMEMLIMIT (operator-supplied constraining
+#   envelope — a GOMEMLIMIT binds only when it is the lowest detected candidate),
+#   MEMORY_BUDGET (the --memory-budget arm), KEEP=1, RUN_ROOT=<dir>.
+#   ceiling-lift needs CONSTRAINED_GOMEMLIMIT and MEMORY_BUDGET; checkpoint needs
+#   CONSTRAINED_GOMEMLIMIT. The harness never sets either value itself.
 PROFILE ?= smoke
 PROVIDER ?= file
 test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput harness (PROFILE=smoke by default)
@@ -375,6 +379,8 @@ test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput ha
 	export GONIMBUS_THROUGHPUT_PROVIDER="$(PROVIDER)"; \
 	export GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT="$(TMPFS_CHECKPOINT_ROOT)"; \
 	export GONIMBUS_THROUGHPUT_CEILING_LIFT_GOMEMLIMIT="$(CEILING_LIFT_GOMEMLIMIT)"; \
+	export GONIMBUS_THROUGHPUT_CONSTRAINED_GOMEMLIMIT="$(CONSTRAINED_GOMEMLIMIT)"; \
+	export GONIMBUS_THROUGHPUT_MEMORY_BUDGET="$(MEMORY_BUDGET)"; \
 	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestGenerate|TestTap|TestCheck|TestResolve|TestChild|TestReport|TestParse|TestEnsure|TestLoadBYO|TestCLIProvider' && \
 	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestSmokeProfileEndToEnd|TestHarnessMakeEntry|TestProfile' -v
 
