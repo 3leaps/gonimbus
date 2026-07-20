@@ -4,7 +4,7 @@ name: Quality Assurance
 description: Testing, validation, and quality gate enforcement
 version: 1.0.2
 author: entarch
-status: approved
+status: review
 category: review
 domains:
   - development
@@ -114,7 +114,7 @@ checklists:
     - "Fixture parity validated (happy path + failure fixtures)"
     - "Findings reported with severity and reproduction steps"
     - "Fixtures: container-first, scenario-driven, no PII"
-    - "Every gate ships at least one negative control - a case that must fail it"
+    - "Every gate ships at least one negative control: a case that must fail it"
 examples:
   - type: other
     title: Body capture validation (fulminar)

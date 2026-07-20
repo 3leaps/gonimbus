@@ -4,7 +4,7 @@ name: Development Lead
 description: Architecture, implementation, and code review
 version: 1.0.2
 author: entarch
-status: approved
+status: review
 category: agentic
 domains:
   - development
@@ -86,7 +86,7 @@ checklists:
     - "Sensitive local data: Is repo content compliant with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md?"
     - "Quality gates: Has make check-all passed locally? (missing test: any new lint/type failures)"
     - "Gate integrity: Does each new gate assert on resolved output state rather than requested input, and does a negative-control case prove it fails? (missing test: a mutation that must fail)"
-    - "Public surface altitude: Does the PR body state what changed rather than the prior state or the rationale, with detail left to CHANGELOG?"
+    - "Public surface altitude: Does the PR body describe the change as it stands, without narrating the behavior it replaces or why we made it? User-visible detail belongs in CHANGELOG; rationale and coordination stay out of the repo entirely. (no automated gate: reviewer-enforced)"
 examples:
   - type: commit
     title: Feature implementation
