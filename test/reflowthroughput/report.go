@@ -209,16 +209,18 @@ func ValidateReportEnvelope(r Report) error {
 			}
 			continue
 		}
-		// A labeled arm must match the candidate that actually BOUND the run,
-		// not merely the lever that was passed to it. Under minimum-selection
-		// an operator value can lose to a lower candidate, so validating the
-		// request alone would accept exactly the class of mislabeling that
-		// motivated these arms.
-		if p.MemoryEnvelope != "" {
-			if err := validateResolvedMemoryProvenance(i, p); err != nil {
-				return err
-			}
+		// Baseline integrity, independent of arm semantics: every point that
+		// actually ran a reflow must carry real resolution evidence. This is
+		// separate from the label rules below — an unlabeled singleton profile
+		// declares no envelope, but it still executed under a resolved one.
+		if err := validateResolvedMemoryProvenance(i, p); err != nil {
+			return err
 		}
+		// A labeled arm must additionally match the candidate that actually
+		// BOUND the run, not merely the lever that was passed to it. Under
+		// minimum-selection an operator value can lose to a lower candidate,
+		// so validating the request alone would accept exactly the class of
+		// mislabeling that motivated these arms.
 		switch p.MemoryEnvelope {
 		case MemoryArmGOMEMLIMIT:
 			if !p.GOMEMLIMITSet {
@@ -293,53 +295,100 @@ func recognizedMemoryBudgetSource(s string) bool {
 	return false
 }
 
-// validateResolvedMemoryProvenance fails closed on a labeled arm whose point
-// carries no usable resolution evidence. A placeholder or absent source cannot
-// support any arm claim, so it must not reach a published report.
+// validateResolvedMemoryProvenance fails closed on any executed reflow point
+// that carries no usable resolution evidence. A placeholder or absent source
+// cannot support a report claim of any kind — labeled or not — so it must not
+// reach a published report.
 func validateResolvedMemoryProvenance(i int, p PointReport) error {
+	where := "unlabeled point"
+	if p.MemoryEnvelope != "" {
+		where = "envelope " + p.MemoryEnvelope
+	}
 	if !recognizedMemoryLimitSource(p.MemoryLimitSource) {
-		return fmt.Errorf("point %d: envelope %s has unrecognized memory_limit_source %q", i, p.MemoryEnvelope, p.MemoryLimitSource)
+		return fmt.Errorf("point %d: %s has unrecognized memory_limit_source %q", i, where, p.MemoryLimitSource)
 	}
 	if !recognizedMemoryBudgetSource(p.MemoryBudgetSource) {
-		return fmt.Errorf("point %d: envelope %s has unrecognized memory_budget_source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+		return fmt.Errorf("point %d: %s has unrecognized memory_budget_source %q", i, where, p.MemoryBudgetSource)
 	}
 	if p.MemoryLimitBytes <= 0 || p.MemoryBudgetEffectiveBytes <= 0 || p.RetryBufferCapBytes <= 0 {
-		return fmt.Errorf("point %d: envelope %s has non-positive resolved memory arithmetic (limit=%d budget=%d cap=%d)",
-			i, p.MemoryEnvelope, p.MemoryLimitBytes, p.MemoryBudgetEffectiveBytes, p.RetryBufferCapBytes)
+		return fmt.Errorf("point %d: %s has non-positive resolved memory arithmetic (limit=%d budget=%d cap=%d)",
+			i, where, p.MemoryLimitBytes, p.MemoryBudgetEffectiveBytes, p.RetryBufferCapBytes)
 	}
 	return nil
 }
 
-// ValidateArmMatrix checks that a report contains exactly the arm × parallel ×
-// checkpoint points its profile declares. Per-point validation cannot see a
-// whole arm that went missing, and "a declared arm is never silently dropped"
-// is precisely what these profiles promise.
+// matrixCell identifies one declared sweep point. Counting per-arm totals is
+// not enough: equal totals can hide a duplicated cell standing in for a missing
+// one, so the identity of each cell is what has to be pinned.
+type matrixCell struct {
+	Envelope        string
+	ExecutionShape  string
+	Parallel        int
+	CheckpointClass string
+}
+
+func (c matrixCell) String() string {
+	return fmt.Sprintf("(arm=%s shape=%s parallel=%d checkpoint=%s)", c.Envelope, c.ExecutionShape, c.Parallel, c.CheckpointClass)
+}
+
+// ValidateArmMatrix checks that a report contains exactly the arm × execution
+// shape × parallel × checkpoint cells its profile declares — each one once.
+// Per-point validation cannot see a whole cell that went missing, and "a
+// declared arm is never silently dropped" is precisely what these profiles
+// promise.
 func ValidateArmMatrix(spec ProfileSpec, r Report) error {
 	if len(spec.MemoryArms) == 0 {
+		// Profiles without declared arms are not matrix-constrained: they
+		// legitimately append points the matrix does not describe (occupancy
+		// samples, full-pipe A/B repeats).
 		return nil
+	}
+	if spec.ExecutionShape != "reflow_only" {
+		// A declared-arm profile that repeats points per cell (full-pipe A/B)
+		// would need declared per-cell multiplicity. Refuse rather than
+		// validate it under a rule that does not describe it.
+		return fmt.Errorf("profile %s declares memory arms with execution shape %q; the arm matrix gate covers reflow_only sweeps only", spec.Name, spec.ExecutionShape)
 	}
 	classes := spec.CheckpointClasses
 	if len(classes) == 0 {
 		classes = []string{"disk"}
 	}
-	want := len(spec.ParallelPoints) * len(classes)
-	counts := map[string]int{}
-	for _, p := range r.Points {
+	expected := map[matrixCell]bool{}
+	for _, arm := range spec.MemoryArms {
+		for _, parallel := range spec.ParallelPoints {
+			for _, class := range classes {
+				expected[matrixCell{
+					Envelope:        arm.Label,
+					ExecutionShape:  spec.ExecutionShape,
+					Parallel:        parallel,
+					CheckpointClass: class,
+				}] = false
+			}
+		}
+	}
+	for i, p := range r.Points {
 		if p.ExecutionShape == "probe_drain" {
 			continue
 		}
-		counts[p.MemoryEnvelope]++
-	}
-	for _, arm := range spec.MemoryArms {
-		got := counts[arm.Label]
-		if got != want {
-			return fmt.Errorf("profile %s arm %s has %d points, want %d (%d parallel × %d checkpoint classes)",
-				spec.Name, arm.Label, got, want, len(spec.ParallelPoints), len(classes))
+		cell := matrixCell{
+			Envelope:        p.MemoryEnvelope,
+			ExecutionShape:  p.ExecutionShape,
+			Parallel:        p.Parallel,
+			CheckpointClass: p.CheckpointClass,
 		}
-		delete(counts, arm.Label)
+		seen, declared := expected[cell]
+		if !declared {
+			return fmt.Errorf("profile %s point %d reported undeclared cell %s", spec.Name, i, cell)
+		}
+		if seen {
+			return fmt.Errorf("profile %s point %d duplicates cell %s", spec.Name, i, cell)
+		}
+		expected[cell] = true
 	}
-	for label, got := range counts {
-		return fmt.Errorf("profile %s reported %d points under undeclared arm %q", spec.Name, got, label)
+	for cell, seen := range expected {
+		if !seen {
+			return fmt.Errorf("profile %s is missing declared cell %s", spec.Name, cell)
+		}
 	}
 	return nil
 }

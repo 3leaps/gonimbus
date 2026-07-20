@@ -37,6 +37,12 @@ func TestParseRejectsMemoryTupleMismatch(t *testing.T) {
 		"limit":  memoryRecordsTuple(gib, 256*mib, 16*mib, 2*gib, 256*mib, 16*mib),
 		"budget": memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 128*mib, 16*mib),
 		"cap":    memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 256*mib, 8*mib),
+		// One case per compared numeric field, so the coverage claim is literal.
+		"requested budget": strings.Replace(
+			memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 256*mib, 16*mib),
+			`"memory_budget_effective_bytes":268435456,"memory_budget_source":"derived","retry_buffer_cap_bytes":16777216,"dest_ifabsent_honored"`,
+			`"memory_budget_requested_bytes":134217728,"memory_budget_effective_bytes":268435456,"memory_budget_source":"derived","retry_buffer_cap_bytes":16777216,"dest_ifabsent_honored"`,
+			1),
 	}
 	for name, stdout := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -89,45 +95,180 @@ func TestFullPipeOptsCarryMemoryBudgetToChild(t *testing.T) {
 	}
 }
 
-func TestValidateArmMatrix(t *testing.T) {
-	t.Parallel()
-	spec, err := ResolveProfile(ProfileCeilingLift)
-	if err != nil {
-		t.Fatal(err)
+// completeMatrix renders exactly the cells a profile declares.
+func completeMatrix(spec ProfileSpec) []PointReport {
+	classes := spec.CheckpointClasses
+	if len(classes) == 0 {
+		classes = []string{"disk"}
 	}
-	full := Report{}
+	var out []PointReport
 	for _, arm := range spec.MemoryArms {
-		for range spec.ParallelPoints {
-			full.Points = append(full.Points, PointReport{ExecutionShape: "reflow_only", MemoryEnvelope: arm.Label})
+		for _, parallel := range spec.ParallelPoints {
+			for _, class := range classes {
+				out = append(out, PointReport{
+					ExecutionShape:  spec.ExecutionShape,
+					MemoryEnvelope:  arm.Label,
+					Parallel:        parallel,
+					CheckpointClass: class,
+				})
+			}
 		}
 	}
-	if err := ValidateArmMatrix(spec, full); err != nil {
-		t.Fatalf("complete matrix: %v", err)
+	return out
+}
+
+func TestValidateArmMatrixPinsDeclaredCells(t *testing.T) {
+	t.Parallel()
+	for _, profile := range []string{ProfileCeilingLift, ProfileCheckpoint} {
+		t.Run(profile, func(t *testing.T) {
+			spec, err := ResolveProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			full := completeMatrix(spec)
+			if err := ValidateArmMatrix(spec, Report{Points: full}); err != nil {
+				t.Fatalf("complete matrix: %v", err)
+			}
+
+			clone := func(mutate func([]PointReport) []PointReport) Report {
+				cp := append([]PointReport{}, full...)
+				return Report{Points: mutate(cp)}
+			}
+			// Every mutation below preserves per-arm cardinality, so a
+			// count-only gate accepts all of them.
+			cases := map[string]Report{
+				"duplicate one cell, miss another": clone(func(p []PointReport) []PointReport {
+					p[1] = p[0]
+					return p
+				}),
+				"all points at one parallel": clone(func(p []PointReport) []PointReport {
+					for i := range p {
+						p[i].Parallel = spec.ParallelPoints[0]
+					}
+					return p
+				}),
+				"wrong checkpoint class": clone(func(p []PointReport) []PointReport {
+					for i := range p {
+						p[i].CheckpointClass = "tmpfs-not-declared"
+					}
+					return p
+				}),
+				"wrong execution shape": clone(func(p []PointReport) []PointReport {
+					for i := range p {
+						p[i].ExecutionShape = "full_pipe"
+					}
+					return p
+				}),
+				"undeclared arm": clone(func(p []PointReport) []PointReport {
+					p[0].MemoryEnvelope = "raised"
+					return p
+				}),
+				"missing a whole arm": clone(func(p []PointReport) []PointReport {
+					return p[:len(p)-len(spec.ParallelPoints)]
+				}),
+			}
+			for name, r := range cases {
+				t.Run(name, func(t *testing.T) {
+					if err := ValidateArmMatrix(spec, r); err == nil {
+						t.Fatalf("expected %s to be rejected", name)
+					}
+				})
+			}
+		})
 	}
-	// A whole arm going missing is invisible to per-point validation.
-	dropped := Report{Points: full.Points[:len(full.Points)-len(spec.ParallelPoints)]}
-	if err := ValidateArmMatrix(spec, dropped); err == nil {
-		t.Fatal("expected a dropped arm to be rejected")
-	}
-	dup := Report{Points: append(append([]PointReport{}, full.Points...), PointReport{
-		ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmProbeBound,
-	})}
-	if err := ValidateArmMatrix(spec, dup); err == nil {
-		t.Fatal("expected a duplicated arm to be rejected")
-	}
-	undeclared := Report{Points: append(append([]PointReport{}, full.Points...), PointReport{
-		ExecutionShape: "reflow_only", MemoryEnvelope: "raised",
-	})}
-	if err := ValidateArmMatrix(spec, undeclared); err == nil {
-		t.Fatal("expected an undeclared arm to be rejected")
-	}
-	// Profiles without declared arms are not matrix-constrained.
+
+	// Profiles without declared arms are not matrix-constrained: they
+	// legitimately append points the matrix does not describe.
 	smoke, err := ResolveProfile(ProfileSmoke)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateArmMatrix(smoke, Report{Points: []PointReport{{ExecutionShape: "reflow_only"}}}); err != nil {
 		t.Fatalf("smoke: %v", err)
+	}
+
+	// A declared-arm profile that repeats cells by design is refused rather
+	// than validated under a rule that does not describe it.
+	fullPipeWithArms, err := ResolveProfile(ProfileFullPipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullPipeWithArms.MemoryArms = []MemoryArm{{Label: MemoryArmProbeBound}}
+	if err := ValidateArmMatrix(fullPipeWithArms, Report{}); err == nil {
+		t.Fatal("expected a declared-arm full-pipe profile to be refused")
+	}
+}
+
+// Baseline provenance integrity applies to unlabeled singleton points too:
+// they declare no envelope, but they still executed under a resolved one.
+func TestValidateReportRejectsUnlabeledPlaceholderProvenance(t *testing.T) {
+	t.Parallel()
+	valid := func() PointReport {
+		p := resolvedPoint("")
+		p.Parallel = 2
+		p.CheckpointClass = "disk"
+		return p
+	}
+	cases := map[string]PointReport{
+		"placeholder limit source": func() PointReport {
+			p := valid()
+			p.MemoryLimitSource = "unknown/not_reported"
+			return p
+		}(),
+		"absent limit source": func() PointReport {
+			p := valid()
+			p.MemoryLimitSource = ""
+			return p
+		}(),
+		"unrecognized limit source": func() PointReport {
+			p := valid()
+			p.MemoryLimitSource = "invented"
+			return p
+		}(),
+		"absent budget source": func() PointReport {
+			p := valid()
+			p.MemoryBudgetSource = ""
+			return p
+		}(),
+		"zero limit bytes": func() PointReport {
+			p := valid()
+			p.MemoryLimitBytes = 0
+			return p
+		}(),
+		"zero effective budget": func() PointReport {
+			p := valid()
+			p.MemoryBudgetEffectiveBytes = 0
+			return p
+		}(),
+		"zero retry cap": func() PointReport {
+			p := valid()
+			p.RetryBufferCapBytes = 0
+			return p
+		}(),
+	}
+	for name, p := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateReportEnvelope(reportWith(p)); err == nil {
+				t.Fatalf("expected %s to be rejected on an unlabeled point", name)
+			}
+		})
+	}
+
+	// Valid unlabeled shapes stay accepted, including an honored operator
+	// budget supplied to a profile with no declared arms.
+	operator := valid()
+	operator.MemoryBudgetRequested = "128MiB"
+	operator.MemoryBudgetSource = memoryBudgetSourceOperator
+	for _, p := range []PointReport{valid(), operator} {
+		if err := ValidateReportEnvelope(reportWith(p)); err != nil {
+			t.Fatalf("valid unlabeled point (budget source %s): %v", p.MemoryBudgetSource, err)
+		}
+	}
+
+	// probe_drain stays exempt: it runs no reflow, so it carries none of
+	// these fields and must not be held to them.
+	if err := ValidateReportEnvelope(reportWith(PointReport{ExecutionShape: "probe_drain", ProbeConcurrency: 4})); err != nil {
+		t.Fatalf("probe_drain exemption: %v", err)
 	}
 }
 

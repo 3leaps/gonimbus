@@ -576,12 +576,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if shape != "probe_drain" {
 			pt.Parallel = parallel
 			pt.CheckpointClass = ckClass
-			// Memory provenance as the product reported it; the placeholder
-			// remains only when a run somehow published no source label.
+			// Memory provenance exactly as the product reported it. A missing
+			// source is a failure the report validator must catch, not
+			// something to paper over with a placeholder label.
 			pt.MemoryLimitSource = parsed.MemoryLimitSource
-			if pt.MemoryLimitSource == "" {
-				pt.MemoryLimitSource = "unknown/not_reported"
-			}
 			pt.MemoryBudgetSource = parsed.MemoryBudgetSource
 			pt.MemoryLimitBytes = parsed.MemoryLimitBytes
 			pt.MemoryBudgetEffectiveBytes = parsed.MemoryBudgetEffectiveBytes
