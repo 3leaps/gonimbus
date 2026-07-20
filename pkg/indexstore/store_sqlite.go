@@ -46,7 +46,7 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping index store: %w", err)
 	}
 
-	if err := configureLocalSQLite(ctx, db, dsn); err != nil {
+	if err := configureLocalSQLite(ctx, db, dsn, cfg.SynchronousFull); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

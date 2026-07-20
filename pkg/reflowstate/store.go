@@ -24,8 +24,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, fmt.Errorf("reflow state path is required")
 	}
-	// Reuse indexstore's local SQLite configuration (WAL, busy_timeout, single conn).
-	db, err := indexstore.Open(ctx, indexstore.Config{Path: cfg.Path})
+	// Reuse indexstore's local SQLite configuration (WAL, busy_timeout, single
+	// conn). The reflow checkpoint store is the resume authority, so its
+	// terminal-state durability is asserted with synchronous=FULL rather than
+	// inherited from the driver default.
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: cfg.Path, SynchronousFull: true})
 	if err != nil {
 		return nil, err
 	}

@@ -22,6 +22,13 @@ type Config struct {
 
 	// AuthToken is appended to URL-based DSNs as authToken=... when not already present.
 	AuthToken string
+
+	// SynchronousFull requests PRAGMA synchronous=FULL on the local connection,
+	// set and verified rather than inherited from the driver default. It is used
+	// by durability-authoritative stores (the reflow checkpoint store) whose
+	// terminal state is the resume authority; leave it false for rebuildable
+	// stores (index builds) that tolerate the driver default under WAL.
+	SynchronousFull bool
 }
 
 // OpenLocalReadOnly opens an existing local SQLite database without creating
@@ -288,14 +295,22 @@ func extractFilePath(dsn string) (string, error) {
 	return strings.TrimPrefix(parsed.Opaque, "//"), nil
 }
 
-func configureLocalSQLite(ctx context.Context, db *sql.DB, dsn string) error {
+// sqliteSynchronousFull is the numeric PRAGMA synchronous value for FULL.
+const sqliteSynchronousFull = 2
+
+func configureLocalSQLite(ctx context.Context, db *sql.DB, dsn string, synchronousFull bool) error {
 	if db == nil {
 		return errors.New("store connection is nil")
 	}
-	if dsn == ":memory:" {
-		return nil
-	}
-	if !strings.HasPrefix(dsn, "file:") {
+	if dsn == ":memory:" || !strings.HasPrefix(dsn, "file:") {
+		// A non-local target (in-memory or a remote/URL DSN) cannot carry the
+		// local WAL+FULL guarantee. A rebuildable store tolerates that and is
+		// left as-is; a durability-authoritative store must fail closed rather
+		// than silently claim a guarantee it did not receive. The DSN is not
+		// echoed — URL DSNs may carry an auth token.
+		if synchronousFull {
+			return errors.New("synchronous=FULL durability requires a local file: SQLite target")
+		}
 		return nil
 	}
 
@@ -315,6 +330,30 @@ func configureLocalSQLite(ctx context.Context, db *sql.DB, dsn string) error {
 		return fmt.Errorf("enable WAL mode: %w", err)
 	}
 
+	if !synchronousFull {
+		return nil
+	}
+
+	// Durability-authoritative store: set synchronous=FULL and verify the
+	// resolved durability configuration rather than trusting the driver
+	// default. synchronous is connection-local; the single held connection
+	// (SetMaxOpenConns(1)) carries it, and reopen re-runs this verification.
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+		return fmt.Errorf("set synchronous=FULL: %w", err)
+	}
+	var syncLevel int
+	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&syncLevel); err != nil {
+		return fmt.Errorf("read synchronous: %w", err)
+	}
+	if syncLevel != sqliteSynchronousFull {
+		return fmt.Errorf("synchronous not FULL after set: got %d, want %d", syncLevel, sqliteSynchronousFull)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("journal_mode not WAL after set: got %q", journalMode)
+	}
+	if busyTimeout != 5000 {
+		return fmt.Errorf("busy_timeout not 5000 after set: got %d", busyTimeout)
+	}
 	return nil
 }
 
