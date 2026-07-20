@@ -3,6 +3,7 @@ package reflowstate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,7 +14,8 @@ import (
 const schemaVersion = 1
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	writer *coordinator
 }
 
 type Config struct {
@@ -21,20 +23,41 @@ type Config struct {
 }
 
 func Open(ctx context.Context, cfg Config) (*Store, error) {
+	return openStore(ctx, cfg, nil)
+}
+
+// openStore opens the checkpoint store and starts its write coordinator. The
+// configure hook, when non-nil, runs against the coordinator before its writer
+// goroutine starts; it exists so in-package tests can inject a deterministic
+// writer failure without racing the goroutine.
+func openStore(ctx context.Context, cfg Config, configure func(*coordinator)) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, fmt.Errorf("reflow state path is required")
 	}
 	// Reuse indexstore's local SQLite configuration (WAL, busy_timeout, single
 	// conn). The reflow checkpoint store is the resume authority, so its
 	// terminal-state durability is asserted with synchronous=FULL rather than
-	// inherited from the driver default.
+	// inherited from the driver default. SynchronousFull also makes Open fail
+	// closed on a target that cannot carry local WAL+FULL.
 	db, err := indexstore.Open(ctx, indexstore.Config{Path: cfg.Path, SynchronousFull: true})
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Store{db: db}
+	// Bounded pre-coordinator setup phase: schema DDL runs on the single pooled
+	// connection before the writer pins it as the sole mutation authority. After
+	// the coordinator starts, no mutation may bypass it via s.db.
 	if err := s.ensureSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	s.writer = newCoordinator(db)
+	if configure != nil {
+		configure(s.writer)
+	}
+	if err := s.writer.start(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -42,10 +65,16 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	if s.writer != nil {
+		return s.writer.close()
+	}
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
 }
 
 func (s *Store) ensureSchema(ctx context.Context) error {
@@ -136,12 +165,11 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Store) SetSourceMetadata(ctx context.Context, provider, bucket, root, sourceURI string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		UPDATE reflow_meta
 		SET source_provider = ?, source_bucket = ?, source_root = ?, source_uri = ?
 		WHERE id = 1
 	`, provider, bucket, root, sourceURI)
-	return err
 }
 
 func (s *Store) SetOperationCheckpointIdentity(ctx context.Context, operation, fingerprint string) error {
@@ -151,21 +179,22 @@ func (s *Store) SetOperationCheckpointIdentity(ctx context.Context, operation, f
 	if strings.TrimSpace(fingerprint) == "" {
 		return fmt.Errorf("config fingerprint is required")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		UPDATE reflow_meta
 		SET opcheckpoint_operation = ?, opcheckpoint_config_fingerprint = ?
 		WHERE id = 1
 	`, operation, fingerprint)
-	return err
 }
 
 func (s *Store) OperationCheckpointFingerprint(ctx context.Context, operation string) (string, error) {
 	var gotOperation, fingerprint string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(opcheckpoint_operation, ''), COALESCE(opcheckpoint_config_fingerprint, '')
-		FROM reflow_meta
-		WHERE id = 1
-	`).Scan(&gotOperation, &fingerprint)
+	err := s.writer.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `
+			SELECT COALESCE(opcheckpoint_operation, ''), COALESCE(opcheckpoint_config_fingerprint, '')
+			FROM reflow_meta
+			WHERE id = 1
+		`).Scan(&gotOperation, &fingerprint)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -177,9 +206,11 @@ func (s *Store) OperationCheckpointFingerprint(ctx context.Context, operation st
 
 func (s *Store) ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error) {
 	var status string
-	err := s.db.QueryRowContext(ctx, `SELECT status FROM reflow_items WHERE source_uri = ? AND dest_uri = ?`, sourceURI, destURI).Scan(&status)
+	err := s.writer.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT status FROM reflow_items WHERE source_uri = ? AND dest_uri = ?`, sourceURI, destURI).Scan(&status)
+	})
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, "", nil
 		}
 		return false, "", err
@@ -211,7 +242,7 @@ func (s *Store) UpsertItem(ctx context.Context, p UpsertItemParams) error {
 	if p.UpdatedAtRFC33 == "" {
 		p.UpdatedAtRFC33 = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		INSERT INTO reflow_items (
 			source_uri, dest_uri, source_key, dest_key, source_etag, source_size_bytes, status, bytes, reason, error_code, error_message, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -229,12 +260,11 @@ func (s *Store) UpsertItem(ctx context.Context, p UpsertItemParams) error {
 	`,
 		p.SourceURI, p.DestURI, p.SourceKey, p.DestKey, p.SourceETag, p.SourceSize, p.Status, p.Bytes, p.Reason, p.ErrorCode, p.ErrorMessage, p.UpdatedAtRFC33,
 	)
-	return err
 }
 
 func (s *Store) NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		INSERT INTO reflow_dest_key_sources (dest_key, source_uri, source_etag, source_size_bytes, first_seen_at, last_seen_at, seen_count)
 		VALUES (?, ?, ?, ?, ?, ?, 1)
 		ON CONFLICT(dest_key, source_uri) DO UPDATE SET
@@ -243,14 +273,15 @@ func (s *Store) NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourc
 			last_seen_at=excluded.last_seen_at,
 			seen_count=reflow_dest_key_sources.seen_count + 1
 	`, destKey, sourceURI, sourceETag, sourceSize, now, now)
-	return err
 }
 
 func (s *Store) DestKeyObserved(ctx context.Context, destKey string) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM reflow_dest_keys WHERE dest_key = ?`, destKey).Scan(&exists)
+	err := s.writer.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT 1 FROM reflow_dest_keys WHERE dest_key = ?`, destKey).Scan(&exists)
+	})
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
@@ -260,14 +291,13 @@ func (s *Store) DestKeyObserved(ctx context.Context, destKey string) (bool, erro
 
 func (s *Store) MarkDestKeyObserved(ctx context.Context, destKey string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		INSERT INTO reflow_dest_keys (dest_key, first_observed_at, last_observed_at, observed_count)
 		VALUES (?, ?, ?, 1)
 		ON CONFLICT(dest_key) DO UPDATE SET
 			last_observed_at=excluded.last_observed_at,
 			observed_count=reflow_dest_keys.observed_count + 1
 	`, destKey, now, now)
-	return err
 }
 
 type CollisionKind string
@@ -280,9 +310,8 @@ const (
 
 func (s *Store) NoteCollision(ctx context.Context, destKey string, kind CollisionKind, sourceURI, sourceETag string, sourceSize int64, destETag string, destSize int64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `
+	return s.writer.exec(ctx, `
 		INSERT INTO reflow_collisions (dest_key, kind, source_uri, source_etag, source_size_bytes, dest_etag, dest_size_bytes, noted_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, destKey, string(kind), sourceURI, sourceETag, sourceSize, destETag, destSize, now)
-	return err
 }

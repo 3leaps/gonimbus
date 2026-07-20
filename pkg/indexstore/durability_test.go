@@ -80,6 +80,65 @@ func TestSynchronousFullRejectsInMemoryTarget(t *testing.T) {
 	}
 }
 
+// TestConfigureDurableConnDrivesConnToFull proves the pinned-writer durability
+// helper is load-bearing rather than incidentally satisfied by the pool's
+// earlier configuration: it degrades a connection to synchronous=NORMAL and
+// requires ConfigureDurableConn to resolve and verify FULL on that exact
+// connection. A no-op helper would leave the connection at NORMAL and fail here,
+// which is the negative control the reflow writer's FULL-on-writer-conn claim
+// otherwise lacks (the pool's single connection is already FULL, so a wiring
+// test alone cannot gate this function).
+func TestConfigureDurableConnDrivesConnToFull(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "durable-conn.db")
+	// Open WITHOUT SynchronousFull so the pool does not pre-set FULL; the helper
+	// under test must be the only thing that brings the connection to FULL.
+	db, err := Open(ctx, Config{Path: path})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin connection: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Degrade to NORMAL and confirm the mutation took, so the post-assertion is
+	// gating ConfigureDurableConn and not a pre-existing FULL default.
+	if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); err != nil {
+		t.Fatalf("degrade synchronous: %v", err)
+	}
+	var before int
+	if err := conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&before); err != nil {
+		t.Fatalf("read synchronous before: %v", err)
+	}
+	if before == sqliteSynchronousFull {
+		t.Fatal("precondition failed: connection already FULL before ConfigureDurableConn; negative control cannot gate")
+	}
+
+	if err := ConfigureDurableConn(ctx, conn); err != nil {
+		t.Fatalf("ConfigureDurableConn: %v", err)
+	}
+
+	var after int
+	if err := conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&after); err != nil {
+		t.Fatalf("read synchronous after: %v", err)
+	}
+	if after != sqliteSynchronousFull {
+		t.Fatalf("synchronous = %d after ConfigureDurableConn, want %d (FULL): helper is not load-bearing", after, sqliteSynchronousFull)
+	}
+}
+
+// TestConfigureDurableConnRejectsNilConn is the nil-guard negative control for
+// the pinned-writer durability helper.
+func TestConfigureDurableConnRejectsNilConn(t *testing.T) {
+	if err := ConfigureDurableConn(context.Background(), nil); err == nil {
+		t.Fatal("ConfigureDurableConn(nil) succeeded; want error")
+	}
+}
+
 // TestConfigureLocalSQLiteRejectsNonFileDSN is a negative control at the
 // configuration boundary: SynchronousFull on a non-file (URL/remote) DSN must
 // fail closed, while a rebuildable store on the same DSN stays permissive.

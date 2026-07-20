@@ -377,6 +377,63 @@ func configureLocalSQLiteConn(ctx context.Context, conn *sql.Conn, dsn string) e
 	return nil
 }
 
+// ConfigureDurableConn asserts the local durability configuration on a specific
+// pinned connection: WAL journal mode, busy_timeout, and synchronous=FULL, with
+// the resolved synchronous level verified rather than inherited from the driver
+// default. A durability-authoritative store that pins one *sql.Conn as its sole
+// mutation authority calls this so the connection-local FULL guarantee holds on
+// the exact connection that performs its write transactions. synchronous and
+// busy_timeout are connection-local; journal_mode is database-global but is
+// reasserted here so the pinned writer verifies the full configuration itself.
+//
+// The caller is responsible for having opened a local file: target: this
+// function verifies the resolved PRAGMA values and returns an error if the
+// connection cannot carry WAL+FULL, so a non-local connection fails closed.
+//
+// This is not redundant with the pool-level configuration done at Open, even
+// though the reflow store keeps SetMaxOpenConns(1): synchronous and busy_timeout
+// are per-connection, not persisted in the database file, so a connection the
+// pool opens or reopens (for example after the prior physical connection is
+// dropped) starts at the driver default. A durability-authoritative writer that
+// pins one connection must therefore assert and verify the setting on that exact
+// connection rather than trust that the pool handed back the one Open configured.
+func ConfigureDurableConn(ctx context.Context, conn *sql.Conn) error {
+	if conn == nil {
+		return errors.New("store connection is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("set busy timeout: %w", err)
+	}
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		return fmt.Errorf("enable WAL mode: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+		return fmt.Errorf("set synchronous=FULL: %w", err)
+	}
+	var syncLevel int
+	if err := conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&syncLevel); err != nil {
+		return fmt.Errorf("read synchronous: %w", err)
+	}
+	if syncLevel != sqliteSynchronousFull {
+		return fmt.Errorf("synchronous not FULL after set: got %d, want %d", syncLevel, sqliteSynchronousFull)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("journal_mode not WAL after set: got %q", journalMode)
+	}
+	if busyTimeout != 5000 {
+		return fmt.Errorf("busy_timeout not 5000 after set: got %d", busyTimeout)
+	}
+	return nil
+}
+
 func ensureStoreDir(path string) error {
 	if strings.TrimSpace(path) == "" || path == ":memory:" {
 		return nil
