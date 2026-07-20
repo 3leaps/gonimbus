@@ -34,6 +34,35 @@ changes.
   concurrency remain separate fields. Requested is reported as operator
   intent; both paths execute under, and truthfully report, the normalized
   effective ceiling and the observed maximum.
+- **`--memory-budget` for transfer reflow** (config key `memory_budget`,
+  declared in the config schema). States the memory governing transfer retry
+  buffering and concurrency sizing — not total process memory — as a size
+  string (e.g. `8GiB`). Bounded to 64 MiB–4 TiB with invalid values refused
+  before any provider construction or destination mutation; budgets above the
+  detected memory limit are clamped to it and recorded as
+  `operator_clamped_to_limit`; when detection is unavailable the operator value
+  is authoritative. The resolved budget persists across `--resume` and
+  `--resume-run`.
+- **Memory admission ledger.** Copy buffer bytes are reserved from the
+  effective budget before the concurrency token and before any provider action,
+  using the allocator's arithmetic (known size reserves
+  `min(size, retry_buffer_cap)`; unknown size reserves the cap). Admission is
+  FIFO with no head-of-line starvation, cancellable, and released exactly once
+  on every terminal path. New pressure fields `memory_reserved_peak_bytes`,
+  `memory_reservation_waits`, and `memory_reservation_wait_ms` report where a
+  run waited on admission; the effective ceiling remains the conservative
+  startup arithmetic (`budget ÷ retry_buffer_cap`) and is not raised by
+  observed pressure.
+- **Memory resolution fields in run and summary records.**
+  `memory_limit_bytes`, `memory_limit_source`, `memory_budget_requested_bytes`,
+  `memory_budget_effective_bytes`, `memory_budget_source`, and
+  `retry_buffer_cap_bytes` record the arithmetic behind a memory-derived
+  ceiling. Fields are omitted when the ceiling was not memory-resolved.
+- **Time-averaged occupancy.** `concurrency_time_avg_active` reports
+  limiter-active provider-operation-seconds over the run's execution window.
+  Both execution paths reset the window immediately before emitting the run
+  record, so setup and preflight are excluded identically; the run record's
+  startup sample is `0` and the summary value is the completed-run diagnostic.
 
 ### Changed
 
@@ -53,6 +82,22 @@ changes.
   CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
   their historical warn-and-continue terminal behavior until they migrate to
   the engine.
+- **The memory limit binds to the lowest detected candidate.** Container/cgroup
+  limit, explicit runtime limit (`GOMEMLIMIT`), and detected physical RAM are
+  all probed and the lowest positive value binds, with its source recorded — an
+  explicit runtime limit may tighten the bound but never authorizes exceeding a
+  lower known one. Physical-RAM detection is new (macOS `sysctl`, Linux
+  `meminfo`, Windows `GlobalMemoryStatusEx`); previously an undetected
+  container limit fell through to a runtime-or-default resolution that could
+  not see host memory at all. The fallback source label is now
+  `detection_unavailable` (was `conservative_default`), and it still resolves
+  to the conservative default rather than assuming host capacity.
+- **The per-copy retry-buffer cap shrinks to the memory budget** instead of the
+  budget being raised to the 16 MiB retry-buffer floor. On hosts whose detected
+  limit is below that floor, the run no longer admits buffering above the
+  limit; objects larger than the resolved cap spool rather than buffer. The
+  resolved cap is reported as `retry_buffer_cap_bytes` and shared by the
+  records and the copy-path allocator.
 
 ### Known limits (stated, not claimed)
 
@@ -60,6 +105,11 @@ changes.
   work; hard process-kill crash windows and concurrent multi-process runs
   sharing one checkpoint root are not claimed (run one transfer per checkpoint
   at a time).
+- On Windows the file-descriptor probe leaves no usable headroom, so the FD cap
+  binds at 1 and serializes copies regardless of `--parallel` or the memory
+  budget. The clamp is reported truthfully (`resource_capped:fd`); a
+  Windows-representative descriptor probe is tracked for the next
+  transfer-concurrency slice.
 
 ## [0.4.1] - 2026-07-18
 
