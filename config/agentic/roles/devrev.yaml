@@ -2,7 +2,7 @@
 slug: devrev
 name: Development Reviewer
 description: Code review, bug finding, and four-eyes audit
-version: 1.0.1
+version: 1.0.2
 author: entarch
 status: approved
 category: review
@@ -123,3 +123,4 @@ checklists:
     - "Fixture parity: Are canonical fixture cases wired and passing? (missing test: fixture case not yet implemented)"
     - "Deferred scope handling: Are out-of-phase features explicitly and canonically rejected? (missing test: explicit rejection assertions)"
     - "Sensitive local data: Is repo content compliant with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md?"
+    - "Gate integrity: Could this gate pass against a mutated build? Are exemptions declared in the contract rather than coded as skips?"

@@ -2,7 +2,7 @@
 slug: devlead
 name: Development Lead
 description: Architecture, implementation, and code review
-version: 1.0.1
+version: 1.0.2
 author: entarch
 status: approved
 category: agentic
@@ -85,6 +85,8 @@ checklists:
     - "Ecosystem parity: Does behavior align with gofulmen conventions? (missing test: ecosystem equivalence)"
     - "Sensitive local data: Is repo content compliant with ADR-0005 and https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md?"
     - "Quality gates: Has make check-all passed locally? (missing test: any new lint/type failures)"
+    - "Gate integrity: Does each new gate assert on resolved output state rather than requested input, and does a negative-control case prove it fails? (missing test: a mutation that must fail)"
+    - "Public surface altitude: Does the PR body state what changed rather than the prior state or the rationale, with detail left to CHANGELOG?"
 examples:
   - type: commit
     title: Feature implementation
