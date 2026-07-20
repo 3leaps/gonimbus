@@ -40,11 +40,14 @@ func newMemoryLedger(capacityBytes int64) *memoryLedger {
 }
 
 // copyReservationBytes is the allocator-identical reservation arithmetic: a
-// known size reserves min(size, retryBufferCap) — exactly what the retry body
-// may hold in memory (larger bodies spool) — and an unknown size reserves the
-// conservative maximum.
+// known positive size reserves min(size, retryBufferCap) — exactly what the
+// retry body may hold in memory (larger bodies spool) — and any non-positive
+// size reserves the conservative maximum. The transfer contract treats a
+// non-positive expected size as optional/absent (omitted JSON sizes decode to
+// zero), so zero must never be inferred as a known empty object: a later Get
+// can still produce a real body that the allocator buffers.
 func copyReservationBytes(sourceSize, retryBufferCap int64) int64 {
-	if sourceSize < 0 || sourceSize > retryBufferCap {
+	if sourceSize <= 0 || sourceSize > retryBufferCap {
 		return retryBufferCap
 	}
 	return sourceSize
@@ -91,6 +94,10 @@ func (l *memoryLedger) Reserve(ctx context.Context, bytes int64) (func(), error)
 					break
 				}
 			}
+			// Removing a queued waiter can make followers admissible — a
+			// cancelled 2MiB head must not leave a now-fitting 1MiB follower
+			// asleep until an unrelated release.
+			l.drainLocked()
 		}
 		l.mu.Unlock()
 		if granted {

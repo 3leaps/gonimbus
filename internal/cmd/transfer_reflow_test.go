@@ -4906,3 +4906,67 @@ func TestTransferReflowResumeRunRestoresMemoryBudget(t *testing.T) {
 	require.Contains(t, string(run.Data), `"memory_budget_source":"operator"`)
 	require.FileExists(t, filepath.Join(destDir, "a.txt"))
 }
+
+// headFailingSourceProvider embeds the concrete memory provider so every
+// optional capability (GetObject, metadata) stays promoted; only Head fails.
+type headFailingSourceProvider struct {
+	*reflowMemoryProvider
+}
+
+func (p headFailingSourceProvider) Head(context.Context, string) (*provider.ObjectMeta, error) {
+	return nil, fmt.Errorf("head unavailable")
+}
+
+// TestTransferReflowUnknownSizeReservesConservativeCap pins the ledger's
+// knownness contract on the CLI-pool path: an input record with an absent
+// (zero) size whose optional Head probe fails still copies successfully, and
+// the admission ledger reserves the conservative retry cap — a zero size is
+// never inferred as a known empty object while the allocator may buffer a
+// real body behind it.
+func TestTransferReflowUnknownSizeReservesConservativeCap(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload", "src-etag", time.Now().UTC())
+	dst := newReflowMemoryProvider()
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			switch cfg.Bucket {
+			case "source-bucket":
+				return headFailingSourceProvider{src}, nil
+			case "dest-bucket":
+				return dst, nil
+			default:
+				return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+			}
+		},
+	})
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return int64(8) << 20, "cgroup_v2", nil // derived budget 2MiB, retry cap 2MiB
+		},
+		FDSoftLimit: func() (int64, error) { return 100000, nil },
+	}
+
+	input := reflowInputLine("source/file.xml", "src-etag", 0, "", "") + "\n"
+	var stdout bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--parallel", "2",
+		"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+		"--on-collision", "overwrite", "--overwrite",
+	})
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "payload", string(dst.mustObject("data/source/file.xml")),
+		"absent size with failed optional Head must still land the real body")
+	sum := requireRecord(t, stdout.String(), reflowpkg.SummaryRecordType, "")
+	require.Contains(t, string(sum.Data), `"execution_path":"cli-pool"`)
+	require.Contains(t, string(sum.Data), `"memory_reserved_peak_bytes":2097152`,
+		"an absent size must reserve the conservative cap, never known-zero")
+}

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
 func TestCopyReservationBytesArithmetic(t *testing.T) {
@@ -22,7 +24,7 @@ func TestCopyReservationBytesArithmetic(t *testing.T) {
 		{name: "size at cap reserves the cap", size: cap16, cap: cap16, want: cap16},
 		{name: "size above cap reserves the cap (spooled body)", size: cap16 * 4, cap: cap16, want: cap16},
 		{name: "unknown size reserves the conservative cap", size: -1, cap: cap16, want: cap16},
-		{name: "zero-byte object reserves nothing", size: 0, cap: cap16, want: 0},
+		{name: "absent size (zero) reserves the conservative cap — never inferred known-empty", size: 0, cap: cap16, want: cap16},
 		{name: "shrunken cap bounds the reservation", size: 3 << 20, cap: 2 << 20, want: 2 << 20},
 	}
 	for _, tc := range cases {
@@ -141,6 +143,67 @@ func TestMemoryLedgerFIFOHeadOfLine(t *testing.T) {
 	}
 }
 
+func TestMemoryLedgerCancelledHeadPromotesAdmissibleFollower(t *testing.T) {
+	const mib = int64(1) << 20
+	ledger := newMemoryLedger(4 * mib)
+
+	holdRelease, err := ledger.Reserve(context.Background(), 3*mib)
+	require.NoError(t, err)
+
+	headCtx, cancelHead := context.WithCancel(context.Background())
+	headErr := make(chan error, 1)
+	go func() {
+		_, reserveErr := ledger.Reserve(headCtx, 2*mib)
+		headErr <- reserveErr
+	}()
+	require.Eventually(t, func() bool {
+		ledger.mu.Lock()
+		defer ledger.mu.Unlock()
+		return len(ledger.queue) == 1
+	}, time.Second, time.Millisecond)
+
+	followerGranted := make(chan struct{})
+	go func() {
+		release, reserveErr := ledger.Reserve(context.Background(), mib)
+		require.NoError(t, reserveErr)
+		defer release()
+		close(followerGranted)
+	}()
+	require.Eventually(t, func() bool {
+		ledger.mu.Lock()
+		defer ledger.mu.Unlock()
+		return len(ledger.queue) == 2
+	}, time.Second, time.Millisecond)
+
+	// The follower fits (3+1 <= 4) but must stay behind the queued 2MiB head.
+	select {
+	case <-followerGranted:
+		t.Fatal("follower must not bypass the queued head")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Cancelling the head must promote the now-admissible follower promptly —
+	// WITHOUT the unrelated 3MiB holder releasing first.
+	cancelHead()
+	select {
+	case reserveErr := <-headErr:
+		require.ErrorIs(t, reserveErr, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled head must return promptly")
+	}
+	select {
+	case <-followerGranted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelling the head must drain the now-admissible follower")
+	}
+
+	holdRelease()
+	ledger.mu.Lock()
+	require.Zero(t, ledger.reserved)
+	require.Empty(t, ledger.queue)
+	ledger.mu.Unlock()
+}
+
 func TestMemoryLedgerCancellationReleasesWaiter(t *testing.T) {
 	const mib = int64(1) << 20
 	ledger := newMemoryLedger(2 * mib)
@@ -216,6 +279,45 @@ func TestMemoryLedgerMixedSizesMakeProgress(t *testing.T) {
 	require.Equal(t, int64(len(sizes)), completed.Load(), "mixed-size workload must fully drain without starvation")
 	stats := ledger.Stats()
 	require.LessOrEqual(t, stats.PeakReservedBytes, 4*mib)
+}
+
+func TestLimiterNormalizesLedgerCapAgainstBudget(t *testing.T) {
+	const mib = int64(1) << 20
+
+	t.Run("absent cap derives min(default, budget)", func(t *testing.T) {
+		limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+			RequestedCeiling:           4,
+			EffectiveCeiling:           4,
+			MemoryBudgetEffectiveBytes: mib,
+		})
+		require.Equal(t, mib, limiter.RetryBufferCap(),
+			"a budgeted config may never fall back to an allocator cap above its budget")
+		release, err := limiter.ReserveCopyMemory(context.Background(), 2*mib)
+		require.NoError(t, err)
+		release()
+		stats := limiter.Snapshot()
+		require.Equal(t, mib, stats.MemoryReservedPeakBytes,
+			"reservation and allocator cap must agree")
+		require.Equal(t, mib, stats.RetryBufferCapBytes,
+			"the normalized cap must be recorded, not zero")
+	})
+
+	t.Run("over-budget explicit cap clamps to the budget", func(t *testing.T) {
+		limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+			RequestedCeiling:           4,
+			EffectiveCeiling:           4,
+			MemoryBudgetEffectiveBytes: mib,
+			RetryBufferCapBytes:        16 * mib,
+		})
+		require.Equal(t, mib, limiter.RetryBufferCap())
+		require.Equal(t, mib, limiter.Snapshot().RetryBufferCapBytes)
+	})
+
+	t.Run("genuinely unbudgeted config keeps the transfer default fallback", func(t *testing.T) {
+		limiter := NewConcurrencyLimiter(ConcurrencyConfig{RequestedCeiling: 4, EffectiveCeiling: 4})
+		require.Equal(t, transfer.DefaultRetryBufferMaxMemoryBytes, limiter.RetryBufferCap())
+		require.Zero(t, limiter.Snapshot().RetryBufferCapBytes)
+	})
 }
 
 func TestLimiterReserveCopyMemoryIntegration(t *testing.T) {

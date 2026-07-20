@@ -360,6 +360,19 @@ func clampConcurrencyInvariants(cfg ConcurrencyConfig) ConcurrencyConfig {
 	} else {
 		cfg.Initial = cfg.EffectiveCeiling
 	}
+	// A positive effective budget activates the admission ledger, so the
+	// allocator cap must be positive, recorded, and never above the budget —
+	// otherwise a partially specified public config could buffer more bytes
+	// than the ledger admits. Genuinely unbudgeted configs (zero budget) keep
+	// a zero cap and fall back to the transfer default at the copy sites.
+	if cfg.MemoryBudgetEffectiveBytes > 0 {
+		if cfg.RetryBufferCapBytes <= 0 {
+			cfg.RetryBufferCapBytes = transfer.DefaultRetryBufferMaxMemoryBytes
+		}
+		if cfg.RetryBufferCapBytes > cfg.MemoryBudgetEffectiveBytes {
+			cfg.RetryBufferCapBytes = cfg.MemoryBudgetEffectiveBytes
+		}
+	}
 	if cfg.CeilingReason == "" {
 		cfg.CeilingReason = "requested"
 	}
