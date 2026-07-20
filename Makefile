@@ -1,6 +1,6 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo test-libsql build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
-.PHONY: sync-embedded-identity verify-embedded-identity
+.PHONY: sync-embedded-identity verify-embedded-identity validate-roles
 .PHONY: test-cloud test-cloud-real test-reflow-throughput moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
@@ -70,7 +70,7 @@ GONEAT_RESOLVE = \
 all: fmt test
 
 help:  ## Show this help message
-	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  test-libsql     - Run tests with the libsql build tag' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  api-stability   - Verify library API stability manifest and soft diff gate' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, api-stability, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run scoped pre-push hooks' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
+	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  test-libsql     - Run tests with the libsql build tag' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  api-stability   - Verify library API stability manifest and soft diff gate' '  validate-roles  - Validate role prompts against the vendored schema' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, api-stability, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run scoped pre-push hooks' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
 
 bootstrap:  ## Install external tools (sfetch, goneat) and dependencies
 	@echo "Installing external tools..."
@@ -435,12 +435,16 @@ fmt:  ## Format code with goneat
 	@$(MAKE) sync-embedded-identity
 	@echo "✅ Formatting completed"
 
+validate-roles: ## Validate role prompts against the vendored role-prompt schema
+	@echo "Validating role prompts..."
+	@go run ./internal/tools/rolevalidate
+
 api-stability: ## Verify library API stability manifest and soft diff gate
 	@echo "Running API stability checks..."
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-check-all: fmt verify-embedded-identity api-stability lint test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
+check-all: fmt verify-embedded-identity api-stability validate-roles lint test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks
