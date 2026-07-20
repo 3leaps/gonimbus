@@ -53,6 +53,31 @@ type Options struct {
 	// WorktreeCommit is optional fallback commit identity when the binary
 	// reports "unknown" (plain go test builds without ldflags).
 	WorktreeCommit string
+
+	// Recipe overrides scale the profile's synthetic corpus at invocation. Zero
+	// means keep the profile default. Accepted via OBJECT_COUNT / SIZE_BYTES /
+	// PARTITIONS (GONIMBUS_THROUGHPUT_OBJECT_COUNT / _SIZE_BYTES / _PARTITIONS).
+	// Absurd values fail closed in Recipe.Validate; the effective corpus is
+	// recorded in the report's corpus block so evidence names what was measured.
+	RecipeObjectCount int
+	RecipeSizeBytes   int
+	RecipePartitions  int
+}
+
+// applyRecipeOverrides scales a profile's recipe by the operator overrides.
+// A zero override keeps the profile default; the result is validated by the
+// caller so out-of-bounds values fail closed.
+func applyRecipeOverrides(r Recipe, opts Options) Recipe {
+	if opts.RecipeObjectCount > 0 {
+		r.ObjectCount = opts.RecipeObjectCount
+	}
+	if opts.RecipeSizeBytes > 0 {
+		r.SizeBytes = opts.RecipeSizeBytes
+	}
+	if opts.RecipePartitions > 0 {
+		r.Partitions = opts.RecipePartitions
+	}
+	return r
 }
 
 // pointRun declares one measured point. Named fields rather than positional
@@ -125,6 +150,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	spec, err := ResolveProfile(opts.Profile)
 	if err != nil {
 		return Report{}, err
+	}
+	spec.Recipe = applyRecipeOverrides(spec.Recipe, opts)
+	if err := spec.Recipe.Validate(); err != nil {
+		return Report{}, fmt.Errorf("recipe override: %w", err)
 	}
 	if err := requireMemoryArmInputs(spec, opts); err != nil {
 		return Report{}, err

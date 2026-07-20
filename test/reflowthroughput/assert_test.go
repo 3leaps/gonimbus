@@ -85,6 +85,58 @@ func TestResolveProfile(t *testing.T) {
 	if err != nil || ps.ExecutionShape != "probe_drain" {
 		t.Fatalf("probe sat shape: %+v %v", ps, err)
 	}
+	scale, err := ResolveProfile(ProfileCheckpointScale)
+	if err != nil {
+		t.Fatalf("checkpoint-scale: %v", err)
+	}
+	if scale.Recipe.ObjectCount != DefaultScaleObjects {
+		t.Fatalf("checkpoint-scale object count = %d, want %d", scale.Recipe.ObjectCount, DefaultScaleObjects)
+	}
+	if !scale.NoAdaptive {
+		t.Fatalf("checkpoint-scale must run fixed-mode: %+v", scale)
+	}
+	if !hasTmpfs(scale) {
+		t.Fatal("checkpoint-scale must declare a tmpfs class")
+	}
+}
+
+func TestApplyRecipeOverrides(t *testing.T) {
+	t.Parallel()
+	base := ScaleRecipe()
+
+	// Zero overrides keep the profile default.
+	got := applyRecipeOverrides(base, Options{})
+	if got != base {
+		t.Fatalf("zero overrides changed recipe: %+v", got)
+	}
+
+	// Non-zero overrides win; unset fields stay at the profile default.
+	got = applyRecipeOverrides(base, Options{RecipeObjectCount: 100000, RecipePartitions: 32})
+	if got.ObjectCount != 100000 || got.Partitions != 32 {
+		t.Fatalf("overrides not applied: %+v", got)
+	}
+	if got.SizeBytes != base.SizeBytes {
+		t.Fatalf("unset override should keep default size: got %d want %d", got.SizeBytes, base.SizeBytes)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("scaled recipe should validate: %v", err)
+	}
+}
+
+func TestRecipeValidateBounds(t *testing.T) {
+	t.Parallel()
+	// Absurd overrides fail closed rather than materializing an oversized corpus.
+	for name, mutate := range map[string]func(Recipe) Recipe{
+		"object_count too high": func(r Recipe) Recipe { r.ObjectCount = MaxRecipeObjectCount + 1; return r },
+		"size_bytes too high":   func(r Recipe) Recipe { r.SizeBytes = MaxRecipeSizeBytes + 1; return r },
+		"partitions too high":   func(r Recipe) Recipe { r.Partitions = MaxRecipePartitions + 1; return r },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := mutate(ScaleRecipe()).Validate(); err == nil {
+				t.Fatalf("%s: expected validation error", name)
+			}
+		})
+	}
 }
 
 func TestChildEnvGOMEMLIMIT(t *testing.T) {

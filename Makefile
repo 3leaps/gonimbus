@@ -356,12 +356,17 @@ MOTO_PORT ?= 5555
 MOTO_ENDPOINT ?= http://localhost:$(MOTO_PORT)
 
 # On-demand reflow throughput harness (non-CI). PROFILE defaults to smoke.
-# Known: smoke, reflow-saturation, ceiling-lift, checkpoint, fullpipe-ab, probe-saturation.
+# Known: smoke, reflow-saturation, ceiling-lift, checkpoint, checkpoint-scale,
+#   fullpipe-ab, probe-saturation.
 # Optional: GOMEMLIMIT / CONSTRAINED_GOMEMLIMIT (operator-supplied constraining
 #   envelope — a GOMEMLIMIT binds only when it is the lowest detected candidate),
 #   MEMORY_BUDGET (the --memory-budget arm), KEEP=1, RUN_ROOT=<dir>.
-#   ceiling-lift needs CONSTRAINED_GOMEMLIMIT and MEMORY_BUDGET; checkpoint needs
-#   CONSTRAINED_GOMEMLIMIT. The harness never sets either value itself.
+#   ceiling-lift needs CONSTRAINED_GOMEMLIMIT and MEMORY_BUDGET; checkpoint and
+#   checkpoint-scale need TMPFS_CHECKPOINT_ROOT. The harness never sets a memory
+#   value itself.
+# Corpus scale overrides (0/unset = profile default; fail closed on absurd values):
+#   OBJECT_COUNT, SIZE_BYTES, PARTITIONS. checkpoint-scale is the intended target
+#   for driving the single-writer wall — raise OBJECT_COUNT for a full measurement.
 PROFILE ?= smoke
 PROVIDER ?= file
 test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput harness (PROFILE=smoke by default)
@@ -385,6 +390,9 @@ test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput ha
 	export GONIMBUS_THROUGHPUT_CEILING_LIFT_GOMEMLIMIT="$(CEILING_LIFT_GOMEMLIMIT)"; \
 	export GONIMBUS_THROUGHPUT_CONSTRAINED_GOMEMLIMIT="$(CONSTRAINED_GOMEMLIMIT)"; \
 	export GONIMBUS_THROUGHPUT_MEMORY_BUDGET="$(MEMORY_BUDGET)"; \
+	export GONIMBUS_THROUGHPUT_OBJECT_COUNT="$(OBJECT_COUNT)"; \
+	export GONIMBUS_THROUGHPUT_SIZE_BYTES="$(SIZE_BYTES)"; \
+	export GONIMBUS_THROUGHPUT_PARTITIONS="$(PARTITIONS)"; \
 	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestGenerate|TestTap|TestCheck|TestResolve|TestChild|TestReport|TestParse|TestEnsure|TestLoadBYO|TestCLIProvider' && \
 	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestSmokeProfileEndToEnd|TestHarnessMakeEntry|TestProfile' -v
 

@@ -11,6 +11,7 @@ const (
 	ProfileReflowSaturation = "reflow-saturation"
 	ProfileCeilingLift      = "ceiling-lift"
 	ProfileCheckpoint       = "checkpoint"
+	ProfileCheckpointScale  = "checkpoint-scale"
 	ProfileFullPipe         = "fullpipe-ab"
 	ProfileProbeSaturation  = "probe-saturation"
 )
@@ -132,6 +133,33 @@ func ResolveProfile(name string) (ProfileSpec, error) {
 			CheckpointClasses: []string{"disk", "tmpfs"},
 			Description:       "Checkpoint discriminator: disk vs tmpfs class (paths never reported), under constrained and detection-bound memory.",
 		}, nil
+	case ProfileCheckpointScale:
+		// Writer-contention discriminator at a lifted ceiling: the same
+		// disk-vs-tmpfs checkpoint-class methodology as ProfileCheckpoint, but
+		// on a large tiny-object corpus and at higher --parallel points, so
+		// concurrent terminal checkpoint upserts contend on the single-connection
+		// state writer. The probe_bound arm applies no memory override, so the
+		// product's detection chain lifts the ceiling and the writer — not the
+		// memory clamp — becomes the binding wall. Scale the corpus via
+		// OBJECT_COUNT / SIZE_BYTES / PARTITIONS.
+		// RequireOccupancy stays off (as in ProfileCheckpoint): the measurement is
+		// the disk-vs-tmpfs timing ratio, not a saturation floor. A tiny-object
+		// corpus drains before high --parallel points fill, so a hard occupancy
+		// floor would fight the design; the product's own concurrency_max_active /
+		// concurrency_ceiling_effective telemetry still records that the ceiling
+		// lifted.
+		return ProfileSpec{
+			Name:           ProfileCheckpointScale,
+			Recipe:         ScaleRecipe(),
+			ExecutionShape: "reflow_only",
+			ParallelPoints: []int{64, 256, 512},
+			NoAdaptive:     true,
+			MemoryArms: []MemoryArm{
+				{Label: MemoryArmProbeBound},
+			},
+			CheckpointClasses: []string{"disk", "tmpfs"},
+			Description:       "Checkpoint-scale: single-writer contention discriminator (disk vs tmpfs) at a detection-lifted ceiling on a large, overridable corpus.",
+		}, nil
 	case ProfileFullPipe:
 		return ProfileSpec{
 			Name:           ProfileFullPipe,
@@ -156,7 +184,7 @@ func ResolveProfile(name string) (ProfileSpec, error) {
 			Description:            "Probe-saturation: producer-only probe with draining sink (no reflow).",
 		}, nil
 	default:
-		return ProfileSpec{}, fmt.Errorf("unknown profile %q (known: smoke, reflow-saturation, ceiling-lift, checkpoint, fullpipe-ab, probe-saturation)", name)
+		return ProfileSpec{}, fmt.Errorf("unknown profile %q (known: smoke, reflow-saturation, ceiling-lift, checkpoint, checkpoint-scale, fullpipe-ab, probe-saturation)", name)
 	}
 }
 
@@ -167,6 +195,7 @@ func ListProfiles() []string {
 		ProfileReflowSaturation,
 		ProfileCeilingLift,
 		ProfileCheckpoint,
+		ProfileCheckpointScale,
 		ProfileFullPipe,
 		ProfileProbeSaturation,
 	}

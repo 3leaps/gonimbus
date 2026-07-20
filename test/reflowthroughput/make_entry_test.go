@@ -3,9 +3,30 @@ package reflowthroughput
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+// intEnv reads an integer override from the primary env name, falling back to
+// the alias. Empty is 0 (profile default); a set-but-unparseable value fails
+// the harness loudly rather than silently reverting to the default.
+func intEnv(t *testing.T, primary, alias string) int {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(primary))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv(alias))
+	}
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("%s: %q is not an integer: %v", primary, raw, err)
+	}
+	return v
+}
 
 // TestHarnessMakeEntry is the Make-target entry: honors GONIMBUS_THROUGHPUT_* env.
 // When env is unset (normal unit runs), the test is skipped.
@@ -45,6 +66,12 @@ func TestHarnessMakeEntry(t *testing.T) {
 	if memoryBudget == "" {
 		memoryBudget = os.Getenv("MEMORY_BUDGET")
 	}
+	// Recipe scale overrides: OBJECT_COUNT / SIZE_BYTES / PARTITIONS scale the
+	// profile's synthetic corpus (0 = profile default). A set-but-unparseable
+	// value fails loudly rather than silently reverting to the default.
+	objectCount := intEnv(t, "GONIMBUS_THROUGHPUT_OBJECT_COUNT", "OBJECT_COUNT")
+	sizeBytes := intEnv(t, "GONIMBUS_THROUGHPUT_SIZE_BYTES", "SIZE_BYTES")
+	partitions := intEnv(t, "GONIMBUS_THROUGHPUT_PARTITIONS", "PARTITIONS")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -59,6 +86,9 @@ func TestHarnessMakeEntry(t *testing.T) {
 		TmpfsCheckpointRoot:   tmpfsRoot,
 		Keep:                  keep,
 		PointTimeout:          10 * time.Minute,
+		RecipeObjectCount:     objectCount,
+		RecipeSizeBytes:       sizeBytes,
+		RecipePartitions:      partitions,
 	})
 	if err != nil {
 		t.Fatalf("harness: %v", err)
