@@ -4,7 +4,7 @@ name: Security Review
 description: Security analysis, vulnerability review, and infosec assessment
 version: 1.0.1
 author: entarch
-status: review
+status: approved
 category: review
 domains:
   - development

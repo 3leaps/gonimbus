@@ -4,7 +4,7 @@ name: Development Reviewer
 description: Code review, bug finding, and four-eyes audit
 version: 1.0.2
 author: entarch
-status: review
+status: approved
 category: review
 domains:
   - development
