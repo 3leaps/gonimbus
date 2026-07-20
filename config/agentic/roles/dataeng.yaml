@@ -2,9 +2,9 @@
 slug: dataeng
 name: Data Engineering
 description: Pipeline operations, manifest authoring, hub lifecycle, production dogfooding, and engagement-fit review for tool briefs and deliveries
-version: 1.4.0
+version: 1.4.1
 author: entarch
-status: approved
+status: review
 category: agentic
 domains:
   - development
@@ -257,7 +257,7 @@ examples:
       Co-Authored-By: Claude Opus 4.6 <noreply@3leaps.net>
       Role: dataeng
       Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
-  - type: workflow
+  - type: other
     title: Full pipeline chain
     content: |
       # Build -> Export -> Hydrate -> Query -> Reflow

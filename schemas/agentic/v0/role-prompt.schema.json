@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/agentic/v0/role-prompt.schema.json",
+  "title": "Agentic Role Prompt",
+  "description": "Schema for AI coding agent role prompts. Defines structured role definitions that guide AI assistants working in repositories.",
+  "type": "object",
+  "required": [
+    "slug",
+    "name",
+    "description",
+    "version",
+    "status",
+    "scope",
+    "responsibilities",
+    "escalates_to",
+    "does_not"
+  ],
+  "properties": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*$",
+      "minLength": 2,
+      "maxLength": 16,
+      "description": "Role identifier (lowercase letters/numbers, no hyphens). Examples: devlead, secrev, infoarch"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Human-readable role name. Example: Development Lead"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 256,
+      "description": "One-line description of the role's purpose"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Semantic version for role prompt evolution"
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Role prompt author (role slug or human identifier)"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "review",
+        "approved",
+        "deprecated"
+      ],
+      "description": "Role prompt lifecycle status"
+    },
+    "tier": {
+      "type": "string",
+      "enum": [
+        "core",
+        "supplemental",
+        "deprecated"
+      ],
+      "description": "Default deployment tier — default guidance, not a mandate; repos that adopt this catalog may re-tier. core = always-on default spine; supplemental = adopt by need; deprecated = retired, prefer the noted alternative."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "agentic",
+        "analytics",
+        "automation",
+        "consulting",
+        "governance",
+        "marketing",
+        "review"
+      ],
+      "description": "Role category for organization"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "description": "Searchable tags for the role"
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "analytics",
+          "architecture",
+          "automation",
+          "consulting",
+          "coordination",
+          "delivery",
+          "development",
+          "documentation",
+          "governance",
+          "implementation",
+          "marketing",
+          "product",
+          "quality",
+          "security",
+          "strategy"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 3,
+      "description": "Process domains this role operates in (1-3). Used for organizational categorization beyond technical functions."
+    },
+    "extends": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL to base role this extends"
+    },
+    "context": {
+      "type": "string",
+      "description": "When to use this role, distinct from similar roles"
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "What this role covers - boundaries of responsibility"
+    },
+    "mindset": {
+      "type": "object",
+      "properties": {
+        "focus": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Key questions to ask, thinking patterns"
+        },
+        "principles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Guiding principles for this role"
+        }
+      },
+      "description": "Context engineering - shapes how the agent approaches problems"
+    },
+    "responsibilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "Specific tasks and duties"
+    },
+    "escalates_to": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/escalation"
+      },
+      "minItems": 1,
+      "description": "When and to whom to escalate"
+    },
+    "does_not": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "Explicit exclusions and out-of-scope items"
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/example"
+      },
+      "description": "Concrete examples of role application"
+    },
+    "checklists": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "description": "Named checklists for common tasks"
+    },
+    "pre_push_checklist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Checklist of validations to perform before pushing changes"
+    },
+    "required_reading": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Explanation of what should be read and why"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Guidance on where to find required reading (project-specific)"
+        }
+      },
+      "description": "Documents that must be read before starting work in this role"
+    },
+    "cross_role_note": {
+      "type": "string",
+      "description": "Guidance on coordination with other roles"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "escalation": {
+      "type": "object",
+      "required": [
+        "target",
+        "when"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "Who to escalate to (role slug, 'human maintainers', etc.)"
+        },
+        "when": {
+          "type": "string",
+          "description": "Conditions that trigger escalation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "example": {
+      "type": "object",
+      "required": [
+        "type",
+        "content"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "commit",
+            "review",
+            "checklist",
+            "other"
+          ],
+          "description": "Type of example"
+        },
+        "title": {
+          "type": "string",
+          "description": "Example title"
+        },
+        "content": {
+          "type": "string",
+          "description": "Example content (may be multi-line)"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
