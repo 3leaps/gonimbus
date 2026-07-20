@@ -2,6 +2,7 @@ package reflow
 
 import (
 	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -143,6 +144,82 @@ func TestMemoryLedgerFIFOHeadOfLine(t *testing.T) {
 	}
 }
 
+func TestMemoryLedgerNearLimitAdmissionNeverOverflows(t *testing.T) {
+	ledger := newMemoryLedger(math.MaxInt64)
+
+	holdRelease, err := ledger.Reserve(context.Background(), math.MaxInt64-4)
+	require.NoError(t, err)
+
+	// 8 bytes do not fit in the remaining 4; a wrapping reserved+bytes sum
+	// would falsely admit this request. It must queue, then cancel cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, reserveErr := ledger.Reserve(ctx, 8)
+		errCh <- reserveErr
+	}()
+	require.Eventually(t, func() bool {
+		ledger.mu.Lock()
+		defer ledger.mu.Unlock()
+		return len(ledger.queue) == 1
+	}, time.Second, time.Millisecond)
+
+	cancel()
+	select {
+	case reserveErr := <-errCh:
+		require.ErrorIs(t, reserveErr, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("near-limit waiter must cancel promptly, never grant")
+	}
+
+	holdRelease()
+	ledger.mu.Lock()
+	require.Zero(t, ledger.reserved)
+	require.Empty(t, ledger.queue)
+	require.LessOrEqual(t, ledger.peak, int64(math.MaxInt64))
+	require.Equal(t, int64(math.MaxInt64-4), ledger.peak,
+		"peak must reflect the held reservation only — the 8-byte request was never admitted")
+	ledger.mu.Unlock()
+}
+
+func TestLimiterNearLimitBudgetAdmissionBoundary(t *testing.T) {
+	limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+		RequestedCeiling:           2,
+		EffectiveCeiling:           2,
+		MemoryBudgetEffectiveBytes: math.MaxInt64,
+		RetryBufferCapBytes:        math.MaxInt64,
+	})
+	require.Equal(t, int64(math.MaxInt64), limiter.RetryBufferCap(),
+		"explicit near-limit cap within the budget must survive normalization")
+
+	holdRelease, err := limiter.ReserveCopyMemory(context.Background(), math.MaxInt64-4)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, reserveErr := limiter.ReserveCopyMemory(ctx, 8)
+		errCh <- reserveErr
+	}()
+	require.Eventually(t, func() bool {
+		limiter.ledger.mu.Lock()
+		defer limiter.ledger.mu.Unlock()
+		return len(limiter.ledger.queue) == 1
+	}, time.Second, time.Millisecond)
+
+	cancel()
+	select {
+	case reserveErr := <-errCh:
+		require.ErrorIs(t, reserveErr, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("near-limit ReserveCopyMemory must cancel, never overflow-admit")
+	}
+
+	holdRelease()
+	stats := limiter.Snapshot()
+	require.Equal(t, int64(math.MaxInt64-4), stats.MemoryReservedPeakBytes)
+}
+
 func TestMemoryLedgerCancelledHeadPromotesAdmissibleFollower(t *testing.T) {
 	const mib = int64(1) << 20
 	ledger := newMemoryLedger(4 * mib)
@@ -162,12 +239,13 @@ func TestMemoryLedgerCancelledHeadPromotesAdmissibleFollower(t *testing.T) {
 		return len(ledger.queue) == 1
 	}, time.Second, time.Millisecond)
 
-	followerGranted := make(chan struct{})
+	// Main owns the follower's release so the terminal-state assertion cannot
+	// race the goroutine's cleanup.
+	followerRelease := make(chan func(), 1)
 	go func() {
 		release, reserveErr := ledger.Reserve(context.Background(), mib)
 		require.NoError(t, reserveErr)
-		defer release()
-		close(followerGranted)
+		followerRelease <- release
 	}()
 	require.Eventually(t, func() bool {
 		ledger.mu.Lock()
@@ -177,7 +255,7 @@ func TestMemoryLedgerCancelledHeadPromotesAdmissibleFollower(t *testing.T) {
 
 	// The follower fits (3+1 <= 4) but must stay behind the queued 2MiB head.
 	select {
-	case <-followerGranted:
+	case <-followerRelease:
 		t.Fatal("follower must not bypass the queued head")
 	case <-time.After(50 * time.Millisecond):
 	}
@@ -191,12 +269,14 @@ func TestMemoryLedgerCancelledHeadPromotesAdmissibleFollower(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelled head must return promptly")
 	}
+	var release func()
 	select {
-	case <-followerGranted:
+	case release = <-followerRelease:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelling the head must drain the now-admissible follower")
 	}
 
+	release()
 	holdRelease()
 	ledger.mu.Lock()
 	require.Zero(t, ledger.reserved)

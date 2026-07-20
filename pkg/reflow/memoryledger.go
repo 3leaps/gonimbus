@@ -66,7 +66,10 @@ func (l *memoryLedger) Reserve(ctx context.Context, bytes int64) (func(), error)
 	}
 
 	l.mu.Lock()
-	if len(l.queue) == 0 && l.reserved+bytes <= l.capacity {
+	// Subtraction form: reserved stays within [0, capacity], so
+	// capacity-reserved cannot overflow, whereas reserved+bytes can wrap
+	// negative near MaxInt64 and falsely admit beyond capacity.
+	if len(l.queue) == 0 && bytes <= l.capacity-l.reserved {
 		l.grantLocked(bytes)
 		l.mu.Unlock()
 		return l.releaseOnce(bytes), nil
@@ -121,7 +124,7 @@ func (l *memoryLedger) grantLocked(bytes int64) {
 func (l *memoryLedger) drainLocked() {
 	for len(l.queue) > 0 {
 		head := l.queue[0]
-		if l.reserved+head.need > l.capacity {
+		if head.need > l.capacity-l.reserved {
 			return
 		}
 		l.grantLocked(head.need)
