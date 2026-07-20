@@ -166,6 +166,12 @@ func TestValidateArmMatrixPinsDeclaredCells(t *testing.T) {
 				"missing a whole arm": clone(func(p []PointReport) []PointReport {
 					return p[:len(p)-len(spec.ParallelPoints)]
 				}),
+				// A probe_drain point is structurally valid on its own, so
+				// envelope validation accepts it; the matrix must still reject
+				// it as a shape this profile never declared.
+				"extra undeclared probe_drain point": clone(func(p []PointReport) []PointReport {
+					return append(p, PointReport{ExecutionShape: "probe_drain", ProbeConcurrency: 4})
+				}),
 			}
 			for name, r := range cases {
 				t.Run(name, func(t *testing.T) {
@@ -174,6 +180,36 @@ func TestValidateArmMatrixPinsDeclaredCells(t *testing.T) {
 					}
 				})
 			}
+
+			// The publication gates run together, so pin the combination the
+			// panel reproduced: a spliced probe_drain point passes envelope
+			// validation on its own merits and must be caught by the matrix.
+			t.Run("spliced probe_drain passes envelope but fails matrix", func(t *testing.T) {
+				spliced := NewReport(spec.Name, "file", "inv", "sha", CompactManifest{Digest: "corpus-digest"}, false)
+				for _, p := range full {
+					resolved := resolvedPoint(p.MemoryEnvelope)
+					resolved.Parallel, resolved.CheckpointClass, resolved.ExecutionShape = p.Parallel, p.CheckpointClass, p.ExecutionShape
+					if p.MemoryEnvelope == MemoryArmGOMEMLIMIT {
+						resolved.GOMEMLIMITSet, resolved.GOMEMLIMITValue = true, "1GiB"
+						resolved.MemoryLimitSource = memorySourceRuntime
+					}
+					if p.MemoryEnvelope == MemoryArmOperatorBudget {
+						resolved.MemoryBudgetRequested = "8GiB"
+						resolved.MemoryBudgetSource = memoryBudgetSourceOperator
+					}
+					spliced.Points = append(spliced.Points, resolved)
+				}
+				if err := ValidateReportEnvelope(spliced); err != nil {
+					t.Fatalf("complete matrix must pass envelope validation: %v", err)
+				}
+				spliced.Points = append(spliced.Points, PointReport{ExecutionShape: "probe_drain", ProbeConcurrency: 4})
+				if err := ValidateReportEnvelope(spliced); err != nil {
+					t.Fatalf("envelope validation is expected to accept the spliced point: %v", err)
+				}
+				if err := ValidateArmMatrix(spec, spliced); err == nil {
+					t.Fatal("expected the matrix to reject the undeclared probe_drain point")
+				}
+			})
 		})
 	}
 

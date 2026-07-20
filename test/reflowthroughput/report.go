@@ -366,10 +366,13 @@ func ValidateArmMatrix(spec ProfileSpec, r Report) error {
 			}
 		}
 	}
+	// Every point must resolve to a declared cell — including probe_drain.
+	// The no-arm early return above already exempts the profiles that
+	// legitimately carry points no matrix describes, so a shape-wide bypass
+	// here would only let a foreign point into a report claiming to contain
+	// exactly its profile's matrix. A declared-arm profile that ever needs
+	// auxiliary points must declare their shape and multiplicity.
 	for i, p := range r.Points {
-		if p.ExecutionShape == "probe_drain" {
-			continue
-		}
 		cell := matrixCell{
 			Envelope:        p.MemoryEnvelope,
 			ExecutionShape:  p.ExecutionShape,
