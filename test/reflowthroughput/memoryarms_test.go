@@ -1,6 +1,7 @@
 package reflowthroughput
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -11,6 +12,123 @@ func memoryRecords(runLimitSource, summaryLimitSource, runBudgetSource, summaryB
 	run := `{"type":"gonimbus.reflow.run.v1","data":{"dest_uri":"x","checkpoint_path":"y","dry_run":false,"resume":false,"parallel":8,"adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"concurrency_time_avg_active":0,"memory_limit_bytes":1073741824,"memory_limit_source":"` + runLimitSource + `","memory_budget_effective_bytes":268435456,"memory_budget_source":"` + runBudgetSource + `","retry_buffer_cap_bytes":16777216}}`
 	summary := `{"type":"gonimbus.reflow.summary.v1","data":{"dest_uri":"x","dry_run":false,"on_collision":"skip-if-duplicate","adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":4,"concurrency_time_avg_active":2.5,"memory_limit_bytes":1073741824,"memory_limit_source":"` + summaryLimitSource + `","memory_budget_effective_bytes":268435456,"memory_budget_source":"` + summaryBudgetSource + `","retry_buffer_cap_bytes":16777216,"dest_ifabsent_honored":null,"fallback_active":false,"ifabsent_fallback_objects":0,"statuses":{"complete":1},"errors":0,"invalid_inputs":0}}`
 	return strings.Join([]string{run, summary}, "\n") + "\n"
+}
+
+// memoryRecordsTuple renders a run+summary pair whose numeric memory tuples
+// can differ, to pin the startup-fixed agreement check.
+func memoryRecordsTuple(runLimit, runBudget, runCap, sumLimit, sumBudget, sumCap int64) string {
+	run := `{"type":"gonimbus.reflow.run.v1","data":{"dest_uri":"x","checkpoint_path":"y","dry_run":false,"resume":false,"parallel":8,"adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"memory_limit_bytes":` + i64s(runLimit) + `,"memory_limit_source":"physical_ram","memory_budget_effective_bytes":` + i64s(runBudget) + `,"memory_budget_source":"derived","retry_buffer_cap_bytes":` + i64s(runCap) + `}}`
+	summary := `{"type":"gonimbus.reflow.summary.v1","data":{"dest_uri":"x","dry_run":false,"on_collision":"skip-if-duplicate","adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":4,"memory_limit_bytes":` + i64s(sumLimit) + `,"memory_limit_source":"physical_ram","memory_budget_effective_bytes":` + i64s(sumBudget) + `,"memory_budget_source":"derived","retry_buffer_cap_bytes":` + i64s(sumCap) + `,"dest_ifabsent_honored":null,"fallback_active":false,"ifabsent_fallback_objects":0,"statuses":{"complete":1},"errors":0,"invalid_inputs":0}}`
+	return strings.Join([]string{run, summary}, "\n") + "\n"
+}
+
+func i64s(v int64) string { return strconv.FormatInt(v, 10) }
+
+// The startup-fixed tuple must agree field by field, not just by source label:
+// matching sources over differing arithmetic would publish the run's numbers as
+// though both records had agreed.
+func TestParseRejectsMemoryTupleMismatch(t *testing.T) {
+	t.Parallel()
+	const gib, mib = int64(1) << 30, int64(1) << 20
+	if _, err := ParseReflowStdout([]byte(memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 256*mib, 16*mib))); err != nil {
+		t.Fatalf("identical tuples: %v", err)
+	}
+	cases := map[string]string{
+		"limit":  memoryRecordsTuple(gib, 256*mib, 16*mib, 2*gib, 256*mib, 16*mib),
+		"budget": memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 128*mib, 16*mib),
+		"cap":    memoryRecordsTuple(gib, 256*mib, 16*mib, gib, 256*mib, 8*mib),
+	}
+	for name, stdout := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseReflowStdout([]byte(stdout)); err == nil {
+				t.Fatalf("expected %s mismatch to fail", name)
+			}
+		})
+	}
+}
+
+// A profile without declared arms must still run the envelope the operator
+// supplied; silently substituting another one is the same evidence failure the
+// labeled arms exist to prevent.
+func TestSingletonArmKeepsSuppliedControls(t *testing.T) {
+	t.Parallel()
+	for _, profile := range []string{ProfileSmoke, ProfileReflowSaturation, ProfileFullPipe} {
+		t.Run(profile, func(t *testing.T) {
+			spec, err := ResolveProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			arms := resolveMemoryArms(spec, Options{GOMEMLIMIT: "64MiB", MemoryBudget: "128MiB"})
+			if len(arms) != 1 {
+				t.Fatalf("arms %+v", arms)
+			}
+			if arms[0].GOMEMLIMIT != "64MiB" {
+				t.Fatalf("dropped GOMEMLIMIT: %+v", arms[0])
+			}
+			if arms[0].MemoryBudget != "128MiB" {
+				t.Fatalf("dropped memory budget: %+v", arms[0])
+			}
+			if arms[0].Label != "" {
+				t.Fatalf("singleton must stay unlabeled: %+v", arms[0])
+			}
+		})
+	}
+}
+
+// The supplied budget must reach the child on the full-pipe path too.
+func TestFullPipeOptsCarryMemoryBudgetToChild(t *testing.T) {
+	t.Parallel()
+	spec, err := ResolveProfile(ProfileFullPipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm := resolveMemoryArms(spec, Options{MemoryBudget: "128MiB"})[0]
+	opts := FullPipeOpts{MemoryBudget: arm.MemoryBudget}
+	if opts.MemoryBudget != "128MiB" {
+		t.Fatalf("full-pipe budget %q", opts.MemoryBudget)
+	}
+}
+
+func TestValidateArmMatrix(t *testing.T) {
+	t.Parallel()
+	spec, err := ResolveProfile(ProfileCeilingLift)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := Report{}
+	for _, arm := range spec.MemoryArms {
+		for range spec.ParallelPoints {
+			full.Points = append(full.Points, PointReport{ExecutionShape: "reflow_only", MemoryEnvelope: arm.Label})
+		}
+	}
+	if err := ValidateArmMatrix(spec, full); err != nil {
+		t.Fatalf("complete matrix: %v", err)
+	}
+	// A whole arm going missing is invisible to per-point validation.
+	dropped := Report{Points: full.Points[:len(full.Points)-len(spec.ParallelPoints)]}
+	if err := ValidateArmMatrix(spec, dropped); err == nil {
+		t.Fatal("expected a dropped arm to be rejected")
+	}
+	dup := Report{Points: append(append([]PointReport{}, full.Points...), PointReport{
+		ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmProbeBound,
+	})}
+	if err := ValidateArmMatrix(spec, dup); err == nil {
+		t.Fatal("expected a duplicated arm to be rejected")
+	}
+	undeclared := Report{Points: append(append([]PointReport{}, full.Points...), PointReport{
+		ExecutionShape: "reflow_only", MemoryEnvelope: "raised",
+	})}
+	if err := ValidateArmMatrix(spec, undeclared); err == nil {
+		t.Fatal("expected an undeclared arm to be rejected")
+	}
+	// Profiles without declared arms are not matrix-constrained.
+	smoke, err := ResolveProfile(ProfileSmoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateArmMatrix(smoke, Report{Points: []PointReport{{ExecutionShape: "reflow_only"}}}); err != nil {
+		t.Fatalf("smoke: %v", err)
+	}
 }
 
 func TestParseCapturesMemoryResolution(t *testing.T) {
@@ -115,65 +233,161 @@ func TestResolveMemoryArmsBindsOperatorValues(t *testing.T) {
 	if arms[2].MemoryBudget != "8GiB" || arms[2].GOMEMLIMIT != "" {
 		t.Fatalf("budget arm %+v", arms[2])
 	}
-	// A profile with no arms still yields exactly one unlabeled run.
+	// A profile with no arms yields exactly one unlabeled run that still
+	// carries the supplied envelope — see TestSingletonArmKeepsSuppliedControls.
 	smoke, err := ResolveProfile(ProfileSmoke)
 	if err != nil {
 		t.Fatal(err)
 	}
 	single := resolveMemoryArms(smoke, Options{GOMEMLIMIT: "2GiB"})
-	if len(single) != 1 || single[0].Label != "" || single[0].GOMEMLIMIT != "" {
+	if len(single) != 1 || single[0].Label != "" || single[0].GOMEMLIMIT != "2GiB" {
 		t.Fatalf("single arm %+v", single)
 	}
 }
 
-// A report must not be able to claim an envelope the child did not run under.
+// resolvedPoint is a well-formed labeled point; cases below mutate one facet so
+// each rejection is attributable to that facet alone.
+func resolvedPoint(envelope string) PointReport {
+	return PointReport{
+		ExecutionShape:             "reflow_only",
+		MemoryEnvelope:             envelope,
+		MemoryLimitSource:          memorySourcePhysicalRAM,
+		MemoryBudgetSource:         memoryBudgetSourceDerived,
+		MemoryLimitBytes:           1 << 30,
+		MemoryBudgetEffectiveBytes: 256 << 20,
+		RetryBufferCapBytes:        16 << 20,
+	}
+}
+
+func reportWith(p PointReport) Report {
+	r := NewReport(ProfileCeilingLift, "file", "inv", "sha", CompactManifest{Digest: "corpus-digest"}, false)
+	r.Points = []PointReport{p}
+	return r
+}
+
+// A report must not be able to claim an envelope the child did not run under —
+// and, critically, an arm label must name the candidate that actually BOUND the
+// run, not merely the lever that was passed in.
 func TestValidateReportRejectsMislabeledMemoryEnvelope(t *testing.T) {
 	t.Parallel()
-	base := func(p PointReport) Report {
-		r := NewReport(ProfileCeilingLift, "file", "inv", "sha", CompactManifest{Digest: "corpus-digest"}, false)
-		r.Points = []PointReport{p}
-		return r
+	gomemBound := func() PointReport {
+		p := resolvedPoint(MemoryArmGOMEMLIMIT)
+		p.GOMEMLIMITSet, p.GOMEMLIMITValue = true, "2GiB"
+		p.MemoryLimitSource = memorySourceRuntime
+		return p
 	}
+	budgetHonored := func() PointReport {
+		p := resolvedPoint(MemoryArmOperatorBudget)
+		p.MemoryBudgetRequested = "8GiB"
+		p.MemoryBudgetSource = memoryBudgetSourceOperator
+		return p
+	}
+
 	cases := []struct {
 		name  string
 		point PointReport
 	}{
-		{"gomemlimit arm without GOMEMLIMIT", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmGOMEMLIMIT,
-		}},
-		{"probe-bound arm with an override", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmProbeBound,
-			GOMEMLIMITSet: true, GOMEMLIMITValue: "2GiB",
-		}},
-		{"probe-bound arm reporting an operator budget", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmProbeBound,
-			MemoryBudgetSource: "operator",
-		}},
-		{"budget arm without a budget", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmOperatorBudget,
-			MemoryBudgetSource: "operator",
-		}},
-		{"budget arm the product did not honor", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmOperatorBudget,
-			MemoryBudgetRequested: "8GiB", MemoryBudgetSource: "derived",
-		}},
-		{"unknown envelope", PointReport{
-			ExecutionShape: "reflow_only", MemoryEnvelope: "raised",
-		}},
+		{"gomemlimit arm without GOMEMLIMIT", func() PointReport {
+			p := resolvedPoint(MemoryArmGOMEMLIMIT)
+			p.MemoryLimitSource = memorySourceRuntime
+			return p
+		}()},
+		// The finding the seats reproduced: a GOMEMLIMIT above a lower
+		// candidate is injected but never binds, so the arm is not constrained
+		// by it and must not be published as such.
+		{"gomemlimit supplied but did not bind", func() PointReport {
+			p := gomemBound()
+			p.MemoryLimitSource = memorySourcePhysicalRAM
+			return p
+		}()},
+		{"gomemlimit arm with a non-derived budget", func() PointReport {
+			p := gomemBound()
+			p.MemoryBudgetSource = memoryBudgetSourceOperator
+			return p
+		}()},
+		{"probe-bound arm with an override", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.GOMEMLIMITSet, p.GOMEMLIMITValue = true, "2GiB"
+			return p
+		}()},
+		// The symmetric false accept: nothing was passed, but a runtime bound
+		// won, so the detection chain is not what bound this arm.
+		{"probe-bound arm bound by the runtime limit", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.MemoryLimitSource = memorySourceRuntime
+			return p
+		}()},
+		{"probe-bound arm reporting an operator budget", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.MemoryBudgetSource = memoryBudgetSourceOperator
+			return p
+		}()},
+		{"budget arm without a budget", func() PointReport {
+			p := budgetHonored()
+			p.MemoryBudgetRequested = ""
+			return p
+		}()},
+		{"budget arm the product did not honor", func() PointReport {
+			p := budgetHonored()
+			p.MemoryBudgetSource = memoryBudgetSourceDerived
+			return p
+		}()},
+		{"placeholder limit provenance", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.MemoryLimitSource = "unknown/not_reported"
+			return p
+		}()},
+		{"absent limit provenance", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.MemoryLimitSource = ""
+			return p
+		}()},
+		{"absent budget provenance", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.MemoryBudgetSource = ""
+			return p
+		}()},
+		{"non-positive resolved arithmetic", func() PointReport {
+			p := resolvedPoint(MemoryArmProbeBound)
+			p.RetryBufferCapBytes = 0
+			return p
+		}()},
+		{"unknown envelope", resolvedPoint("raised")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ValidateReportEnvelope(base(tc.point)); err == nil {
+			if err := ValidateReportEnvelope(reportWith(tc.point)); err == nil {
 				t.Fatalf("expected rejection for %s", tc.name)
 			}
 		})
 	}
+}
 
-	ok := base(PointReport{
-		ExecutionShape: "reflow_only", MemoryEnvelope: MemoryArmOperatorBudget,
-		MemoryBudgetRequested: "8GiB", MemoryBudgetSource: "operator_clamped_to_limit",
-	})
-	if err := ValidateReportEnvelope(ok); err != nil {
-		t.Fatalf("honored budget arm: %v", err)
+// The shapes the current measurement actually produces must stay accepted, so
+// the strengthened gate does not require remeasurement.
+func TestValidateReportAcceptsBoundMemoryEnvelopes(t *testing.T) {
+	t.Parallel()
+	gomem := resolvedPoint(MemoryArmGOMEMLIMIT)
+	gomem.GOMEMLIMITSet, gomem.GOMEMLIMITValue = true, "1GiB"
+	gomem.MemoryLimitSource = memorySourceRuntime
+
+	cgroup := resolvedPoint(MemoryArmProbeBound)
+	cgroup.MemoryLimitSource = memorySourceCgroupV2
+
+	undetected := resolvedPoint(MemoryArmProbeBound)
+	undetected.MemoryLimitSource = memorySourceDetectionUnavailable
+
+	budget := resolvedPoint(MemoryArmOperatorBudget)
+	budget.MemoryBudgetRequested = "8GiB"
+	budget.MemoryBudgetSource = memoryBudgetSourceOperator
+
+	clamped := resolvedPoint(MemoryArmOperatorBudget)
+	clamped.MemoryBudgetRequested = "8GiB"
+	clamped.MemoryBudgetSource = memoryBudgetSourceOperatorClamped
+
+	for _, p := range []PointReport{gomem, resolvedPoint(MemoryArmProbeBound), cgroup, undetected, budget, clamped} {
+		if err := ValidateReportEnvelope(reportWith(p)); err != nil {
+			t.Fatalf("envelope %s limit=%s budget=%s: %v", p.MemoryEnvelope, p.MemoryLimitSource, p.MemoryBudgetSource, err)
+		}
 	}
 }

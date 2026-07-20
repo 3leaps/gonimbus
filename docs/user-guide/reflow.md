@@ -247,7 +247,7 @@ gonimbus transfer reflow --stdin \
 
 - **Clamp is visible, never silent.** If the requested ceiling is reduced by the
   resource cap, the run reports it via `concurrency_ceiling_reason` (e.g.
-  `resource_capped:memory:cgroup` or `resource_capped:fd`) plus a stderr notice —
+  `resource_capped:memory:cgroup_v2` or `resource_capped:fd`) plus a stderr notice —
   so a lower-than-requested concurrency is explained, not guessed at.
 - **`--no-adaptive`** runs fixed at the **effective** ceiling (still resource-capped —
   a fixed `--parallel 9385` is clamped too), for deterministic runs.

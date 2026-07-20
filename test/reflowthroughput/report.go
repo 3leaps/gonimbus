@@ -209,8 +209,16 @@ func ValidateReportEnvelope(r Report) error {
 			}
 			continue
 		}
-		// An arm label must match what the point actually ran under, so a
-		// report can never describe an envelope the child was not given.
+		// A labeled arm must match the candidate that actually BOUND the run,
+		// not merely the lever that was passed to it. Under minimum-selection
+		// an operator value can lose to a lower candidate, so validating the
+		// request alone would accept exactly the class of mislabeling that
+		// motivated these arms.
+		if p.MemoryEnvelope != "" {
+			if err := validateResolvedMemoryProvenance(i, p); err != nil {
+				return err
+			}
+		}
 		switch p.MemoryEnvelope {
 		case MemoryArmGOMEMLIMIT:
 			if !p.GOMEMLIMITSet {
@@ -219,12 +227,21 @@ func ValidateReportEnvelope(r Report) error {
 			if p.MemoryBudgetRequested != "" {
 				return fmt.Errorf("point %d: envelope %s must not also set a memory budget", i, p.MemoryEnvelope)
 			}
+			if p.MemoryLimitSource != memorySourceRuntime {
+				return fmt.Errorf("point %d: envelope %s but the binding limit was %q — the supplied GOMEMLIMIT did not constrain this run", i, p.MemoryEnvelope, p.MemoryLimitSource)
+			}
+			if p.MemoryBudgetSource != memoryBudgetSourceDerived {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q, want %s", i, p.MemoryEnvelope, p.MemoryBudgetSource, memoryBudgetSourceDerived)
+			}
 		case MemoryArmProbeBound:
 			if p.GOMEMLIMITSet || p.MemoryBudgetRequested != "" {
 				return fmt.Errorf("point %d: envelope %s must run without memory overrides", i, p.MemoryEnvelope)
 			}
-			if p.MemoryBudgetSource != "" && p.MemoryBudgetSource != "derived" {
-				return fmt.Errorf("point %d: envelope %s reported budget source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+			if p.MemoryLimitSource == memorySourceRuntime {
+				return fmt.Errorf("point %d: envelope %s but the binding limit was %q — that is a runtime bound, not a detected one", i, p.MemoryEnvelope, p.MemoryLimitSource)
+			}
+			if p.MemoryBudgetSource != memoryBudgetSourceDerived {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q, want %s", i, p.MemoryEnvelope, p.MemoryBudgetSource, memoryBudgetSourceDerived)
 			}
 		case MemoryArmOperatorBudget:
 			if p.MemoryBudgetRequested == "" {
@@ -233,14 +250,96 @@ func ValidateReportEnvelope(r Report) error {
 			if p.GOMEMLIMITSet {
 				return fmt.Errorf("point %d: envelope %s must not also constrain GOMEMLIMIT", i, p.MemoryEnvelope)
 			}
-			if p.MemoryBudgetSource != "operator" && p.MemoryBudgetSource != "operator_clamped_to_limit" {
-				return fmt.Errorf("point %d: envelope %s reported budget source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+			if p.MemoryBudgetSource != memoryBudgetSourceOperator && p.MemoryBudgetSource != memoryBudgetSourceOperatorClamped {
+				return fmt.Errorf("point %d: envelope %s reported budget source %q — the operator budget did not govern this run", i, p.MemoryEnvelope, p.MemoryBudgetSource)
 			}
 		case "":
 			// Unlabeled single-arm profiles (smoke, saturation) declare nothing.
 		default:
 			return fmt.Errorf("point %d: unknown memory_envelope %q", i, p.MemoryEnvelope)
 		}
+	}
+	return nil
+}
+
+// Product memory provenance labels, mirrored here so the harness validates
+// against the vocabulary the product actually emits rather than free text.
+const (
+	memorySourceCgroupV2             = "cgroup_v2"
+	memorySourceCgroupV1             = "cgroup_v1"
+	memorySourceRuntime              = "runtime"
+	memorySourcePhysicalRAM          = "physical_ram"
+	memorySourceDetectionUnavailable = "detection_unavailable"
+
+	memoryBudgetSourceDerived         = "derived"
+	memoryBudgetSourceOperator        = "operator"
+	memoryBudgetSourceOperatorClamped = "operator_clamped_to_limit"
+)
+
+func recognizedMemoryLimitSource(s string) bool {
+	switch s {
+	case memorySourceCgroupV2, memorySourceCgroupV1, memorySourceRuntime,
+		memorySourcePhysicalRAM, memorySourceDetectionUnavailable:
+		return true
+	}
+	return false
+}
+
+func recognizedMemoryBudgetSource(s string) bool {
+	switch s {
+	case memoryBudgetSourceDerived, memoryBudgetSourceOperator, memoryBudgetSourceOperatorClamped:
+		return true
+	}
+	return false
+}
+
+// validateResolvedMemoryProvenance fails closed on a labeled arm whose point
+// carries no usable resolution evidence. A placeholder or absent source cannot
+// support any arm claim, so it must not reach a published report.
+func validateResolvedMemoryProvenance(i int, p PointReport) error {
+	if !recognizedMemoryLimitSource(p.MemoryLimitSource) {
+		return fmt.Errorf("point %d: envelope %s has unrecognized memory_limit_source %q", i, p.MemoryEnvelope, p.MemoryLimitSource)
+	}
+	if !recognizedMemoryBudgetSource(p.MemoryBudgetSource) {
+		return fmt.Errorf("point %d: envelope %s has unrecognized memory_budget_source %q", i, p.MemoryEnvelope, p.MemoryBudgetSource)
+	}
+	if p.MemoryLimitBytes <= 0 || p.MemoryBudgetEffectiveBytes <= 0 || p.RetryBufferCapBytes <= 0 {
+		return fmt.Errorf("point %d: envelope %s has non-positive resolved memory arithmetic (limit=%d budget=%d cap=%d)",
+			i, p.MemoryEnvelope, p.MemoryLimitBytes, p.MemoryBudgetEffectiveBytes, p.RetryBufferCapBytes)
+	}
+	return nil
+}
+
+// ValidateArmMatrix checks that a report contains exactly the arm × parallel ×
+// checkpoint points its profile declares. Per-point validation cannot see a
+// whole arm that went missing, and "a declared arm is never silently dropped"
+// is precisely what these profiles promise.
+func ValidateArmMatrix(spec ProfileSpec, r Report) error {
+	if len(spec.MemoryArms) == 0 {
+		return nil
+	}
+	classes := spec.CheckpointClasses
+	if len(classes) == 0 {
+		classes = []string{"disk"}
+	}
+	want := len(spec.ParallelPoints) * len(classes)
+	counts := map[string]int{}
+	for _, p := range r.Points {
+		if p.ExecutionShape == "probe_drain" {
+			continue
+		}
+		counts[p.MemoryEnvelope]++
+	}
+	for _, arm := range spec.MemoryArms {
+		got := counts[arm.Label]
+		if got != want {
+			return fmt.Errorf("profile %s arm %s has %d points, want %d (%d parallel × %d checkpoint classes)",
+				spec.Name, arm.Label, got, want, len(spec.ParallelPoints), len(classes))
+		}
+		delete(counts, arm.Label)
+	}
+	for label, got := range counts {
+		return fmt.Errorf("profile %s reported %d points under undeclared arm %q", spec.Name, got, label)
 	}
 	return nil
 }

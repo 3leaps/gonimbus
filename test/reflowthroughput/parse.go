@@ -12,6 +12,16 @@ import (
 	"github.com/3leaps/gonimbus/pkg/reflow"
 )
 
+// MemoryResolution is the startup-fixed memory arithmetic one record reports.
+type MemoryResolution struct {
+	LimitBytes           int64
+	LimitSource          string
+	BudgetRequestedBytes int64
+	BudgetEffectiveBytes int64
+	BudgetSource         string
+	RetryBufferCapBytes  int64
+}
+
 // ParsedReflowOutput is the allowlist-extracted view of reflow child stdout.
 // It never retains destination URI or checkpoint path from product records.
 type ParsedReflowOutput struct {
@@ -40,15 +50,18 @@ type ParsedReflowOutput struct {
 	SummaryFinal     int
 	SummaryAdaptive  bool
 
-	// Memory resolution as the product reported it. Run and summary derive from
-	// the same resolved config, so disagreement is a hard failure. Values stay
-	// aggregate (bytes and source labels) — no host identity is retained.
-	RunMemoryLimitSource       string
-	SummaryMemoryLimitSource   string
-	RunMemoryBudgetSource      string
-	SummaryMemoryBudgetSource  string
+	// Memory resolution as the product reported it. The whole tuple is fixed at
+	// startup, so run and summary must agree on every field — comparing only
+	// the source labels would let a differing limit, budget, or retry cap
+	// through and publish the run's values as if both records agreed. Values
+	// stay aggregate (bytes and source labels) — no host identity is retained.
+	RunMemory     MemoryResolution
+	SummaryMemory MemoryResolution
+
+	// Consensus memory resolution after the agreement check.
 	MemoryLimitBytes           int64
 	MemoryLimitSource          string
+	MemoryBudgetRequestedBytes int64
 	MemoryBudgetEffectiveBytes int64
 	MemoryBudgetSource         string
 	RetryBufferCapBytes        int64
@@ -138,11 +151,14 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.ThrottleBackoffs = rr.ConcurrencyThrottleBackoffs
 			out.AdditiveIncreases = rr.ConcurrencyAdditiveIncreases
 			out.ConnectionFreezes = rr.ConcurrencyConnectionErrorFreezes
-			out.RunMemoryLimitSource = rr.MemoryLimitSource
-			out.RunMemoryBudgetSource = rr.MemoryBudgetSource
-			out.MemoryLimitBytes = rr.MemoryLimitBytes
-			out.MemoryBudgetEffectiveBytes = rr.MemoryBudgetEffectiveBytes
-			out.RetryBufferCapBytes = rr.RetryBufferCapBytes
+			out.RunMemory = MemoryResolution{
+				LimitBytes:           rr.MemoryLimitBytes,
+				LimitSource:          rr.MemoryLimitSource,
+				BudgetRequestedBytes: rr.MemoryBudgetRequestedBytes,
+				BudgetEffectiveBytes: rr.MemoryBudgetEffectiveBytes,
+				BudgetSource:         rr.MemoryBudgetSource,
+				RetryBufferCapBytes:  rr.RetryBufferCapBytes,
+			}
 		case reflow.SummaryRecordType:
 			out.SummaryCount++
 			var sr reflow.SummaryRecord
@@ -155,8 +171,14 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.SummaryMaxActive = sr.ConcurrencyMaxActive
 			out.SummaryFinal = sr.ConcurrencyFinal
 			out.SummaryAdaptive = sr.AdaptiveEnabled
-			out.SummaryMemoryLimitSource = sr.MemoryLimitSource
-			out.SummaryMemoryBudgetSource = sr.MemoryBudgetSource
+			out.SummaryMemory = MemoryResolution{
+				LimitBytes:           sr.MemoryLimitBytes,
+				LimitSource:          sr.MemoryLimitSource,
+				BudgetRequestedBytes: sr.MemoryBudgetRequestedBytes,
+				BudgetEffectiveBytes: sr.MemoryBudgetEffectiveBytes,
+				BudgetSource:         sr.MemoryBudgetSource,
+				RetryBufferCapBytes:  sr.RetryBufferCapBytes,
+			}
 			out.SummaryTimeAvgActive = sr.ConcurrencyTimeAvgActive
 			out.InvalidInputs = sr.InvalidInputs
 			out.SummaryErrors = sr.Errors
@@ -276,6 +298,29 @@ func asInt(v any) int {
 	}
 }
 
+// agreeMemoryResolution compares the startup-fixed memory tuple field by
+// field. Occupancy and ledger pressure legitimately evolve between the two
+// records and are deliberately not part of this comparison.
+func agreeMemoryResolution(run, summary MemoryResolution) error {
+	type field struct {
+		name               string
+		runVal, summaryVal any
+	}
+	for _, f := range []field{
+		{"memory_limit_bytes", run.LimitBytes, summary.LimitBytes},
+		{"memory_limit_source", run.LimitSource, summary.LimitSource},
+		{"memory_budget_requested_bytes", run.BudgetRequestedBytes, summary.BudgetRequestedBytes},
+		{"memory_budget_effective_bytes", run.BudgetEffectiveBytes, summary.BudgetEffectiveBytes},
+		{"memory_budget_source", run.BudgetSource, summary.BudgetSource},
+		{"retry_buffer_cap_bytes", run.RetryBufferCapBytes, summary.RetryBufferCapBytes},
+	} {
+		if f.runVal != f.summaryVal {
+			return fmt.Errorf("run/summary %s mismatch: %v vs %v", f.name, f.runVal, f.summaryVal)
+		}
+	}
+	return nil
+}
+
 func (p *ParsedReflowOutput) agreeRunSummary() error {
 	// Ceiling identity must match between run and summary (emitted at start vs end).
 	if p.RunRequested != p.SummaryRequested {
@@ -290,17 +335,18 @@ func (p *ParsedReflowOutput) agreeRunSummary() error {
 	if p.RunAdaptive != p.SummaryAdaptive {
 		return fmt.Errorf("run/summary adaptive mismatch: %v vs %v", p.RunAdaptive, p.SummaryAdaptive)
 	}
-	// Memory resolution is fixed at startup, so both records must report the
-	// same provenance. A divergence means the run did not execute under the
-	// configuration it published.
-	if p.RunMemoryLimitSource != p.SummaryMemoryLimitSource {
-		return fmt.Errorf("run/summary memory_limit_source mismatch: %q vs %q", p.RunMemoryLimitSource, p.SummaryMemoryLimitSource)
+	// The whole memory tuple is fixed at startup, so both records must report
+	// it identically. A divergence in any field means the run did not execute
+	// under the configuration it published.
+	if err := agreeMemoryResolution(p.RunMemory, p.SummaryMemory); err != nil {
+		return err
 	}
-	if p.RunMemoryBudgetSource != p.SummaryMemoryBudgetSource {
-		return fmt.Errorf("run/summary memory_budget_source mismatch: %q vs %q", p.RunMemoryBudgetSource, p.SummaryMemoryBudgetSource)
-	}
-	p.MemoryLimitSource = p.RunMemoryLimitSource
-	p.MemoryBudgetSource = p.RunMemoryBudgetSource
+	p.MemoryLimitBytes = p.RunMemory.LimitBytes
+	p.MemoryLimitSource = p.RunMemory.LimitSource
+	p.MemoryBudgetRequestedBytes = p.RunMemory.BudgetRequestedBytes
+	p.MemoryBudgetEffectiveBytes = p.RunMemory.BudgetEffectiveBytes
+	p.MemoryBudgetSource = p.RunMemory.BudgetSource
+	p.RetryBufferCapBytes = p.RunMemory.RetryBufferCapBytes
 	// max_active is a progressive peak: run may still be 0 when emitted at start;
 	// summary holds the authoritative peak. Require summary >= run.
 	if p.SummaryMaxActive < p.RunMaxActive {

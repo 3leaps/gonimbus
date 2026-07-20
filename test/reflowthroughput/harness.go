@@ -77,11 +77,17 @@ type resolvedArm struct {
 }
 
 // resolveMemoryArms binds each declared arm to operator-supplied values. A
-// profile that declares no arms runs a single arm with no memory override, so
-// the product's own detection chain binds the envelope.
+// profile that declares no arms runs one unlabeled arm that still carries any
+// generic GOMEMLIMIT / memory budget the operator supplied: dropping them
+// would run a different envelope than the caller asked for, which is the same
+// evidence failure the labeled arms exist to prevent.
 func resolveMemoryArms(spec ProfileSpec, opts Options) []resolvedArm {
 	if len(spec.MemoryArms) == 0 {
-		return []resolvedArm{{Label: ""}}
+		return []resolvedArm{{
+			Label:        "",
+			GOMEMLIMIT:   opts.GOMEMLIMIT,
+			MemoryBudget: opts.MemoryBudget,
+		}}
 	}
 	constrained := firstNonEmpty(opts.ConstrainedGOMEMLIMIT, opts.GOMEMLIMIT)
 	out := make([]resolvedArm, 0, len(spec.MemoryArms))
@@ -737,6 +743,9 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	if err := ValidateReportEnvelope(report); err != nil {
+		return report, err
+	}
+	if err := ValidateArmMatrix(spec, report); err != nil {
 		return report, err
 	}
 
