@@ -53,6 +53,56 @@ type Options struct {
 	// WorktreeCommit is optional fallback commit identity when the binary
 	// reports "unknown" (plain go test builds without ldflags).
 	WorktreeCommit string
+
+	// Recipe overrides scale the profile's synthetic corpus at invocation. Zero
+	// means keep the profile default. Accepted via OBJECT_COUNT / SIZE_BYTES /
+	// PARTITIONS (GONIMBUS_THROUGHPUT_OBJECT_COUNT / _SIZE_BYTES / _PARTITIONS).
+	// Absurd values fail closed in Recipe.Validate; the effective corpus is
+	// recorded in the report's corpus block so evidence names what was measured.
+	RecipeObjectCount int
+	RecipeSizeBytes   int
+	RecipePartitions  int
+}
+
+// applyRecipeOverrides scales a profile's recipe by the operator overrides.
+// A zero override keeps the profile default. Negative values are neither applied
+// here nor treated as "unset" — resolveRecipe rejects them first so they cannot
+// silently fall through to the default.
+func applyRecipeOverrides(r Recipe, opts Options) Recipe {
+	if opts.RecipeObjectCount > 0 {
+		r.ObjectCount = opts.RecipeObjectCount
+	}
+	if opts.RecipeSizeBytes > 0 {
+		r.SizeBytes = opts.RecipeSizeBytes
+	}
+	if opts.RecipePartitions > 0 {
+		r.Partitions = opts.RecipePartitions
+	}
+	return r
+}
+
+// resolveRecipe is the resolved override path: it rejects negative overrides
+// (fail closed — a set-negative value is an error, never a silent revert to the
+// profile default), applies positive overrides, and validates the result so
+// out-of-bounds and oversized-aggregate corpora are rejected before generation.
+func resolveRecipe(base Recipe, opts Options) (Recipe, error) {
+	for _, o := range []struct {
+		name string
+		val  int
+	}{
+		{"OBJECT_COUNT", opts.RecipeObjectCount},
+		{"SIZE_BYTES", opts.RecipeSizeBytes},
+		{"PARTITIONS", opts.RecipePartitions},
+	} {
+		if o.val < 0 {
+			return Recipe{}, fmt.Errorf("%s override %d must be >= 0 (0 = profile default)", o.name, o.val)
+		}
+	}
+	r := applyRecipeOverrides(base, opts)
+	if err := r.Validate(); err != nil {
+		return Recipe{}, err
+	}
+	return r, nil
 }
 
 // pointRun declares one measured point. Named fields rather than positional
@@ -125,6 +175,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	spec, err := ResolveProfile(opts.Profile)
 	if err != nil {
 		return Report{}, err
+	}
+	spec.Recipe, err = resolveRecipe(spec.Recipe, opts)
+	if err != nil {
+		return Report{}, fmt.Errorf("recipe override: %w", err)
 	}
 	if err := requireMemoryArmInputs(spec, opts); err != nil {
 		return Report{}, err

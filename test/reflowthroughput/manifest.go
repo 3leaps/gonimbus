@@ -18,9 +18,14 @@ type ManifestEntry struct {
 
 // Manifest is the canonical corpus identity bound into every report envelope.
 type Manifest struct {
-	RecipeVersion string          `json:"recipe_version"`
-	Seed          int64           `json:"seed"`
-	ObjectCount   int             `json:"object_count"`
+	RecipeVersion string `json:"recipe_version"`
+	Seed          int64  `json:"seed"`
+	ObjectCount   int    `json:"object_count"`
+	// SizeBytes and Partitions are the resolved recipe knobs, recorded so a
+	// reader can name the exact corpus shape that produced the evidence.
+	// Partitions in particular cannot be reconstructed from the entry digest.
+	SizeBytes     int             `json:"size_bytes"`
+	Partitions    int             `json:"partitions"`
 	TotalBytes    int64           `json:"total_bytes"`
 	SizeHistogram map[string]int  `json:"size_histogram"`
 	Entries       []ManifestEntry `json:"entries"`
@@ -50,6 +55,8 @@ func BuildManifest(recipe Recipe, entries []ManifestEntry) (Manifest, error) {
 		RecipeVersion: recipe.Version,
 		Seed:          recipe.Seed,
 		ObjectCount:   recipe.ObjectCount,
+		SizeBytes:     recipe.SizeBytes,
+		Partitions:    recipe.Partitions,
 		TotalBytes:    total,
 		SizeHistogram: hist,
 		Entries:       append([]ManifestEntry(nil), entries...),
@@ -93,6 +100,8 @@ type CompactManifest struct {
 	RecipeVersion string         `json:"recipe_version"`
 	Seed          int64          `json:"seed"`
 	ObjectCount   int            `json:"object_count"`
+	SizeBytes     int            `json:"size_bytes"`
+	Partitions    int            `json:"partitions"`
 	TotalBytes    int64          `json:"total_bytes"`
 	SizeHistogram map[string]int `json:"size_histogram"`
 	Digest        string         `json:"digest"`
@@ -108,6 +117,8 @@ func (m Manifest) Compact() CompactManifest {
 		RecipeVersion: m.RecipeVersion,
 		Seed:          m.Seed,
 		ObjectCount:   m.ObjectCount,
+		SizeBytes:     m.SizeBytes,
+		Partitions:    m.Partitions,
 		TotalBytes:    m.TotalBytes,
 		SizeHistogram: hist,
 		Digest:        m.Digest,

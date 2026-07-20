@@ -150,10 +150,13 @@ behavior.
 `absolute_envelope_validation=not_evaluated`. The default profiles are a
 **small-scale honesty / relative-throughput** instrument (requested vs
 effective concurrency, serial-dispatch occupancy, two-regime per-stage rates,
-disk-vs-tmpfs and clamp discriminators). Configurable high-object-count /
-mixed-size runs and absolute field-scale envelope validation are **deferred to
-an opt-in BYO-cloud follow-on** — local/`file://` and moto results must not be
-read as a portable throughput oracle.
+disk-vs-tmpfs and clamp discriminators). Corpus scale is configurable locally
+via `OBJECT_COUNT` / `SIZE_BYTES` / `PARTITIONS` (e.g. `checkpoint-scale` drives
+the single-writer wall on a large local corpus), but the scope is unchanged:
+these remain relative discriminators. **Absolute field-scale envelope
+validation** stays `not_evaluated` and **deferred to an opt-in BYO-cloud
+follow-on** — local/`file://` and moto results must not be read as a portable
+throughput oracle regardless of corpus size.
 
 ```bash
 make test-reflow-throughput                 # PROFILE=smoke PROVIDER=file (default)
@@ -163,19 +166,21 @@ make test-reflow-throughput PROFILE=ceiling-lift GOMEMLIMIT=8GiB
 make test-reflow-throughput PROFILE=fullpipe-ab
 make test-reflow-throughput PROFILE=probe-saturation
 make test-reflow-throughput PROFILE=checkpoint TMPFS_CHECKPOINT_ROOT=/path/to/tmpfs GOMEMLIMIT=2GiB
+make test-reflow-throughput PROFILE=checkpoint-scale TMPFS_CHECKPOINT_ROOT=/path/to/tmpfs OBJECT_COUNT=50000
 # Optional BYO transport (same env lane as make test-cloud-real / test/cloudtest):
 make test-reflow-throughput PROFILE=smoke PROVIDER=s3-compatible   # needs GONIMBUS_S3_TEST_*
 make test-reflow-throughput PROFILE=smoke PROVIDER=moto            # needs make moto-start
 ```
 
-| Profile             | Purpose                                                   |
-| ------------------- | --------------------------------------------------------- |
-| `smoke`             | Credential-free local correctness (default; cheap)        |
-| `reflow-saturation` | Fixed `--parallel` sweep + occupancy samples              |
-| `ceiling-lift`      | Same sweep with operator-supplied `GOMEMLIMIT` only       |
-| `checkpoint`        | Disk vs tmpfs checkpoint class discriminator              |
-| `fullpipe-ab`       | `content probe` → tap → `transfer reflow` per-stage rates |
-| `probe-saturation`  | Producer-only probe with draining sink (no reflow)        |
+| Profile             | Purpose                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `smoke`             | Credential-free local correctness (default; cheap)                                          |
+| `reflow-saturation` | Fixed `--parallel` sweep + occupancy samples                                                |
+| `ceiling-lift`      | Same sweep with operator-supplied `GOMEMLIMIT` only                                         |
+| `checkpoint`        | Disk vs tmpfs checkpoint class discriminator                                                |
+| `checkpoint-scale`  | Single-writer contention at a lifted ceiling on a large, overridable corpus (disk vs tmpfs) |
+| `fullpipe-ab`       | `content probe` → tap → `transfer reflow` per-stage rates                                   |
+| `probe-saturation`  | Producer-only probe with draining sink (no reflow)                                          |
 
 **Provider classes** (`PROVIDER=`, default `file`)
 
@@ -210,14 +215,15 @@ never appear in the sanitized report.
 
 Optional env for operators:
 
-| Variable                                                              | Purpose                                                                                             |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `RUN_ROOT`                                                            | External operator root; each run mints `inv-<id>/` underneath                                       |
-| `KEEP=1`                                                              | Retain minted roots (report only sanitized invocation id)                                           |
-| `PROVIDER` / `GONIMBUS_THROUGHPUT_PROVIDER`                           | `file` (default), `moto`, `s3-compatible`                                                           |
-| `TMPFS_CHECKPOINT_ROOT` / `GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT` | Required for `PROFILE=checkpoint` tmpfs arms                                                        |
-| `GOMEMLIMIT`                                                          | Operator-supplied only; never auto-raised. Required for ceiling-lift and **raised** checkpoint arms |
-| `CEILING_LIFT_GOMEMLIMIT`                                             | Optional raised-envelope override when distinct from `GOMEMLIMIT`                                   |
+| Variable                                                              | Purpose                                                                                                                                                                    |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RUN_ROOT`                                                            | External operator root; each run mints `inv-<id>/` underneath                                                                                                              |
+| `KEEP=1`                                                              | Retain minted roots (report only sanitized invocation id)                                                                                                                  |
+| `PROVIDER` / `GONIMBUS_THROUGHPUT_PROVIDER`                           | `file` (default), `moto`, `s3-compatible`                                                                                                                                  |
+| `TMPFS_CHECKPOINT_ROOT` / `GONIMBUS_THROUGHPUT_TMPFS_CHECKPOINT_ROOT` | Required for `PROFILE=checkpoint` and `checkpoint-scale` tmpfs arms                                                                                                        |
+| `GOMEMLIMIT`                                                          | Operator-supplied only; never auto-raised. Required for ceiling-lift and **raised** checkpoint arms                                                                        |
+| `CEILING_LIFT_GOMEMLIMIT`                                             | Optional raised-envelope override when distinct from `GOMEMLIMIT`                                                                                                          |
+| `OBJECT_COUNT` / `SIZE_BYTES` / `PARTITIONS`                          | Scale the profile's synthetic corpus (0/unset = profile default; fail closed on absurd values). Raise `OBJECT_COUNT` on `checkpoint-scale` to drive the single-writer wall |
 
 Checkpoint dual-envelope: **clamped** arms run with no child `GOMEMLIMIT`;
 **raised** arms use operator `GOMEMLIMIT` / `CEILING_LIFT_GOMEMLIMIT`. Reports

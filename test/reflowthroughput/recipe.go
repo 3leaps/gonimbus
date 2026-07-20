@@ -52,6 +52,39 @@ func SaturationRecipe() Recipe {
 	return r
 }
 
+// Scale corpus defaults for the checkpoint-scale profile. Many tiny objects so
+// per-object checkpoint-write cost dominates copy cost: at a lifted concurrency
+// ceiling the single-connection checkpoint writer — not the copy path — is the
+// binding wall, and the disk-vs-tmpfs class gap becomes measurable. Operators
+// scale the corpus further via the OBJECT_COUNT / SIZE_BYTES / PARTITIONS
+// overrides; these are only the starting point.
+const (
+	DefaultScaleObjects    int = 20000
+	DefaultScaleSizeBytes  int = 256
+	DefaultScalePartitions int = 8
+)
+
+// Recipe override bounds. Overrides fail closed on absurd values rather than
+// silently materializing a corpus that would exhaust local disk or memory.
+// The per-dimension maxima are not independently sufficient — their product is
+// astronomically large — so an aggregate byte bound caps the materialized
+// corpus regardless of how the dimensions combine.
+const (
+	MaxRecipeObjectCount int   = 5_000_000
+	MaxRecipeSizeBytes   int   = 64 << 20 // 64 MiB
+	MaxRecipePartitions  int   = 4096
+	MaxTotalCorpusBytes  int64 = 64 << 30 // 64 GiB: aggregate cap on materialized source corpus
+)
+
+// ScaleRecipe returns the checkpoint-scale corpus (see the scale defaults above).
+func ScaleRecipe() Recipe {
+	r := DefaultSmokeRecipe()
+	r.ObjectCount = DefaultScaleObjects
+	r.SizeBytes = DefaultScaleSizeBytes
+	r.Partitions = DefaultScalePartitions
+	return r
+}
+
 // Validate checks recipe bounds.
 func (r Recipe) Validate() error {
 	if r.Version == "" {
@@ -60,11 +93,26 @@ func (r Recipe) Validate() error {
 	if r.ObjectCount < 1 {
 		return fmt.Errorf("object_count must be >= 1")
 	}
+	if r.ObjectCount > MaxRecipeObjectCount {
+		return fmt.Errorf("object_count %d exceeds maximum %d", r.ObjectCount, MaxRecipeObjectCount)
+	}
 	if r.SizeBytes < 64 {
 		return fmt.Errorf("size_bytes must be >= 64 (probeable head)")
 	}
+	if r.SizeBytes > MaxRecipeSizeBytes {
+		return fmt.Errorf("size_bytes %d exceeds maximum %d", r.SizeBytes, MaxRecipeSizeBytes)
+	}
 	if r.Partitions < 1 {
 		return fmt.Errorf("partitions must be >= 1")
+	}
+	if r.Partitions > MaxRecipePartitions {
+		return fmt.Errorf("partitions %d exceeds maximum %d", r.Partitions, MaxRecipePartitions)
+	}
+	// Aggregate bound: the per-dimension maxima above already hold, so the
+	// int64 product cannot overflow. This rejects combinations where each
+	// dimension is individually legal but the materialized corpus is not.
+	if total := int64(r.ObjectCount) * int64(r.SizeBytes); total > MaxTotalCorpusBytes {
+		return fmt.Errorf("total corpus %d objects × %d bytes = %d bytes exceeds maximum %d", r.ObjectCount, r.SizeBytes, total, MaxTotalCorpusBytes)
 	}
 	if r.FixedDate == "" {
 		return fmt.Errorf("fixed_date is required")
