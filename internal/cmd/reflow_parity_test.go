@@ -43,6 +43,14 @@ var presentationDropKeys = map[string]bool{
 	// Wall-clock-derived occupancy varies run-to-run; its relations are
 	// asserted by the behavioral harness, not output parity.
 	"concurrency_time_avg_active": true,
+	// Ledger pressure is scheduling-dependent: the peak is a maximum
+	// concurrent reservation and the wait counters follow admission
+	// interleaving, so both legitimately differ between the two pools and
+	// between runs. The resolved memory configuration each path executes
+	// under — limit, budget, sources, retry cap — stays compared.
+	"memory_reserved_peak_bytes": true,
+	"memory_reservation_waits":   true,
+	"memory_reservation_wait_ms": true,
 }
 
 // normalizedEvent is the presentation-stripped form of a reflow event, comparable
