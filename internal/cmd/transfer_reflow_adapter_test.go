@@ -1093,6 +1093,98 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 	}
 }
 
+// TestTransferReflowPoolPathCLIOnlyTerminalUpsertFailureNeverAcks is the
+// E-A3-I3 / §6 P1 parity gate for the CLI-only success terminals the engine does
+// not yet implement, so they run on the legacy worker-pool fallback: the
+// overwrite-if-source-newer skips (skipped_src_older, skipped_concurrent_mutation)
+// and the collision-conflict quarantine (quarantined). Reached through REAL
+// adapter selection (the engine returns ErrNotImplemented for these modes, so the
+// command falls through to the pool). When the checkpoint store cannot record the
+// terminal, the pool must NOT acknowledge the success terminal: it reports
+// failed/checkpoint.write_failed and the run exits non-zero — matching the engine
+// and the pool's own complete/collision.duplicate terminals. (The metadata
+// derivation quarantine terminal shares the identical strict template; quarantine
+// resume-authority is separately deferred to the engine-convergence arc.)
+func TestTransferReflowPoolPathCLIOnlyTerminalUpsertFailureNeverAcks(t *testing.T) {
+	scenarios := []struct {
+		name          string
+		successStatus string
+		successReason string
+		run           func(t *testing.T, checkpoint string) (string, error)
+	}{
+		{
+			name:          "overwrite-if-source-newer/src_older",
+			successStatus: "skipped",
+			successReason: "collision.skipped_src_older",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+				dst := newReflowMemoryProvider()
+				dst.ignoreIfAbsent = true
+				dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
+				stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--stdin", "--dest", "s3://dest-bucket/data/", "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1",
+					"--on-collision", "overwrite-if-source-newer", "--checkpoint", checkpoint)
+				return stdout, err
+			},
+		},
+		{
+			name:          "overwrite-if-source-newer/concurrent_mutation",
+			successStatus: "skipped",
+			successReason: "collision.skipped_concurrent_mutation",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+				dst := newReflowMemoryProvider()
+				dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+				dst.mutateBeforeIfMatch = true
+				return runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--on-collision", "overwrite-if-source-newer", "--checkpoint", checkpoint)
+			},
+		},
+		{
+			name:          "quarantine/quarantined",
+			successStatus: "quarantined",
+			successReason: "collision.conflict.quarantined",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+				dst := newReflowMemoryProvider()
+				dst.ignoreIfAbsent = true
+				dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Time{})
+				stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--stdin", "--dest", "s3://dest-bucket/data/", "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1",
+					"--on-collision", "quarantine", "--collision-quarantine-prefix", "_conflict", "--checkpoint", checkpoint)
+				return stdout, err
+			},
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			oldStateStore := newReflowStateStore
+			newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+				store, err := oldStateStore(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				return upsertFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected terminal upsert failure")}, nil
+			}
+			t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+			checkpoint := filepath.Join(t.TempDir(), "state.db")
+			stdout, err := sc.run(t, checkpoint)
+			require.Error(t, err, "terminal upsert failure must exit non-zero")
+			records := requireReflowRecords(t, stdout)
+			// The success terminal is suppressed: no skipped/quarantined ack survives
+			// a store that could not durably record it.
+			requireReflowStatusReasonCount(t, records, sc.successStatus, sc.successReason, 0)
+			// It is replaced by a typed failed terminal, matching the engine.
+			requireReflowStatusReasonCount(t, records, "failed", "checkpoint.write_failed", 1)
+		})
+	}
+}
+
 // TestTransferReflowCommand_EngineSingleSourceProviderConstruction proves the
 // adapter's lazy resolver cache stays single-authority now that the engine
 // executes live copies: exactly one source provider is constructed for the
