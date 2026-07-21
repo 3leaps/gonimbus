@@ -556,7 +556,7 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 			kind = collisionDuplicate
 		}
 		collision = newCollisionInfo(kind, dstMeta, decisionOverwrite)
-		if err := r.noteCollision(ctx, destKey, "overwrite", in, dstMeta); err != nil {
+		if err := r.noteCollisionBestEffort(ctx, destKey, "overwrite", in, dstMeta); err != nil {
 			return 0, provider.PutResult{}, nil, "", "", err
 		}
 	case provider.IsNotFound(headErr):
@@ -577,7 +577,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 	}
 	if duplicate {
 		collision := newCollisionInfo(collisionDuplicate, dstMeta, decisionPath)
-		if err := r.noteCollision(ctx, destKey, "duplicate", in, dstMeta); err != nil {
+		if err := r.noteCollisionBestEffort(ctx, destKey, "duplicate", in, dstMeta); err != nil {
 			return 0, provider.PutResult{}, nil, "", "", err
 		}
 		if r.cfg.Collision.Mode == CollisionSkipIfDuplicate || r.cfg.Collision.Mode == CollisionQuarantine || r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
@@ -594,7 +594,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 	}
 
 	collision := newCollisionInfo(collisionConflict, dstMeta, decisionPath)
-	if err := r.noteCollision(ctx, destKey, "conflict", in, dstMeta); err != nil {
+	if err := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); err != nil {
 		return 0, provider.PutResult{}, nil, "", "", err
 	}
 	return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with different content: %s", destKey)
@@ -633,7 +633,7 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 
 	if !shouldOverwrite {
 		collision := newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
-		if err := r.noteCollision(ctx, destKey, "conflict", in, dstMeta); err != nil {
+		if err := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); err != nil {
 			return 0, provider.PutResult{}, nil, "", "", err
 		}
 		return 0, provider.PutResult{}, collision, "skipped", "collision.skipped_src_older", nil
@@ -645,7 +645,7 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 	if err != nil {
 		if isConditionalExists(err) {
 			concurrent := newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
-			if nerr := r.noteCollision(ctx, destKey, "conflict", in, dstMeta); nerr != nil {
+			if nerr := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); nerr != nil {
 				return 0, provider.PutResult{}, nil, "", "", nerr
 			}
 			return 0, provider.PutResult{}, concurrent, "skipped", "collision.skipped_concurrent_mutation", nil
@@ -655,10 +655,8 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 	// The overwrite has landed: recording the overwrite collision is auxiliary
 	// audit state, so a store failure warns (typed) rather than un-landing a
 	// completed object (mirrors NoteDestKeySource and the CLI pool).
-	if nerr := r.noteCollision(ctx, destKey, "overwrite", in, dstMeta); nerr != nil {
-		if werr := r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, "", nerr); werr != nil {
-			return 0, provider.PutResult{}, nil, "", "", werr
-		}
+	if err := r.noteCollisionBestEffort(ctx, destKey, "overwrite", in, dstMeta); err != nil {
+		return 0, provider.PutResult{}, nil, "", "", err
 	}
 	return bytes, result, collision, "complete", "", nil
 }
@@ -800,6 +798,19 @@ func (r *Runner) noteCollision(ctx context.Context, destKey, kind string, in ref
 		DestETag:   dstMeta.ETag,
 		DestSize:   dstMeta.Size,
 	})
+}
+
+// noteCollisionBestEffort records collision audit state as auxiliary state,
+// matching the CLI pool's checkpointWriteFailed contract: a store-write failure
+// emits the sanitized checkpoint-state warning and is swallowed so it never
+// alters the collision decision, the copy, or the terminal outcome. Only an
+// event-sink failure — a genuine infrastructure fault — propagates and aborts
+// the run. The terminal UpsertItem remains the strict resume authority.
+func (r *Runner) noteCollisionBestEffort(ctx context.Context, destKey, kind string, in reflowInput, dstMeta *provider.ObjectMeta) error {
+	if err := r.noteCollision(ctx, destKey, kind, in, dstMeta); err != nil {
+		return r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, "", err)
+	}
+	return nil
 }
 
 func (in reflowInput) withSourceMeta(etag string, size int64) reflowInput {

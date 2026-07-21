@@ -1,22 +1,50 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/provider"
+	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
+	"github.com/3leaps/gonimbus/pkg/reflowstate"
 )
 
+// runTransferReflowRawStdin drives the real transfer-reflow command with the
+// given stdin and args, returning stdout and the execution error.
+func runTransferReflowRawStdin(t *testing.T, input string, args ...string) (string, error) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), err
+}
+
 // Engine<->CLI-pool behavioral parity for the migrated overwrite (#2) and
-// overwrite-if-source-newer (#4) collision cells. Each scenario runs the SAME
-// live stdin input through the real command on both execution paths — the engine
-// (default routing) and the genuinely-routed CLI pool (poolRoute) — against
-// identically-seeded providers, then asserts the terminal record, collision
-// metadata, and destination state are identical. This is the ADR-0006 dual-path
-// gate for the collision-cell migration.
+// overwrite-if-source-newer (#4) collision cells. Each parity scenario runs the
+// SAME live stdin input through the real command on both execution paths — the
+// engine (default routing) and the genuinely-routed CLI pool (poolRoute) —
+// against identically-seeded providers, then asserts the terminal record,
+// collision metadata, summary tallies, and destination state are identical.
+// This is the ADR-0006 dual-path gate for the collision-cell migration.
+//
+// Alongside the parity scenarios, this file pins two properties that are engine
+// contracts rather than pool comparisons: NoteCollision is auxiliary (a store
+// failure never changes a terminal), and the mandatory-vs-optional source-HEAD
+// distinction.
 
 type collisionDualPathArm struct {
 	stdout string
@@ -62,24 +90,27 @@ func soleTerminalReflowRecord(t *testing.T, stdout string) testReflowData {
 	return terminal[0]
 }
 
+type reflowSummaryTally struct {
+	Statuses      map[string]int64 `json:"statuses"`
+	Collisions    map[string]int64 `json:"collisions"`
+	InvalidInputs int64            `json:"invalid_inputs"`
+	Errors        int64            `json:"errors"`
+}
+
+func reflowSummaryTallyOf(t *testing.T, stdout string) reflowSummaryTally {
+	t.Helper()
+	rec := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
+	var s reflowSummaryTally
+	require.NoError(t, json.Unmarshal(rec.Data, &s))
+	return s
+}
+
 // requireReflowSummaryParity asserts the terminal summary's outcome tallies —
 // per-status counts, per-collision-kind counts, invalid inputs, and errors —
 // are identical across the two execution paths.
 func requireReflowSummaryParity(t *testing.T, engineStdout, poolStdout string) {
 	t.Helper()
-	type summaryTally struct {
-		Statuses      map[string]int64 `json:"statuses"`
-		Collisions    map[string]int64 `json:"collisions"`
-		InvalidInputs int64            `json:"invalid_inputs"`
-		Errors        int64            `json:"errors"`
-	}
-	parse := func(stdout string) summaryTally {
-		rec := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
-		var s summaryTally
-		require.NoError(t, json.Unmarshal(rec.Data, &s))
-		return s
-	}
-	engine, pool := parse(engineStdout), parse(poolStdout)
+	engine, pool := reflowSummaryTallyOf(t, engineStdout), reflowSummaryTallyOf(t, poolStdout)
 	require.Equal(t, pool.Statuses, engine.Statuses, "summary status tallies must match across paths")
 	require.Equal(t, pool.Collisions, engine.Collisions, "summary collision tallies must match across paths")
 	require.Equal(t, pool.InvalidInputs, engine.InvalidInputs)
@@ -113,9 +144,9 @@ func requireReflowTerminalEqual(t *testing.T, engine, pool testReflowData) {
 	require.Equal(t, pool.Collision.DestLastModifiedObserved, engine.Collision.DestLastModifiedObserved)
 }
 
-func TestTransferReflowDualPath_OverwriteReplacesUnconditionally(t *testing.T) {
+func TestTransferReflowDualPath_OverwriteReplacesConflict(t *testing.T) {
 	engine, pool := runReflowCollisionDualPath(t, func(dst *reflowMemoryProvider) {
-		// A stale, conflicting object at the destination key.
+		// A stale, differing object at the destination key.
 		dst.putFixture("data/source/file.xml", "stale-content", "other-etag", time.Time{})
 	}, "--on-collision", "overwrite", "--overwrite")
 
@@ -133,9 +164,43 @@ func TestTransferReflowDualPath_OverwriteReplacesUnconditionally(t *testing.T) {
 	requireReflowTerminalEqual(t, engineRec, poolRec)
 	requireReflowSummaryParity(t, engine.stdout, pool.stdout)
 
-	// Both paths landed the real body over the stale destination.
 	require.Equal(t, "payload", string(engine.dst.mustObject("data/source/file.xml")))
 	require.Equal(t, "payload", string(pool.dst.mustObject("data/source/file.xml")))
+}
+
+func TestTransferReflowDualPath_OverwriteReplacesDuplicate(t *testing.T) {
+	engine, pool := runReflowCollisionDualPath(t, func(dst *reflowMemoryProvider) {
+		// An identical object (same etag + size as the source) already present.
+		dst.putFixture("data/source/file.xml", "payload", "src-etag", time.Time{})
+	}, "--on-collision", "overwrite", "--overwrite")
+
+	require.NoError(t, engine.err)
+	require.NoError(t, pool.err)
+
+	engineRec := soleTerminalReflowRecord(t, engine.stdout)
+	poolRec := soleTerminalReflowRecord(t, pool.stdout)
+	require.Equal(t, "complete", engineRec.Status)
+	// Identical dest -> classified duplicate (not conflict), still unconditional.
+	requireCollisionEqual(t, engineRec, collisionDuplicate, decisionOverwrite, "src-etag", int64(len("payload")))
+	requireReflowTerminalEqual(t, engineRec, poolRec)
+	requireReflowSummaryParity(t, engine.stdout, pool.stdout)
+	require.Equal(t, "payload", string(engine.dst.mustObject("data/source/file.xml")))
+}
+
+func TestTransferReflowDualPath_OverwriteAbsentDestNoCollision(t *testing.T) {
+	// No destination seed: overwrite against an absent key lands with no collision.
+	engine, pool := runReflowCollisionDualPath(t, nil, "--on-collision", "overwrite", "--overwrite")
+
+	require.NoError(t, engine.err)
+	require.NoError(t, pool.err)
+
+	engineRec := soleTerminalReflowRecord(t, engine.stdout)
+	poolRec := soleTerminalReflowRecord(t, pool.stdout)
+	require.Equal(t, "complete", engineRec.Status)
+	require.Nil(t, engineRec.Collision, "an absent destination carries no collision")
+	requireReflowTerminalEqual(t, engineRec, poolRec)
+	requireReflowSummaryParity(t, engine.stdout, pool.stdout)
+	require.Equal(t, "payload", string(engine.dst.mustObject("data/source/file.xml")))
 }
 
 func TestTransferReflowDualPath_SourceNewerReplacesWithIfMatch(t *testing.T) {
@@ -213,43 +278,240 @@ func TestTransferReflowDualPath_SourceNewerConcurrentMutationSkips(t *testing.T)
 }
 
 // TestTransferReflowDualPath_SourceNewerResumeSkipsNoDoubleLand pins the
-// strict-authority checkpoint contract for the migrated source-newer overwrite:
-// the completing overwrite writes a resume-authoritative item, and a --resume
-// rerun skips it (resume.complete) rather than landing the object a second time.
+// strict-authority checkpoint contract for the migrated source-newer overwrite
+// on BOTH execution paths: the completing overwrite writes a resume-authoritative
+// item, and a --resume rerun skips it (resume.complete) rather than landing the
+// object a second time.
 func TestTransferReflowDualPath_SourceNewerResumeSkipsNoDoubleLand(t *testing.T) {
-	env := newFlagProbeEnv(t)
-	env.dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+	arms := []struct {
+		name string
+		path string
+		pool bool
+	}{
+		{name: "engine", path: reflowpkg.ExecutionPathEngine, pool: false},
+		{name: "cli-pool", path: reflowpkg.ExecutionPathCLIPool, pool: true},
+	}
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			env.dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
 
-	// Conditional PUTs targeting the actual destination key (the IfAbsent write
-	// probe on the run's dedicated preflight prefix is excluded — it fires once
-	// per run regardless of resume).
-	destKeyPuts := func() int {
-		n := 0
-		for _, k := range env.dst.conditionalPutCallsSnapshot() {
-			if k == "data/source/file.xml" {
-				n++
+			runArm := func(extra ...string) (string, error) {
+				if arm.pool {
+					return env.runPool(t, extra...)
+				}
+				return env.run(t, extra...)
 			}
+			// Conditional PUTs targeting the actual destination key (the IfAbsent
+			// write probe on the run's dedicated preflight prefix is excluded — it
+			// fires once per run regardless of resume).
+			destKeyPuts := func() int {
+				n := 0
+				for _, k := range env.dst.conditionalPutCallsSnapshot() {
+					if k == "data/source/file.xml" {
+						n++
+					}
+				}
+				return n
+			}
+
+			stdout1, err := runArm("--on-collision", "overwrite-if-source-newer")
+			require.NoError(t, err)
+			require.Equal(t, arm.path, executionPathOf(t, stdout1))
+			require.Equal(t, "complete", soleTerminalReflowRecord(t, stdout1).Status)
+			require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")))
+			destPutsAfterFirst := destKeyPuts()
+			require.Positive(t, destPutsAfterFirst, "the first run must have written the destination key")
+
+			stdout2, err := runArm("--on-collision", "overwrite-if-source-newer", "--resume")
+			require.NoError(t, err)
+			require.Equal(t, arm.path, executionPathOf(t, stdout2))
+			resumed := soleTerminalReflowRecord(t, stdout2)
+			require.Equal(t, "skipped", resumed.Status)
+			require.Equal(t, "resume.complete", resumed.Reason)
+			require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")))
+			require.Equal(t, destPutsAfterFirst, destKeyPuts(),
+				"resume must not issue any additional conditional PUT for the settled destination key")
+		})
+	}
+}
+
+// noteCollisionFailingReflowState fails every NoteCollision audit write while
+// passing all other store operations through, for the auxiliary-classification
+// disposition (E-CVG-S2-F1): an audit-row failure must never change a terminal.
+type noteCollisionFailingReflowState struct {
+	reflowStateStore
+	err error
+}
+
+func (s noteCollisionFailingReflowState) NoteCollision(context.Context, string, reflowstate.CollisionKind, string, string, int64, string, int64) error {
+	return s.err
+}
+
+// TestTransferReflowNoteCollisionFailureIsAuxiliary proves NoteCollision is
+// auxiliary on the migrated collision branches: when the audit write fails, the
+// engine emits the sanitized checkpoint-state warning and preserves the exact
+// terminal (overwrite lands, source-older/concurrent-mutation skip), with zero
+// run errors. Matches the CLI pool's checkpointWriteFailed contract.
+func TestTransferReflowNoteCollisionFailureIsAuxiliary(t *testing.T) {
+	cases := []struct {
+		name       string
+		seedDst    func(dst *reflowMemoryProvider)
+		args       []string
+		wantStatus string
+		wantReason string
+		wantDest   string
+	}{
+		{
+			name: "overwrite_conflict",
+			seedDst: func(dst *reflowMemoryProvider) {
+				dst.putFixture("data/source/file.xml", "stale", "other-etag", time.Time{})
+			},
+			args:       []string{"--on-collision", "overwrite", "--overwrite"},
+			wantStatus: "complete",
+			wantReason: "",
+			wantDest:   "payload",
+		},
+		{
+			name: "source_older_skip",
+			seedDst: func(dst *reflowMemoryProvider) {
+				dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
+			},
+			args:       []string{"--on-collision", "overwrite-if-source-newer"},
+			wantStatus: "skipped",
+			wantReason: "collision.skipped_src_older",
+			wantDest:   "old payload",
+		},
+		{
+			name: "concurrent_mutation_skip",
+			seedDst: func(dst *reflowMemoryProvider) {
+				dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+				dst.mutateBeforeIfMatch = true
+			},
+			args:       []string{"--on-collision", "overwrite-if-source-newer"},
+			wantStatus: "skipped",
+			wantReason: "collision.skipped_concurrent_mutation",
+			wantDest:   "concurrent mutation",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			oldStateStore := newReflowStateStore
+			newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+				store, err := oldStateStore(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				return noteCollisionFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected note-collision failure")}, nil
+			}
+			t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+			tc.seedDst(env.dst)
+			stdout, err := env.run(t, tc.args...)
+			require.NoError(t, err, "an auxiliary NoteCollision failure must not fail the run")
+			require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout))
+
+			rec := soleTerminalReflowRecord(t, stdout)
+			require.Equal(t, tc.wantStatus, rec.Status, "terminal status must survive the audit-write failure")
+			require.Equal(t, tc.wantReason, rec.Reason)
+			require.Equal(t, tc.wantDest, string(env.dst.mustObject("data/source/file.xml")))
+
+			require.Zero(t, reflowSummaryTallyOf(t, stdout).Errors, "an auxiliary failure must not raise the run error count")
+			warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
+			require.Contains(t, string(warn.Data), "REFLOW_ARBITRATION_STATE_WRITE_FAILED",
+				"the sanitized checkpoint-state warning must be emitted")
+		})
+	}
+}
+
+// TestTransferReflowSourceHeadMandatoryVsOptional pins the source-HEAD
+// distinction the overwrite migration restored across all migrated modes: a HEAD
+// probed only to recover an absent size is optional (its failure is tolerated,
+// unknown size reserving the conservative cap and the copy still landing), while
+// a HEAD required to recover source-newer's LastModified is mandatory (its
+// failure fails the object with no destination mutation). It also pins
+// adjudication #3: a successful HEAD that yields a zero LastModified fails with
+// the source-LastModified terminal, no mutation, one run error.
+func TestTransferReflowSourceHeadMandatoryVsOptional(t *testing.T) {
+	newSourceHeadEnv := func(t *testing.T, headFails bool, srcLastMod time.Time) (*reflowMemoryProvider, *reflowMemoryProvider) {
+		t.Helper()
+		withTransferReflowTestState(t)
+		srcBase := newReflowMemoryProvider()
+		srcBase.putFixture("source/file.xml", "payload", "src-etag", srcLastMod)
+		dst := newReflowMemoryProvider()
+		reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+			MemoryLimitBytes: func() (int64, string, error) { return int64(8) << 20, "cgroup_v2", nil },
+			FDSoftLimit:      func() (int64, error) { return 100000, nil },
 		}
-		return n
+		var src provider.Provider = srcBase
+		if headFails {
+			src = headFailingSourceProvider{srcBase}
+		}
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				switch cfg.Bucket {
+				case "source-bucket":
+					return src, nil
+				case "dest-bucket":
+					return dst, nil
+				default:
+					return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+				}
+			},
+			File: func(providerfile.Config) (provider.Provider, error) { return dst, nil },
+		})
+		return srcBase, dst
+	}
+	runSourceHead := func(t *testing.T, input string, extra ...string) (string, error) {
+		t.Helper()
+		return runTransferReflowRawStdin(t, input, append([]string{
+			"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "2",
+		}, extra...)...)
 	}
 
-	// First run: the newer source overwrites the destination and completes.
-	stdout1, err := env.run(t, "--on-collision", "overwrite-if-source-newer")
-	require.NoError(t, err)
-	require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout1))
-	require.Equal(t, "complete", soleTerminalReflowRecord(t, stdout1).Status)
-	require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")))
-	destPutsAfterFirst := destKeyPuts()
-	require.Positive(t, destPutsAfterFirst, "the first run must have written the destination key")
+	// Optional HEAD (absent size only) tolerates failure and still lands, for
+	// every migrated mode.
+	for _, mode := range [][]string{
+		{"--on-collision", "skip-if-duplicate"},
+		{"--on-collision", "fail"},
+		{"--on-collision", "overwrite", "--overwrite"},
+	} {
+		t.Run("optional_head_failure_lands"+mode[1], func(t *testing.T) {
+			_, dst := newSourceHeadEnv(t, true, time.Now().UTC())
+			// Size 0 in the record triggers the optional HEAD; the input carries a
+			// LastModified so source-newer does not make the HEAD mandatory.
+			stdout, err := runSourceHead(t, reflowInputLine("source/file.xml", "src-etag", 0, "", "")+"\n", mode...)
+			require.NoError(t, err, stdout)
+			require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout))
+			require.Equal(t, "complete", soleTerminalReflowRecord(t, stdout).Status)
+			require.Equal(t, "payload", string(dst.mustObject("data/source/file.xml")))
+			require.Contains(t, string(requireRecord(t, stdout, reflowpkg.SummaryRecordType, "").Data), `"memory_reserved_peak_bytes":2097152`)
+		})
+	}
 
-	// Resume: the item is already durable, so it skips without a second land.
-	stdout2, err := env.run(t, "--on-collision", "overwrite-if-source-newer", "--resume")
-	require.NoError(t, err)
-	require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout2))
-	resumed := soleTerminalReflowRecord(t, stdout2)
-	require.Equal(t, "skipped", resumed.Status)
-	require.Equal(t, "resume.complete", resumed.Reason)
-	require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")))
-	require.Equal(t, destPutsAfterFirst, destKeyPuts(),
-		"resume must not issue any additional conditional PUT for the settled destination key")
+	t.Run("source_newer_mandatory_head_failure_fails_no_mutation", func(t *testing.T) {
+		_, dst := newSourceHeadEnv(t, true, time.Now().UTC())
+		// No source_last_modified in the record makes the source HEAD mandatory
+		// for overwrite-if-source-newer; the failing HEAD fails the object.
+		stdout, err := runSourceHead(t, reflowInputLineWithoutLastModified("source/file.xml", "src-etag", int64(len("payload")))+"\n", "--on-collision", "overwrite-if-source-newer")
+		require.Error(t, err)
+		require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout))
+		require.Equal(t, "failed", soleTerminalReflowRecord(t, stdout).Status)
+		require.False(t, dst.hasObject("data/source/file.xml"), "a mandatory-HEAD failure must not mutate the destination")
+	})
+
+	t.Run("source_newer_zero_lastmodified_head_fails_terminal", func(t *testing.T) {
+		// The HEAD succeeds but yields a zero LastModified; the source-LastModified
+		// guard fails the object with its typed terminal and no mutation.
+		_, dst := newSourceHeadEnv(t, false, time.Time{})
+		dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+		stdout, err := runSourceHead(t, reflowInputLineWithoutLastModified("source/file.xml", "src-etag", int64(len("payload")))+"\n", "--on-collision", "overwrite-if-source-newer")
+		require.Error(t, err)
+		rec := soleTerminalReflowRecord(t, stdout)
+		require.Equal(t, "failed", rec.Status)
+		require.Equal(t, "collision.missing_source_last_modified", rec.Reason)
+		require.Equal(t, int64(1), reflowSummaryTallyOf(t, stdout).Errors)
+		require.Equal(t, "old payload", string(dst.mustObject("data/source/file.xml")), "the guard must not mutate the destination")
+	})
 }
