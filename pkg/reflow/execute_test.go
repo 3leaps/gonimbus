@@ -557,7 +557,9 @@ func TestRunnerDefersBeforeReading(t *testing.T) {
 	})
 
 	t.Run("unsupported copy collision modes defer before reader or destination mutation", func(t *testing.T) {
-		for _, mode := range []string{CollisionOverwrite, CollisionQuarantine, CollisionOverwriteIfSourceNewer} {
+		// overwrite and overwrite-if-source-newer are now executed by the engine;
+		// quarantine remains the unmigrated collision mode that must defer.
+		for _, mode := range []string{CollisionQuarantine} {
 			t.Run(mode, func(t *testing.T) {
 				src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
 				src.putFixture("a/b.xml", "payload", "etag-a")

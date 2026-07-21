@@ -93,11 +93,11 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		plan.reason = "provenance sidecars not migrated"
 		return plan
 	}
-	if reflowOverwrite || collCfg.Mode == reflowCollisionOver || collCfg.Mode == reflowCollisionQuar || collCfg.Mode == reflowCollisionSrcNew {
+	if collCfg.Mode == reflowCollisionQuar {
 		plan.reason = "collision mode not migrated"
 		return plan
 	}
-	if collCfg.Mode != reflowCollisionSkip && collCfg.Mode != reflowCollisionFail {
+	if collCfg.Mode != reflowCollisionSkip && collCfg.Mode != reflowCollisionFail && collCfg.Mode != reflowCollisionOver && collCfg.Mode != reflowCollisionSrcNew {
 		plan.reason = "collision mode not migrated"
 		return plan
 	}

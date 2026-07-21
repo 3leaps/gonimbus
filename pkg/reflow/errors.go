@@ -17,9 +17,25 @@ const (
 	ErrCodeInternal            = "INTERNAL"
 )
 
+// collisionResolveError carries a specific failed-terminal classification
+// (error code + record reason) for a collision-resolution outcome the generic
+// error mapping cannot derive — for example the overwrite-if-source-newer guard
+// that refuses when the destination has no LastModified to compare against. It
+// mirrors the corresponding CLI-pool failed terminal.
+type collisionResolveError struct {
+	code   string
+	reason string
+	msg    string
+}
+
+func (e *collisionResolveError) Error() string { return e.msg }
+
 func reflowErrCode(err error) string {
 	var budgetErr *MetadataBudgetError
+	var collisionErr *collisionResolveError
 	switch {
+	case errors.As(err, &collisionErr):
+		return collisionErr.code
 	case errors.As(err, &budgetErr):
 		return ErrCodeInvalidInput
 	case provider.IsNotFound(err):

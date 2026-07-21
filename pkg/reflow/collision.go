@@ -7,16 +7,27 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
 const (
-	collisionDuplicate = "duplicate"
-	collisionConflict  = "conflict"
+	collisionDuplicate     = "duplicate"
+	collisionConflict      = "conflict"
+	collisionOverwritten   = "overwritten"
+	collisionSrcOlder      = "skipped_src_older"
+	collisionConcurrentMut = "skipped_concurrent_mutation"
 
 	decisionIfAbsentHead = "ifabsent_then_head"
+	decisionOverwrite    = "unconditional_overwrite"
+	decisionHeadCompare  = "head_compare_then_conditional_overwrite"
 	decisionHeadFallback = "head_compare_fallback"
+
+	reasonSrcNewer         = "src_newer"
+	reasonSrcOlder         = "src_older"
+	reasonEqualSizeDiffers = "equal_time_size_differs"
+	reasonConcurrentMut    = "concurrent_mutation"
 )
 
 func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath string) *CollisionInfo {
@@ -26,6 +37,24 @@ func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath s
 		info.DestETagObserved = destMeta.ETag
 		info.DestSizeObserved = &size
 	}
+	return info
+}
+
+// newSourceNewerCollisionInfo extends newCollisionInfo with the source and
+// destination LastModified timestamps and the decision reason that drove an
+// overwrite-if-source-newer outcome. It mirrors the CLI pool constructor of the
+// same name so both execution paths emit byte-identical collision metadata.
+func newSourceNewerCollisionInfo(kind string, destMeta *provider.ObjectMeta, srcLastModified time.Time, decisionPath, decisionReason string) *CollisionInfo {
+	info := newCollisionInfo(kind, destMeta, decisionPath)
+	if !srcLastModified.IsZero() {
+		t := srcLastModified.UTC()
+		info.SrcLastModified = &t
+	}
+	if destMeta != nil && !destMeta.LastModified.IsZero() {
+		t := destMeta.LastModified.UTC()
+		info.DestLastModifiedObserved = &t
+	}
+	info.DecisionReason = decisionReason
 	return info
 }
 

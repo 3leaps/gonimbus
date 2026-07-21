@@ -4967,7 +4967,10 @@ func TestTransferReflowUnknownSizeReservesConservativeCap(t *testing.T) {
 	require.Equal(t, "payload", string(dst.mustObject("data/source/file.xml")),
 		"absent size with failed optional Head must still land the real body")
 	sum := requireRecord(t, stdout.String(), reflowpkg.SummaryRecordType, "")
-	require.Contains(t, string(sum.Data), `"execution_path":"cli-pool"`)
+	// Plain overwrite now runs on the engine record-stream runner; an optional
+	// source Head (probed only for the absent size) failing is tolerated on both
+	// paths, and an unknown size reserves the conservative cap on both.
+	require.Contains(t, string(sum.Data), `"execution_path":"engine"`)
 	require.Contains(t, string(sum.Data), `"memory_reserved_peak_bytes":2097152`,
 		"an absent size must reserve the conservative cap, never known-zero")
 }
