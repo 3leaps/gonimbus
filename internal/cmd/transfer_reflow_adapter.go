@@ -196,17 +196,20 @@ func classifyTransferReflowFirstRecord(input io.Reader) (io.Reader, firstRecordC
 		b, err := reader.ReadByte()
 		if err == nil {
 			prefix = append(prefix, b)
+			// Enforce the ceiling immediately after the append and before newline
+			// classification, so a record whose terminating newline lands at
+			// exactly max+1 cannot slip through as accepted. A prefix of exactly
+			// max bytes (newline included) is still accepted. Refuse without a
+			// replay reader — nothing downstream will consume the stream.
+			if len(prefix) > maxReflowFirstRecordSniffBytes {
+				return nil, firstRecordRefuse, reflowRefuseTooLarge, nil
+			}
 			if b == '\n' {
 				if line := strings.TrimSpace(string(prefix[lineStart : len(prefix)-1])); line != "" {
 					class, reason := classifyReflowFirstRecord(line)
 					return io.MultiReader(bytes.NewReader(prefix), reader), class, reason, nil
 				}
 				lineStart = len(prefix)
-			}
-			if len(prefix) > maxReflowFirstRecordSniffBytes {
-				// Refuse without a replay reader and without growing the prefix
-				// past the ceiling: nothing downstream will consume the stream.
-				return nil, firstRecordRefuse, reflowRefuseTooLarge, nil
 			}
 			continue
 		}

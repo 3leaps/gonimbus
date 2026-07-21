@@ -210,6 +210,53 @@ func TestClassifyTransferReflowFirstRecord_OversizedBlankPreambleRefused(t *test
 	require.LessOrEqual(t, cr.n, int64(maxReflowFirstRecordSniffBytes+8192), "underlying reads stay within the ceiling plus a fixed reader buffer (read %d bytes)", cr.n)
 }
 
+// TestClassifyTransferReflowFirstRecord_CeilingBoundary pins the exact ceiling:
+// a prefix of exactly max bytes (newline included) is accepted and replayed
+// byte-exact; max+1 refuses whether or not the final byte is the newline. This
+// guards the ordering where the newline classification must not precede the
+// length check.
+func TestClassifyTransferReflowFirstRecord_CeilingBoundary(t *testing.T) {
+	base := reflowInputLine("source/a.xml", "etag", 1, "", "") // valid engine-ready v1 line
+	// prefixOf builds a first record padded with trailing spaces (trimmed away
+	// before classification) so the sniff prefix hits an exact byte length.
+	prefixOf := func(totalPrefixLen int, withNewline bool) string {
+		spaces := totalPrefixLen - len(base)
+		if withNewline {
+			spaces--
+		}
+		line := base + strings.Repeat(" ", spaces)
+		if withNewline {
+			line += "\n"
+		}
+		return line
+	}
+
+	// Exactly max, newline included -> accepted and replayed exactly.
+	atMax := prefixOf(maxReflowFirstRecordSniffBytes, true)
+	require.Len(t, atMax, maxReflowFirstRecordSniffBytes)
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(atMax))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, atMax, string(got))
+
+	// max+1, newline included -> refuse (the newline must not classify first).
+	overWithNL := prefixOf(maxReflowFirstRecordSniffBytes+1, true)
+	_, class, reason, err = classifyTransferReflowFirstRecord(strings.NewReader(overWithNL))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+
+	// max+1, no newline -> refuse.
+	overNoNL := prefixOf(maxReflowFirstRecordSniffBytes+1, false)
+	_, class, reason, err = classifyTransferReflowFirstRecord(strings.NewReader(overNoNL))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+}
+
 // countingReader records how many bytes were pulled from the underlying reader,
 // so a test can prove stdin consumption stayed bounded to the first record.
 type countingReader struct {
