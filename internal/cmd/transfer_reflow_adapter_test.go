@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
@@ -105,18 +106,167 @@ func (p *concurrentGetBarrierProvider) Close() error {
 	return p.base.Close()
 }
 
-func TestPrepareTransferReflowEngineInput_PreservesLeadingBlanksAndSniffedRecord(t *testing.T) {
+func TestClassifyTransferReflowFirstRecord_PreservesLeadingBlanksAndSniffedRecord(t *testing.T) {
 	first := reflowInputLine("source/first.xml", "etag-0", 8, "", "")
 	second := reflowInputLine("source/second.xml", "etag-1", 8, "", "")
 	original := "\n\n" + first + "\n" + second + "\n"
 
-	replay, ok, err := prepareTransferReflowEngineInput(strings.NewReader(original))
+	replay, class, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.Equal(t, firstRecordEngineReady, class)
 
 	got, err := io.ReadAll(replay)
 	require.NoError(t, err)
 	require.Equal(t, original, string(got))
+}
+
+func TestClassifyReflowFirstRecord_Dispositions(t *testing.T) {
+	// Engine-ready: v1 record with an s3:// source.
+	s3Line := reflowInputLine("source/a.xml", "etag", 1, "", "")
+	require.Equal(t, firstRecordEngineReady, classifyReflowFirstRecord(s3Line))
+
+	// Fallback: every form the CLI pool still accepts today.
+	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"file:///tmp/a.xml"}}`), "v1 with a not-yet-migrated source")
+	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord(`{"type":"gonimbus.index.object.v1","data":{"base_uri":"s3://b/","key":"a.xml"}}`), "index-object record")
+	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord("s3://source-bucket/a.txt"), "bare object URI")
+	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord("s3://source-bucket/prefix/"), "bare prefix URI")
+
+	// Refuse: only inputs the pool itself deterministically rejects at parse.
+	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{not json`), "unparseable JSON envelope")
+	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v0","data":{"source_uri":"s3://b/a.xml"}}`), "unsupported record type")
+	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{"type":"something.else","data":{}}`), "unknown record type")
+}
+
+func TestClassifyTransferReflowFirstRecord_EmptyStreamFallsBack(t *testing.T) {
+	replay, class, err := classifyTransferReflowFirstRecord(strings.NewReader("\n\n"))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordFallback, class)
+
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, "\n\n", string(got))
+}
+
+func TestClassifyTransferReflowFirstRecord_NilReaderRefuses(t *testing.T) {
+	_, class, err := classifyTransferReflowFirstRecord(nil)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+}
+
+// countingReader records how many bytes were pulled from the underlying reader,
+// so a test can prove stdin consumption stayed bounded to the first record.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	m, err := c.r.Read(p)
+	c.n += int64(m)
+	return m, err
+}
+
+// TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO is the step-1
+// negative gate: an unsupported first record is refused before the state store
+// or any provider is constructed, no records are emitted, and stdin consumption
+// is bounded to the first record rather than draining the stream.
+func TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	oldStateStore := newReflowStateStore
+	stateStoreConstructed := false
+	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+		stateStoreConstructed = true
+		return oldStateStore(ctx, cfg)
+	}
+	t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+	providerConstructed := false
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			providerConstructed = true
+			return nil, fmt.Errorf("S3 provider factory must not be called on refusal")
+		},
+	})
+
+	// A large tail after the unsupported first record: refusal must decide from
+	// the first record without draining the rest.
+	tail := strings.Repeat("s3://source-bucket/tail.xml\n", 100000)
+	input := `{"type":"unsupported","data":{}}` + "\n" + tail
+	cr := &countingReader{r: strings.NewReader(input)}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(cr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Unsupported reflow input")
+	require.Contains(t, err.Error(), "exit code 40", "refusal maps to ExitInvalidArgument")
+	require.False(t, stateStoreConstructed, "state store must not be opened on refusal")
+	require.False(t, providerConstructed, "no provider factory may run on refusal")
+	require.Empty(t, stdout.String(), "no run/error/summary record is emitted on refusal")
+	require.Less(t, cr.n, int64(64*1024), "stdin consumption is bounded to the first record (read %d bytes of %d)", cr.n, len(input))
+}
+
+// TestTransferReflowCommand_EnginePlanNotImplementedNeverReselectsPool is the
+// no-executor-re-selection gate: once the engine owns an enabled (plan-time
+// vetted) run, an ErrNotImplemented fails closed as an internal error and the
+// CLI pool is never re-entered.
+func TestTransferReflowCommand_EnginePlanNotImplementedNeverReselectsPool(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	oldRun := runTransferReflowViaEngineFn
+	engineInvoked := false
+	runTransferReflowViaEngineFn = func(ctx context.Context, plan transferReflowEnginePlan, w *output.JSONLWriter, checkpointPath string, resume bool, provCfg provenanceConfig, metaCfg reflowMetadataConfig) (reflowpkg.Summary, error) {
+		engineInvoked = true
+		require.True(t, plan.enabled, "the gate applies only to an enabled plan")
+		return reflowpkg.Summary{}, reflowpkg.ErrNotImplemented
+	}
+	t.Cleanup(func() { runTransferReflowViaEngineFn = oldRun })
+
+	dst := newReflowMemoryProvider()
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			if cfg.Bucket == "dest-bucket" {
+				return dst, nil
+			}
+			// The source provider is resolved lazily by the engine; on this
+			// fail-closed path it must never be constructed.
+			return nil, fmt.Errorf("unexpected provider construction for bucket %q", cfg.Bucket)
+		},
+	})
+
+	input := reflowInputLine("source/a.xml", "etag", 7, "", "") + "\n" // v1 + s3 => engine-eligible
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(input))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.True(t, engineInvoked, "the engine plan must have been enabled and run")
+	require.Contains(t, err.Error(), "Internal error")
+	require.Contains(t, err.Error(), "exit code 1", "a vetted-config ErrNotImplemented maps to ExitFailure")
+	require.NotContains(t, stdout.String(), string(reflowpkg.ExecutionPathCLIPool), "the CLI pool must never be re-selected after the engine owns the run")
 }
 
 func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
@@ -132,7 +282,7 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.True(t, plan.enabled, "live migrated stdin runs dispatch to the engine (reason=%q)", plan.reason)
 	require.Empty(t, plan.reason)
@@ -157,7 +307,7 @@ func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *tes
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.False(t, plan.enabled, "non-migrated source-failure policy must route to the CLI pool")
 	require.Equal(t, "source-failure policy not migrated", plan.reason)
@@ -181,7 +331,7 @@ func TestPlanTransferReflowEngineAdapter_DryRunKeepsEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.True(t, plan.enabled)
 	require.Empty(t, plan.reason)

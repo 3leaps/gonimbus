@@ -1008,13 +1008,14 @@ func TestTransferReflowCommand_StdinPipeConsumesInput(t *testing.T) {
 		"--parallel", "1",
 	})
 
+	// An unsupported JSON record type is now a deliberate pre-I/O refusal (the
+	// pool rejected it at parse anyway); no run/error/summary records are emitted.
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid_inputs=1")
+	require.Contains(t, err.Error(), "Unsupported reflow input")
 	require.NotContains(t, err.Error(), "source-uri")
 	require.NotContains(t, err.Error(), "requires exactly 1 argument")
-	require.Contains(t, stdout.String(), "unsupported json record type")
-	require.Contains(t, stdout.String(), "transfer_reflow")
+	require.Empty(t, stdout.String(), "refusal precedes any record emission")
 }
 
 func TestTransferReflowCommand_StdinDestRelKeyDoesNotRequireRewrite(t *testing.T) {

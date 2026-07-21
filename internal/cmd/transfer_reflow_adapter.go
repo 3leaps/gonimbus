@@ -27,23 +27,36 @@ type transferReflowEnginePlan struct {
 	close   func()
 }
 
-func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore) transferReflowEnginePlan {
+// firstRecordClass is the disposition derived from the bounded, replayable sniff
+// of the first non-blank stdin record. It is decided before any provider or
+// checkpoint I/O so the command can refuse an unsupported input outright instead
+// of silently selecting the legacy CLI pool.
+type firstRecordClass int
+
+const (
+	// firstRecordEngineReady marks a gonimbus.reflow.input.v1 record with an
+	// s3:// source: eligible for the engine record-stream runner.
+	firstRecordEngineReady firstRecordClass = iota
+	// firstRecordFallback marks a form that still falls through to the CLI pool
+	// until its migration lands: a valid v1 record with a not-yet-migrated
+	// (non-s3://) source, or an empty stream (the pool no-ops).
+	firstRecordFallback
+	// firstRecordRefuse marks an unsupported input — a malformed or non-v1
+	// first record, or a nil reader. The command refuses these before any I/O.
+	firstRecordRefuse
+)
+
+func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, firstClass firstRecordClass, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore) transferReflowEnginePlan {
 	plan := transferReflowEnginePlan{input: input}
 	if !reflowStdin {
 		plan.reason = "positional source path not migrated"
 		return plan
 	}
-	if input == nil {
-		plan.reason = "stdin reader is nil"
-		return plan
-	}
-	engineInput, ok, err := prepareTransferReflowEngineInput(input)
-	plan.input = engineInput
-	if err != nil {
-		plan.reason = err.Error()
-		return plan
-	}
-	if !ok {
+	// Unsupported first records are refused before this adapter runs (see
+	// classifyTransferReflowFirstRecord at the command dispatch); any record
+	// reaching here that is not engine-ready is a migrate-pending form that
+	// still falls through to the CLI pool.
+	if firstClass != firstRecordEngineReady {
 		plan.reason = "stdin record stream not migrated"
 		return plan
 	}
@@ -131,7 +144,7 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, destS
 		Checkpoint:  checkpointAdapter(state, reflowResume),
 	}
 	plan.source = reflowpkg.RecordStreamSource{
-		Records: engineInput,
+		Records: input,
 		Resolve: srcResolver,
 	}
 	plan.close = func() {
@@ -142,7 +155,16 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, destS
 	return plan
 }
 
-func prepareTransferReflowEngineInput(input io.Reader) (io.Reader, bool, error) {
+// classifyTransferReflowFirstRecord performs the bounded, replayable first-record
+// sniff at the honest pre-execution boundary. It reads only up to and including
+// the first non-blank line, classifies it, and returns a reader that replays the
+// full original stream (leading blanks included) for the engine or pool path.
+// An empty stream classifies as fallback (the pool no-ops), preserving today's
+// behavior; a nil reader is a refusal and a read error surfaces to the caller.
+func classifyTransferReflowFirstRecord(input io.Reader) (io.Reader, firstRecordClass, error) {
+	if input == nil {
+		return nil, firstRecordRefuse, nil
+	}
 	reader := bufio.NewReader(input)
 	var prefix strings.Builder
 	for {
@@ -151,29 +173,53 @@ func prepareTransferReflowEngineInput(input io.Reader) (io.Reader, bool, error) 
 			prefix.WriteString(line)
 		}
 		trimmed := strings.TrimSpace(line)
+		replay := io.MultiReader(strings.NewReader(prefix.String()), reader)
 		if trimmed != "" {
-			return io.MultiReader(strings.NewReader(prefix.String()), reader), isMigratedReflowInputLine(trimmed), nil
+			return replay, classifyReflowFirstRecord(trimmed), nil
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return io.MultiReader(strings.NewReader(prefix.String()), reader), false, nil
+				return replay, firstRecordFallback, nil
 			}
-			return io.MultiReader(strings.NewReader(prefix.String()), reader), false, err
+			return replay, firstRecordRefuse, err
 		}
 	}
 }
 
-func isMigratedReflowInputLine(line string) bool {
+// classifyReflowFirstRecord derives the disposition of a single first-record
+// line, mirroring the CLI pool's own first-record accept/reject boundary
+// (enqueueReflowLine): the refusal set is exactly the inputs the pool would
+// deterministically reject at envelope parse — a JSON record with an unparseable
+// envelope or an unsupported type. Everything the pool accepts falls through:
+// a gonimbus.reflow.input.v1 record with an s3:// source is engine-ready; a v1
+// record with a not-yet-migrated (non-s3://) source, a gonimbus.index.object.v1
+// record, and a bare source-URI line all still run on the pool.
+func classifyReflowFirstRecord(line string) firstRecordClass {
+	trimmed := strings.TrimSpace(line)
+	// Bare (non-JSON) lines are source URIs the pool parses and validates.
+	if !strings.HasPrefix(trimmed, "{") {
+		return firstRecordFallback
+	}
 	var env struct {
 		Type string `json:"type"`
 		Data struct {
 			SourceURI string `json:"source_uri"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(line), &env); err != nil {
-		return false
+	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+		return firstRecordRefuse
 	}
-	return env.Type == "gonimbus.reflow.input.v1" && strings.HasPrefix(strings.TrimSpace(env.Data.SourceURI), "s3://")
+	switch env.Type {
+	case "gonimbus.reflow.input.v1":
+		if strings.HasPrefix(strings.TrimSpace(env.Data.SourceURI), "s3://") {
+			return firstRecordEngineReady
+		}
+		return firstRecordFallback
+	case "gonimbus.index.object.v1":
+		return firstRecordFallback
+	default:
+		return firstRecordRefuse
+	}
 }
 
 func runTransferReflowViaEngine(ctx context.Context, plan transferReflowEnginePlan, w *output.JSONLWriter, checkpointPath string, resume bool, provCfg provenanceConfig, metaCfg reflowMetadataConfig) (reflowpkg.Summary, error) {

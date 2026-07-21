@@ -151,6 +151,10 @@ var (
 	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
 		return reflowstate.Open(ctx, cfg)
 	}
+	// runTransferReflowViaEngineFn is a seam so the no-executor-re-selection gate
+	// can force an engine ErrNotImplemented on an otherwise-enabled plan and prove
+	// the CLI pool is never re-entered.
+	runTransferReflowViaEngineFn = runTransferReflowViaEngine
 )
 
 func init() {
@@ -348,6 +352,24 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg, memoryBudgetBytes)
 
+	// Bounded, replayable first-record sniff — the honest pre-execution refusal
+	// boundary. An unsupported stdin record is refused here, before the state
+	// store or any provider is constructed, rather than silently falling through
+	// to the CLI pool. The replay reader carries the full stream to the engine or
+	// pool below.
+	reflowInput := cmd.InOrStdin()
+	firstRecordClass := firstRecordEngineReady
+	if reflowStdin {
+		var classifyErr error
+		reflowInput, firstRecordClass, classifyErr = classifyTransferReflowFirstRecord(reflowInput)
+		if classifyErr != nil {
+			return exitError(foundry.ExitInvalidArgument, "Failed to read input", classifyErr)
+		}
+		if firstRecordClass == firstRecordRefuse {
+			return exitError(foundry.ExitInvalidArgument, "Unsupported reflow input", errors.New("first stdin record is not a supported gonimbus.reflow.input.v1 record"))
+		}
+	}
+
 	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {
 		return exitError(foundry.ExitFileWriteError, "Failed to open checkpoint", err)
@@ -402,17 +424,22 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
-	reflowInput := cmd.InOrStdin()
-	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
+	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
 	reflowInput = enginePlan.input
 	if enginePlan.enabled {
-		_, runErr := runTransferReflowViaEngine(ctx, enginePlan, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		_, runErr := runTransferReflowViaEngineFn(ctx, enginePlan, w, checkpointPath, reflowResume, provCfg, metaCfg)
 		if runErr == nil {
 			return nil
 		}
-		if !errors.Is(runErr, reflowpkg.ErrNotImplemented) {
-			return transferReflowEngineTerminalError(runErr)
+		// Once the engine owns an enabled (plan-time vetted: s3 source,
+		// supported collision mode, no provenance/preserve/file-dest) run, it is
+		// never silently re-selected onto the CLI pool. An ErrNotImplemented at
+		// this point signals a plan/runner contract drift and fails closed as an
+		// internal error rather than falling through.
+		if errors.Is(runErr, reflowpkg.ErrNotImplemented) {
+			return exitError(foundry.ExitFailure, "Internal error: reflow engine refused a vetted configuration", runErr)
 		}
+		return transferReflowEngineTerminalError(runErr)
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
