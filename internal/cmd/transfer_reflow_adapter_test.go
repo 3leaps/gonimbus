@@ -111,9 +111,25 @@ func TestClassifyTransferReflowFirstRecord_PreservesLeadingBlanksAndSniffedRecor
 	second := reflowInputLine("source/second.xml", "etag-1", 8, "", "")
 	original := "\n\n" + first + "\n" + second + "\n"
 
-	replay, class, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
 	require.NoError(t, err)
 	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
+
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, original, string(got))
+}
+
+// TestClassifyTransferReflowFirstRecord_FinalRecordWithoutNewlineReplays proves
+// byte-exact replay when the first record ends the stream without a newline.
+func TestClassifyTransferReflowFirstRecord_FinalRecordWithoutNewlineReplays(t *testing.T) {
+	original := "\n\n" + reflowInputLine("source/a.xml", "etag", 8, "", "") // no trailing newline
+
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
 
 	got, err := io.ReadAll(replay)
 	require.NoError(t, err)
@@ -121,26 +137,38 @@ func TestClassifyTransferReflowFirstRecord_PreservesLeadingBlanksAndSniffedRecor
 }
 
 func TestClassifyReflowFirstRecord_Dispositions(t *testing.T) {
+	classOf := func(line string) firstRecordClass {
+		class, _ := classifyReflowFirstRecord(line)
+		return class
+	}
+
 	// Engine-ready: v1 record with an s3:// source.
-	s3Line := reflowInputLine("source/a.xml", "etag", 1, "", "")
-	require.Equal(t, firstRecordEngineReady, classifyReflowFirstRecord(s3Line))
+	require.Equal(t, firstRecordEngineReady, classOf(reflowInputLine("source/a.xml", "etag", 1, "", "")))
 
 	// Fallback: every form the CLI pool still accepts today.
-	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"file:///tmp/a.xml"}}`), "v1 with a not-yet-migrated source")
-	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord(`{"type":"gonimbus.index.object.v1","data":{"base_uri":"s3://b/","key":"a.xml"}}`), "index-object record")
-	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord("s3://source-bucket/a.txt"), "bare object URI")
-	require.Equal(t, firstRecordFallback, classifyReflowFirstRecord("s3://source-bucket/prefix/"), "bare prefix URI")
+	require.Equal(t, firstRecordFallback, classOf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"file:///tmp/a.xml"}}`), "v1 with a not-yet-migrated source")
+	require.Equal(t, firstRecordFallback, classOf(`{"type":"gonimbus.index.object.v1","data":{"base_uri":"s3://b/","key":"a.xml"}}`), "index-object record")
+	require.Equal(t, firstRecordFallback, classOf("s3://source-bucket/a.txt"), "bare object URI")
+	require.Equal(t, firstRecordFallback, classOf("s3://source-bucket/prefix/"), "bare prefix URI")
 
-	// Refuse: only inputs the pool itself deterministically rejects at parse.
-	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{not json`), "unparseable JSON envelope")
-	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v0","data":{"source_uri":"s3://b/a.xml"}}`), "unsupported record type")
-	require.Equal(t, firstRecordRefuse, classifyReflowFirstRecord(`{"type":"something.else","data":{}}`), "unknown record type")
+	// Refuse: only inputs the pool itself deterministically rejects at parse,
+	// each with an accurate operator-visible reason.
+	class, reason := classifyReflowFirstRecord(`{not json`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseMalformed, reason)
+	class, reason = classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v0","data":{"source_uri":"s3://b/a.xml"}}`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseUnknownType, reason)
+	class, reason = classifyReflowFirstRecord(`{"type":"something.else","data":{}}`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseUnknownType, reason)
 }
 
 func TestClassifyTransferReflowFirstRecord_EmptyStreamFallsBack(t *testing.T) {
-	replay, class, err := classifyTransferReflowFirstRecord(strings.NewReader("\n\n"))
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader("\n\n"))
 	require.NoError(t, err)
 	require.Equal(t, firstRecordFallback, class)
+	require.Empty(t, reason)
 
 	got, err := io.ReadAll(replay)
 	require.NoError(t, err)
@@ -148,9 +176,38 @@ func TestClassifyTransferReflowFirstRecord_EmptyStreamFallsBack(t *testing.T) {
 }
 
 func TestClassifyTransferReflowFirstRecord_NilReaderRefuses(t *testing.T) {
-	_, class, err := classifyTransferReflowFirstRecord(nil)
+	_, class, reason, err := classifyTransferReflowFirstRecord(nil)
 	require.NoError(t, err)
 	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseNilReader, reason)
+}
+
+// TestClassifyTransferReflowFirstRecord_OversizedFirstRecordRefused is an F1
+// negative control: an unterminated first record beyond the ceiling refuses
+// after reading no more than the ceiling plus a fixed reader buffer, and never
+// accumulates proportional to the attacker-controlled line.
+func TestClassifyTransferReflowFirstRecord_OversizedFirstRecordRefused(t *testing.T) {
+	oversized := strings.Repeat("x", 2*maxReflowFirstRecordSniffBytes) // newline-free
+	cr := &countingReader{r: strings.NewReader(oversized)}
+
+	_, class, reason, err := classifyTransferReflowFirstRecord(cr)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+	require.LessOrEqual(t, cr.n, int64(maxReflowFirstRecordSniffBytes+8192), "underlying reads stay within the ceiling plus a fixed reader buffer (read %d bytes)", cr.n)
+}
+
+// TestClassifyTransferReflowFirstRecord_OversizedBlankPreambleRefused is the
+// second F1 negative control: an arbitrarily long blank preamble is bounded too.
+func TestClassifyTransferReflowFirstRecord_OversizedBlankPreambleRefused(t *testing.T) {
+	preamble := strings.Repeat("\n", 2*maxReflowFirstRecordSniffBytes)
+	cr := &countingReader{r: strings.NewReader(preamble + reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n")}
+
+	_, class, reason, err := classifyTransferReflowFirstRecord(cr)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+	require.LessOrEqual(t, cr.n, int64(maxReflowFirstRecordSniffBytes+8192), "underlying reads stay within the ceiling plus a fixed reader buffer (read %d bytes)", cr.n)
 }
 
 // countingReader records how many bytes were pulled from the underlying reader,
@@ -167,11 +224,23 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO is the step-1
-// negative gate: an unsupported first record is refused before the state store
-// or any provider is constructed, no records are emitted, and stdin consumption
-// is bounded to the first record rather than draining the stream.
+// negative gate: an unsupported first record is refused before the JSONL writer,
+// the state store, or any provider is constructed — even under a forced
+// concurrency clamp that would otherwise emit a warning record — no records are
+// emitted, and stdin consumption is bounded to the first record.
 func TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO(t *testing.T) {
 	withTransferReflowTestState(t)
+
+	// Force a concurrency clamp: were classification to run after the JSONL
+	// writer, emitReflowConcurrencyClampWarning would emit a warning record.
+	oldProbe := reflowResourceProbeForRun
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+		},
+		FDSoftLimit: func() (int64, error) { return 8, nil },
+	}
+	t.Cleanup(func() { reflowResourceProbeForRun = oldProbe })
 
 	oldStateStore := newReflowStateStore
 	stateStoreConstructed := false
@@ -205,68 +274,48 @@ func TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO(t *testing.T) 
 		"--dest", "s3://dest-bucket/data/",
 		"--rewrite-from", "{key}",
 		"--rewrite-to", "{key}",
-		"--parallel", "1",
+		"--parallel", "128",
 	})
 
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unsupported reflow input")
+	require.Contains(t, err.Error(), "unsupported record type", "reason distinguishes the refusal cause")
 	require.Contains(t, err.Error(), "exit code 40", "refusal maps to ExitInvalidArgument")
 	require.False(t, stateStoreConstructed, "state store must not be opened on refusal")
 	require.False(t, providerConstructed, "no provider factory may run on refusal")
-	require.Empty(t, stdout.String(), "no run/error/summary record is emitted on refusal")
+	require.Empty(t, stdout.String(), "no run/warning/summary record is emitted before the refusal")
 	require.Less(t, cr.n, int64(64*1024), "stdin consumption is bounded to the first record (read %d bytes of %d)", cr.n, len(input))
 }
 
-// TestTransferReflowCommand_EnginePlanNotImplementedNeverReselectsPool is the
-// no-executor-re-selection gate: once the engine owns an enabled (plan-time
-// vetted) run, an ErrNotImplemented fails closed as an internal error and the
-// CLI pool is never re-entered.
-func TestTransferReflowCommand_EnginePlanNotImplementedNeverReselectsPool(t *testing.T) {
-	withTransferReflowTestState(t)
-
-	oldRun := runTransferReflowViaEngineFn
+// TestRunEnabledTransferReflowEngine_ErrNotImplementedFailsClosed is the
+// no-executor-re-selection gate expressed without a mutable production seam: the
+// engine entrypoint is injected as an argument, and an enabled plan whose engine
+// returns ErrNotImplemented fails closed as an internal error. Structural
+// exclusivity in runTransferReflow (enabled ⇒ return here) keeps the CLI pool
+// unreachable on this path.
+func TestRunEnabledTransferReflowEngine_ErrNotImplementedFailsClosed(t *testing.T) {
 	engineInvoked := false
-	runTransferReflowViaEngineFn = func(ctx context.Context, plan transferReflowEnginePlan, w *output.JSONLWriter, checkpointPath string, resume bool, provCfg provenanceConfig, metaCfg reflowMetadataConfig) (reflowpkg.Summary, error) {
+	runEngine := func(_ context.Context, plan transferReflowEnginePlan, _ *output.JSONLWriter, _ string, _ bool, _ provenanceConfig, _ reflowMetadataConfig) (reflowpkg.Summary, error) {
 		engineInvoked = true
 		require.True(t, plan.enabled, "the gate applies only to an enabled plan")
 		return reflowpkg.Summary{}, reflowpkg.ErrNotImplemented
 	}
-	t.Cleanup(func() { runTransferReflowViaEngineFn = oldRun })
 
-	dst := newReflowMemoryProvider()
-	useTransferReflowProviderFactories(t, providerdispatch.Factories{
-		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-			if cfg.Bucket == "dest-bucket" {
-				return dst, nil
-			}
-			// The source provider is resolved lazily by the engine; on this
-			// fail-closed path it must never be constructed.
-			return nil, fmt.Errorf("unexpected provider construction for bucket %q", cfg.Bucket)
-		},
-	})
-
-	input := reflowInputLine("source/a.xml", "etag", 7, "", "") + "\n" // v1 + s3 => engine-eligible
-
-	var stdout, stderr bytes.Buffer
-	cmd := newTransferReflowTestCommand()
-	cmd.SetIn(strings.NewReader(input))
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{
-		"--stdin",
-		"--dest", "s3://dest-bucket/data/",
-		"--rewrite-from", "{key}",
-		"--rewrite-to", "{key}",
-		"--parallel", "1",
-	})
-
-	err := cmd.Execute()
+	err := runEnabledTransferReflowEngine(context.Background(), transferReflowEnginePlan{enabled: true}, runEngine, nil, "checkpoint.db", false, provenanceConfig{}, reflowMetadataConfig{})
+	require.True(t, engineInvoked, "the engine entrypoint must run")
 	require.Error(t, err)
-	require.True(t, engineInvoked, "the engine plan must have been enabled and run")
 	require.Contains(t, err.Error(), "Internal error")
 	require.Contains(t, err.Error(), "exit code 1", "a vetted-config ErrNotImplemented maps to ExitFailure")
-	require.NotContains(t, stdout.String(), string(reflowpkg.ExecutionPathCLIPool), "the CLI pool must never be re-selected after the engine owns the run")
+}
+
+// TestRunEnabledTransferReflowEngine_SuccessReturnsNil pins the success path: a
+// clean engine run returns nil (the command then returns without touching the pool).
+func TestRunEnabledTransferReflowEngine_SuccessReturnsNil(t *testing.T) {
+	runEngine := func(context.Context, transferReflowEnginePlan, *output.JSONLWriter, string, bool, provenanceConfig, reflowMetadataConfig) (reflowpkg.Summary, error) {
+		return reflowpkg.Summary{}, nil
+	}
+	require.NoError(t, runEnabledTransferReflowEngine(context.Background(), transferReflowEnginePlan{enabled: true}, runEngine, nil, "", false, provenanceConfig{}, reflowMetadataConfig{}))
 }
 
 func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
