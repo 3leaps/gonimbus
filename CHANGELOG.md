@@ -99,6 +99,22 @@ changes.
   resolved cap is reported as `retry_buffer_cap_bytes` and shared by the
   records and the copy-path allocator.
 
+### Library API
+
+- **Added (compatible): provider conditional-write capability declaration.** New
+  `provider.ConditionalWriteCapabilities` descriptor and
+  `provider.ConditionalCapabilityReporter` interface let a destination provider
+  declare which conditional-write predicates it honors atomically — `IfAbsent`,
+  `IfMatchETag`, and `ConditionalMultipartCompletion`. The built-in S3 and file
+  providers declare If-Match support (S3 also conditional multipart completion);
+  GCS declares IfAbsent only. The reflow engine now validates source-newer
+  overwrite support against this declaration instead of inferring it from
+  `ConditionalPutter` presence, so an IfAbsent-only conditional provider is
+  refused before any read or destination mutation. Additive: existing embedders
+  that do not implement the reporter are treated as unable to prove If-Match and
+  are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
+  refusal.
+
 ### Known limits (stated, not claimed)
 
 - Reflow interruption guarantees cover in-process cancellation with in-flight

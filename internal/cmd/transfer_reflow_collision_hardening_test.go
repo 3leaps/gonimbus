@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,27 +206,106 @@ func TestTransferReflowMissingDestLastModifiedRedactsKey(t *testing.T) {
 	}
 }
 
-// TestTransferReflowSourceNewerFanInSerialized pins DR-CVG-S2-F1: two same-run
-// sources contending for one destination key resolve inside the per-key critical
-// section (head + LastModified decision + If-Match PUT all under the gate), so
-// the second contender re-evaluates against the FIRST's committed copy instead
-// of racing its If-Match against the stale original. The exact winner is the
-// gate-acquisition order (both sources are newer than the original T0, so the
-// first to acquire overwrites; the destination LastModified is then the copy
-// time, making the second a legitimate src_older skip). The load-bearing
-// property is that no contender is ever stranded as a spurious
-// concurrent_mutation skip and no update is lost to the race.
+// fanInGateProbeDest instruments the destination so a controlled barrier forces
+// the pre-fix stale-read interleave the per-key gate must prevent. It counts
+// heads and successful If-Match lands on the contended key, and snapshots the
+// landed count at the moment the SECOND head occurs — the direct gate-integrity
+// witness: under the fix the second worker is held out of the critical section
+// until the first commit lands (landed == 1 at the second head); if the gate
+// release regresses to before the head, the second head races the stale original
+// (landed == 0 at the second head) and a spurious concurrent_mutation results.
+type fanInGateProbeDest struct {
+	*reflowMemoryProvider
+	mergedKey          string
+	barrierT           time.Duration
+	headCount          int32
+	landed             int32
+	landedAtSecondHead int32
+	firstIfMatch       sync.Once
+}
+
+func (p *fanInGateProbeDest) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	meta, err := p.reflowMemoryProvider.Head(ctx, key)
+	if key == p.mergedKey {
+		if atomic.AddInt32(&p.headCount, 1) == 2 {
+			atomic.StoreInt32(&p.landedAtSecondHead, atomic.LoadInt32(&p.landed))
+		}
+	}
+	return meta, err
+}
+
+func (p *fanInGateProbeDest) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
+	if key == p.mergedKey && precond.IfMatchETag != nil {
+		isFirst := false
+		p.firstIfMatch.Do(func() { isFirst = true })
+		if isFirst {
+			// The first committer waits for a concurrent second head. Under the
+			// per-key gate the second worker cannot head until this commit lands and
+			// the gate releases, so headCount never reaches 2 here and the wait times
+			// out harmlessly (a one-time barrierT delay on the happy path). If the
+			// gate release regresses to before the head, the second worker heads the
+			// stale original concurrently, headCount reaches 2, the wait ends early,
+			// and the two contenders race their If-Match against the same original —
+			// stranding one as a spurious concurrent_mutation.
+			deadline := time.After(p.barrierT)
+		waitLoop:
+			for atomic.LoadInt32(&p.headCount) < 2 {
+				select {
+				case <-deadline:
+					break waitLoop
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}
+	}
+	res, err := p.reflowMemoryProvider.PutObjectConditional(ctx, key, body, contentLength, precond)
+	if err == nil && key == p.mergedKey && precond.IfMatchETag != nil {
+		atomic.AddInt32(&p.landed, 1)
+	}
+	return res, err
+}
+
+// TestTransferReflowSourceNewerFanInSerialized pins DR-CVG-S2-F1 with a
+// controlled gate-integrity barrier. Two same-run sources — both newer than the
+// original destination — contend for one destination key. The per-key gate holds
+// the whole source-newer resolution (head + LastModified decision + If-Match PUT)
+// so the SECOND contender re-evaluates against the FIRST's committed copy instead
+// of racing its If-Match against the stale original.
+//
+// The barrier makes the failure deterministic rather than scheduling-dependent:
+// the first committer parks until a concurrent second head is observed, which can
+// only happen if the gate releases before the head. Under the fix the wait times
+// out and the second head is taken only after the commit lands, so
+// landedAtSecondHead == 1 and no contender is stranded as concurrent_mutation.
+// Restoring the release to its pre-fix position (before the head) makes this test
+// fail on both landedAtSecondHead and the concurrent_mutation assertion.
+//
+// Contract note (narrowed, behavior-preserving): the FIRST gate winner becomes
+// the terminal authority. The destination LastModified is copy time, so the loser
+// is a legitimate src_older skip — newest-business-date-wins is NOT claimed and no
+// "no update is lost" guarantee is made; a future increment would need persisted
+// logical source time. Both the IfAbsent-honored and head-compare fallback
+// resolution arms are exercised.
 func TestTransferReflowSourceNewerFanInSerialized(t *testing.T) {
 	t0 := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
 	t1 := time.Date(2026, 1, 12, 0, 0, 0, 0, time.UTC)
 	t2 := time.Date(2026, 1, 14, 0, 0, 0, 0, time.UTC)
 
-	setup := func(t *testing.T) *reflowMemoryProvider {
+	setup := func(t *testing.T, ifAbsentHonored bool) *fanInGateProbeDest {
 		withTransferReflowTestState(t)
 		srcBase := newReflowMemoryProvider()
 		srcBase.putFixture("src/older.xml", "OLDER-BODY", "older-etag", t1)
 		srcBase.putFixture("src/newer.xml", "NEWER-BODY", "newer-etag", t2)
-		dst := newReflowMemoryProvider()
+		dst := &fanInGateProbeDest{
+			reflowMemoryProvider: newReflowMemoryProvider(),
+			mergedKey:            "data/merged.xml",
+			barrierT:             200 * time.Millisecond,
+		}
+		if !ifAbsentHonored {
+			// An IfAbsent-ignoring destination fails the write probe's honored check,
+			// activating the head-compare fallback resolution arm.
+			dst.ignoreIfAbsent = true
+		}
 		dst.putFixture("data/merged.xml", "T0-BODY-ORIG", "e0", t0)
 		reflowResourceProbeForRun = reflowpkg.ResourceProbe{
 			MemoryLimitBytes: func() (int64, string, error) { return transferDefaultBudget(), "test_override", nil },
@@ -255,34 +337,49 @@ func TestTransferReflowSourceNewerFanInSerialized(t *testing.T) {
 		return runTransferReflowRawStdin(t, strings.Join(lines, "\n")+"\n", args...)
 	}
 
-	dst := setup(t)
-	checkpointPath := filepath.Join(t.TempDir(), "state.db")
-	stdout, err := run(t, checkpointPath, false)
-	require.NoError(t, err, stdout)
+	for _, arm := range []struct {
+		name            string
+		ifAbsentHonored bool
+	}{
+		{"ifabsent_honored", true},
+		{"head_compare_fallback", false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			dst := setup(t, arm.ifAbsentHonored)
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+			stdout, err := run(t, checkpointPath, false)
+			require.NoError(t, err, stdout)
 
-	terminals := map[string]int{}
-	for _, rec := range requireReflowRecords(t, stdout) {
-		if rec.Status == "in_progress" {
-			continue
-		}
-		require.NotEqual(t, "collision.skipped_concurrent_mutation", rec.Reason,
-			"serialized contenders must never be stranded as a spurious concurrent-mutation skip")
-		terminals[rec.Status+"/"+rec.Reason]++
-	}
-	// The gate winner lands; the loser compares against the committed copy and
-	// skips as src_older. Exactly one of each — no lost update, no race skip.
-	require.Equal(t, 1, terminals["complete/"], "exactly one contender lands the overwrite")
-	require.Equal(t, 1, terminals["skipped/collision.skipped_src_older"], "the other re-evaluates against the committed copy")
-	final := string(dst.mustObject("data/merged.xml"))
-	require.Contains(t, []string{"OLDER-BODY", "NEWER-BODY"}, final, "the destination holds a committed copy, not the untouched original")
+			// Gate-integrity witnesses: the second head observed the winner's
+			// committed copy (landed already 1), and exactly one contender landed.
+			require.Equal(t, int32(1), atomic.LoadInt32(&dst.landedAtSecondHead),
+				"the second destination head must occur only after the first commit lands")
+			require.Equal(t, int32(1), atomic.LoadInt32(&dst.landed), "exactly one contender lands the overwrite")
 
-	// Resume converges without a second land; the settled result is preserved.
-	stdout2, err := run(t, checkpointPath, true)
-	require.NoError(t, err)
-	for _, rec := range requireReflowRecords(t, stdout2) {
-		if rec.Status != "in_progress" {
-			require.True(t, strings.HasPrefix(rec.Reason, "resume."), "resume must re-skip settled items, got reason %q", rec.Reason)
-		}
+			terminals := map[string]int{}
+			for _, rec := range requireReflowRecords(t, stdout) {
+				if rec.Status == "in_progress" {
+					continue
+				}
+				require.NotEqual(t, "collision.skipped_concurrent_mutation", rec.Reason,
+					"serialized contenders must never be stranded as a spurious concurrent-mutation skip")
+				terminals[rec.Status+"/"+rec.Reason]++
+			}
+			require.Equal(t, 1, terminals["complete/"], "exactly one contender lands the overwrite")
+			require.Equal(t, 1, terminals["skipped/collision.skipped_src_older"], "the other re-evaluates against the committed copy")
+			final := string(dst.mustObject("data/merged.xml"))
+			require.Contains(t, []string{"OLDER-BODY", "NEWER-BODY"}, final, "the gate winner's committed copy stands, not the untouched original")
+
+			// Resume converges without a second land; the settled result is preserved.
+			stdout2, err := run(t, checkpointPath, true)
+			require.NoError(t, err)
+			for _, rec := range requireReflowRecords(t, stdout2) {
+				if rec.Status != "in_progress" {
+					require.True(t, strings.HasPrefix(rec.Reason, "resume."), "resume must re-skip settled items, got reason %q", rec.Reason)
+				}
+			}
+			require.Equal(t, int32(1), atomic.LoadInt32(&dst.landed), "resume must not land the overwrite a second time")
+			require.Equal(t, final, string(dst.mustObject("data/merged.xml")), "resume must not change the settled destination")
+		})
 	}
-	require.Equal(t, final, string(dst.mustObject("data/merged.xml")), "resume must not change the settled destination")
 }

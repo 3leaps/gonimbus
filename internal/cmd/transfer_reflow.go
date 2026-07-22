@@ -412,7 +412,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	if err := ensureCollisionCapability(dstProv, destSpec.Provider, collCfg); err != nil {
 		return emitReflowConfigError(ctx, w, "Invalid collision configuration", err, map[string]any{
-			"missing_capability": "ConditionalPutter.IfMatchETag",
+			"missing_capability": collisionMissingCapabilityLabel(err),
 			"on_collision":       collCfg.Mode,
 			"provider":           destSpec.Provider,
 		})

@@ -3380,10 +3380,17 @@ func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testin
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
 }
 
-func TestTransferReflowCollisionCapabilityRejectsGCSOverwriteIfSourceNewer(t *testing.T) {
+func TestTransferReflowCollisionCapabilityRejectsUndeclaredOverwriteIfSourceNewer(t *testing.T) {
+	// A provider that declares no conditional-write capabilities cannot prove it
+	// honors If-Match and is refused fail-closed — regardless of provider label,
+	// so the check no longer special-cases GCS by ProviderID.
 	err := ensureCollisionCapability(&mockProvider{}, string(provider.ProviderGCS), collisionConfig{Mode: reflowCollisionSrcNew})
 	require.ErrorContains(t, err, `provider "gcs" does not support ConditionalPutter.IfMatchETag`)
 	require.ErrorContains(t, err, "--on-collision=overwrite-if-source-newer")
+
+	var capErr *reflowpkg.MissingConditionalCapabilityError
+	require.ErrorAs(t, err, &capErr)
+	require.Equal(t, "ConditionalPutter.IfMatchETag", capErr.MissingCapability)
 }
 
 func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
@@ -4726,6 +4733,13 @@ func (p *reflowMemoryProvider) applyPutOptions(key string, opts provider.PutOpti
 	meta.ContentType = opts.ContentType
 	meta.StorageClass = opts.StorageClass
 	p.meta[key] = meta
+}
+
+// ConditionalWriteCapabilities declares the honored conditional-write predicates:
+// IfAbsent (O_EXCL-style create) and IfMatch (ETag compare-and-swap). The fixture
+// has no multipart path, so conditional multipart completion is not offered.
+func (p *reflowMemoryProvider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{IfAbsent: true, IfMatchETag: true}
 }
 
 func (p *reflowMemoryProvider) Close() error {

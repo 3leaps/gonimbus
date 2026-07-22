@@ -234,26 +234,85 @@ func recordStreamCopyCollisionModeSupported(mode string) bool {
 	}
 }
 
+// MissingConditionalCapabilityError reports that a destination provider cannot
+// honor a conditional-write predicate a collision mode requires. It carries the
+// provider-dispatch capability label so the command adapter can surface a
+// structured missing_capability preflight detail identical to its other
+// capability errors, and both the library and the command adapter derive it from
+// the same RequireSourceNewerCapability authority.
+type MissingConditionalCapabilityError struct {
+	// Mode is the collision mode that required the missing predicate.
+	Mode string
+	// MissingCapability is the provider-dispatch capability label, e.g.
+	// "ConditionalPutter.IfMatchETag" or "ConditionalMultipartCompleter.IfMatchETag".
+	MissingCapability string
+	// reason is the human-readable defect phrased for the destination provider.
+	reason string
+}
+
+func (e *MissingConditionalCapabilityError) Error() string {
+	return fmt.Sprintf("destination provider %s, required by --on-collision=%s", e.reason, e.Mode)
+}
+
+// RequireSourceNewerCapability validates, from the destination provider's own
+// capability declaration, that it can honor the conditional-write predicates
+// overwrite-if-source-newer needs before any read or destination mutation:
+//   - an If-Match single-PUT compare-and-swap, always; and
+//   - conditional multipart completion when the provider routes large objects
+//     through multipart (implements MultipartUploader), so a >threshold overwrite
+//     cannot upload parts and then discover the predicate is unsupported only at
+//     completion time.
+//
+// The provider's ConditionalCapabilityReporter declaration is the authority: a
+// provider that does not declare its conditional-write capabilities cannot prove
+// If-Match support and is refused fail-closed. The mere presence of
+// ConditionalPutter is never accepted as proof — an IfAbsent-only implementation
+// exposes ConditionalPutter yet cannot honor If-Match. A remote endpoint reached
+// through a declaring adapter remains a documented trust boundary. Both the
+// library (validateCollisionCapability) and the command adapter
+// (ensureCollisionCapability) call this so the two surfaces refuse identically.
+func RequireSourceNewerCapability(dst provider.Provider) error {
+	reporter, ok := dst.(provider.ConditionalCapabilityReporter)
+	if !ok {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "does not declare conditional-write capabilities (If-Match)",
+		}
+	}
+	caps := reporter.ConditionalWriteCapabilities()
+	if !caps.IfMatchETag {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "does not honor the If-Match write precondition",
+		}
+	}
+	if _, isMultipart := dst.(provider.MultipartUploader); isMultipart && !caps.ConditionalMultipartCompletion {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
+			reason:            "supports multipart uploads but cannot complete them conditionally (If-Match) for large objects",
+		}
+	}
+	return nil
+}
+
 // validateCollisionCapability enforces the destination write-precondition a
 // collision mode requires, in the library (the ADR-0006 authority) rather than
 // only in the command adapter. overwrite-if-source-newer resolves conflicts with
-// an If-Match conditional PUT, so a destination that cannot honor If-Match (GCS,
-// which offers ConditionalPutter only for IfAbsent, or a provider without
-// ConditionalPutter at all) must be refused up front — otherwise a direct
-// embedder mutates fresh keys unconditionally and fails only when a later
-// conflict happens to need the predicate. This mirrors the command's
-// ensureCollisionCapability so both surfaces refuse identically; it validates the
-// provider-contract shape, a narrow incremental stand-in for a full conditional-
-// capability descriptor.
+// an If-Match conditional PUT, so a destination that cannot prove it honors
+// If-Match (and conditional multipart completion for large objects) must be
+// refused up front via RequireSourceNewerCapability — otherwise a direct embedder
+// mutates fresh keys unconditionally and fails only when a later conflict happens
+// to need the predicate. This mirrors the command's ensureCollisionCapability so
+// both surfaces refuse identically from one authority.
 func (r *Runner) validateCollisionCapability() error {
 	if r.cfg.Collision.Mode != CollisionOverwriteIfSourceNewer {
 		return nil
 	}
-	if r.cfg.Destination.ProviderID == string(provider.ProviderGCS) {
-		return fmt.Errorf("reflow: destination provider %q does not support the If-Match write precondition required by --on-collision=%s", r.cfg.Destination.ProviderID, CollisionOverwriteIfSourceNewer)
-	}
-	if _, ok := r.cfg.Destination.Provider.(provider.ConditionalPutter); !ok {
-		return fmt.Errorf("reflow: destination provider does not implement ConditionalPutter (If-Match), required by --on-collision=%s", CollisionOverwriteIfSourceNewer)
+	if err := RequireSourceNewerCapability(r.cfg.Destination.Provider); err != nil {
+		return fmt.Errorf("reflow: %w", err)
 	}
 	return nil
 }

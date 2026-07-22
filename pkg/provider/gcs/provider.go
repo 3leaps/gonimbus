@@ -309,6 +309,19 @@ func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key stri
 	return putResultFromAttrs(writer.Attrs()), nil
 }
 
+// ConditionalWriteCapabilities declares the conditional-write predicates this
+// GCS adapter honors: IfAbsent only, mapped to a DoesNotExist generation
+// precondition. GCS has no ETag If-Match compare-and-swap here, so IfMatchETag
+// is not offered and PutObjectConditional returns ErrUnsupportedPrecondition for
+// it; conditional multipart completion is likewise unsupported.
+func (p *Provider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{
+		IfAbsent:                       true,
+		IfMatchETag:                    false,
+		ConditionalMultipartCompletion: false,
+	}
+}
+
 // DeleteObject deletes an object.
 func (p *Provider) DeleteObject(ctx context.Context, key string) error {
 	if err := p.guardWrite("DeleteObject", key); err != nil {

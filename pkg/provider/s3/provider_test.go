@@ -1172,6 +1172,46 @@ func TestMultipartUploadPartAndConditionalComplete(t *testing.T) {
 	require.Equal(t, "*", completeReq.Header.Get("If-None-Match"))
 }
 
+// TestMultipartConditionalCompleteSendsIfMatch pins that an If-Match multipart
+// completion — the write a large overwrite-if-source-newer conditional overwrite
+// performs — carries the exact If-Match header (the observed destination ETag),
+// not IfAbsent. This is the multipart analogue of the single-PUT compare-and-swap
+// and the load-bearing atomicity guarantee for large conditional overwrites.
+func TestMultipartConditionalCompleteSendsIfMatch(t *testing.T) {
+	reqs := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs <- r.Clone(context.Background())
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == "POST" && strings.Contains(r.URL.RawQuery, "uploadId=upload-123"):
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>object.txt</Key><ETag>"complete-etag"</ETag></CompleteMultipartUploadResult>`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	p, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        server.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIAFIRST000000001",
+		SecretAccessKey: "first-secret",
+	})
+	require.NoError(t, err)
+
+	etag := "observed-etag"
+	result, err := p.CompleteMultipartUploadConditional(context.Background(), "object.txt", "upload-123", []provider.PartETag{{PartNumber: 1, ETag: "part-etag"}}, provider.PutPrecondition{IfMatchETag: &etag})
+	require.NoError(t, err)
+	require.Equal(t, "complete-etag", result.ETag)
+	completeReq := receiveRequest(t, reqs, "multipart complete")
+	require.Equal(t, "POST", completeReq.Method)
+	require.Contains(t, completeReq.URL.RawQuery, "uploadId=upload-123")
+	require.Equal(t, `"observed-etag"`, completeReq.Header.Get("If-Match"), "the conditional completion must carry the observed ETag as If-Match")
+	require.Empty(t, completeReq.Header.Get("If-None-Match"), "an If-Match completion must not also send If-None-Match")
+}
+
 func receiveObservedRequest(t *testing.T, ch <-chan observedS3Request, label string) observedS3Request {
 	t.Helper()
 

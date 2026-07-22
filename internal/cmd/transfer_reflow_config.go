@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -387,6 +388,14 @@ func ensureMetadataCapability(dst provider.Provider, destProvider string, cfg re
 	return nil
 }
 
+// ensureCollisionCapability refuses overwrite-if-source-newer when the
+// destination cannot prove it honors the required conditional-write predicates.
+// It delegates to reflowpkg.RequireSourceNewerCapability — the same authority the
+// engine consumes (validateCollisionCapability) — so the CLI adapter and the
+// library refuse identically. The provider's own capability declaration, not the
+// mere presence of ConditionalPutter, is the authority; the returned error wraps
+// the typed *reflowpkg.MissingConditionalCapabilityError so the caller can surface
+// its predicate-specific missing_capability preflight detail.
 func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg collisionConfig) error {
 	if cfg.Mode != reflowCollisionSrcNew {
 		return nil
@@ -394,14 +403,23 @@ func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg c
 	if destProvider == "" {
 		destProvider = "destination"
 	}
-	if destProvider == string(provider.ProviderGCS) {
-		return fmt.Errorf("%s provider %q does not support ConditionalPutter.IfMatchETag required by --on-collision=%s", operationTransferReflow, destProvider, reflowCollisionSrcNew)
+	err := reflowpkg.RequireSourceNewerCapability(dst)
+	if err == nil {
+		return nil
 	}
-	_, err := providerdispatch.RequireCapability[provider.ConditionalPutter](dst, operationTransferReflow, destProvider, "ConditionalPutter.IfMatchETag")
-	if err != nil {
-		return fmt.Errorf("%w required by --on-collision=%s", err, reflowCollisionSrcNew)
+	missing := collisionMissingCapabilityLabel(err)
+	return fmt.Errorf("%s provider %q does not support %s required by --on-collision=%s: %w", operationTransferReflow, destProvider, missing, reflowCollisionSrcNew, err)
+}
+
+// collisionMissingCapabilityLabel extracts the provider-dispatch capability label
+// from a source-newer capability refusal, defaulting to the If-Match single-PUT
+// predicate when the error is not the typed capability error.
+func collisionMissingCapabilityLabel(err error) string {
+	var capErr *reflowpkg.MissingConditionalCapabilityError
+	if errors.As(err, &capErr) && capErr.MissingCapability != "" {
+		return capErr.MissingCapability
 	}
-	return nil
+	return "ConditionalPutter.IfMatchETag"
 }
 
 func cloneMetadataMap(in map[string]string) map[string]string {

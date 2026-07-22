@@ -121,6 +121,41 @@ type ConditionalMultipartCompleter interface {
 	CompleteMultipartUploadConditional(ctx context.Context, key, uploadID string, parts []PartETag, precond PutPrecondition) (PutResult, error)
 }
 
+// ConditionalWriteCapabilities enumerates the conditional-write predicates a
+// destination provider honors atomically. It exists so a caller can validate
+// predicate support up front — before any read or destination mutation — instead
+// of inferring support from the presence of ConditionalPutter, which cannot
+// distinguish an IfAbsent-only implementation from one that also honors IfMatch
+// or conditional multipart completion. A provider that advertises a predicate
+// here promises to honor it (or return ErrPreconditionFailed when the predicate
+// evaluates false); it must never fall back to an unconditional write or return
+// ErrUnsupportedPrecondition for an advertised predicate.
+type ConditionalWriteCapabilities struct {
+	// IfAbsent reports that PutObjectConditional honors an IfAbsent precondition.
+	IfAbsent bool
+	// IfMatchETag reports that PutObjectConditional honors an IfMatchETag
+	// precondition (atomic compare-and-swap against the destination ETag).
+	IfMatchETag bool
+	// ConditionalMultipartCompletion reports that CompleteMultipartUploadConditional
+	// honors its precondition, so a large conditional overwrite completes
+	// atomically instead of uploading parts and discovering the predicate is
+	// unsupported only at completion time.
+	ConditionalMultipartCompletion bool
+}
+
+// ConditionalCapabilityReporter reports which conditional-write predicates the
+// provider honors. Providers that implement ConditionalPutter (and, where
+// applicable, ConditionalMultipartCompleter) should implement this so callers
+// can validate predicate support before touching the destination. A provider
+// that does not implement this interface cannot prove it honors any conditional
+// predicate and must be treated as unable to honor them — the injected adapter's
+// declared capability, not the mere presence of ConditionalPutter, is the
+// authority. A remote endpoint reached through a declaring adapter remains a
+// documented trust boundary.
+type ConditionalCapabilityReporter interface {
+	ConditionalWriteCapabilities() ConditionalWriteCapabilities
+}
+
 // MetadataAwareMultipartUploader can start multipart uploads with the same
 // destination object attributes as a single-part PUT.
 type MetadataAwareMultipartUploader interface {
