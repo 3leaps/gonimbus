@@ -392,10 +392,14 @@ func ensureMetadataCapability(dst provider.Provider, destProvider string, cfg re
 // destination cannot prove it honors the required conditional-write predicates.
 // It delegates to reflowpkg.RequireSourceNewerCapability — the same authority the
 // engine consumes (validateCollisionCapability) — so the CLI adapter and the
-// library refuse identically. The provider's own capability declaration, not the
-// mere presence of ConditionalPutter, is the authority; the returned error wraps
-// the typed *reflowpkg.MissingConditionalCapabilityError so the caller can surface
-// its predicate-specific missing_capability preflight detail.
+// library apply the same semantic refusal before any provider write probe or
+// user-key mutation. (The CLI's bounded, replayable first-record sniff precedes
+// this gate and may emit a memory-clamp warning or open a checkpoint; the shared
+// contract is refusal before destination probing and mutation, not literally zero
+// input bytes as on the direct library path.) The provider's own capability
+// declaration, not the mere presence of ConditionalPutter, is the authority; the
+// returned error wraps the typed *reflowpkg.MissingConditionalCapabilityError so
+// the caller can surface its predicate-specific missing_capability preflight detail.
 func ensureCollisionCapability(dst provider.Provider, destProvider string, cfg collisionConfig) error {
 	if cfg.Mode != reflowCollisionSrcNew {
 		return nil

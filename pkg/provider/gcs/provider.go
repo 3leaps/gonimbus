@@ -309,6 +309,14 @@ func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key stri
 	return putResultFromAttrs(writer.Attrs()), nil
 }
 
+// Compile-time assertions: GCS is a ConditionalCapabilityReporter and a
+// ConditionalPutter (for its IfAbsent generation precondition); it declares no
+// If-Match, so it is not required to be a ConditionalMultipartCompleter.
+var (
+	_ provider.ConditionalCapabilityReporter = (*Provider)(nil)
+	_ provider.ConditionalPutter             = (*Provider)(nil)
+)
+
 // ConditionalWriteCapabilities declares the conditional-write predicates this
 // GCS adapter honors: IfAbsent only, mapped to a DoesNotExist generation
 // precondition. GCS has no ETag If-Match compare-and-swap here, so IfMatchETag

@@ -376,6 +376,13 @@ func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key stri
 	return result, nil
 }
 
+// Compile-time assertions that the declared If-Match capability is backed by a
+// callable ConditionalPutter (the file adapter has no multipart path).
+var (
+	_ provider.ConditionalCapabilityReporter = (*Provider)(nil)
+	_ provider.ConditionalPutter             = (*Provider)(nil)
+)
+
 // ConditionalWriteCapabilities declares the conditional-write predicates this
 // file adapter honors: IfAbsent (O_EXCL create) and IfMatch (lock + ETag
 // compare-and-swap). The file provider has no multipart path, so conditional

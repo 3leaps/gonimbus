@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,17 +23,36 @@ import (
 )
 
 // multipartOverThresholdBytes is just over the 64 MiB multipart threshold, so the
-// copy path routes through multipart. The source streams only a few bytes — the
-// routing decision uses the declared size, and the multipart reader tolerates a
-// short body — so the test exercises the real multipart completion path without
-// moving 64 MiB.
+// copy path routes through multipart. The source streams this full, truthful
+// length (not a short body) so the test does not depend on the uploader treating a
+// short known-size body as a complete upload.
 const multipartOverThresholdBytes = int64(64<<20) + 1
 
-// largeSourceProvider serves one object whose declared size exceeds the multipart
-// threshold while its body streams only a handful of bytes.
+// fixedSizeReader yields exactly n bytes without allocating them, so a source can
+// stream a multipart-sized object truthfully without moving a real 64 MiB buffer.
+type fixedSizeReader struct{ remaining int64 }
+
+func (r *fixedSizeReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	return int(n), nil
+}
+
+func (r *fixedSizeReader) Close() error { return nil }
+
+// largeSourceProvider serves one object whose body streams its full declared size
+// (just over the multipart threshold).
 type largeSourceProvider struct {
 	key          string
-	body         string
 	etag         string
 	lastModified time.Time
 	declaredSize int64
@@ -55,9 +73,8 @@ func (p *largeSourceProvider) GetObject(_ context.Context, key string) (io.ReadC
 	if key != p.key {
 		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderS3, Key: key, Err: provider.ErrNotFound}
 	}
-	// Declared length exceeds the streamed body so multipart routing engages while
-	// the test streams only a few bytes; the multipart reader completes on EOF.
-	return io.NopCloser(strings.NewReader(p.body)), p.declaredSize, nil
+	// Stream the full declared length so transferred bytes match the known size.
+	return &fixedSizeReader{remaining: p.declaredSize}, p.declaredSize, nil
 }
 
 func (p *largeSourceProvider) Close() error { return nil }
@@ -208,7 +225,6 @@ func TestTransferReflowSourceNewerMultipartConcurrentMutation(t *testing.T) {
 	withTransferReflowTestState(t)
 	src := &largeSourceProvider{
 		key:          "src/big.xml",
-		body:         "NEWER-MULTIPART-BODY",
 		etag:         "newer-etag",
 		lastModified: t2,
 		declaredSize: multipartOverThresholdBytes,

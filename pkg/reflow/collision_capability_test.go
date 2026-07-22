@@ -68,13 +68,55 @@ func (multipartNoConditionalDest) AbortMultipartUpload(context.Context, string, 
 	return nil
 }
 
+// ifMatchClaimNoPutterDest declares If-Match support but implements only an
+// unconditional ObjectPutter — no ConditionalPutter — so it cannot actually issue
+// the conditional overwrite it advertises. It records unconditional lands so a
+// live test can prove the gate refuses before any fresh-key mutation (the
+// contradiction has the same live fresh-key impact as RR1 via the head fallback).
+type ifMatchClaimNoPutterDest struct {
+	mu     sync.Mutex
+	landed map[string][]byte
+}
+
+func newIfMatchClaimNoPutterDest() *ifMatchClaimNoPutterDest {
+	return &ifMatchClaimNoPutterDest{landed: map[string][]byte{}}
+}
+
+func (d *ifMatchClaimNoPutterDest) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
+	return &provider.ListResult{}, nil
+}
+
+func (d *ifMatchClaimNoPutterDest) Head(context.Context, string) (*provider.ObjectMeta, error) {
+	return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderS3, Err: provider.ErrNotFound}
+}
+
+func (d *ifMatchClaimNoPutterDest) Close() error { return nil }
+
+func (d *ifMatchClaimNoPutterDest) PutObject(_ context.Context, key string, body io.Reader, _ int64) error {
+	data, _ := io.ReadAll(body)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.landed[key] = data
+	return nil
+}
+
+func (d *ifMatchClaimNoPutterDest) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{IfMatchETag: true}
+}
+
+func (d *ifMatchClaimNoPutterDest) landedKeys() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.landed)
+}
+
 // TestRequireSourceNewerCapabilityMultipart pins the ConditionalMultipartCompletion
 // arm of the predicate-specific capability authority (E-CVG-S2 multipart
 // guardrail): a MultipartUploader that cannot complete conditionally is refused
 // before any user-key effect, even though it honors single-PUT If-Match; a
 // provider with no multipart path is accepted on single-PUT If-Match alone.
 func TestRequireSourceNewerCapabilityMultipart(t *testing.T) {
-	t.Run("multipart without conditional completion is refused", func(t *testing.T) {
+	t.Run("multipart not declaring conditional completion is refused", func(t *testing.T) {
 		dst := multipartNoConditionalDest{copyMemoryProvider: newCopyMemoryProvider()} // ProviderS3, IfMatch-capable single-PUT
 		err := RequireSourceNewerCapability(dst)
 		require.Error(t, err)
@@ -85,6 +127,32 @@ func TestRequireSourceNewerCapabilityMultipart(t *testing.T) {
 
 	t.Run("non-multipart if-match provider is accepted", func(t *testing.T) {
 		require.NoError(t, RequireSourceNewerCapability(newCopyMemoryProvider()))
+	})
+}
+
+// TestRequireSourceNewerCapabilityRequiresCallableInterface pins E-CVG-S2-RR2: a
+// declared capability boolean must be paired with the callable interface that
+// exercises it. Local method availability is fully knowable and fails closed —
+// distinct from the remote-endpoint trust boundary — so a contradictory adapter
+// cannot pass the pre-I/O gate and then discover it has no callable method.
+func TestRequireSourceNewerCapabilityRequiresCallableInterface(t *testing.T) {
+	t.Run("declares If-Match but implements no ConditionalPutter", func(t *testing.T) {
+		err := RequireSourceNewerCapability(newIfMatchClaimNoPutterDest())
+		require.Error(t, err)
+		var capErr *MissingConditionalCapabilityError
+		require.ErrorAs(t, err, &capErr)
+		require.Equal(t, "ConditionalPutter.IfMatchETag", capErr.MissingCapability)
+	})
+
+	t.Run("declares conditional multipart completion but implements no ConditionalMultipartCompleter", func(t *testing.T) {
+		base := newCopyMemoryProvider()
+		base.condCaps = &provider.ConditionalWriteCapabilities{IfAbsent: true, IfMatchETag: true, ConditionalMultipartCompletion: true}
+		dst := multipartNoConditionalDest{copyMemoryProvider: base} // MultipartUploader, ConditionalPutter, but no ConditionalMultipartCompleter
+		err := RequireSourceNewerCapability(dst)
+		require.Error(t, err)
+		var capErr *MissingConditionalCapabilityError
+		require.ErrorAs(t, err, &capErr)
+		require.Equal(t, "ConditionalMultipartCompleter.IfMatchETag", capErr.MissingCapability)
 	})
 }
 
@@ -176,6 +244,32 @@ func TestRunnerSourceNewerRequiresIfMatchCapability(t *testing.T) {
 		require.False(t, sink.emitted(), "refusal must precede any event emission")
 		require.Empty(t, dst.preconditions(), "no IfAbsent write-probe or conditional PUT on a refused config")
 		require.Empty(t, dst.body("data/a/b.xml"), "a fresh key must not be mutated on a refused config")
+	})
+
+	t.Run("declares If-Match but implements no ConditionalPutter is refused before any effect", func(t *testing.T) {
+		// The RR2 contradiction with the same live fresh-key impact as RR1: the
+		// adapter advertises If-Match but can only issue an unconditional PutObject,
+		// so a passed gate would land the fresh key through the head fallback.
+		src := newCopyMemoryProvider()
+		src.putFixture("a/b.xml", "payload", "etag-a")
+		dst := newIfMatchClaimNoPutterDest()
+		sink := &collectSink{}
+		cfg := sourceNewer(copyConfig(newCopyMemoryProvider(), sink))
+		cfg.Destination.Provider = dst
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		reader := &countingReader{r: strings.NewReader(sourceNewerCapabilityLine)}
+		_, runErr := runner.Run(context.Background(), RecordStreamSource{
+			Records: reader,
+			Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+		})
+		require.Error(t, runErr)
+		require.NotErrorIs(t, runErr, ErrNotImplemented)
+		require.Contains(t, runErr.Error(), "If-Match")
+		require.Zero(t, reader.n, "the record stream must not be read on a refused config")
+		require.False(t, sink.emitted(), "refusal must precede any event emission")
+		require.Zero(t, dst.landedKeys(), "no fresh key may be landed through the head fallback on a refused config")
 	})
 
 	t.Run("if-match-capable s3 destination overwrites live via compare-and-swap", func(t *testing.T) {

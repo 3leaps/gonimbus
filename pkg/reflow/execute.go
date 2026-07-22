@@ -267,10 +267,20 @@ func (e *MissingConditionalCapabilityError) Error() string {
 // provider that does not declare its conditional-write capabilities cannot prove
 // If-Match support and is refused fail-closed. The mere presence of
 // ConditionalPutter is never accepted as proof — an IfAbsent-only implementation
-// exposes ConditionalPutter yet cannot honor If-Match. A remote endpoint reached
-// through a declaring adapter remains a documented trust boundary. Both the
-// library (validateCollisionCapability) and the command adapter
-// (ensureCollisionCapability) call this so the two surfaces refuse identically.
+// exposes ConditionalPutter yet cannot honor If-Match.
+//
+// A declared predicate must additionally be paired with the callable interface
+// that exercises it. Local method availability is fully knowable and fails closed
+// here, distinct from the remote-endpoint trust boundary (a declaring adapter's
+// remote endpoint is trusted to honor the advertised predicate or return the
+// documented unsupported error). Without this, a contradictory adapter — one that
+// declares If-Match but does not implement ConditionalPutter, or declares
+// conditional multipart completion but does not implement
+// ConditionalMultipartCompleter — would pass the pre-I/O gate and then land a
+// fresh key unconditionally through the head fallback, or upload parts before
+// discovering completion is unavailable. Both the library
+// (validateCollisionCapability) and the command adapter (ensureCollisionCapability)
+// call this so the two surfaces refuse identically.
 func RequireSourceNewerCapability(dst provider.Provider) error {
 	reporter, ok := dst.(provider.ConditionalCapabilityReporter)
 	if !ok {
@@ -288,11 +298,30 @@ func RequireSourceNewerCapability(dst provider.Provider) error {
 			reason:            "does not honor the If-Match write precondition",
 		}
 	}
-	if _, isMultipart := dst.(provider.MultipartUploader); isMultipart && !caps.ConditionalMultipartCompletion {
+	// The declared If-Match predicate must be exercisable: the adapter must
+	// implement ConditionalPutter, not merely advertise the capability.
+	if _, ok := dst.(provider.ConditionalPutter); !ok {
 		return &MissingConditionalCapabilityError{
 			Mode:              CollisionOverwriteIfSourceNewer,
-			MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
-			reason:            "supports multipart uploads but cannot complete them conditionally (If-Match) for large objects",
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "declares If-Match support but does not implement ConditionalPutter",
+		}
+	}
+	if _, isMultipart := dst.(provider.MultipartUploader); isMultipart {
+		if !caps.ConditionalMultipartCompletion {
+			return &MissingConditionalCapabilityError{
+				Mode:              CollisionOverwriteIfSourceNewer,
+				MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
+				reason:            "supports multipart uploads but does not declare conditional multipart completion (If-Match) for large objects",
+			}
+		}
+		// The declared conditional-multipart predicate must be exercisable too.
+		if _, ok := dst.(provider.ConditionalMultipartCompleter); !ok {
+			return &MissingConditionalCapabilityError{
+				Mode:              CollisionOverwriteIfSourceNewer,
+				MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
+				reason:            "declares conditional multipart completion but does not implement ConditionalMultipartCompleter",
+			}
 		}
 	}
 	return nil
