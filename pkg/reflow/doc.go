@@ -12,11 +12,12 @@
 // RecordStreamSource: it streams S3 reflow-input records, plans destination
 // mappings, emits typed events, performs conditional PUTs for copied objects, and
 // returns an InvalidInputsError after the summary when a stream carries invalid
-// records (mirroring the command path's non-zero exit). Forms and scenarios not
-// yet migrated (object/prefix/file-tree sources and later collision/provenance
-// variants) return ErrNotImplemented, decided from the source form and config
-// before any stream bytes are read, so a caller can fall back to the CLI path with
-// the same Source. Providers are injected as provider.Provider handles, so the
+// records (mirroring the command path's non-zero exit). The copy plane executes
+// the skip-if-duplicate, fail, overwrite, and overwrite-if-source-newer collision
+// modes; forms and scenarios not yet migrated (object/prefix/file-tree sources,
+// the quarantine collision cell, and provenance sidecars) return
+// ErrNotImplemented, decided from the source form and config before any stream
+// bytes are read, so a caller can fall back to the CLI path with the same Source. Providers are injected as provider.Provider handles, so the
 // engine never imports a concrete provider, SDK, or the storageful
 // (sqlite/index-store) graph — enforced by the dependency-boundary test.
 //

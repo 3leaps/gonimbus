@@ -46,6 +46,13 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if !r.cfg.DryRun && !recordStreamCopyCollisionModeSupported(r.cfg.Collision.Mode) {
 		return Summary{}, ErrNotImplemented
 	}
+	// The library owns the collision write-precondition capability check (ADR-0006
+	// authority), before any stream read, event emission, IfAbsent probe, or
+	// destination mutation — a direct embedder must be refused the same way the
+	// command adapter refuses it, not left to fail only on the first conflict.
+	if err := r.validateCollisionCapability(); err != nil {
+		return Summary{}, err
+	}
 	if !r.cfg.DryRun && src.Resolve == nil {
 		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
 	}
@@ -227,6 +234,30 @@ func recordStreamCopyCollisionModeSupported(mode string) bool {
 	}
 }
 
+// validateCollisionCapability enforces the destination write-precondition a
+// collision mode requires, in the library (the ADR-0006 authority) rather than
+// only in the command adapter. overwrite-if-source-newer resolves conflicts with
+// an If-Match conditional PUT, so a destination that cannot honor If-Match (GCS,
+// which offers ConditionalPutter only for IfAbsent, or a provider without
+// ConditionalPutter at all) must be refused up front — otherwise a direct
+// embedder mutates fresh keys unconditionally and fails only when a later
+// conflict happens to need the predicate. This mirrors the command's
+// ensureCollisionCapability so both surfaces refuse identically; it validates the
+// provider-contract shape, a narrow incremental stand-in for a full conditional-
+// capability descriptor.
+func (r *Runner) validateCollisionCapability() error {
+	if r.cfg.Collision.Mode != CollisionOverwriteIfSourceNewer {
+		return nil
+	}
+	if r.cfg.Destination.ProviderID == string(provider.ProviderGCS) {
+		return fmt.Errorf("reflow: destination provider %q does not support the If-Match write precondition required by --on-collision=%s", r.cfg.Destination.ProviderID, CollisionOverwriteIfSourceNewer)
+	}
+	if _, ok := r.cfg.Destination.Provider.(provider.ConditionalPutter); !ok {
+		return fmt.Errorf("reflow: destination provider does not implement ConditionalPutter (If-Match), required by --on-collision=%s", CollisionOverwriteIfSourceNewer)
+	}
+	return nil
+}
+
 // InvalidInputsError reports that a run completed and emitted its terminal summary
 // but encountered one or more invalid input records (surfaced as INVALID_INPUT
 // events). The Summary is still returned with it. It mirrors the command path,
@@ -331,6 +362,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 
 	sourceETag := in.SourceETag
 	sourceSize := in.SourceSize
+	sourceSizeKnown := in.SourceSizeKnown
 	sourceLastMod := in.SourceLastMod
 	var sourceMeta *provider.ObjectMeta
 	// overwrite-if-source-newer needs a source LastModified to compare against the
@@ -349,6 +381,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			sourceMeta = meta
 			sourceETag = meta.ETag
 			sourceSize = meta.Size
+			sourceSizeKnown = true // a successful HEAD measures the size
 			if !meta.LastModified.IsZero() {
 				sourceLastMod = meta.LastModified
 			}
@@ -388,6 +421,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 
 	copyInput := in.withSourceMeta(sourceETag, sourceSize)
 	copyInput.SourceLastMod = sourceLastMod
+	copyInput.SourceSizeKnown = sourceSizeKnown
 	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, copyInput, destKey, putOptions)
 	if err != nil {
 		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
@@ -441,11 +475,23 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	}
 
 	// Per-dest-key gate: concurrent workers targeting the same destination key
-	// serialize through the observed-check/copy critical section so a
-	// conditional PUT never races another in-process worker for the same key.
-	// Collision resolution (head + duplicate compare) runs outside the gate —
-	// it is read-only against an existing destination object.
+	// serialize through the observed-check/copy critical section so a conditional
+	// PUT never races another in-process worker for the same key. For read-only
+	// resolution modes (skip/fail) the head + duplicate compare runs after an
+	// early release. overwrite-if-source-newer, however, WRITES inside
+	// handleExistingDestination (an If-Match conditional overwrite), so its
+	// critical section must span head + decision + conditional PUT: hold the gate
+	// for the whole resolution so a less-new same-run contender cannot win the
+	// If-Match first and durably strand the newer source as concurrent_mutation.
 	gate, release := arbiter.acquire(destKey)
+	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
+		// Defer captures the real release (fired once at return); neutralizing the
+		// variable turns the paths' inline release() calls into no-ops so the gate
+		// stays held across the entire source-newer resolution. An external
+		// mutation between head and PUT still yields a concurrent_mutation skip.
+		defer release()
+		release = func() {}
+	}
 	known := gate.observed
 	if !known && r.cfg.Checkpoint != nil {
 		observed, err := r.cfg.Checkpoint.DestKeyObserved(ctx, destKey)
@@ -613,10 +659,12 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 		sourceNewerDecisionPath = decisionHeadFallback
 	}
 	if dstMeta.LastModified.IsZero() {
+		// The destination key travels only in the record's structured key/dest_uri
+		// fields, never interpolated into this free-text message/cause.
 		return 0, provider.PutResult{}, nil, "", "", &collisionResolveError{
 			code:   ErrCodeInvalidInput,
 			reason: "collision.missing_dest_last_modified",
-			msg:    fmt.Sprintf("destination LastModified is required for --on-collision=%s: %s", CollisionOverwriteIfSourceNewer, destKey),
+			msg:    fmt.Sprintf("destination LastModified is required for --on-collision=%s", CollisionOverwriteIfSourceNewer),
 		}
 	}
 
@@ -626,9 +674,22 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 	case in.SourceLastMod.After(dstMeta.LastModified):
 		decisionReason = reasonSrcNewer
 		shouldOverwrite = true
-	case in.SourceLastMod.Equal(dstMeta.LastModified) && in.SourceSize != dstMeta.Size:
-		decisionReason = reasonEqualSizeDiffers
-		shouldOverwrite = true
+	case in.SourceLastMod.Equal(dstMeta.LastModified):
+		// Equal timestamps: only a KNOWN size difference breaks the tie. An unknown
+		// source size (numeric-zero sentinel from an absent field plus a tolerated
+		// optional HEAD) must never be read as "different" and authorize a
+		// destructive overwrite — refuse fail-closed instead.
+		if !in.SourceSizeKnown {
+			return 0, provider.PutResult{}, nil, "", "", &collisionResolveError{
+				code:   ErrCodeInvalidInput,
+				reason: "collision.source_size_unavailable",
+				msg:    fmt.Sprintf("source size is required to resolve an equal-timestamp conflict for --on-collision=%s", CollisionOverwriteIfSourceNewer),
+			}
+		}
+		if in.SourceSize != dstMeta.Size {
+			decisionReason = reasonEqualSizeDiffers
+			shouldOverwrite = true
+		}
 	}
 
 	if !shouldOverwrite {

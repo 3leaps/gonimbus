@@ -354,33 +354,41 @@ func (s noteCollisionFailingReflowState) NoteCollision(context.Context, string, 
 // terminal (overwrite lands, source-older/concurrent-mutation skip), with zero
 // run errors. Matches the CLI pool's checkpointWriteFailed contract.
 func TestTransferReflowNoteCollisionFailureIsAuxiliary(t *testing.T) {
+	// A credential-bearing cause proves the warning message is sanitized.
+	const noteFailureCause = "note write failed for https://user:s3cr3t-token@collision.example/audit?sig=DEADBEEF"
 	cases := []struct {
-		name       string
-		seedDst    func(dst *reflowMemoryProvider)
-		args       []string
-		wantStatus string
-		wantReason string
-		wantDest   string
+		name         string
+		seedDst      func(dst *reflowMemoryProvider)
+		args         []string
+		wantStatus   string
+		wantReason   string
+		wantDest     string
+		wantKind     string
+		wantDecision string
 	}{
 		{
 			name: "overwrite_conflict",
 			seedDst: func(dst *reflowMemoryProvider) {
 				dst.putFixture("data/source/file.xml", "stale", "other-etag", time.Time{})
 			},
-			args:       []string{"--on-collision", "overwrite", "--overwrite"},
-			wantStatus: "complete",
-			wantReason: "",
-			wantDest:   "payload",
+			args:         []string{"--on-collision", "overwrite", "--overwrite"},
+			wantStatus:   "complete",
+			wantReason:   "",
+			wantDest:     "payload",
+			wantKind:     collisionConflict,
+			wantDecision: decisionOverwrite,
 		},
 		{
 			name: "source_older_skip",
 			seedDst: func(dst *reflowMemoryProvider) {
 				dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
 			},
-			args:       []string{"--on-collision", "overwrite-if-source-newer"},
-			wantStatus: "skipped",
-			wantReason: "collision.skipped_src_older",
-			wantDest:   "old payload",
+			args:         []string{"--on-collision", "overwrite-if-source-newer"},
+			wantStatus:   "skipped",
+			wantReason:   "collision.skipped_src_older",
+			wantDest:     "old payload",
+			wantKind:     collisionSrcOlder,
+			wantDecision: decisionHeadCompare,
 		},
 		{
 			name: "concurrent_mutation_skip",
@@ -388,10 +396,12 @@ func TestTransferReflowNoteCollisionFailureIsAuxiliary(t *testing.T) {
 				dst.putFixture("data/source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
 				dst.mutateBeforeIfMatch = true
 			},
-			args:       []string{"--on-collision", "overwrite-if-source-newer"},
-			wantStatus: "skipped",
-			wantReason: "collision.skipped_concurrent_mutation",
-			wantDest:   "concurrent mutation",
+			args:         []string{"--on-collision", "overwrite-if-source-newer"},
+			wantStatus:   "skipped",
+			wantReason:   "collision.skipped_concurrent_mutation",
+			wantDest:     "concurrent mutation",
+			wantKind:     collisionConcurrentMut,
+			wantDecision: decisionHeadCompare,
 		},
 	}
 	for _, tc := range cases {
@@ -403,7 +413,7 @@ func TestTransferReflowNoteCollisionFailureIsAuxiliary(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return noteCollisionFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected note-collision failure")}, nil
+				return noteCollisionFailingReflowState{reflowStateStore: store, err: fmt.Errorf("%s", noteFailureCause)}, nil
 			}
 			t.Cleanup(func() { newReflowStateStore = oldStateStore })
 
@@ -417,10 +427,19 @@ func TestTransferReflowNoteCollisionFailureIsAuxiliary(t *testing.T) {
 			require.Equal(t, tc.wantReason, rec.Reason)
 			require.Equal(t, tc.wantDest, string(env.dst.mustObject("data/source/file.xml")))
 
+			// The collision evidence must survive the audit-write failure — an audit
+			// failure cannot erase the terminal's collision object.
+			require.NotNil(t, rec.Collision, "the terminal must retain its collision object")
+			require.Equal(t, tc.wantKind, rec.Collision.Kind)
+			require.Equal(t, tc.wantDecision, rec.Collision.DecisionPath)
+
 			require.Zero(t, reflowSummaryTallyOf(t, stdout).Errors, "an auxiliary failure must not raise the run error count")
 			warn := requireRecord(t, stdout, reflowpkg.WarningRecordType, "")
 			require.Contains(t, string(warn.Data), "REFLOW_ARBITRATION_STATE_WRITE_FAILED",
 				"the sanitized checkpoint-state warning must be emitted")
+			// The credential-bearing cause must be redacted out of the warning message.
+			require.NotContains(t, string(warn.Data), "s3cr3t-token", "credential userinfo must be redacted")
+			require.NotContains(t, string(warn.Data), "DEADBEEF", "credential query value must be redacted")
 		})
 	}
 }

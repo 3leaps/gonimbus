@@ -1339,19 +1339,18 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 	}
 }
 
-// TestTransferReflowPoolPathCLIOnlyTerminalUpsertFailureNeverAcks is the
-// E-A3-I3 / §6 P1 parity gate for the CLI-only success terminals the engine does
-// not yet implement, so they run on the legacy worker-pool fallback: the
-// overwrite-if-source-newer skips (skipped_src_older, skipped_concurrent_mutation)
-// and the collision-conflict quarantine (quarantined). Reached through REAL
-// adapter selection (the engine returns ErrNotImplemented for these modes, so the
-// command falls through to the pool). When the checkpoint store cannot record the
-// terminal, the pool must NOT acknowledge the success terminal: it reports
-// failed/checkpoint.write_failed and the run exits non-zero — matching the engine
-// and the pool's own complete/collision.duplicate terminals. (The metadata
-// derivation quarantine terminal shares the identical strict template; quarantine
-// resume-authority is separately deferred to the engine-convergence arc.)
-func TestTransferReflowPoolPathCLIOnlyTerminalUpsertFailureNeverAcks(t *testing.T) {
+// TestTransferReflowStrictTerminalUpsertFailureNeverAcks is the parity gate for
+// the strict terminal-write discipline across the converged routing: the
+// overwrite-if-source-newer src_older skip now runs on the ENGINE (S3
+// destination), the source-newer concurrent-mutation skip runs on the POOL (file
+// destination is not migrated), and the collision-conflict quarantine still runs
+// on the POOL (quarantine is not migrated). Reached through REAL adapter
+// selection. When the checkpoint store cannot record the terminal, neither path
+// acknowledges the success terminal: it reports failed/checkpoint.write_failed
+// and the run exits non-zero — matching the complete/collision.duplicate
+// terminals. (Quarantine resume-authority is separately deferred to the
+// engine-convergence arc.)
+func TestTransferReflowStrictTerminalUpsertFailureNeverAcks(t *testing.T) {
 	scenarios := []struct {
 		name          string
 		successStatus string

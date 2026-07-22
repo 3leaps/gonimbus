@@ -272,9 +272,11 @@ provider-generalized model (resource cap, AIMD control, transport tuning).
 engine** (the embeddable `pkg/reflow` runner, which executes live stdin
 record-stream copies with a concurrent worker pool) and the **CLI worker pool**
 (the command-layer pool that carries run shapes the engine has not migrated:
-positional sources, provenance sidecars, overwrite/quarantine/source-newer
-collision modes, file destinations, non-default source-failure policy, and
-run-id resume). Dispatch selects the path per run shape.
+positional sources, provenance sidecars, the quarantine collision mode, file
+destinations, non-default source-failure policy, and run-id resume). The engine
+executes the skip-if-duplicate, fail, overwrite, and overwrite-if-source-newer
+collision modes for supported record-stream destinations. Dispatch selects the
+path per run shape.
 
 Path selection is **observable evidence, never an implementation detail**:
 
@@ -312,10 +314,11 @@ any object twice.
 - The resume pre-check (`ItemDone`) is a best-effort skip; per-destination-key
   arbitration plus conditional creates remain the correctness authority for
   duplicate input lines.
-- The CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`)
-  retain their historical warn-and-continue behavior on checkpoint write
-  failure of a successful terminal; they adopt the strict discipline when
-  those modes migrate to the engine.
+- On the engine, every collision mode shares one checkpoint discipline: the
+  terminal item write is strict (a failure reports `failed`/`checkpoint.write_failed`),
+  while the auxiliary collision-audit note is best-effort (a store failure warns
+  and never changes the terminal). The `quarantine` collision mode still runs on
+  the CLI pool and retains its historical behavior until it migrates.
 - On Windows the file-descriptor probe reports a soft limit that leaves no
   usable headroom, so the FD cap binds at 1 and serializes copies regardless of
   `--parallel` or the memory budget. The clamp is still reported truthfully
@@ -442,6 +445,15 @@ a HEAD/compare fallback before writing. The fallback keeps duplicate skips and
 conflict handling correct and surfaces the degraded capability in
 `gonimbus.warning.v1` and the final `gonimbus.reflow.summary.v1`; cross-process
 create-if-absent atomicity remains limited by the destination.
+
+`overwrite-if-source-newer` resolves a real conflict with an `If-Match` (ETag)
+conditional overwrite, so its concurrent-mutation guard assumes the destination
+honors `If-Match`. GCS is refused up front (it does not offer that predicate) and
+AWS S3 honors it; for other S3-compatible endpoints, `If-Match` support is
+assumed per the provider contract (the same trust boundary as the rest of the
+conditional-write surface) and is not runtime-probed today. On an endpoint that
+silently ignores `If-Match`, the concurrent-mutation guard is not enforced —
+scope the mode to endpoints known to honor conditional writes.
 
 ### Checkpoint and Resume
 
