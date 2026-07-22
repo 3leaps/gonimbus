@@ -439,30 +439,36 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 	},
 	"overwrite": {
-		note: "confirmation companion of --on-collision=overwrite (which refuses without it); overwrite semantics not migrated, so setting it routes dispatch",
-		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
-			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t, "--overwrite")
-			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
-		}},
-		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
-			// The confirmation gate: overwrite mode without the flag refuses.
+		note: "confirmation companion of --on-collision=overwrite (which refuses without it); overwrite is now executed by the engine record-stream runner and the pool alike",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// The confirmation gate: overwrite mode without the flag refuses
+			// before any destination mutation.
 			envRefuse := newFlagProbeEnv(t)
 			_, err := envRefuse.run(t, "--on-collision", "overwrite")
 			require.Error(t, err, "--on-collision=overwrite must refuse without --overwrite")
 			require.Contains(t, err.Error(), "--overwrite")
 
-			// With the flag, the stale destination is replaced on the pool.
+			// With the flag, the engine replaces the stale destination.
 			env := newFlagProbeEnv(t)
 			env.dst.putFixture("data/source/file.xml", "stale-content", "other-etag", time.Time{})
 			stdout, err := env.run(t, "--on-collision", "overwrite", "--overwrite")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")),
+				"overwrite mode with confirmation must replace the stale destination object")
+		}},
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// With the confirmation flag, the stale destination is replaced on the
+			// genuinely-routed pool arm.
+			env := newFlagProbeEnv(t)
+			env.dst.putFixture("data/source/file.xml", "stale-content", "other-etag", time.Time{})
+			stdout, err := env.runPool(t, "--on-collision", "overwrite", "--overwrite")
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			require.Equal(t, "payload", string(env.dst.mustObject("data/source/file.xml")),
 				"overwrite mode with confirmation must replace the stale destination object")
 		}},
 	},
 	"on-collision": {
-		note: "engine executes skip-if-duplicate|fail; other modes route to the pool (routing arm probed under collision-quarantine-prefix)",
+		note: "engine executes skip-if-duplicate|fail|overwrite|overwrite-if-source-newer; quarantine still routes to the pool (routing arm probed under collision-quarantine-prefix)",
 		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
 			env.dst.putFixture("data/source/file.xml", "payload", "src-etag", time.Time{})

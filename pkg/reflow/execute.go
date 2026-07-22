@@ -46,6 +46,13 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if !r.cfg.DryRun && !recordStreamCopyCollisionModeSupported(r.cfg.Collision.Mode) {
 		return Summary{}, ErrNotImplemented
 	}
+	// The library owns the collision write-precondition capability check (ADR-0006
+	// authority), before any stream read, event emission, IfAbsent probe, or
+	// destination mutation — a direct embedder must be refused the same way the
+	// command adapter refuses it, not left to fail only on the first conflict.
+	if err := r.validateCollisionCapability(); err != nil {
+		return Summary{}, err
+	}
 	if !r.cfg.DryRun && src.Resolve == nil {
 		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
 	}
@@ -220,11 +227,123 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 
 func recordStreamCopyCollisionModeSupported(mode string) bool {
 	switch mode {
-	case CollisionSkipIfDuplicate, CollisionFail:
+	case CollisionSkipIfDuplicate, CollisionFail, CollisionOverwrite, CollisionOverwriteIfSourceNewer:
 		return true
 	default:
 		return false
 	}
+}
+
+// MissingConditionalCapabilityError reports that a destination provider cannot
+// honor a conditional-write predicate a collision mode requires. It carries the
+// provider-dispatch capability label so the command adapter can surface a
+// structured missing_capability preflight detail identical to its other
+// capability errors, and both the library and the command adapter derive it from
+// the same RequireSourceNewerCapability authority.
+type MissingConditionalCapabilityError struct {
+	// Mode is the collision mode that required the missing predicate.
+	Mode string
+	// MissingCapability is the provider-dispatch capability label, e.g.
+	// "ConditionalPutter.IfMatchETag" or "ConditionalMultipartCompleter.IfMatchETag".
+	MissingCapability string
+	// reason is the human-readable defect phrased for the destination provider.
+	reason string
+}
+
+func (e *MissingConditionalCapabilityError) Error() string {
+	return fmt.Sprintf("destination provider %s, required by --on-collision=%s", e.reason, e.Mode)
+}
+
+// RequireSourceNewerCapability validates, from the destination provider's own
+// capability declaration, that it can honor the conditional-write predicates
+// overwrite-if-source-newer needs before any read or destination mutation:
+//   - an If-Match single-PUT compare-and-swap, always; and
+//   - conditional multipart completion when the provider routes large objects
+//     through multipart (implements MultipartUploader), so a >threshold overwrite
+//     cannot upload parts and then discover the predicate is unsupported only at
+//     completion time.
+//
+// The provider's ConditionalCapabilityReporter declaration is the authority: a
+// provider that does not declare its conditional-write capabilities cannot prove
+// If-Match support and is refused fail-closed. The mere presence of
+// ConditionalPutter is never accepted as proof — an IfAbsent-only implementation
+// exposes ConditionalPutter yet cannot honor If-Match.
+//
+// A declared predicate must additionally be paired with the callable interface
+// that exercises it. Local method availability is fully knowable and fails closed
+// here, distinct from the remote-endpoint trust boundary (a declaring adapter's
+// remote endpoint is trusted to honor the advertised predicate or return the
+// documented unsupported error). Without this, a contradictory adapter — one that
+// declares If-Match but does not implement ConditionalPutter, or declares
+// conditional multipart completion but does not implement
+// ConditionalMultipartCompleter — would pass the pre-I/O gate and then land a
+// fresh key unconditionally through the head fallback, or upload parts before
+// discovering completion is unavailable. Both the library
+// (validateCollisionCapability) and the command adapter (ensureCollisionCapability)
+// call this so the two surfaces refuse identically.
+func RequireSourceNewerCapability(dst provider.Provider) error {
+	reporter, ok := dst.(provider.ConditionalCapabilityReporter)
+	if !ok {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "does not declare conditional-write capabilities (If-Match)",
+		}
+	}
+	caps := reporter.ConditionalWriteCapabilities()
+	if !caps.IfMatchETag {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "does not honor the If-Match write precondition",
+		}
+	}
+	// The declared If-Match predicate must be exercisable: the adapter must
+	// implement ConditionalPutter, not merely advertise the capability.
+	if _, ok := dst.(provider.ConditionalPutter); !ok {
+		return &MissingConditionalCapabilityError{
+			Mode:              CollisionOverwriteIfSourceNewer,
+			MissingCapability: "ConditionalPutter.IfMatchETag",
+			reason:            "declares If-Match support but does not implement ConditionalPutter",
+		}
+	}
+	if _, isMultipart := dst.(provider.MultipartUploader); isMultipart {
+		if !caps.ConditionalMultipartCompletion {
+			return &MissingConditionalCapabilityError{
+				Mode:              CollisionOverwriteIfSourceNewer,
+				MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
+				reason:            "supports multipart uploads but does not declare conditional multipart completion (If-Match) for large objects",
+			}
+		}
+		// The declared conditional-multipart predicate must be exercisable too.
+		if _, ok := dst.(provider.ConditionalMultipartCompleter); !ok {
+			return &MissingConditionalCapabilityError{
+				Mode:              CollisionOverwriteIfSourceNewer,
+				MissingCapability: "ConditionalMultipartCompleter.IfMatchETag",
+				reason:            "declares conditional multipart completion but does not implement ConditionalMultipartCompleter",
+			}
+		}
+	}
+	return nil
+}
+
+// validateCollisionCapability enforces the destination write-precondition a
+// collision mode requires, in the library (the ADR-0006 authority) rather than
+// only in the command adapter. overwrite-if-source-newer resolves conflicts with
+// an If-Match conditional PUT, so a destination that cannot prove it honors
+// If-Match (and conditional multipart completion for large objects) must be
+// refused up front via RequireSourceNewerCapability — otherwise a direct embedder
+// mutates fresh keys unconditionally and fails only when a later conflict happens
+// to need the predicate. This mirrors the command's ensureCollisionCapability so
+// both surfaces refuse identically from one authority.
+func (r *Runner) validateCollisionCapability() error {
+	if r.cfg.Collision.Mode != CollisionOverwriteIfSourceNewer {
+		return nil
+	}
+	if err := RequireSourceNewerCapability(r.cfg.Destination.Provider); err != nil {
+		return fmt.Errorf("reflow: %w", err)
+	}
+	return nil
 }
 
 // InvalidInputsError reports that a run completed and emitted its terminal summary
@@ -331,15 +450,40 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 
 	sourceETag := in.SourceETag
 	sourceSize := in.SourceSize
+	sourceSizeKnown := in.SourceSizeKnown
+	sourceLastMod := in.SourceLastMod
 	var sourceMeta *provider.ObjectMeta
-	if r.cfg.Metadata.NeedsSourceHead() || sourceETag == "" || sourceSize == 0 {
+	// overwrite-if-source-newer needs a source LastModified to compare against the
+	// destination; head the source to recover it when the input record omitted it,
+	// mirroring the CLI pool's needsSourceHeadForCollision.
+	needsSourceHeadForCollision := r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer && sourceLastMod.IsZero()
+	// A head required by metadata policy or source-newer collision handling is
+	// mandatory; one probed only to recover an absent etag/size is optional and
+	// tolerates failure (the copy proceeds with the input's values, an unknown
+	// size reserving the conservative memory cap). Mirrors the CLI pool.
+	mandatorySourceHead := r.cfg.Metadata.NeedsSourceHead() || needsSourceHeadForCollision
+	if mandatorySourceHead || sourceETag == "" || sourceSize == 0 {
 		meta, err := limitedHead(ctx, limiter, sourceProvider, in.SourceKey)
-		if err != nil {
+		switch {
+		case err == nil:
+			sourceMeta = meta
+			sourceETag = meta.ETag
+			sourceSize = meta.Size
+			sourceSizeKnown = true // a successful HEAD measures the size
+			if !meta.LastModified.IsZero() {
+				sourceLastMod = meta.LastModified
+			}
+		case mandatorySourceHead:
 			return r.recordObjectError(ctx, stats, in, destURI, destKey, "source metadata read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
 		}
-		sourceMeta = meta
-		sourceETag = meta.ETag
-		sourceSize = meta.Size
+	}
+	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer && sourceLastMod.IsZero() {
+		// The comparison is undecidable without a source timestamp; refuse rather
+		// than overwrite blindly. Unlike the CLI pool (which emits only an error
+		// event), the engine emits one terminal record per accepted input.
+		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "source metadata unavailable",
+			&collisionResolveError{code: ErrCodeInvalidInput, reason: "collision.missing_source_last_modified", msg: fmt.Sprintf("source LastModified is required for --on-collision=%s", CollisionOverwriteIfSourceNewer)},
+			map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
 	}
 
 	putOptions, err := r.cfg.Metadata.PutOptions(sourceMeta)
@@ -363,7 +507,10 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "destination metadata options failed", err, details, nil)
 	}
 
-	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, in.withSourceMeta(sourceETag, sourceSize), destKey, putOptions)
+	copyInput := in.withSourceMeta(sourceETag, sourceSize)
+	copyInput.SourceLastMod = sourceLastMod
+	copyInput.SourceSizeKnown = sourceSizeKnown
+	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, copyInput, destKey, putOptions)
 	if err != nil {
 		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
 		msg := "copy failed"
@@ -412,16 +559,27 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	dst := r.cfg.Destination.Provider
 	if r.cfg.Collision.Mode == CollisionOverwrite {
-		bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
-		return bytes, provider.PutResult{}, nil, "complete", "", err
+		return r.copyUnconditionalOverwrite(ctx, src, layout, limiter, in, destKey, opts)
 	}
 
 	// Per-dest-key gate: concurrent workers targeting the same destination key
-	// serialize through the observed-check/copy critical section so a
-	// conditional PUT never races another in-process worker for the same key.
-	// Collision resolution (head + duplicate compare) runs outside the gate —
-	// it is read-only against an existing destination object.
+	// serialize through the observed-check/copy critical section so a conditional
+	// PUT never races another in-process worker for the same key. For read-only
+	// resolution modes (skip/fail) the head + duplicate compare runs after an
+	// early release. overwrite-if-source-newer, however, WRITES inside
+	// handleExistingDestination (an If-Match conditional overwrite), so its
+	// critical section must span head + decision + conditional PUT: hold the gate
+	// for the whole resolution so a less-new same-run contender cannot win the
+	// If-Match first and durably strand the newer source as concurrent_mutation.
 	gate, release := arbiter.acquire(destKey)
+	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
+		// Defer captures the real release (fired once at return); neutralizing the
+		// variable turns the paths' inline release() calls into no-ops so the gate
+		// stays held across the entire source-newer resolution. An external
+		// mutation between head and PUT still yields a concurrent_mutation skip.
+		defer release()
+		release = func() {}
+	}
 	known := gate.observed
 	if !known && r.cfg.Checkpoint != nil {
 		observed, err := r.cfg.Checkpoint.DestKeyObserved(ctx, destKey)
@@ -440,7 +598,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		if headErr != nil {
 			return 0, provider.PutResult{}, nil, "", "", headErr
 		}
-		return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
+		return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead, opts)
 	}
 
 	// markObserved records the key as observed on the in-process gate AND in the
@@ -476,7 +634,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 			if markErr != nil {
 				return 0, provider.PutResult{}, nil, "", "", markErr
 			}
-			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback)
+			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback, opts)
 		case provider.IsNotFound(headErr):
 			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
 			if err == nil {
@@ -512,10 +670,39 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	if headErr != nil {
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead)
+	return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead, opts)
 }
 
-func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+// copyUnconditionalOverwrite lands the source over the destination without a
+// precondition. Mirroring the CLI pool, it first heads the destination so an
+// existing object is reported as a collision (duplicate or conflict) on the
+// "unconditional_overwrite" decision path, then copies last-write-wins. A dest
+// head returning NotFound simply lands with no collision; any other head error
+// is fatal. No per-key arbiter is needed — overwrite is inherently last-writer.
+func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	dst := r.cfg.Destination.Provider
+	var collision *CollisionInfo
+	dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+	switch {
+	case headErr == nil:
+		kind := collisionConflict
+		if isDuplicateCollision(in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta) {
+			kind = collisionDuplicate
+		}
+		collision = newCollisionInfo(kind, dstMeta, decisionOverwrite)
+		if err := r.noteCollisionBestEffort(ctx, destKey, "overwrite", in, dstMeta); err != nil {
+			return 0, provider.PutResult{}, nil, "", "", err
+		}
+	case provider.IsNotFound(headErr):
+		// Destination absent: land it, no collision.
+	default:
+		return 0, provider.PutResult{}, nil, "", "", headErr
+	}
+	bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+	return bytes, provider.PutResult{}, collision, "complete", "", err
+}
+
+func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	duplicate, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (bool, error) {
 		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
 	})
@@ -524,7 +711,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 	}
 	if duplicate {
 		collision := newCollisionInfo(collisionDuplicate, dstMeta, decisionPath)
-		if err := r.noteCollision(ctx, destKey, "duplicate", in, dstMeta); err != nil {
+		if err := r.noteCollisionBestEffort(ctx, destKey, "duplicate", in, dstMeta); err != nil {
 			return 0, provider.PutResult{}, nil, "", "", err
 		}
 		if r.cfg.Collision.Mode == CollisionSkipIfDuplicate || r.cfg.Collision.Mode == CollisionQuarantine || r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
@@ -533,14 +720,94 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 		return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with identical content: %s", destKey)
 	}
 
+	// A genuine content conflict. overwrite-if-source-newer resolves it by
+	// comparing timestamps and conditionally overwriting; every other conflict
+	// terminal mode fails closed.
+	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
+		return r.resolveSourceNewerConflict(ctx, src, limiter, in, destKey, dstMeta, decisionPath, opts)
+	}
+
 	collision := newCollisionInfo(collisionConflict, dstMeta, decisionPath)
-	if err := r.noteCollision(ctx, destKey, "conflict", in, dstMeta); err != nil {
+	if err := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); err != nil {
 		return 0, provider.PutResult{}, nil, "", "", err
 	}
-	if r.cfg.Collision.Mode == CollisionFail {
-		return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with different content: %s", destKey)
-	}
 	return 0, provider.PutResult{}, collision, "", "", fmt.Errorf("destination key exists with different content: %s", destKey)
+}
+
+// resolveSourceNewerConflict resolves an overwrite-if-source-newer content
+// conflict against an existing destination, mirroring the CLI pool: the source
+// wins (and is conditionally overwritten with If-Match on the observed dest
+// ETag) only when it is strictly newer, or equally-timed but a different size;
+// otherwise the destination is preserved. A dest mutated between the head and
+// the conditional PUT yields a concurrent-mutation skip. All three terminals
+// carry byte-identical source-newer collision metadata for dual-path parity.
+func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Provider, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	sourceNewerDecisionPath := decisionHeadCompare
+	if decisionPath == decisionHeadFallback {
+		sourceNewerDecisionPath = decisionHeadFallback
+	}
+	if dstMeta.LastModified.IsZero() {
+		// The destination key travels only in the record's structured key/dest_uri
+		// fields, never interpolated into this free-text message/cause.
+		return 0, provider.PutResult{}, nil, "", "", &collisionResolveError{
+			code:   ErrCodeInvalidInput,
+			reason: "collision.missing_dest_last_modified",
+			msg:    fmt.Sprintf("destination LastModified is required for --on-collision=%s", CollisionOverwriteIfSourceNewer),
+		}
+	}
+
+	decisionReason := reasonSrcOlder
+	shouldOverwrite := false
+	switch {
+	case in.SourceLastMod.After(dstMeta.LastModified):
+		decisionReason = reasonSrcNewer
+		shouldOverwrite = true
+	case in.SourceLastMod.Equal(dstMeta.LastModified):
+		// Equal timestamps: only a KNOWN size difference breaks the tie. An unknown
+		// source size (numeric-zero sentinel from an absent field plus a tolerated
+		// optional HEAD) must never be read as "different" and authorize a
+		// destructive overwrite — refuse fail-closed instead.
+		if !in.SourceSizeKnown {
+			return 0, provider.PutResult{}, nil, "", "", &collisionResolveError{
+				code:   ErrCodeInvalidInput,
+				reason: "collision.source_size_unavailable",
+				msg:    fmt.Sprintf("source size is required to resolve an equal-timestamp conflict for --on-collision=%s", CollisionOverwriteIfSourceNewer),
+			}
+		}
+		if in.SourceSize != dstMeta.Size {
+			decisionReason = reasonEqualSizeDiffers
+			shouldOverwrite = true
+		}
+	}
+
+	if !shouldOverwrite {
+		collision := newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
+		if err := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); err != nil {
+			return 0, provider.PutResult{}, nil, "", "", err
+		}
+		return 0, provider.PutResult{}, collision, "skipped", "collision.skipped_src_older", nil
+	}
+
+	collision := newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
+	etag := dstMeta.ETag
+	bytes, result, err := limitedCopyConditional(ctx, limiter, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts)
+	if err != nil {
+		if isConditionalExists(err) {
+			concurrent := newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
+			if nerr := r.noteCollisionBestEffort(ctx, destKey, "conflict", in, dstMeta); nerr != nil {
+				return 0, provider.PutResult{}, nil, "", "", nerr
+			}
+			return 0, provider.PutResult{}, concurrent, "skipped", "collision.skipped_concurrent_mutation", nil
+		}
+		return 0, provider.PutResult{}, collision, "", "", err
+	}
+	// The overwrite has landed: recording the overwrite collision is auxiliary
+	// audit state, so a store failure warns (typed) rather than un-landing a
+	// completed object (mirrors NoteDestKeySource and the CLI pool).
+	if err := r.noteCollisionBestEffort(ctx, destKey, "overwrite", in, dstMeta); err != nil {
+		return 0, provider.PutResult{}, nil, "", "", err
+	}
+	return bytes, result, collision, "complete", "", nil
 }
 
 func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in reflowInput, destURI, destKey, msg string, err error, details map[string]any, collision *CollisionInfo) error {
@@ -568,7 +835,7 @@ func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in refl
 		}
 	}
 	rec := in.record(destURI, destKey, "failed")
-	rec.Reason = failedRecordReason(code, collision)
+	rec.Reason = failedRecordReason(err, code, collision)
 	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
@@ -634,7 +901,11 @@ func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, sr
 	return bytes, result, err
 }
 
-func failedRecordReason(code string, collision *CollisionInfo) string {
+func failedRecordReason(err error, code string, collision *CollisionInfo) string {
+	var collisionErr *collisionResolveError
+	if errors.As(err, &collisionErr) && collisionErr.reason != "" {
+		return collisionErr.reason
+	}
 	if collision == nil {
 		return reflowReasonForErrCode(code)
 	}
@@ -676,6 +947,19 @@ func (r *Runner) noteCollision(ctx context.Context, destKey, kind string, in ref
 		DestETag:   dstMeta.ETag,
 		DestSize:   dstMeta.Size,
 	})
+}
+
+// noteCollisionBestEffort records collision audit state as auxiliary state,
+// matching the CLI pool's checkpointWriteFailed contract: a store-write failure
+// emits the sanitized checkpoint-state warning and is swallowed so it never
+// alters the collision decision, the copy, or the terminal outcome. Only an
+// event-sink failure — a genuine infrastructure fault — propagates and aborts
+// the run. The terminal UpsertItem remains the strict resume authority.
+func (r *Runner) noteCollisionBestEffort(ctx context.Context, destKey, kind string, in reflowInput, dstMeta *provider.ObjectMeta) error {
+	if err := r.noteCollision(ctx, destKey, kind, in, dstMeta); err != nil {
+		return r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, "", err)
+	}
+	return nil
 }
 
 func (in reflowInput) withSourceMeta(etag string, size int64) reflowInput {

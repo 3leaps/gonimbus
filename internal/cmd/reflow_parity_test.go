@@ -287,6 +287,41 @@ var reflowParityCases = []parityCase{
 		},
 	},
 	{
+		name: "collision_overwrite_replaces_conflicting_dest",
+		seed: func(src, dst *reflowMemoryProvider) {
+			src.putFixture(paritySrcKey, "new payload", "src-etag", time.Time{})
+			dst.putFixture("data/"+paritySrcKey, "old payload", "old-etag", time.Time{})
+		},
+		input:   reflowInputLine(paritySrcKey, "src-etag", int64(len("new payload")), "", ""),
+		cliArgs: []string{"--stdin", "--dest", parityDestBase, "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1", "--on-collision", "overwrite", "--overwrite"},
+		config: func(dst *reflowMemoryProvider) reflowpkg.Config {
+			cfg := baseParityConfig(dst)
+			cfg.Collision = reflowpkg.CollisionPolicy{Mode: "overwrite"}
+			return cfg
+		},
+		source: func(src *reflowMemoryProvider) reflowpkg.Source {
+			return parityRecordStream(src, reflowInputLine(paritySrcKey, "src-etag", int64(len("new payload")), "", ""))
+		},
+	},
+	{
+		name: "collision_source_newer_replaces_with_ifmatch",
+		seed: func(src, dst *reflowMemoryProvider) {
+			// Input source_last_modified is 2026-01-15; the destination is older.
+			src.putFixture(paritySrcKey, "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+			dst.putFixture("data/"+paritySrcKey, "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+		},
+		input:   reflowInputLine(paritySrcKey, "src-etag", int64(len("new payload")), "", ""),
+		cliArgs: []string{"--stdin", "--dest", parityDestBase, "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1", "--on-collision", "overwrite-if-source-newer"},
+		config: func(dst *reflowMemoryProvider) reflowpkg.Config {
+			cfg := baseParityConfig(dst)
+			cfg.Collision = reflowpkg.CollisionPolicy{Mode: "overwrite-if-source-newer"}
+			return cfg
+		},
+		source: func(src *reflowMemoryProvider) reflowpkg.Source {
+			return parityRecordStream(src, reflowInputLine(paritySrcKey, "src-etag", int64(len("new payload")), "", ""))
+		},
+	},
+	{
 		// A reflow-input record without dest_rel_key and no rewrite templates is
 		// invalid: both paths emit the run/warning/summary, count the invalid input,
 		// and report failure.

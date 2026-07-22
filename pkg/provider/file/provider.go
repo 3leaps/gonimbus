@@ -376,6 +376,25 @@ func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key stri
 	return result, nil
 }
 
+// Compile-time assertions that the declared If-Match capability is backed by a
+// callable ConditionalPutter (the file adapter has no multipart path).
+var (
+	_ provider.ConditionalCapabilityReporter = (*Provider)(nil)
+	_ provider.ConditionalPutter             = (*Provider)(nil)
+)
+
+// ConditionalWriteCapabilities declares the conditional-write predicates this
+// file adapter honors: IfAbsent (O_EXCL create) and IfMatch (lock + ETag
+// compare-and-swap). The file provider has no multipart path, so conditional
+// multipart completion is not offered.
+func (p *Provider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{
+		IfAbsent:                       true,
+		IfMatchETag:                    true,
+		ConditionalMultipartCompletion: false,
+	}
+}
+
 func (p *Provider) putObjectIfMatch(ctx context.Context, key, full string, body io.Reader, etag string) (provider.PutResult, error) {
 	lockPath := full + ".gonimbus.lock"
 	lock, err := acquireFileLock(ctx, lockPath)

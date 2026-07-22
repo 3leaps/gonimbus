@@ -66,6 +66,13 @@ type copyMemoryProvider struct {
 	putErrByKey            map[string]error
 	throttleHeadsRemaining int
 	throttleGetsRemaining  int
+	// condCaps overrides the providerType-derived conditional-write capability
+	// declaration when set — used to model an IfAbsent-only S3-shaped adapter.
+	condCaps *provider.ConditionalWriteCapabilities
+	// mutateBeforeIfMatch, when true, mutates the stored object once before the
+	// next IfMatch evaluation so the compare-and-swap observes a changed ETag —
+	// modelling a destination mutated between the head and the conditional PUT.
+	mutateBeforeIfMatch bool
 }
 
 func newCopyMemoryProvider() *copyMemoryProvider {
@@ -88,6 +95,13 @@ func (p *copyMemoryProvider) putFixture(key, body, etag string) {
 	defer p.mu.Unlock()
 	p.objects[key] = []byte(body)
 	p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(body)), ETag: etag}}
+}
+
+func (p *copyMemoryProvider) putFixtureAt(key, body, etag string, lastMod time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.objects[key] = []byte(body)
+	p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(body)), ETag: etag, LastModified: lastMod}}
 }
 
 func (p *copyMemoryProvider) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
@@ -163,10 +177,40 @@ func (p *copyMemoryProvider) PutObjectConditional(_ context.Context, key string,
 		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag}}
 		return provider.PutResult{ETag: etag}, nil
 	}
-	if precond.IfMatchETag != nil && p.providerType == provider.ProviderGCS {
-		return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrUnsupportedPrecondition}
+	if precond.IfMatchETag != nil {
+		if p.providerType == provider.ProviderGCS {
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrUnsupportedPrecondition}
+		}
+		if p.mutateBeforeIfMatch {
+			p.objects[key] = []byte("concurrent mutation")
+			p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len("concurrent mutation")), ETag: "mutated-" + key, LastModified: time.Now().UTC()}}
+			p.mutateBeforeIfMatch = false
+		}
+		meta, ok := p.meta[key]
+		if !ok || meta.ETag != *precond.IfMatchETag {
+			return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrPreconditionFailed}
+		}
+		etag := "dest-" + key + "-v2"
+		p.objects[key] = data
+		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag, LastModified: time.Now().UTC()}}
+		return provider.PutResult{ETag: etag}, nil
 	}
 	return provider.PutResult{}, &provider.ProviderError{Op: "PutObjectConditional", Provider: p.providerType, Key: key, Err: provider.ErrUnsupportedPrecondition}
+}
+
+// ConditionalWriteCapabilities declares the fixture's honored conditional-write
+// predicates. A GCS-typed fixture honors IfAbsent only; an S3-typed fixture also
+// honors IfMatch compare-and-swap. condCaps overrides this to model an
+// IfAbsent-only S3-shaped adapter whose ConditionalPutter presence must not be
+// mistaken for If-Match support.
+func (p *copyMemoryProvider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	if p.condCaps != nil {
+		return *p.condCaps
+	}
+	if p.providerType == provider.ProviderGCS {
+		return provider.ConditionalWriteCapabilities{IfAbsent: true}
+	}
+	return provider.ConditionalWriteCapabilities{IfAbsent: true, IfMatchETag: true}
 }
 
 func (p *copyMemoryProvider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
@@ -557,7 +601,9 @@ func TestRunnerDefersBeforeReading(t *testing.T) {
 	})
 
 	t.Run("unsupported copy collision modes defer before reader or destination mutation", func(t *testing.T) {
-		for _, mode := range []string{CollisionOverwrite, CollisionQuarantine, CollisionOverwriteIfSourceNewer} {
+		// overwrite and overwrite-if-source-newer are now executed by the engine;
+		// quarantine remains the unmigrated collision mode that must defer.
+		for _, mode := range []string{CollisionQuarantine} {
 			t.Run(mode, func(t *testing.T) {
 				src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
 				src.putFixture("a/b.xml", "payload", "etag-a")

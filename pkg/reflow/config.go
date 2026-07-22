@@ -42,9 +42,12 @@ type RewriteConfig struct {
 
 // CollisionPolicy selects how the engine handles an existing destination object.
 // Mode is one of skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer.
-// The copy-plane migration currently executes skip-if-duplicate and fail;
-// other non-dry-run modes return ErrNotImplemented until their command-path
-// semantics migrate.
+// The engine executes skip-if-duplicate, fail, overwrite, and
+// overwrite-if-source-newer for a supported record-stream destination; quarantine
+// (and other not-yet-migrated cells) return ErrNotImplemented so the caller can
+// fall back to the command path. overwrite-if-source-newer additionally requires
+// a destination that honors the If-Match write precondition (see
+// runRecordStream's capability check).
 type CollisionPolicy struct {
 	Mode             string
 	QuarantinePrefix string

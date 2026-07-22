@@ -387,6 +387,27 @@ func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io
 	return nil
 }
 
+// Compile-time assertions that the declared conditional-write capabilities are
+// backed by the callable interfaces the reflow authority requires (guards adapter
+// drift between the declaration and the method set).
+var (
+	_ provider.ConditionalCapabilityReporter = (*Provider)(nil)
+	_ provider.ConditionalPutter             = (*Provider)(nil)
+	_ provider.ConditionalMultipartCompleter = (*Provider)(nil)
+)
+
+// ConditionalWriteCapabilities declares the conditional-write predicates this
+// S3 adapter honors: IfAbsent (If-None-Match: *), IfMatch (If-Match: etag) on
+// both single-PUT and conditional multipart completion. The remote endpoint
+// behind a custom Endpoint remains the documented trust boundary.
+func (p *Provider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{
+		IfAbsent:                       true,
+		IfMatchETag:                    true,
+		ConditionalMultipartCompletion: true,
+	}
+}
+
 func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {
 	return p.PutObjectConditionalWithOptions(ctx, key, body, contentLength, precond, provider.PutOptions{})
 }

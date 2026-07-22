@@ -1008,13 +1008,14 @@ func TestTransferReflowCommand_StdinPipeConsumesInput(t *testing.T) {
 		"--parallel", "1",
 	})
 
+	// An unsupported JSON record type is now a deliberate pre-I/O refusal (the
+	// pool rejected it at parse anyway); no run/error/summary records are emitted.
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid_inputs=1")
+	require.Contains(t, err.Error(), "Unsupported reflow input")
 	require.NotContains(t, err.Error(), "source-uri")
 	require.NotContains(t, err.Error(), "requires exactly 1 argument")
-	require.Contains(t, stdout.String(), "unsupported json record type")
-	require.Contains(t, stdout.String(), "transfer_reflow")
+	require.Empty(t, stdout.String(), "refusal precedes any record emission")
 }
 
 func TestTransferReflowCommand_StdinDestRelKeyDoesNotRequireRewrite(t *testing.T) {
@@ -3379,10 +3380,17 @@ func TestTransferReflowMetadataCapabilityRequiredOnlyForOptionedWrites(t *testin
 	require.ErrorContains(t, ensureMetadataCapability(&mockProvider{}, string(provider.ProviderFile), reflowMetadataConfig{Policy: metadataPolicyClear, SourceKeyRules: []metadataSourceKeyRule{{DestKey: "foo", SourceKey: "bar"}}}), "--metadata-set-from-source-key")
 }
 
-func TestTransferReflowCollisionCapabilityRejectsGCSOverwriteIfSourceNewer(t *testing.T) {
+func TestTransferReflowCollisionCapabilityRejectsUndeclaredOverwriteIfSourceNewer(t *testing.T) {
+	// A provider that declares no conditional-write capabilities cannot prove it
+	// honors If-Match and is refused fail-closed — regardless of provider label,
+	// so the check no longer special-cases GCS by ProviderID.
 	err := ensureCollisionCapability(&mockProvider{}, string(provider.ProviderGCS), collisionConfig{Mode: reflowCollisionSrcNew})
 	require.ErrorContains(t, err, `provider "gcs" does not support ConditionalPutter.IfMatchETag`)
 	require.ErrorContains(t, err, "--on-collision=overwrite-if-source-newer")
+
+	var capErr *reflowpkg.MissingConditionalCapabilityError
+	require.ErrorAs(t, err, &capErr)
+	require.Equal(t, "ConditionalPutter.IfMatchETag", capErr.MissingCapability)
 }
 
 func TestTransferReflowHelpWarnsAboutDurableMetadata(t *testing.T) {
@@ -4727,6 +4735,13 @@ func (p *reflowMemoryProvider) applyPutOptions(key string, opts provider.PutOpti
 	p.meta[key] = meta
 }
 
+// ConditionalWriteCapabilities declares the honored conditional-write predicates:
+// IfAbsent (O_EXCL-style create) and IfMatch (ETag compare-and-swap). The fixture
+// has no multipart path, so conditional multipart completion is not offered.
+func (p *reflowMemoryProvider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{IfAbsent: true, IfMatchETag: true}
+}
+
 func (p *reflowMemoryProvider) Close() error {
 	return nil
 }
@@ -4966,7 +4981,10 @@ func TestTransferReflowUnknownSizeReservesConservativeCap(t *testing.T) {
 	require.Equal(t, "payload", string(dst.mustObject("data/source/file.xml")),
 		"absent size with failed optional Head must still land the real body")
 	sum := requireRecord(t, stdout.String(), reflowpkg.SummaryRecordType, "")
-	require.Contains(t, string(sum.Data), `"execution_path":"cli-pool"`)
+	// Plain overwrite now runs on the engine record-stream runner; an optional
+	// source Head (probed only for the absent size) failing is tolerated on both
+	// paths, and an unknown size reserves the conservative cap on both.
+	require.Contains(t, string(sum.Data), `"execution_path":"engine"`)
 	require.Contains(t, string(sum.Data), `"memory_reserved_peak_bytes":2097152`,
 		"an absent size must reserve the conservative cap, never known-zero")
 }

@@ -329,6 +329,27 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	cmd.SilenceUsage = true
 
+	// Bounded, replayable first-record sniff — the honest pre-execution refusal
+	// boundary. It runs before the JSONL writer, the checkpoint store, and any
+	// provider is constructed, so an unsupported stdin record is refused with no
+	// record emitted and no I/O, rather than silently falling through to the CLI
+	// pool. The replay reader carries the full stream to the engine or pool below.
+	reflowInput := cmd.InOrStdin()
+	firstRecordClass := firstRecordEngineReady
+	if reflowStdin {
+		var (
+			refusalReason string
+			classifyErr   error
+		)
+		reflowInput, firstRecordClass, refusalReason, classifyErr = classifyTransferReflowFirstRecord(reflowInput)
+		if classifyErr != nil {
+			return exitError(foundry.ExitInvalidArgument, "Failed to read input", classifyErr)
+		}
+		if firstRecordClass == firstRecordRefuse {
+			return exitError(foundry.ExitInvalidArgument, "Unsupported reflow input", errors.New(refusalReason))
+		}
+	}
+
 	jobID := strings.TrimSpace(runID)
 	if jobID == "" {
 		jobID = uuid.New().String()
@@ -391,7 +412,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	if err := ensureCollisionCapability(dstProv, destSpec.Provider, collCfg); err != nil {
 		return emitReflowConfigError(ctx, w, "Invalid collision configuration", err, map[string]any{
-			"missing_capability": "ConditionalPutter.IfMatchETag",
+			"missing_capability": collisionMissingCapabilityLabel(err),
 			"on_collision":       collCfg.Mode,
 			"provider":           destSpec.Provider,
 		})
@@ -402,17 +423,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
-	reflowInput := cmd.InOrStdin()
-	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
+	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
 	reflowInput = enginePlan.input
+	// Structural exclusivity: an enabled (plan-vetted) plan returns here, so the
+	// CLI-pool body below is reachable only for a disabled/fallback plan. The
+	// helper fails closed on any engine error — an ErrNotImplemented is contract
+	// drift, never a pool fall-through.
 	if enginePlan.enabled {
-		_, runErr := runTransferReflowViaEngine(ctx, enginePlan, w, checkpointPath, reflowResume, provCfg, metaCfg)
-		if runErr == nil {
-			return nil
-		}
-		if !errors.Is(runErr, reflowpkg.ErrNotImplemented) {
-			return transferReflowEngineTerminalError(runErr)
-		}
+		return runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
@@ -569,6 +587,24 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		return fatalRun
 	}
 
+	// checkpointWriteFailed records a non-strict checkpoint-store write failure.
+	// A fatal writer failure (ErrWriterFailed) means the coordinator can no longer
+	// durably persist terminal state, so the FIRST such error across the whole run
+	// is surfaced once above Debug (devrev#2) — a run-level durability event, not a
+	// per-item detail — while ordinary, non-fatal write errors stay at Debug. It
+	// does not alter control flow: strict terminals suppress their success record
+	// at the call site; best-effort/auxiliary writes log here and continue.
+	var firstFatalWriterOnce sync.Once
+	checkpointWriteFailed := func(werr error) {
+		if errors.Is(werr, reflowstate.ErrWriterFailed) {
+			firstFatalWriterOnce.Do(func() {
+				observability.CLILogger.Error("Reflow checkpoint writer failed; terminal acknowledgements are fail-closed for the remainder of the run", zap.Error(werr))
+			})
+			return
+		}
+		observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+	}
+
 	tasks := make(chan reflowTask, concurrencyCfg.EffectiveCeiling*2)
 	destArbiter := newReflowDestKeyArbiter()
 	var wg sync.WaitGroup
@@ -616,7 +652,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						err := fmt.Errorf("stdin record lacks dest_rel_key and no rewrite templates were supplied")
 						_ = emitReflowInputError(context.Background(), w, task.SourceKey, "destination mapping unavailable", err, map[string]any{"source_uri": srcAuditURI})
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: "", SourceKey: task.SourceKey, DestKey: "", SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						continue
 					}
@@ -625,7 +661,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						invalidCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "rewrite failed", err, map[string]any{"source_uri": srcAuditURI})
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: "", SourceKey: task.SourceKey, DestKey: "", SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: err.Error()}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						continue
 					}
@@ -647,7 +683,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						rec.Reason = "resume." + status
 						writeReflowRecord(ctx, rec)
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "skipped", Reason: "resume." + status}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						continue
 					}
@@ -665,7 +701,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source path validation failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						rec := task.reflowRecord(dstURI, dstKey, "failed")
 						rec.Reason = "source.path.validation_failed"
@@ -677,7 +713,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						err := errors.New("file source path uses a symlink")
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source symlink refused", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						rec := task.reflowRecord(dstURI, dstKey, "failed")
 						rec.Reason = "source.symlink.refused"
@@ -748,7 +784,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							code := reflowErrCode(qerr)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 							rec.Reason = "metadata.quarantine_copy_failed"
@@ -757,14 +793,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							continue
 						}
 						if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 						destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
 						sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, nil)
 						if sidecarFatal {
 							errorCount.Add(1)
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 							rec.Reason = "provenance.write_failed"
@@ -775,7 +811,19 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							continue
 						}
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "metadata.derivation.quarantined", Bytes: bytes}); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							// Strict terminal (matching the engine and the complete/duplicate
+							// terminals): a quarantine is never acknowledged as durable on a
+							// store that could not record it. Report failed (typed); resume
+							// against a healthy store re-drives the quarantine.
+							errorCount.Add(1)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+							rec.Reason = "checkpoint.write_failed"
+							rec.Bytes = bytes
+							rec.RoutingClass = "quarantine"
+							rec.Provenance = sidecarRef
+							writeReflowRecord(ctx, rec)
+							continue
 						}
 						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 						rec.Reason = "metadata.derivation.quarantined"
@@ -787,7 +835,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					}
 					errorCount.Add(1)
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
-						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						checkpointWriteFailed(werr)
 					}
 					continue
 				}
@@ -804,7 +852,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						collision = newCollisionInfo(kind, dstMeta, decisionOverwrite)
 						if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionOverwrite, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-							observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+							checkpointWriteFailed(werr)
 						}
 					} else if !provider.IsNotFound(headErr) {
 						if recordFatalReflowError(headErr) {
@@ -853,7 +901,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							if err == nil || isConditionalExists(err) {
 								gate.observed = true
 								if markErr := state.MarkDestKeyObserved(ctx, dstKey); markErr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(markErr))
+									checkpointWriteFailed(markErr)
 									_ = w.WriteAny(ctx, reflowpkg.WarningRecordType, reflowpkg.Warning{
 										Code:    "REFLOW_ARBITRATION_STATE_WRITE_FAILED",
 										Message: fmt.Sprintf("destination arbitration state write failed: %s", markErr.Error()),
@@ -893,14 +941,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						if dup {
 							collision = newCollisionInfo(collisionDuplicate, dstMeta, collisionDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionDuplicate, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							if collCfg.Mode == reflowCollisionSkip || collCfg.Mode == reflowCollisionQuar || collCfg.Mode == reflowCollisionSrcNew {
 								sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, dstMeta, reflowRewriteTo, "skipped.duplicate", jobID, collision)
 								if sidecarFatal {
 									errorCount.Add(1)
 									if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
-										observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+										checkpointWriteFailed(werr)
 									}
 									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 									rec.Reason = "provenance.write_failed"
@@ -931,7 +979,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							errorCount.Add(1)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "collision duplicate", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 							rec.Reason = "collision.exists.duplicate"
@@ -945,7 +993,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								err := fmt.Errorf("destination LastModified is required for --on-collision=%s: %s", reflowCollisionSrcNew, dstKey)
 								_ = emitReflowError(context.Background(), w, task.SourceKey, "destination metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 								rec.Reason = "collision.missing_dest_last_modified"
@@ -965,10 +1013,20 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							if !shouldOverwrite {
 								collision = newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.skipped_src_older"}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									// Terminal UpsertItem is the resume authority (matching the
+									// engine and the complete/duplicate terminals): a
+									// collision-skip is never acknowledged on a store that could
+									// not record it. Report failed (typed); resume against a
+									// healthy store re-drives via the collision path.
+									errorCount.Add(1)
+									_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+									rec.Reason = "checkpoint.write_failed"
+									writeReflowRecord(ctx, recordWithCollision(rec, collision))
+									continue
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.skipped_src_older"
@@ -981,10 +1039,19 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							if err != nil && isConditionalExists(err) {
 								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "skipped", Reason: "collision.skipped_concurrent_mutation"}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									// Strict terminal (matching the engine): a concurrent-mutation
+									// skip is never acknowledged on a store that could not record
+									// it. Report failed (typed); resume re-drives via the collision
+									// path.
+									errorCount.Add(1)
+									_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+									rec.Reason = "checkpoint.write_failed"
+									writeReflowRecord(ctx, recordWithCollision(rec, collision))
+									continue
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "skipped")
 								rec.Reason = "collision.skipped_concurrent_mutation"
@@ -993,7 +1060,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 							if err == nil {
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionOverwrite, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 							}
 						} else if collCfg.Mode == reflowCollisionQuar {
@@ -1003,7 +1070,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 							collision = newCollisionInfo(collisionQuarantined, dstMeta, quarantineDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 							quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
@@ -1017,7 +1084,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								code := reflowErrCode(err)
 								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision})
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 								rec.Reason = "collision.quarantine_copy_failed"
@@ -1026,14 +1093,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								continue
 							}
 							if werr := state.NoteDestKeySource(context.Background(), quarantineDstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: quarantineDstKey, Size: bytes}}
 							sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), quarantineDestRel, quarantineDstKey, quarantineDstURI, destMeta, reflowRewriteTo, "quarantined", jobID, collision)
 							if sidecarFatal {
 								errorCount.Add(1)
 								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
-									observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+									checkpointWriteFailed(werr)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
 								rec.Reason = "provenance.write_failed"
@@ -1044,7 +1111,19 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								continue
 							}
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "quarantined", Reason: "collision.conflict.quarantined", Bytes: bytes}); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								// Strict terminal (matching the engine and the complete/duplicate
+								// terminals): a quarantine is never acknowledged as durable on a
+								// store that could not record it. Report failed (typed); resume
+								// against a healthy store re-drives the quarantine.
+								errorCount.Add(1)
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "checkpoint write failed", werr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
+								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
+								rec.Reason = "checkpoint.write_failed"
+								rec.Bytes = bytes
+								rec.RoutingClass = "quarantine"
+								rec.Provenance = sidecarRef
+								writeReflowRecord(ctx, recordWithCollision(rec, collision))
+								continue
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 							rec.Reason = "collision.conflict.quarantined"
@@ -1056,7 +1135,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						} else {
 							collision = newCollisionInfo(collisionConflict, dstMeta, collisionDecisionPath)
 							if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							reason := "collision.conflict"
 							if collCfg.Mode == reflowCollisionFail {
@@ -1066,7 +1145,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							errorCount.Add(1)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "collision", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "collision": collision})
 							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeAlreadyExists, ErrorMessage: err.Error()}); werr != nil {
-								observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+								checkpointWriteFailed(werr)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 							rec.Reason = reason
@@ -1083,7 +1162,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					code := reflowErrCode(err)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
-						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						checkpointWriteFailed(werr)
 					}
 					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 					rec.Reason = reflowReasonForErrCode(code)
@@ -1102,14 +1181,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				}
 
 				if werr := state.NoteDestKeySource(context.Background(), dstKey, srcCheckpointURI, srcETag, srcSize); werr != nil {
-					observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+					checkpointWriteFailed(werr)
 				}
 				destMeta := &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: dstKey, Size: bytes, ETag: putResult.ETag}}
 				sidecarRef, sidecarFatal := writeProvenanceSidecar(ctx, w, sidecarDst, provCfg, destSpec, task.withSourceMeta(srcETag, srcSize), destRel, dstKey, dstURI, destMeta, reflowRewriteTo, reflowActionForTask(task), jobID, collision)
 				if sidecarFatal {
 					errorCount.Add(1)
 					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: output.ErrCodeInternal, ErrorMessage: "provenance sidecar write failed"}); werr != nil {
-						observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
+						checkpointWriteFailed(werr)
 					}
 					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
 					rec.Reason = "provenance.write_failed"

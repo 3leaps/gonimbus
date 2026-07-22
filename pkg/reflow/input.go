@@ -25,12 +25,17 @@ const ErrCodeInvalidInput = "INVALID_INPUT"
 // FileTreeSource, so a file:// record is out of this contract and surfaces as
 // invalid input rather than being planned here.
 type reflowInput struct {
-	SourceProvider   string
-	SourceBucket     string
-	SourceURI        string
-	SourceKey        string
-	SourceETag       string
-	SourceSize       int64
+	SourceProvider string
+	SourceBucket   string
+	SourceURI      string
+	SourceKey      string
+	SourceETag     string
+	SourceSize     int64
+	// SourceSizeKnown distinguishes a measured/declared source size (including a
+	// verified zero-byte source) from an absent one. It gates the source-newer
+	// equal-timestamp size tie-breaker so an unknown size (numeric-zero sentinel)
+	// can never be read as "a different size" and authorize an overwrite.
+	SourceSizeKnown  bool
 	SourceLastMod    time.Time
 	Vars             map[string]string
 	DestRelKey       string
@@ -71,7 +76,7 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		SourceURI        string            `json:"source_uri"`
 		SourceKey        string            `json:"source_key"`
 		SourceETag       string            `json:"source_etag"`
-		SourceSize       int64             `json:"source_size_bytes"`
+		SourceSize       *int64            `json:"source_size_bytes"`
 		SourceLastMod    time.Time         `json:"source_last_modified"`
 		Vars             map[string]string `json:"vars"`
 		DestRelKey       string            `json:"dest_rel_key"`
@@ -83,6 +88,10 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 	}
 	if strings.TrimSpace(data.SourceURI) == "" {
 		return reflowInput{}, fmt.Errorf("missing data.source_uri")
+	}
+	sourceSize, sourceSizeKnown, err := resolveDeclaredSize(data.SourceSize, "source_size_bytes")
+	if err != nil {
+		return reflowInput{}, err
 	}
 	u, err := uri.ParseURI(data.SourceURI)
 	if err != nil {
@@ -121,7 +130,8 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		SourceURI:        fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key),
 		SourceKey:        key,
 		SourceETag:       data.SourceETag,
-		SourceSize:       data.SourceSize,
+		SourceSize:       sourceSize,
+		SourceSizeKnown:  sourceSizeKnown,
 		SourceLastMod:    data.SourceLastMod,
 		Vars:             data.Vars,
 		DestRelKey:       strings.Trim(strings.TrimSpace(data.DestRelKey), "/"),
@@ -130,12 +140,27 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 	}, nil
 }
 
+// resolveDeclaredSize validates a declared object size and reports whether it was
+// present. A negative size is rejected (INVALID_INPUT) rather than silently
+// recovered; an absent size is unknown (a numeric-zero sentinel a later stage
+// must not treat as a measured zero); a present non-negative size — zero
+// included — is a known measurement.
+func resolveDeclaredSize(declared *int64, field string) (size int64, known bool, err error) {
+	if declared == nil {
+		return 0, false, nil
+	}
+	if *declared < 0 {
+		return 0, false, fmt.Errorf("%s must not be negative", field)
+	}
+	return *declared, true, nil
+}
+
 func parseIndexObjectInputData(raw json.RawMessage) (reflowInput, error) {
 	var data struct {
 		BaseURI      string    `json:"base_uri"`
 		Key          string    `json:"key"`
 		ETag         string    `json:"etag"`
-		SizeBytes    int64     `json:"size_bytes"`
+		SizeBytes    *int64    `json:"size_bytes"`
 		LastModified time.Time `json:"last_modified"`
 		RelKey       string    `json:"rel_key"`
 		DeletedAt    *string   `json:"deleted_at"`
@@ -145,6 +170,10 @@ func parseIndexObjectInputData(raw json.RawMessage) (reflowInput, error) {
 	}
 	if data.DeletedAt != nil {
 		return reflowInput{}, fmt.Errorf("deleted objects are not supported in reflow input")
+	}
+	sourceSize, sourceSizeKnown, err := resolveDeclaredSize(data.SizeBytes, "size_bytes")
+	if err != nil {
+		return reflowInput{}, err
 	}
 	base, err := uri.ParseURI(data.BaseURI)
 	if err != nil {
@@ -161,14 +190,15 @@ func parseIndexObjectInputData(raw json.RawMessage) (reflowInput, error) {
 		return reflowInput{}, fmt.Errorf("missing key in index record")
 	}
 	return reflowInput{
-		SourceProvider: string(provider.ProviderS3),
-		SourceBucket:   base.Bucket,
-		SourceURI:      fmt.Sprintf("s3://%s/%s", base.Bucket, key),
-		SourceKey:      key,
-		SourceETag:     data.ETag,
-		SourceSize:     data.SizeBytes,
-		SourceLastMod:  data.LastModified,
-		RoutingClass:   "normal",
+		SourceProvider:  string(provider.ProviderS3),
+		SourceBucket:    base.Bucket,
+		SourceURI:       fmt.Sprintf("s3://%s/%s", base.Bucket, key),
+		SourceKey:       key,
+		SourceETag:      data.ETag,
+		SourceSize:      sourceSize,
+		SourceSizeKnown: sourceSizeKnown,
+		SourceLastMod:   data.LastModified,
+		RoutingClass:    "normal",
 	}, nil
 }
 

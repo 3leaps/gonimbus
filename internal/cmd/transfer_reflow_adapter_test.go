@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
@@ -105,18 +106,263 @@ func (p *concurrentGetBarrierProvider) Close() error {
 	return p.base.Close()
 }
 
-func TestPrepareTransferReflowEngineInput_PreservesLeadingBlanksAndSniffedRecord(t *testing.T) {
+func TestClassifyTransferReflowFirstRecord_PreservesLeadingBlanksAndSniffedRecord(t *testing.T) {
 	first := reflowInputLine("source/first.xml", "etag-0", 8, "", "")
 	second := reflowInputLine("source/second.xml", "etag-1", 8, "", "")
 	original := "\n\n" + first + "\n" + second + "\n"
 
-	replay, ok, err := prepareTransferReflowEngineInput(strings.NewReader(original))
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
 
 	got, err := io.ReadAll(replay)
 	require.NoError(t, err)
 	require.Equal(t, original, string(got))
+}
+
+// TestClassifyTransferReflowFirstRecord_FinalRecordWithoutNewlineReplays proves
+// byte-exact replay when the first record ends the stream without a newline.
+func TestClassifyTransferReflowFirstRecord_FinalRecordWithoutNewlineReplays(t *testing.T) {
+	original := "\n\n" + reflowInputLine("source/a.xml", "etag", 8, "", "") // no trailing newline
+
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(original))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
+
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, original, string(got))
+}
+
+func TestClassifyReflowFirstRecord_Dispositions(t *testing.T) {
+	classOf := func(line string) firstRecordClass {
+		class, _ := classifyReflowFirstRecord(line)
+		return class
+	}
+
+	// Engine-ready: v1 record with an s3:// source.
+	require.Equal(t, firstRecordEngineReady, classOf(reflowInputLine("source/a.xml", "etag", 1, "", "")))
+
+	// Fallback: every form the CLI pool still accepts today.
+	require.Equal(t, firstRecordFallback, classOf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"file:///tmp/a.xml"}}`), "v1 with a not-yet-migrated source")
+	require.Equal(t, firstRecordFallback, classOf(`{"type":"gonimbus.index.object.v1","data":{"base_uri":"s3://b/","key":"a.xml"}}`), "index-object record")
+	require.Equal(t, firstRecordFallback, classOf("s3://source-bucket/a.txt"), "bare object URI")
+	require.Equal(t, firstRecordFallback, classOf("s3://source-bucket/prefix/"), "bare prefix URI")
+
+	// Refuse: only inputs the pool itself deterministically rejects at parse,
+	// each with an accurate operator-visible reason.
+	class, reason := classifyReflowFirstRecord(`{not json`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseMalformed, reason)
+	class, reason = classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v0","data":{"source_uri":"s3://b/a.xml"}}`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseUnknownType, reason)
+	class, reason = classifyReflowFirstRecord(`{"type":"something.else","data":{}}`)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseUnknownType, reason)
+}
+
+func TestClassifyTransferReflowFirstRecord_EmptyStreamFallsBack(t *testing.T) {
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader("\n\n"))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordFallback, class)
+	require.Empty(t, reason)
+
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, "\n\n", string(got))
+}
+
+func TestClassifyTransferReflowFirstRecord_NilReaderRefuses(t *testing.T) {
+	_, class, reason, err := classifyTransferReflowFirstRecord(nil)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseNilReader, reason)
+}
+
+// TestClassifyTransferReflowFirstRecord_OversizedFirstRecordRefused is an F1
+// negative control: an unterminated first record beyond the ceiling refuses
+// after reading no more than the ceiling plus a fixed reader buffer, and never
+// accumulates proportional to the attacker-controlled line.
+func TestClassifyTransferReflowFirstRecord_OversizedFirstRecordRefused(t *testing.T) {
+	oversized := strings.Repeat("x", 2*maxReflowFirstRecordSniffBytes) // newline-free
+	cr := &countingReader{r: strings.NewReader(oversized)}
+
+	_, class, reason, err := classifyTransferReflowFirstRecord(cr)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+	require.LessOrEqual(t, cr.n, int64(maxReflowFirstRecordSniffBytes+8192), "underlying reads stay within the ceiling plus a fixed reader buffer (read %d bytes)", cr.n)
+}
+
+// TestClassifyTransferReflowFirstRecord_OversizedBlankPreambleRefused is the
+// second F1 negative control: an arbitrarily long blank preamble is bounded too.
+func TestClassifyTransferReflowFirstRecord_OversizedBlankPreambleRefused(t *testing.T) {
+	preamble := strings.Repeat("\n", 2*maxReflowFirstRecordSniffBytes)
+	cr := &countingReader{r: strings.NewReader(preamble + reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n")}
+
+	_, class, reason, err := classifyTransferReflowFirstRecord(cr)
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+	require.LessOrEqual(t, cr.n, int64(maxReflowFirstRecordSniffBytes+8192), "underlying reads stay within the ceiling plus a fixed reader buffer (read %d bytes)", cr.n)
+}
+
+// TestClassifyTransferReflowFirstRecord_CeilingBoundary pins the exact ceiling:
+// a prefix of exactly max bytes (newline included) is accepted and replayed
+// byte-exact; max+1 refuses whether or not the final byte is the newline. This
+// guards the ordering where the newline classification must not precede the
+// length check.
+func TestClassifyTransferReflowFirstRecord_CeilingBoundary(t *testing.T) {
+	base := reflowInputLine("source/a.xml", "etag", 1, "", "") // valid engine-ready v1 line
+	// prefixOf builds a first record padded with trailing spaces (trimmed away
+	// before classification) so the sniff prefix hits an exact byte length.
+	prefixOf := func(totalPrefixLen int, withNewline bool) string {
+		spaces := totalPrefixLen - len(base)
+		if withNewline {
+			spaces--
+		}
+		line := base + strings.Repeat(" ", spaces)
+		if withNewline {
+			line += "\n"
+		}
+		return line
+	}
+
+	// Exactly max, newline included -> accepted and replayed exactly.
+	atMax := prefixOf(maxReflowFirstRecordSniffBytes, true)
+	require.Len(t, atMax, maxReflowFirstRecordSniffBytes)
+	replay, class, reason, err := classifyTransferReflowFirstRecord(strings.NewReader(atMax))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordEngineReady, class)
+	require.Empty(t, reason)
+	got, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.Equal(t, atMax, string(got))
+
+	// max+1, newline included -> refuse (the newline must not classify first).
+	overWithNL := prefixOf(maxReflowFirstRecordSniffBytes+1, true)
+	_, class, reason, err = classifyTransferReflowFirstRecord(strings.NewReader(overWithNL))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+
+	// max+1, no newline -> refuse.
+	overNoNL := prefixOf(maxReflowFirstRecordSniffBytes+1, false)
+	_, class, reason, err = classifyTransferReflowFirstRecord(strings.NewReader(overNoNL))
+	require.NoError(t, err)
+	require.Equal(t, firstRecordRefuse, class)
+	require.Equal(t, reflowRefuseTooLarge, reason)
+}
+
+// countingReader records how many bytes were pulled from the underlying reader,
+// so a test can prove stdin consumption stayed bounded to the first record.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	m, err := c.r.Read(p)
+	c.n += int64(m)
+	return m, err
+}
+
+// TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO is the step-1
+// negative gate: an unsupported first record is refused before the JSONL writer,
+// the state store, or any provider is constructed — even under a forced
+// concurrency clamp that would otherwise emit a warning record — no records are
+// emitted, and stdin consumption is bounded to the first record.
+func TestTransferReflowCommand_UnsupportedStdinRefusesBeforeAnyIO(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	// Force a concurrency clamp: were classification to run after the JSONL
+	// writer, emitReflowConcurrencyClampWarning would emit a warning record.
+	oldProbe := reflowResourceProbeForRun
+	reflowResourceProbeForRun = reflowpkg.ResourceProbe{
+		MemoryLimitBytes: func() (int64, string, error) {
+			return transfer.DefaultRetryBufferMaxMemoryBytes * 64, "test_override", nil
+		},
+		FDSoftLimit: func() (int64, error) { return 8, nil },
+	}
+	t.Cleanup(func() { reflowResourceProbeForRun = oldProbe })
+
+	oldStateStore := newReflowStateStore
+	stateStoreConstructed := false
+	newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+		stateStoreConstructed = true
+		return oldStateStore(ctx, cfg)
+	}
+	t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+	providerConstructed := false
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(context.Context, s3.Config) (provider.Provider, error) {
+			providerConstructed = true
+			return nil, fmt.Errorf("S3 provider factory must not be called on refusal")
+		},
+	})
+
+	// A large tail after the unsupported first record: refusal must decide from
+	// the first record without draining the rest.
+	tail := strings.Repeat("s3://source-bucket/tail.xml\n", 100000)
+	input := `{"type":"unsupported","data":{}}` + "\n" + tail
+	cr := &countingReader{r: strings.NewReader(input)}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(cr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", "s3://dest-bucket/data/",
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "128",
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Unsupported reflow input")
+	require.Contains(t, err.Error(), "unsupported record type", "reason distinguishes the refusal cause")
+	require.Contains(t, err.Error(), "exit code 40", "refusal maps to ExitInvalidArgument")
+	require.False(t, stateStoreConstructed, "state store must not be opened on refusal")
+	require.False(t, providerConstructed, "no provider factory may run on refusal")
+	require.Empty(t, stdout.String(), "no run/warning/summary record is emitted before the refusal")
+	require.Less(t, cr.n, int64(64*1024), "stdin consumption is bounded to the first record (read %d bytes of %d)", cr.n, len(input))
+}
+
+// TestRunEnabledTransferReflowEngine_ErrNotImplementedFailsClosed is the
+// no-executor-re-selection gate expressed without a mutable production seam: the
+// engine entrypoint is injected as an argument, and an enabled plan whose engine
+// returns ErrNotImplemented fails closed as an internal error. Structural
+// exclusivity in runTransferReflow (enabled ⇒ return here) keeps the CLI pool
+// unreachable on this path.
+func TestRunEnabledTransferReflowEngine_ErrNotImplementedFailsClosed(t *testing.T) {
+	engineInvoked := false
+	runEngine := func(_ context.Context, plan transferReflowEnginePlan, _ *output.JSONLWriter, _ string, _ bool, _ provenanceConfig, _ reflowMetadataConfig) (reflowpkg.Summary, error) {
+		engineInvoked = true
+		require.True(t, plan.enabled, "the gate applies only to an enabled plan")
+		return reflowpkg.Summary{}, reflowpkg.ErrNotImplemented
+	}
+
+	err := runEnabledTransferReflowEngine(context.Background(), transferReflowEnginePlan{enabled: true}, runEngine, nil, "checkpoint.db", false, provenanceConfig{}, reflowMetadataConfig{})
+	require.True(t, engineInvoked, "the engine entrypoint must run")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Internal error")
+	require.Contains(t, err.Error(), "exit code 1", "a vetted-config ErrNotImplemented maps to ExitFailure")
+}
+
+// TestRunEnabledTransferReflowEngine_SuccessReturnsNil pins the success path: a
+// clean engine run returns nil (the command then returns without touching the pool).
+func TestRunEnabledTransferReflowEngine_SuccessReturnsNil(t *testing.T) {
+	runEngine := func(context.Context, transferReflowEnginePlan, *output.JSONLWriter, string, bool, provenanceConfig, reflowMetadataConfig) (reflowpkg.Summary, error) {
+		return reflowpkg.Summary{}, nil
+	}
+	require.NoError(t, runEnabledTransferReflowEngine(context.Background(), transferReflowEnginePlan{enabled: true}, runEngine, nil, "", false, provenanceConfig{}, reflowMetadataConfig{}))
 }
 
 func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
@@ -132,7 +378,7 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.True(t, plan.enabled, "live migrated stdin runs dispatch to the engine (reason=%q)", plan.reason)
 	require.Empty(t, plan.reason)
@@ -157,7 +403,7 @@ func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *tes
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.False(t, plan.enabled, "non-migrated source-failure policy must route to the CLI pool")
 	require.Equal(t, "source-failure policy not migrated", plan.reason)
@@ -181,7 +427,7 @@ func TestPlanTransferReflowEngineAdapter_DryRunKeepsEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
 
 	require.True(t, plan.enabled)
 	require.Empty(t, plan.reason)
@@ -1090,6 +1336,97 @@ func TestTransferReflowDualPathTerminalUpsertFailureNeverAcksTerminal(t *testing
 					"successful object-level lands across failure + resume")
 			})
 		}
+	}
+}
+
+// TestTransferReflowStrictTerminalUpsertFailureNeverAcks is the parity gate for
+// the strict terminal-write discipline across the converged routing: the
+// overwrite-if-source-newer src_older skip now runs on the ENGINE (S3
+// destination), the source-newer concurrent-mutation skip runs on the POOL (file
+// destination is not migrated), and the collision-conflict quarantine still runs
+// on the POOL (quarantine is not migrated). Reached through REAL adapter
+// selection. When the checkpoint store cannot record the terminal, neither path
+// acknowledges the success terminal: it reports failed/checkpoint.write_failed
+// and the run exits non-zero — matching the complete/collision.duplicate
+// terminals. (Quarantine resume-authority is separately deferred to the
+// engine-convergence arc.)
+func TestTransferReflowStrictTerminalUpsertFailureNeverAcks(t *testing.T) {
+	scenarios := []struct {
+		name          string
+		successStatus string
+		successReason string
+		run           func(t *testing.T, checkpoint string) (string, error)
+	}{
+		{
+			name:          "overwrite-if-source-newer/src_older",
+			successStatus: "skipped",
+			successReason: "collision.skipped_src_older",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+				dst := newReflowMemoryProvider()
+				dst.ignoreIfAbsent = true
+				dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Date(2026, 1, 16, 20, 53, 44, 0, time.UTC))
+				stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--stdin", "--dest", "s3://dest-bucket/data/", "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1",
+					"--on-collision", "overwrite-if-source-newer", "--checkpoint", checkpoint)
+				return stdout, err
+			},
+		},
+		{
+			name:          "overwrite-if-source-newer/concurrent_mutation",
+			successStatus: "skipped",
+			successReason: "collision.skipped_concurrent_mutation",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+				dst := newReflowMemoryProvider()
+				dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+				dst.mutateBeforeIfMatch = true
+				return runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--on-collision", "overwrite-if-source-newer", "--checkpoint", checkpoint)
+			},
+		},
+		{
+			name:          "quarantine/quarantined",
+			successStatus: "quarantined",
+			successReason: "collision.conflict.quarantined",
+			run: func(t *testing.T, checkpoint string) (string, error) {
+				src := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
+				dst := newReflowMemoryProvider()
+				dst.ignoreIfAbsent = true
+				dst.putFixture("data/source/file.xml", "old payload", "old-etag", time.Time{})
+				stdout, _, err := runTransferReflowWithProviderFactory(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", ""),
+					"--stdin", "--dest", "s3://dest-bucket/data/", "--rewrite-from", "{key}", "--rewrite-to", "{key}", "--parallel", "1",
+					"--on-collision", "quarantine", "--collision-quarantine-prefix", "_conflict", "--checkpoint", checkpoint)
+				return stdout, err
+			},
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			oldStateStore := newReflowStateStore
+			newReflowStateStore = func(ctx context.Context, cfg reflowstate.Config) (reflowStateStore, error) {
+				store, err := oldStateStore(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				return upsertFailingReflowState{reflowStateStore: store, err: fmt.Errorf("injected terminal upsert failure")}, nil
+			}
+			t.Cleanup(func() { newReflowStateStore = oldStateStore })
+
+			checkpoint := filepath.Join(t.TempDir(), "state.db")
+			stdout, err := sc.run(t, checkpoint)
+			require.Error(t, err, "terminal upsert failure must exit non-zero")
+			records := requireReflowRecords(t, stdout)
+			// The success terminal is suppressed: no skipped/quarantined ack survives
+			// a store that could not durably record it.
+			requireReflowStatusReasonCount(t, records, sc.successStatus, sc.successReason, 0)
+			// It is replaced by a typed failed terminal, matching the engine.
+			requireReflowStatusReasonCount(t, records, "failed", "checkpoint.write_failed", 1)
+		})
 	}
 }
 
