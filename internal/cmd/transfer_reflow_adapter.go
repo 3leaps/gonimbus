@@ -66,7 +66,7 @@ const (
 // here rather than read and retained in full.
 const maxReflowFirstRecordSniffBytes = 1 << 20
 
-func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, firstClass firstRecordClass, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore) transferReflowEnginePlan {
+func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, firstClass firstRecordClass, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, provCfg provenanceConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore, jobID string) transferReflowEnginePlan {
 	plan := transferReflowEnginePlan{input: input}
 	if !reflowStdin {
 		plan.reason = "positional source path not migrated"
@@ -87,10 +87,6 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 	// carries the sniffed first record for any CLI fallback below.
 	if destSpec == nil || dst == nil {
 		plan.reason = "destination provider unavailable"
-		return plan
-	}
-	if reflowProvenance != provenanceModeNone {
-		plan.reason = "provenance sidecars not migrated"
 		return plan
 	}
 	if collCfg.Mode == reflowCollisionQuar {
@@ -161,6 +157,7 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		DryRun:      reflowDryRun,
 		ReadOnly:    IsReadOnly(),
 		Metadata:    metaCfg,
+		Provenance:  provCfg.enginePlan(jobID),
 		Checkpoint:  checkpointAdapter(state, reflowResume),
 	}
 	plan.source = reflowpkg.RecordStreamSource{
@@ -299,7 +296,6 @@ func runTransferReflowViaEngine(ctx context.Context, plan transferReflowEnginePl
 		w:              w,
 		checkpointPath: checkpointPath,
 		resume:         resume,
-		provenance:     provCfg.runConfig(),
 		metadata:       metadataRunConfig(metaCfg),
 	}
 	runner, err := reflowpkg.NewRunner(plan.cfg)
@@ -325,14 +321,15 @@ type transferReflowEventSink struct {
 	w              *output.JSONLWriter
 	checkpointPath string
 	resume         bool
-	provenance     *reflowpkg.ProvenanceRunConfig
 	metadata       *reflowpkg.MetadataRunConfig
 }
 
 func (s transferReflowEventSink) OnRun(ctx context.Context, rec reflowpkg.RunRecord) error {
 	rec.CheckpointPath = s.checkpointPath
 	rec.Resume = s.resume
-	rec.Provenance = s.provenance
+	// Provenance is authored by the engine from the validated plan
+	// (rec.Provenance is already set); the command no longer overwrites it, so a
+	// direct library caller and the command exercise one provenance authority.
 	rec.Metadata = s.metadata
 	return s.w.WriteAny(ctx, reflowpkg.RunRecordType, rec)
 }

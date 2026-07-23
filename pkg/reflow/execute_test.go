@@ -58,12 +58,16 @@ func dryRunConfig(sink EventSink) Config {
 }
 
 type copyMemoryProvider struct {
-	mu                     sync.Mutex
-	providerType           provider.ProviderType
-	objects                map[string][]byte
-	meta                   map[string]provider.ObjectMeta
-	preconds               []provider.PutPrecondition
-	putErrByKey            map[string]error
+	mu           sync.Mutex
+	providerType provider.ProviderType
+	objects      map[string][]byte
+	meta         map[string]provider.ObjectMeta
+	preconds     []provider.PutPrecondition
+	putErrByKey  map[string]error
+	// putObjectErrByKey fails the unconditional PutObject for a specific key,
+	// modelling a sidecar write failure (sidecars are written via PutObject) while
+	// leaving the conditional main-object land unaffected.
+	putObjectErrByKey      map[string]error
 	throttleHeadsRemaining int
 	throttleGetsRemaining  int
 	// condCaps overrides the providerType-derived conditional-write capability
@@ -73,15 +77,28 @@ type copyMemoryProvider struct {
 	// next IfMatch evaluation so the compare-and-swap observes a changed ETag —
 	// modelling a destination mutated between the head and the conditional PUT.
 	mutateBeforeIfMatch bool
+	// writeCounts counts successful object writes (lands) per key across every put
+	// path, so a test can assert the exact number of data-object lands — e.g. a
+	// resume that re-lands under overwrite adds one.
+	writeCounts map[string]int
 }
 
 func newCopyMemoryProvider() *copyMemoryProvider {
 	return &copyMemoryProvider{
-		providerType: provider.ProviderS3,
-		objects:      map[string][]byte{},
-		meta:         map[string]provider.ObjectMeta{},
-		putErrByKey:  map[string]error{},
+		providerType:      provider.ProviderS3,
+		objects:           map[string][]byte{},
+		meta:              map[string]provider.ObjectMeta{},
+		putErrByKey:       map[string]error{},
+		putObjectErrByKey: map[string]error{},
+		writeCounts:       map[string]int{},
 	}
+}
+
+// writeCount reports how many successful writes landed at key.
+func (p *copyMemoryProvider) writeCount(key string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.writeCounts[key]
 }
 
 func newGCSCapabilityProvider() *copyMemoryProvider {
@@ -146,7 +163,11 @@ func (p *copyMemoryProvider) PutObject(_ context.Context, key string, body io.Re
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if perr := p.putObjectErrByKey[key]; perr != nil {
+		return &provider.ProviderError{Op: "PutObject", Provider: p.providerType, Key: key, Err: perr}
+	}
 	p.objects[key] = data
+	p.writeCounts[key]++
 	p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: "dest-" + key}}
 	return nil
 }
@@ -174,6 +195,7 @@ func (p *copyMemoryProvider) PutObjectConditional(_ context.Context, key string,
 		}
 		etag := "dest-" + key
 		p.objects[key] = data
+		p.writeCounts[key]++
 		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag}}
 		return provider.PutResult{ETag: etag}, nil
 	}
@@ -192,6 +214,7 @@ func (p *copyMemoryProvider) PutObjectConditional(_ context.Context, key string,
 		}
 		etag := "dest-" + key + "-v2"
 		p.objects[key] = data
+		p.writeCounts[key]++
 		p.meta[key] = provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Key: key, Size: int64(len(data)), ETag: etag, LastModified: time.Now().UTC()}}
 		return provider.PutResult{ETag: etag}, nil
 	}

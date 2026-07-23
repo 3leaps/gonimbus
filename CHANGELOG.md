@@ -63,6 +63,24 @@ changes.
   Both execution paths reset the window immediately before emitting the run
   record, so setup and preflight are excluded identically; the run record's
   startup sample is `0` and the summary value is the completed-run diagnostic.
+- **Provenance sidecar emission in the library reflow engine.** Per-object
+  `gonimbus.provenance.v1` sidecars are now written by the `pkg/reflow`
+  record-stream runner (previously the command worker pool only). An enabled
+  `--provenance sidecar` run dispatches to the engine, which is the sole
+  provenance authority: it validates the plan before any read or mutation,
+  writes the sidecar inside the same per-destination-key section as the land —
+  so a successfully written sidecar describes the same operation as the final
+  object under same-key fan-in (a failed replacement write leaves the prior,
+  now-stale, sidecar; it is corrected only when a later re-drive lands in a
+  repairing recovery-matrix row, and under warn or the non-repairing rows it
+  requires operator action) — routes the sidecar PUT through the concurrency/AIMD
+  limiter, and authors the run-record provenance echo. A sidecar is written only
+  for a landed object (including overwrite and source-newer re-land) and a
+  duplicate skip. Under `--provenance-on-write-error fail` a sidecar write
+  failure reports `failed`/`provenance.write_failed` and is never acknowledged
+  complete; an enabled live run requires a callable sidecar object-putter before
+  any effect. Byte-identical sidecar content across the engine and command paths
+  is held by a standing dual-path parity gate.
 
 ### Changed
 
@@ -98,6 +116,13 @@ changes.
   limit; objects larger than the resolved cap spool rather than buffer. The
   resolved cap is reported as `retry_buffer_cap_bytes` and shared by the
   records and the copy-path allocator.
+- **Object-store provenance sidecar roots are constrained to the destination
+  bucket for GCS as well as S3.** A cross-bucket object-store mirrored root is
+  refused before any I/O: the sidecar is written through the destination's
+  bucket-bound handle, so a cross-bucket root could otherwise render a
+  `provenance.uri` naming a bucket the object was never written to. A same-bucket
+  GCS mirrored root now honors the sidecar-root prefix — previously a GCS
+  mirrored root fell back to adjacent placement and silently ignored the root.
 
 ### Library API
 
@@ -889,31 +914,29 @@ narrative walkthrough.
 - **File source provider parity** — `transfer reflow` now accepts
   `file:///absolute/source-root/` sources and routes them through the same
   rewrite, collision, metadata, checkpoint, dry-run, and audit machinery used
-  for object-store sources (GON-035).
+  for object-store sources.
 - **Safe hidden-path default** — local-tree reflow skips hidden files and
   dot-directories by default. Use `--hidden=include` only after reviewing
   `--dry-run` output and adding explicit excludes for non-hidden generated
-  paths that should not be copied (GON-035).
+  paths that should not be copied.
 - **Local-source disclosure controls** — per-object output uses
   `file://local/<relative-path>` rather than absolute source roots; checkpoint
   files and run metadata remain local operational artifacts and should be
-  treated accordingly (GON-035).
+  treated accordingly.
 
 #### Index metadata
 
 - **LIST-derived storage class** — index builds now persist provider storage
   class values returned during listing and emit `storage_class` in query JSONL
-  when present (GON-036).
+  when present.
 - **Storage-class query filter** — `index query --storage-class` filters exact,
   case-sensitive storage class values. The flag is repeatable and accepts
-  comma-separated values, including canonical-by-ETag mode (GON-036).
+  comma-separated values, including canonical-by-ETag mode.
 - **HEAD enrichment command** — `index enrich-with-head <index-set-id>` caches
   HEAD-derived archive status, restore state, restore expiry, content type, and
-  `head_enriched_at` for filtered candidate rows in an existing index
-  (GON-037).
+  `head_enriched_at` for filtered candidate rows in an existing index.
 - **Enrichment-aware query output** — `index query` can emit the enriched
-  archive/restore/content-type fields and filter by `--enriched-after`
-  (GON-037).
+  archive/restore/content-type fields and filter by `--enriched-after`.
 
 ### Changed
 
@@ -924,7 +947,7 @@ narrative walkthrough.
   `golangci-lint-action` v2.11.2 so builds, scans, and release artifacts run
   on a patched Go 1.26 lane (PR #53).
 - **Provider dispatch docs expanded** to document file source URI handling and
-  future provider extension points for reflow (GON-035).
+  future provider extension points for reflow.
 
 ### Security
 
@@ -948,16 +971,16 @@ v0.2.1 is a focused release for reflow operators who need destination objects to
 
 #### Reflow destination metadata
 
-- **Caller-controlled destination user metadata** — `transfer reflow` can write explicit destination user metadata with repeatable `--metadata-set key=value`. Keys are normalized to lower case and repeated keys use last-value-wins semantics (GON-033).
-- **Source metadata policies** — `--metadata-policy clear|preserve|merge` controls whether source user metadata is omitted, copied, or copied then overridden by `--metadata-set`. Preserve/merge reject source metadata key collisions after lower-case normalization instead of guessing (GON-033).
-- **Content-Type and storage-class controls** — `--preserve-content-type` copies the source content type, and `--destination-storage-class <class>|propagate` writes an explicit destination storage class or propagates the source class when it is a valid PUT target (GON-033).
-- **Metadata-aware provider writes** — S3 and file providers implement metadata-aware PUT paths, including conditional PUT variants, so destination metadata composes with the default `skip-if-duplicate` reflow path. Local file destinations store metadata in cleartext `.gnb-meta.json` sidecars (GON-033).
+- **Caller-controlled destination user metadata** — `transfer reflow` can write explicit destination user metadata with repeatable `--metadata-set key=value`. Keys are normalized to lower case and repeated keys use last-value-wins semantics.
+- **Source metadata policies** — `--metadata-policy clear|preserve|merge` controls whether source user metadata is omitted, copied, or copied then overridden by `--metadata-set`. Preserve/merge reject source metadata key collisions after lower-case normalization instead of guessing.
+- **Content-Type and storage-class controls** — `--preserve-content-type` copies the source content type, and `--destination-storage-class <class>|propagate` writes an explicit destination storage class or propagates the source class when it is a valid PUT target.
+- **Metadata-aware provider writes** — S3 and file providers implement metadata-aware PUT paths, including conditional PUT variants, so destination metadata composes with the default `skip-if-duplicate` reflow path. Local file destinations store metadata in cleartext `.gnb-meta.json` sidecars.
 
 #### Per-object metadata derivation
 
-- **Per-object source-key projection** — `--metadata-set-from-source-key dest=src` copies one named source user-metadata key into one named destination user-metadata key per object (GON-034).
-- **Per-object expression derivation** — `--metadata-set-from-source-derived dest=expr` supports the v1 expression set: `meta.<key>.<subfield>`, `urldecode(meta.<key>).<subfield>`, `system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`, and one string-literal concatenation such as `system.etag + "-src"` (GON-034).
-- **Missing-source routing** — `--metadata-on-missing-source skip|fail|empty` controls missing source keys, invalid JSON, URL-decode failures, null values, and unsupported non-scalar JSON results. `fail` emits a redacted `gonimbus.error.v1`; with `--on-collision=quarantine`, failed derivations route to the quarantine prefix (GON-034).
+- **Per-object source-key projection** — `--metadata-set-from-source-key dest=src` copies one named source user-metadata key into one named destination user-metadata key per object.
+- **Per-object expression derivation** — `--metadata-set-from-source-derived dest=expr` supports the v1 expression set: `meta.<key>.<subfield>`, `urldecode(meta.<key>).<subfield>`, `system.etag`, `system.last_modified`, `system.content_length`, `system.content_type`, `system.storage_class`, and one string-literal concatenation such as `system.etag + "-src"`.
+- **Missing-source routing** — `--metadata-on-missing-source skip|fail|empty` controls missing source keys, invalid JSON, URL-decode failures, null values, and unsupported non-scalar JSON results. `fail` emits a redacted `gonimbus.error.v1`; with `--on-collision=quarantine`, failed derivations route to the quarantine prefix.
 
 ### Changed
 
@@ -973,7 +996,7 @@ v0.2.1 is a focused release for reflow operators who need destination objects to
 
 - **Destination metadata disclosure is explicit operator surface.** Values supplied by `--metadata-set`, copied or derived from source metadata, preserved content type, propagated storage class, and file-provider metadata sidecars are durable destination metadata. They are visible to callers with destination HEAD/GET or filesystem access and are not redacted at destination. Use `--metadata-policy clear` plus explicit `--metadata-set*` allow-lists when source metadata might contain credential URIs, tokens, or other sensitive values.
 - **Per-object derivation is an allow-list, not projection.** Gonimbus rejects wildcard destination keys and wildcard subfield projection. v1 derivation accepts only scalar JSON outputs (string, number, bool); null, arrays, and objects route through `--metadata-on-missing-source` so a nested object cannot be serialized wholesale by accident.
-- **Destination system metadata remains a non-goal.** `system.<field>` expressions read source-side system fields as derivation inputs, but the new flags write only destination user metadata (`x-amz-meta-*` for S3-compatible stores). Gonimbus does not set destination ETag, destination LastModified, destination ContentLength, or other object-store-generated system fields. Content-Type and StorageClass are writable only through their explicit GON-033 flags.
+- **Destination system metadata remains a non-goal.** `system.<field>` expressions read source-side system fields as derivation inputs, but the new flags write only destination user metadata (`x-amz-meta-*` for S3-compatible stores). Gonimbus does not set destination ETag, destination LastModified, destination ContentLength, or other object-store-generated system fields. Content-Type and StorageClass are writable only through their explicit metadata flags.
 - **Derivation failures redact source values.** Invalid JSON, invalid URL escapes, decoded-invalid JSON, non-scalar fail mode, and source canonical-collision failures name the destination key, expression, and reason kind without echoing raw source metadata values in error JSONL, checkpoints, or default stderr.
 
 ### Internal
@@ -991,50 +1014,50 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 
 #### Library enablement
 
-- **Public URI parser package** ([`pkg/uri`](pkg/uri)) — Go library consumers can use the CLI's existing S3 URI parsing behavior without importing internal command code. Promoted from `internal/uri` per the library-consumer roadmap (GON-021).
-- **Library-consumer config contract documentation** ([`docs/library-consumers.md`](docs/library-consumers.md)) — credential resolution, env-var precedence, hermetic-embedder posture, dep-tree boundary, and provider-construction patterns for downstream Go modules (GON-022).
+- **Public URI parser package** ([`pkg/uri`](pkg/uri)) — Go library consumers can use the CLI's existing S3 URI parsing behavior without importing internal command code. Promoted from `internal/uri` per the library-consumer roadmap.
+- **Library-consumer config contract documentation** ([`docs/library-consumers.md`](docs/library-consumers.md)) — credential resolution, env-var precedence, hermetic-embedder posture, dep-tree boundary, and provider-construction patterns for downstream Go modules.
 - **`internal/buildinfo` package** — version resolution chain that gives downstream `go install`-built binaries a reliable version string (see Fixed: #6 below).
 
 #### Reflow + probe sophistication
 
-- **Probe derived variables** — `content probe` computes declared `derived` vars from extracted values via `substring`, `regex_capture`, `format`, `pad`, `lowercase`, `uppercase` transforms. Pair with `transfer reflow`'s mixed-segment rendering (below) to build destination keys without a separate transform step (GON-024).
-- **Mixed rewrite segments** — `transfer reflow` renders one placeholder with literal prefix/suffix inside a single path segment, e.g. `year={year}` or `events/{tenant}-{date}/`. Earlier releases required a whole segment per placeholder (GON-024).
-- **Probe lookup derived variables** — new `lookup` transform with `regex`, `prefix`, and `exact` match modes for table-driven derivations. Pairs with `content probe --rewrite-from` so probe recipes can derive values from source-key captures before `transfer reflow` renders destination keys (GON-031).
-- **Reflow provenance sidecars** — `transfer reflow` writes a `.gnb.json` sidecar next to each destination object recording source URI, derived fields, and rewrite path. Sibling default; sidecar-suppression flag also available (GON-019).
-- **Mirrored provenance sidecar placement** — `--provenance-sidecar-root` for `transfer reflow` allows sidecars to be written under a separate same-bucket root while preserving the sibling default and the provider-relative `provenance.key` contract (GON-025).
-- **Reflow collision modes refined** — `--on-collision skip-if-duplicate` is the clearer default name; new `--on-collision quarantine` with `--collision-quarantine-prefix` for explicit isolation of collisions; nested `collision` metadata on collision records (GON-020).
-- **Hive-style partition emission pattern** — `docs/user-guide/examples/` documents the recommended pattern for emitting Hive-style partitions (`category={x}/date={y}/`) by composing `extract` + `derived` + mixed-segment rewrites without per-pattern engine changes (GON-027).
-- **Index query canonical-by-ETag mode** — `gonimbus index query --canonical-by-etag` emits one canonical object per non-empty ETag group, with deterministic tie-breaks, mixed empty-ETag passthrough records, output-record-count `--count` / `--limit` semantics, and optional `--include-alternates` for audit detail. Solves content-fingerprint deduplication at query time (GON-032).
+- **Probe derived variables** — `content probe` computes declared `derived` vars from extracted values via `substring`, `regex_capture`, `format`, `pad`, `lowercase`, `uppercase` transforms. Pair with `transfer reflow`'s mixed-segment rendering (below) to build destination keys without a separate transform step.
+- **Mixed rewrite segments** — `transfer reflow` renders one placeholder with literal prefix/suffix inside a single path segment, e.g. `year={year}` or `events/{tenant}-{date}/`. Earlier releases required a whole segment per placeholder.
+- **Probe lookup derived variables** — new `lookup` transform with `regex`, `prefix`, and `exact` match modes for table-driven derivations. Pairs with `content probe --rewrite-from` so probe recipes can derive values from source-key captures before `transfer reflow` renders destination keys.
+- **Reflow provenance sidecars** — `transfer reflow` writes a `.gnb.json` sidecar next to each destination object recording source URI, derived fields, and rewrite path. Sibling default; sidecar-suppression flag also available.
+- **Mirrored provenance sidecar placement** — `--provenance-sidecar-root` for `transfer reflow` allows sidecars to be written under a separate same-bucket root while preserving the sibling default and the provider-relative `provenance.key` contract.
+- **Reflow collision modes refined** — `--on-collision skip-if-duplicate` is the clearer default name; new `--on-collision quarantine` with `--collision-quarantine-prefix` for explicit isolation of collisions; nested `collision` metadata on collision records.
+- **Hive-style partition emission pattern** — `docs/user-guide/examples/` documents the recommended pattern for emitting Hive-style partitions (`category={x}/date={y}/`) by composing `extract` + `derived` + mixed-segment rewrites without per-pattern engine changes.
+- **Index query canonical-by-ETag mode** — `gonimbus index query --canonical-by-etag` emits one canonical object per non-empty ETag group, with deterministic tie-breaks, mixed empty-ETag passthrough records, output-record-count `--count` / `--limit` semantics, and optional `--include-alternates` for audit detail. Solves content-fingerprint deduplication at query time.
 
 #### Scaling correctness
 
-- **Local atlas phase A** — `gonimbus atlas build` produces a derived view across completed indexes for cross-run analytics. Phase A scope: local-only build, single-index input; cross-index aggregation tracked for later (GON-012).
-- **Conditional `latest.json` CAS** — `gonimbus index export` uses If-Match / If-None-Match on `latest.json` writes for fail-closed publish semantics on substrates that support it. Best-effort fallback preserved for v0.1.x-compatible hubs (GON-013).
-- **Atomic conditional puts** — provider-level `If-None-Match: *` for objects requiring race-safe creation; opt-in via provider capability detection (GON-014).
-- **Opt-in build summary** — `gonimbus index build --summary` emits a per-run JSONL summary (object counts, byte totals, prefix breakdown) without changing default streaming behavior (GON-011).
-- **Until-resolved probe reads** — `content probe` reads until a configurable resolution condition is met (rather than fixed byte ranges), reducing wasted reads on variable-length headers (GON-017).
-- **`doctor` S3 endpoint + region flags** — `gonimbus doctor --endpoint URL --region NAME` for explicit probe target overrides during cross-account / cross-endpoint validation (GON-016).
+- **Local atlas phase A** — `gonimbus atlas build` produces a derived view across completed indexes for cross-run analytics. Phase A scope: local-only build, single-index input; cross-index aggregation tracked for later.
+- **Conditional `latest.json` CAS** — `gonimbus index export` uses If-Match / If-None-Match on `latest.json` writes for fail-closed publish semantics on substrates that support it. Best-effort fallback preserved for v0.1.x-compatible hubs.
+- **Atomic conditional puts** — provider-level `If-None-Match: *` for objects requiring race-safe creation; opt-in via provider capability detection.
+- **Opt-in build summary** — `gonimbus index build --summary` emits a per-run JSONL summary (object counts, byte totals, prefix breakdown) without changing default streaming behavior.
+- **Until-resolved probe reads** — `content probe` reads until a configurable resolution condition is met (rather than fixed byte ranges), reducing wasted reads on variable-length headers.
+- **`doctor` S3 endpoint + region flags** — `gonimbus doctor --endpoint URL --region NAME` for explicit probe target overrides during cross-account / cross-endpoint validation.
 
 #### Server + stream
 
-- **Stream put** — `gonimbus stream put` accepts raw stdin (`feat(stream): add raw stdin put command`) and framed input (`feat(stream): accept framed stream put input`) for bulk-load patterns (GON-015).
+- **Stream put** — `gonimbus stream put` accepts raw stdin (`feat(stream): add raw stdin put command`) and framed input (`feat(stream): accept framed stream put input`) for bulk-load patterns.
 - **Local job control API** — `gonimbus serve` exposes a local job control API (start/list/cancel) for scripted orchestration against a single runner (phase A of the control-plane work).
 
 ### Changed
 
-- **(Breaking) Reflow collision Phase B — flat fields removed**. The legacy flat collision JSONL fields (`collision_kind`, `collision_etag`, `collision_size_bytes`) are removed from `gonimbus.reflow.v1` records after the GON-020 Phase A warning window. Audit tooling must read the nested `collision` object as the sole current collision representation (GON-026).
-- **`--on-collision log` is deprecated** as an alias for `skip-if-duplicate`; the new name is the default. Will be removed in a later release (GON-020).
+- **(Breaking) Reflow collision Phase B — flat fields removed**. The legacy flat collision JSONL fields (`collision_kind`, `collision_etag`, `collision_size_bytes`) are removed from `gonimbus.reflow.v1` records after the Phase A warning window. Audit tooling must read the nested `collision` object as the sole current collision representation.
+- **`--on-collision log` is deprecated** as an alias for `skip-if-duplicate`; the new name is the default. Will be removed in a later release.
 - **Bumped version to `0.2.0`** for this release. Version stamping respects the `internal/buildinfo` chain so `go install ...@v0.2.0` reports the correct version (see Fixed: #6 below).
-- **Bumped bounded dependency set** ([PR #42](https://github.com/3leaps/gonimbus/pull/42)) — gofulmen v0.3.2 → v0.3.5 (pulls crucible v0.4.9 → v0.4.12, doublestar v4.9.1 → v4.10.0, zap v1.27 → v1.28); AWS SDK family coherent settle (`aws-sdk-go-v2` v1.41.0 → v1.41.7, `s3` v1.95.0 → v1.101.0, plus credentials, config, IMDS, smithy, service-internal modules); `chi/v5` v5.2.3 → v5.2.5; `mapstructure/v2` v2.4.0 → v2.5.0; `cobra` v1.10.1 → v1.10.2; `golang.org/x/net` v0.48.0 → v0.54.0; `golang.org/x/time` v0.14.0 → v0.15.0. `modernc.org/sqlite` + libsql substrate updates deferred to GON-023's delivery PR.
+- **Bumped bounded dependency set** ([PR #42](https://github.com/3leaps/gonimbus/pull/42)) — gofulmen v0.3.2 → v0.3.5 (pulls crucible v0.4.9 → v0.4.12, doublestar v4.9.1 → v4.10.0, zap v1.27 → v1.28); AWS SDK family coherent settle (`aws-sdk-go-v2` v1.41.0 → v1.41.7, `s3` v1.95.0 → v1.101.0, plus credentials, config, IMDS, smithy, service-internal modules); `chi/v5` v5.2.3 → v5.2.5; `mapstructure/v2` v2.4.0 → v2.5.0; `cobra` v1.10.1 → v1.10.2; `golang.org/x/net` v0.48.0 → v0.54.0; `golang.org/x/time` v0.14.0 → v0.15.0. `modernc.org/sqlite` + libsql substrate updates deferred to a later delivery PR.
 - **Steady-state index operations docs clarified** — `docs/user-guide/steady-state-index-operations.md` documents the operator-side lifecycle for index sets after the initial build (refresh, snapshot, gc cadence).
 - **Index build mental model docs** ([PR #39](https://github.com/3leaps/gonimbus/pull/39)) — `docs/user-guide/index-build-mental-model.md` walks through the prefix-first listing approach and where index-build cost sits in the larger pipeline.
 
 ### Fixed
 
-- **Parallel content-aware reflow now preserves the default `skip-if-duplicate` contract** (GON-030). When `transfer reflow --parallel N>1` routes multiple source objects to the same destination key, a single gonimbus process now arbitrates per destination key before conditional writes. The first object lands; byte-identical race losers emit `status=skipped reason=collision.duplicate` instead of redundant `complete collision=no` records. This protects the single-run operator path even on S3-compatible substrates that accept but do not enforce `If-None-Match: *`; cross-process and cross-operator races still depend on substrate-level conditional-write support. Active in-memory gates are bounded to in-flight destination keys; per-run observed destination keys are tracked in the checkpoint database. For local file destinations, same-size collision losers fall back to a byte comparison because file version tokens are not source-provider ETags.
+- **Parallel content-aware reflow now preserves the default `skip-if-duplicate` contract**. When `transfer reflow --parallel N>1` routes multiple source objects to the same destination key, a single gonimbus process now arbitrates per destination key before conditional writes. The first object lands; byte-identical race losers emit `status=skipped reason=collision.duplicate` instead of redundant `complete collision=no` records. This protects the single-run operator path even on S3-compatible substrates that accept but do not enforce `If-None-Match: *`; cross-process and cross-operator races still depend on substrate-level conditional-write support. Active in-memory gates are bounded to in-flight destination keys; per-run observed destination keys are tracked in the checkpoint database. For local file destinations, same-size collision losers fall back to a byte comparison because file version tokens are not source-provider ETags.
 - **`go install`-built binaries now report the correct version** ([#6](https://github.com/3leaps/gonimbus/issues/6)). The Makefile's `-ldflags -X main.version=…` injection is no longer the only source of the version string — a new `internal/buildinfo` package resolves the version from a three-tier chain: ldflags overrides → `runtime/debug.ReadBuildInfo` (covers `go install module@vX.Y.Z`) → embedded `VERSION` file (covers `go install ./cmd/...` from a working tree). The repo-root `VERSION` is mirrored into `internal/buildinfo/VERSION` by `make sync-app-version`. Regression guard in `test/integration/standalone_binary_test.go` builds the binary with no ldflags and asserts the reported version matches `VERSION`.
 - **Pinned yamlfmt config** ([#3](https://github.com/3leaps/gonimbus/issues/3)). Added `.yamlfmt` at repo root with `pad_line_comments: 2` so that local `make fmt` (via goneat) and CI's `yamlfmt -lint .` agree on inline-comment spacing. Without this pin, `make check-all` could rewrite YAML files to a different convention than CI expected, producing unrelated format-check failures.
-- **`content probe` decodes declared XML charsets** ([#28](https://github.com/3leaps/gonimbus/pull/28)) — previously assumed UTF-8 and produced extraction errors on POS XML with declared non-UTF-8 encodings. Now honors the XML declaration's `encoding` attribute (GON-018).
+- **`content probe` decodes declared XML charsets** ([#28](https://github.com/3leaps/gonimbus/pull/28)) — previously assumed UTF-8 and produced extraction errors on POS XML with declared non-UTF-8 encodings. Now honors the XML declaration's `encoding` attribute.
 - **`inspect` reports capped output explicitly** ([#8](https://github.com/3leaps/gonimbus/pull/8)) — when the result set hits the configured `--limit`, output now includes a clear truncation marker rather than silently capping. Caught after a recurring "where are the rest of my objects?" pattern.
 - **`index doctor` honors positional targets** ([#10](https://github.com/3leaps/gonimbus/pull/10)) — `gonimbus index doctor <hub-uri>` was being ignored in favor of `--hub`; both forms now work.
 - **`index` accepts positional hub URIs** ([#14](https://github.com/3leaps/gonimbus/pull/14)) — subcommand uniformity.

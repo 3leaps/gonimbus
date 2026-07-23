@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -41,6 +42,9 @@ type reflowInput struct {
 	DestRelKey       string
 	RoutingClass     string
 	QuarantinePrefix string
+	// Probe carries the content-probe audit block through to the provenance
+	// sidecar (audit-trail fidelity); nil when the input record had none.
+	Probe *probe.ProbeAudit
 }
 
 // parseReflowInputLine parses a single reflow-input JSONL line into the engine's
@@ -82,6 +86,7 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		DestRelKey       string            `json:"dest_rel_key"`
 		RoutingClass     string            `json:"routing_class"`
 		QuarantinePrefix string            `json:"quarantine_prefix"`
+		Probe            *probe.ProbeAudit `json:"probe"`
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return reflowInput{}, err
@@ -137,6 +142,7 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		DestRelKey:       strings.Trim(strings.TrimSpace(data.DestRelKey), "/"),
 		RoutingClass:     routingClass,
 		QuarantinePrefix: quarantinePrefix,
+		Probe:            data.Probe,
 	}, nil
 }
 
