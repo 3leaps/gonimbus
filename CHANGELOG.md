@@ -100,6 +100,13 @@ changes.
   CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
   their historical warn-and-continue terminal behavior until they migrate to
   the engine.
+- **Failed-copy checkpoints record the specific failure reason.** On the
+  record-stream engine path, a failed collision now persists the same specific
+  reason on the durable checkpoint, the error event, and the emitted record
+  (e.g. `collision.exists.duplicate` or `collision.exists.conflict`) rather
+  than the coarse error class on the checkpoint. `error_code` still carries the
+  class and the sanitized cause is retained, so a resume reading the checkpoint
+  sees the reason a consumer saw on the record.
 - **The memory limit binds to the lowest detected candidate.** Container/cgroup
   limit, explicit runtime limit (`GOMEMLIMIT`), and detected physical RAM are
   all probed and the lowest positive value binds, with its source recorded — an

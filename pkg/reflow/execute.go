@@ -901,15 +901,24 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in reflowInput, destURI, destKey, msg string, err error, details map[string]any, collision *CollisionInfo) error {
 	stats.recordError()
 	code := reflowErrCode(err)
+	// reason is the specific failure reason (collision-aware) shared by all three
+	// failure surfaces — the error event, the durable checkpoint, and the emitted
+	// record — so a resume reading the checkpoint sees the same reason a consumer
+	// saw on the record (e.g. collision.exists.duplicate), not the coarser error
+	// class. error_code still carries the class.
+	reason := failedRecordReason(err, code, collision)
 	if details == nil {
 		details = map[string]any{}
 	}
 	if _, ok := details["mode"]; !ok {
 		details["mode"] = "transfer_reflow"
 	}
-	if _, ok := details["reason"]; !ok {
-		details["reason"] = reflowReasonForErrCode(code)
-	}
+	// The derived reason is authoritative for the event too: assign it
+	// unconditionally so a caller-supplied details["reason"] can never diverge the
+	// event from the checkpoint and record. This locally enforces the single-reason
+	// invariant this path establishes rather than relying on every caller to omit
+	// the key.
+	details["reason"] = reason
 	if err := r.emitError(ctx, ErrorEvent{Code: code, Key: in.SourceKey, Message: FormatErrorMessage(msg, err), Details: details, Collision: collision}); err != nil {
 		return err
 	}
@@ -917,13 +926,13 @@ func (r *Runner) recordObjectError(ctx context.Context, stats *runStats, in refl
 	// is already being reported failed, so a store write failure here warns
 	// (typed) rather than escalating — an unrecorded failed item is simply
 	// re-driven on resume.
-	if cperr := r.checkpointItem(ctx, in, destURI, destKey, "failed", reflowReasonForErrCode(code), 0, code, SanitizeOperationCauseMessage(err)); cperr != nil {
+	if cperr := r.checkpointItem(ctx, in, destURI, destKey, "failed", reason, 0, code, SanitizeOperationCauseMessage(err)); cperr != nil {
 		if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, cperr); werr != nil {
 			return werr
 		}
 	}
 	rec := in.record(destURI, destKey, "failed")
-	rec.Reason = failedRecordReason(err, code, collision)
+	rec.Reason = reason
 	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
