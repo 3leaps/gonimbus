@@ -3438,6 +3438,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "")
 	cmd.Flags().BoolVar(&reflowResume, "resume", false, "")
 	cmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "")
+	cmd.Flags().StringVar(&reflowRunID, "run-id", "", "")
 	cmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "")
 	cmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "")
 	cmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "")
@@ -3485,6 +3486,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldDryRun := reflowDryRun
 	oldResume := reflowResume
 	oldResumeRun := reflowResumeRun
+	oldRunID := reflowRunID
 	oldCheckpoint := reflowCheckpoint
 	oldOverwrite := reflowOverwrite
 	oldOnCollision := reflowOnCollision
@@ -3531,6 +3533,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowDryRun = false
 	reflowResume = false
 	reflowResumeRun = ""
+	reflowRunID = ""
 	reflowCheckpoint = ""
 	reflowOverwrite = false
 	reflowOnCollision = reflowCollisionSkip
@@ -3573,6 +3576,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowDryRun = oldDryRun
 		reflowResume = oldResume
 		reflowResumeRun = oldResumeRun
+		reflowRunID = oldRunID
 		reflowCheckpoint = oldCheckpoint
 		reflowOverwrite = oldOverwrite
 		reflowOnCollision = oldOnCollision
@@ -3780,6 +3784,8 @@ func TestValidateProvenanceConfigRejectsUnsafeSuffix(t *testing.T) {
 func TestParseProvenanceSidecarRootValidation(t *testing.T) {
 	s3Dest, err := parseReflowDest("s3://b1/data/")
 	require.NoError(t, err)
+	gcsDest, err := parseReflowDest("gs://b1/data/")
+	require.NoError(t, err)
 	fileDest, err := parseReflowDest("file://" + t.TempDir() + "/")
 	require.NoError(t, err)
 
@@ -3793,6 +3799,10 @@ func TestParseProvenanceSidecarRootValidation(t *testing.T) {
 		{name: "different provider", raw: "file:///tmp/sidecars/", dest: s3Dest, wantErr: "different-provider-scheme"},
 		{name: "different bucket", raw: "s3://b2/sidecars/", dest: s3Dest, wantErr: "different-bucket"},
 		{name: "same bucket", raw: "s3://b1/sidecars/", dest: s3Dest},
+		// Object-store cross-bucket refusal covers GCS as well as S3: the sidecar
+		// is written through the destination's bucket-bound handle.
+		{name: "gcs different bucket", raw: "gs://b2/sidecars/", dest: gcsDest, wantErr: "different-bucket"},
+		{name: "gcs same bucket", raw: "gs://b1/sidecars/", dest: gcsDest},
 		{name: "file same scheme", raw: "file://" + t.TempDir() + "/", dest: fileDest},
 	}
 
@@ -3910,12 +3920,24 @@ func TestWriteProvenanceSidecarWarnsOnFailure(t *testing.T) {
 
 	require.False(t, fatal)
 	require.Equal(t, &reflowpkg.ProvenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
-	warn := requireRecord(t, stdout.String(), reflowpkg.WarningRecordType, "")
-	require.Contains(t, string(warn.Data), "PROVENANCE_WRITE_FAILED")
-	require.Contains(t, string(warn.Data), "provenance sidecar write failed: provider error redacted")
-	require.NotContains(t, string(warn.Data), "SENSITIVE-MARKER")
-	require.NotContains(t, string(warn.Data), "token@example.invalid")
-	require.NotContains(t, string(warn.Data), "VISIBLE")
+	// Pin the exact native warning record shape (code, key, message, full details),
+	// not substrings, so a change to any field is caught.
+	rec := requireRecord(t, stdout.String(), reflowpkg.WarningRecordType, "")
+	var warnRec reflowpkg.Warning
+	require.NoError(t, json.Unmarshal(rec.Data, &warnRec))
+	require.Equal(t, reflowpkg.ProvenanceWriteFailedWarningCode, warnRec.Code)
+	require.Equal(t, "dest/key.gnb.json", warnRec.Key)
+	require.Equal(t, "provenance sidecar write failed: provider error redacted", warnRec.Message)
+	require.Equal(t, map[string]any{
+		"sidecar_key": "dest/key.gnb.json",
+		"sidecar_uri": "s3://bucket/dest/key.gnb.json",
+		"dest_uri":    "s3://bucket/dest/key",
+		"mode":        "transfer_reflow",
+	}, warnRec.Details)
+	// Redaction: no credential material from the cause survives anywhere in the record.
+	require.NotContains(t, string(rec.Data), "SENSITIVE-MARKER")
+	require.NotContains(t, string(rec.Data), "token@example.invalid")
+	require.NotContains(t, string(rec.Data), "VISIBLE")
 }
 
 func TestWriteProvenanceSidecarFailsOnFailure(t *testing.T) {
@@ -3925,12 +3947,40 @@ func TestWriteProvenanceSidecarFailsOnFailure(t *testing.T) {
 
 	destSpec, err := parseReflowDest("s3://bucket/dest/")
 	require.NoError(t, err)
-	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: errors.New("boom")}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorFail, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
+	// A credential-bearing provider cause must be redacted in the emitted fail
+	// record exactly as it is on the warn path — the fail policy is not a redaction
+	// bypass.
+	sensitiveErr := errors.New("PUT https://token@example.invalid/sidecar?X-Amz-Signature=SENSITIVE-MARKER&custom=VISIBLE failed")
+	ref, fatal := writeProvenanceSidecar(context.Background(), w, failingPutter{err: sensitiveErr}, provenanceConfig{Mode: provenanceModeSidecar, Suffix: provenanceSuffix, OnWriteError: provenanceErrorFail, PlacementMode: provenancePlaceSibling}, destSpec, reflowTask{SourceURI: "s3://source/key", SourceKey: "key"}, "dest/key", "dest/key", "s3://bucket/dest/key", nil, "{key}", "landed", "job-123", nil)
 
 	require.True(t, fatal)
 	require.Equal(t, &reflowpkg.ProvenanceRef{Written: false, Key: "dest/key.gnb.json", URI: "s3://bucket/dest/key.gnb.json"}, ref)
-	require.Contains(t, stdout.String(), output.TypeError)
-	require.Contains(t, stdout.String(), "provenance sidecar write failed")
+	// Pin the exact native error record shape (code, key, message, full details,
+	// collision omission), not substrings.
+	rec := requireRecord(t, stdout.String(), output.TypeError, "")
+	var errRec struct {
+		Code      string         `json:"code"`
+		Message   string         `json:"message"`
+		Key       string         `json:"key"`
+		Details   map[string]any `json:"details"`
+		Collision any            `json:"collision"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Data, &errRec))
+	require.Equal(t, output.ErrCodeInternal, errRec.Code)
+	require.Equal(t, "dest/key.gnb.json", errRec.Key)
+	require.Equal(t, "provenance sidecar write failed: provider error redacted", errRec.Message)
+	require.Equal(t, map[string]any{
+		"sidecar_key": "dest/key.gnb.json",
+		"sidecar_uri": "s3://bucket/dest/key.gnb.json",
+		"dest_uri":    "s3://bucket/dest/key",
+		"mode":        "transfer_reflow",
+		"reason":      "internal",
+	}, errRec.Details)
+	require.Nil(t, errRec.Collision, "a provenance write failure carries no collision context")
+	// Redaction: no credential material from the cause survives anywhere in the record.
+	require.NotContains(t, string(rec.Data), "SENSITIVE-MARKER")
+	require.NotContains(t, string(rec.Data), "token@example.invalid")
+	require.NotContains(t, string(rec.Data), "VISIBLE")
 }
 
 type failingPutter struct {

@@ -896,7 +896,7 @@ gonimbus transfer reflow --stdin \
 ```
 
 Each reflow-input record carries its own `dest_rel_key`, so no rewrite template is
-needed here; data lands under `s3://bucket/data/landing/<dest_rel_key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<dest_rel_key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and S3 sidecar roots must use the same bucket as the destination. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
+needed here; data lands under `s3://bucket/data/landing/<dest_rel_key>` and sidecars land under `s3://bucket/runs/run-001/sidecars/<dest_rel_key>.gnb.json`. The stdout `provenance.key` remains the provider-relative sidecar object key, while `provenance.uri` carries the full sidecar URI. The sidecar root must end in `/`; it must use the same provider scheme as `--dest`, and object-store sidecar roots (S3 and GCS) must use the same bucket as the destination. A cross-bucket object-store root is refused before any I/O: the sidecar is written through the destination's bucket-bound handle, so its `provenance.uri` must name the bucket actually written to. If the sidecar root is nested inside the destination root, or the destination root is nested inside the sidecar root, Gonimbus warns but does not reject the run.
 
 The sidecar key suffix is configurable:
 
@@ -920,7 +920,40 @@ provenance:
 
 Suffixes must start with a dot, must not contain `/`, and must not look like glob patterns. Gonimbus also rejects common data extensions such as `.xml`, `.json`, `.jsonl`, `.csv`, `.parquet`, `.avro`, `.txt`, `.gz`, `.zst`, `.zip`, `.tar`, `.html`, and `.pdf` unless `--allow-unsafe-suffix` is passed.
 
-Sidecars are written after the main object. With `--provenance-on-write-error warn` (default), a sidecar write failure emits a `gonimbus.warning.v1` record and reflow continues. With `fail`, the failure emits `gonimbus.error.v1` and marks that per-object reflow as failed; the main object may already exist and can be filled in on a later run.
+Sidecars are written after the main object, inside the same per-destination-key
+section as the land, so a **successfully written** sidecar describes the same
+operation as the final object even when several sources fan in on one key. A
+sidecar write is an unconditional PUT with no invalidation, so if a **replacement**
+sidecar write fails, the prior sidecar remains: after a sidecar write failure the
+durable sidecar may be absent **or stale** (still describe a superseded operation).
+With `--provenance-on-write-error warn` (default), a sidecar write failure emits a
+`gonimbus.warning.v1` record and reflow continues — so under `warn`, a sidecar is
+**not guaranteed** to be present or current after a `complete`. The item is already
+acknowledged complete, so a resume does not re-drive it: an absent or stale sidecar
+under `warn` persists until an operator, or a later run that overwrites the same
+key, replaces it. With `fail`, the failure emits `gonimbus.error.v1` and marks that
+per-object reflow as `failed` with reason `provenance.write_failed`; the main object
+may already have landed, but the item is never acknowledged complete until a later
+run records a terminal. A stale or absent sidecar is corrected **only** when a later
+re-drive lands in a recovery-matrix row that repairs (the proven-duplicate skip and
+the overwrite/source-newer re-land rows below); under `fail` mode and the
+source-older / concurrent-mutation outcomes the item does not repair, so operator
+action is required.
+
+Whether a resume repairs a missing sidecar depends on the collision mode and how
+the re-drive resolves against the now-existing destination:
+
+- **skip-if-duplicate** and **overwrite-if-source-newer**, when the re-drive is a
+  proven duplicate (identical bytes): the sidecar is re-attempted with **no**
+  additional data-object write.
+- **overwrite** (and **overwrite-if-source-newer** when the source is still newer):
+  the object is re-landed, repairing the sidecar at the cost of **one** additional
+  PUT — a new version on a versioned bucket.
+- **fail** mode, and the **source-older** or **concurrent-mutation** outcomes of
+  overwrite-if-source-newer: the object exists but the item does not re-land, so
+  the sidecar is **not** repaired automatically and requires operator action.
+
+These are operator-visible limitations, not a silent repair contract.
 
 Operational cost is one extra PUT per landed, duplicate, or quarantined object plus storage for the sidecar objects and any later list/get activity by audit jobs. Before enabling sidecars on sustained high-volume runs, estimate:
 

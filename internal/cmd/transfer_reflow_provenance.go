@@ -1,19 +1,15 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"github.com/3leaps/gonimbus/pkg/output"
-	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 )
@@ -84,37 +80,19 @@ func resolveProvenanceConfig(cmd *cobra.Command, dest *reflowDestSpec) (provenan
 }
 
 func validateProvenanceConfig(cfg provenanceConfig) error {
+	// Mode, on-write-error, and suffix rules delegate to the shared pkg/reflow
+	// validators so the CLI and the engine enforce one canonical rule set.
+	if err := reflowpkg.ValidateProvenanceModeAndPolicy(cfg.Mode, cfg.OnWriteError); err != nil {
+		return err
+	}
 	switch cfg.Mode {
 	case "", provenanceModeNone:
 		if cfg.SidecarRootRaw != "" {
 			return fmt.Errorf("provenance-sidecar-root requires --provenance sidecar")
 		}
 		return nil
-	case provenanceModeSidecar:
-		// Continue below.
-	default:
-		return fmt.Errorf("provenance must be one of: none, sidecar")
 	}
-
-	switch cfg.OnWriteError {
-	case "", provenanceErrorWarn, provenanceErrorFail:
-		// ok
-	default:
-		return fmt.Errorf("provenance-on-write-error must be one of: warn, fail")
-	}
-	if !strings.HasPrefix(cfg.Suffix, ".") {
-		return fmt.Errorf("provenance suffix must start with a leading dot")
-	}
-	if strings.Contains(cfg.Suffix, "/") {
-		return fmt.Errorf("provenance suffix must not contain '/'")
-	}
-	if strings.ContainsAny(cfg.Suffix, "*?[") {
-		return fmt.Errorf("provenance suffix must not look like a glob pattern")
-	}
-	if !cfg.AllowUnsafeSuffix && isUnsafeProvenanceSuffix(cfg.Suffix) {
-		return fmt.Errorf("provenance suffix %q collides with common data extensions; pass --allow-unsafe-suffix to confirm", cfg.Suffix)
-	}
-	return nil
+	return reflowpkg.ValidateProvenanceSuffix(cfg.Suffix, cfg.AllowUnsafeSuffix)
 }
 
 func parseProvenanceSidecarRoot(raw string, dest *reflowDestSpec) (*reflowDestSpec, error) {
@@ -131,7 +109,11 @@ func parseProvenanceSidecarRoot(raw string, dest *reflowDestSpec) (*reflowDestSp
 	if root.Provider != dest.Provider {
 		return nil, fmt.Errorf("different-provider-scheme sidecar placement not supported -- file an issue if needed")
 	}
-	if root.Provider == string(provider.ProviderS3) && root.Bucket != dest.Bucket {
+	// Object-store mirrored roots must resolve to the destination bucket (S3 and
+	// GCS): the sidecar is written through the bucket-bound destination handle, so
+	// a cross-bucket root would render a URI naming a bucket the object was never
+	// written to. Refuse it up front rather than emit a false provenance URI.
+	if isObjectStoreProvider(root.Provider) && root.Bucket != dest.Bucket {
 		return nil, fmt.Errorf("different-bucket sidecar placement requires the --provenance-sidecar-* flag family -- future enhancement; file an issue if needed")
 	}
 	return root, nil
@@ -183,17 +165,47 @@ func comparableRootURI(spec *reflowDestSpec) string {
 	}
 }
 
-func isUnsafeProvenanceSuffix(suffix string) bool {
-	switch strings.ToLower(suffix) {
-	case ".xml", ".json", ".jsonl", ".csv", ".parquet", ".avro", ".txt", ".gz", ".zst", ".zip", ".tar", ".html", ".pdf":
-		return true
-	default:
-		return false
-	}
-}
-
 func (cfg provenanceConfig) enabled() bool {
 	return cfg.Mode == provenanceModeSidecar
+}
+
+// enginePlan resolves the CLI provenance config into the engine's validated
+// ProvenancePlan. The engine is the sole provenance authority for a migrated run:
+// it owns validation, per-object sidecar emission, and the RunRecord echo. runID
+// is the job identity carried into each sidecar's run.run_id. For the command
+// surface only sibling and same-bucket object-store mirrored placement are
+// reachable (a file destination is not engine-migrated), so the sidecar is always
+// written through the destination handle and needs no injected second provider;
+// the resolved root's BaseURI mirrors the raw flag so the RunRecord echo matches
+// the pool byte-for-byte.
+func (cfg provenanceConfig) enginePlan(runID string) reflowpkg.ProvenancePlan {
+	if !cfg.enabled() {
+		return reflowpkg.ProvenancePlan{Mode: reflowpkg.ProvenanceModeNone}
+	}
+	plan := reflowpkg.ProvenancePlan{
+		Mode:              reflowpkg.ProvenanceModeSidecar,
+		Suffix:            cfg.Suffix,
+		AllowUnsafeSuffix: cfg.AllowUnsafeSuffix,
+		OnWriteError:      cfg.OnWriteError,
+		Placement:         reflowpkg.ProvenancePlacementPlan{Mode: reflowpkg.ProvenancePlacementSibling},
+		RunID:             runID,
+		ToolVersion:       reflowToolVersion(),
+	}
+	if cfg.PlacementMode == provenancePlaceMirror && cfg.SidecarRoot != nil {
+		root := cfg.SidecarRoot
+		plan.Placement = reflowpkg.ProvenancePlacementPlan{
+			Mode: reflowpkg.ProvenancePlacementMirror,
+			SidecarRoot: &reflowpkg.ProvenanceSidecarRoot{
+				Provider:         root.Provider,
+				Bucket:           root.Bucket,
+				Prefix:           root.Prefix,
+				BaseDir:          root.BaseDir,
+				BaseURI:          cfg.SidecarRootRaw,
+				SameBucketAsDest: true,
+			},
+		}
+	}
+	return plan
 }
 
 func (cfg provenanceConfig) runConfig() *reflowpkg.ProvenanceRunConfig {
@@ -207,68 +219,54 @@ func (cfg provenanceConfig) runConfig() *reflowpkg.ProvenanceRunConfig {
 	return &reflowpkg.ProvenanceRunConfig{Mode: cfg.Mode, Suffix: cfg.Suffix, OnWriteError: cfg.OnWriteError, Placement: placement}
 }
 
-type provenanceSidecar struct {
-	Schema        string                   `json:"schema"`
-	SchemaVersion string                   `json:"schema_version"`
-	Source        provenanceSource         `json:"source"`
-	Destination   provenanceDestination    `json:"destination"`
-	Run           provenanceRun            `json:"run"`
-	Routing       provenanceRouting        `json:"routing"`
-	Collision     *reflowpkg.CollisionInfo `json:"collision,omitempty"`
-	Vars          map[string]string        `json:"vars,omitempty"`
-	Probe         *probe.ProbeAudit        `json:"probe,omitempty"`
-	Action        string                   `json:"action"`
+// poolProvenanceEmitter delivers the shared sidecar writer's warn/fail outcomes
+// through the command pool's existing record paths, keeping the pool's emitted
+// warning/error records byte-identical after the writer relocation.
+type poolProvenanceEmitter struct{ w *output.JSONLWriter }
+
+func (e poolProvenanceEmitter) EmitProvenanceWarning(ctx context.Context, warning reflowpkg.Warning) error {
+	return e.w.WriteAny(ctx, reflowpkg.WarningRecordType, warning)
 }
 
-type provenanceSource struct {
-	URI          string     `json:"uri"`
-	ETag         string     `json:"etag,omitempty"`
-	Size         int64      `json:"size,omitempty"`
-	LastModified *time.Time `json:"last_modified,omitempty"`
+func (e poolProvenanceEmitter) EmitProvenanceError(ctx context.Context, key, message string, cause error, details map[string]any) error {
+	return emitReflowError(ctx, e.w, key, message, cause, details)
 }
 
-type provenanceDestination struct {
-	URI  string `json:"uri"`
-	ETag string `json:"etag,omitempty"`
-	Size int64  `json:"size,omitempty"`
-}
-
-type provenanceRun struct {
-	RunID       string `json:"run_id"`
-	TS          string `json:"ts"`
-	ToolVersion string `json:"tool_version"`
-}
-
-type provenanceRouting struct {
-	RoutingClass     string  `json:"routing_class"`
-	RewriteTemplate  string  `json:"rewrite_template,omitempty"`
-	QuarantinePrefix *string `json:"quarantine_prefix"`
-}
-
+// writeProvenanceSidecar resolves the sidecar placement (key/URI) from the CLI
+// layout and delegates the content build + write + on-write-error policy to the
+// shared pkg/reflow authority, so the command pool and the engine emit
+// byte-identical sidecar objects and apply one policy.
 func writeProvenanceSidecar(ctx context.Context, w *output.JSONLWriter, sidecarDst provider.Provider, cfg provenanceConfig, destSpec *reflowDestSpec, task reflowTask, destRel string, destKey string, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string, collision *reflowpkg.CollisionInfo) (*reflowpkg.ProvenanceRef, bool) {
 	if !cfg.enabled() {
 		return nil, false
 	}
-
 	sidecarKey := buildProvenanceSidecarKey(cfg, destSpec, destRel, destKey)
 	sidecarURI := buildProvenanceSidecarURI(cfg, destSpec, sidecarKey)
-	ref := &reflowpkg.ProvenanceRef{Written: false, Key: sidecarKey, URI: sidecarURI}
-	putter, ok := sidecarDst.(provider.ObjectPutter)
-	if !ok {
-		err := fmt.Errorf("destination provider does not support PutObject")
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
+	in := reflowpkg.ProvenanceSidecarInput{
+		SourceURI:        task.auditSourceURI(),
+		SourceETag:       task.SourceETag,
+		SourceSize:       task.SourceSize,
+		SourceLastMod:    task.SourceLastMod,
+		DestURI:          destURI,
+		RoutingClass:     task.RoutingClass,
+		RewriteTemplate:  rewriteTemplate,
+		QuarantinePrefix: task.QuarantinePrefix,
+		Collision:        collision,
+		Vars:             task.Vars,
+		Probe:            task.Probe,
+		Action:           action,
 	}
-
-	payload, err := json.Marshal(buildProvenanceSidecar(task, destURI, destMeta, rewriteTemplate, action, jobID, collision))
-	if err != nil {
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
+	if destMeta != nil {
+		in.DestETag = destMeta.ETag
+		in.DestSize = destMeta.Size
 	}
-	payload = append(payload, '\n')
-	if err := putter.PutObject(ctx, sidecarKey, bytes.NewReader(payload), int64(len(payload))); err != nil {
-		return ref, handleProvenanceWriteError(ctx, w, cfg, sidecarKey, sidecarURI, destURI, err)
-	}
-	ref.Written = true
-	return ref, false
+	// mode="transfer_reflow" (underscore) matches the pool's historical details
+	// label exactly; do not use operationTransferReflow ("transfer-reflow").
+	ref, sidecarFatal, emitErr := reflowpkg.WriteProvenanceSidecar(ctx, reflowpkg.ProvenancePutViaProvider(sidecarDst), jobID, reflowToolVersion(), reflowpkg.ProvenanceNow(), "transfer_reflow", cfg.OnWriteError, sidecarKey, sidecarURI, destURI, in, poolProvenanceEmitter{w: w})
+	// A warn/error whose record could not be delivered must not let the caller
+	// proceed to a success terminal: fold an undelivered event into the
+	// fatal signal so the item is reported failed rather than silently completed.
+	return ref, sidecarFatal || emitErr != nil
 }
 
 func buildProvenanceSidecarKey(cfg provenanceConfig, destSpec *reflowDestSpec, destRel string, destKey string) string {
@@ -277,7 +275,10 @@ func buildProvenanceSidecarKey(cfg provenanceConfig, destSpec *reflowDestSpec, d
 	}
 	rel := strings.Trim(destRel, "/")
 	switch cfg.SidecarRoot.Provider {
-	case string(provider.ProviderS3):
+	case string(provider.ProviderS3), string(provider.ProviderGCS):
+		// INTENTIONAL FIX: GCS previously fell through to the default branch and
+		// used destKey+suffix, silently ignoring the mirrored sidecar-root prefix.
+		// Object stores share the prefix-relative layout.
 		key := strings.TrimPrefix(cfg.SidecarRoot.Prefix+rel, "/")
 		key = strings.ReplaceAll(key, "//", "/")
 		return key + cfg.Suffix
@@ -297,70 +298,6 @@ func buildProvenanceSidecarURI(cfg provenanceConfig, destSpec *reflowDestSpec, s
 		root = cfg.SidecarRoot
 	}
 	return buildReflowDestURI(root, sidecarKey)
-}
-
-func buildProvenanceSidecar(task reflowTask, destURI string, destMeta *provider.ObjectMeta, rewriteTemplate string, action string, jobID string, collision *reflowpkg.CollisionInfo) provenanceSidecar {
-	routingClass := task.RoutingClass
-	if routingClass == "" {
-		routingClass = "normal"
-	}
-	var lastModified *time.Time
-	if !task.SourceLastMod.IsZero() {
-		t := task.SourceLastMod.UTC()
-		lastModified = &t
-	}
-	var quarantinePrefix *string
-	if routingClass == "quarantine" {
-		prefix := task.QuarantinePrefix
-		quarantinePrefix = &prefix
-	}
-
-	dest := provenanceDestination{URI: destURI}
-	if destMeta != nil {
-		dest.ETag = destMeta.ETag
-		dest.Size = destMeta.Size
-	}
-
-	return provenanceSidecar{
-		Schema:        provenanceSchema,
-		SchemaVersion: provenanceSchemaVer,
-		Source: provenanceSource{
-			URI:          task.auditSourceURI(),
-			ETag:         task.SourceETag,
-			Size:         task.SourceSize,
-			LastModified: lastModified,
-		},
-		Destination: dest,
-		Run: provenanceRun{
-			RunID:       jobID,
-			TS:          time.Now().UTC().Format(time.RFC3339Nano),
-			ToolVersion: reflowToolVersion(),
-		},
-		Routing: provenanceRouting{
-			RoutingClass:     routingClass,
-			RewriteTemplate:  rewriteTemplate,
-			QuarantinePrefix: quarantinePrefix,
-		},
-		Collision: collision,
-		Vars:      task.Vars,
-		Probe:     task.Probe,
-		Action:    action,
-	}
-}
-
-func handleProvenanceWriteError(ctx context.Context, w *output.JSONLWriter, cfg provenanceConfig, sidecarKey string, sidecarURI string, destURI string, err error) bool {
-	details := map[string]any{"sidecar_key": sidecarKey, "sidecar_uri": sidecarURI, "dest_uri": destURI, "mode": "transfer_reflow"}
-	if cfg.OnWriteError == provenanceErrorFail {
-		_ = emitReflowError(ctx, w, sidecarKey, "provenance sidecar write failed", err, details)
-		return true
-	}
-	_ = w.WriteAny(ctx, reflowpkg.WarningRecordType, reflowpkg.Warning{
-		Code:    "PROVENANCE_WRITE_FAILED",
-		Message: reflowpkg.FormatErrorMessage("provenance sidecar write failed", err),
-		Key:     sidecarKey,
-		Details: details,
-	})
-	return false
 }
 
 func reflowToolVersion() string {

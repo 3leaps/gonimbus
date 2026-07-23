@@ -53,12 +53,41 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if err := r.validateCollisionCapability(); err != nil {
 		return Summary{}, err
 	}
+	// The provenance plan is validated in the library (the ADR-0006 authority)
+	// before any stream read, event emission, provider probe, or destination
+	// mutation, so a direct embedder is refused the same way the command adapter
+	// is — never left to fail only when the first sidecar write is attempted.
+	if err := r.cfg.Provenance.Validate(); err != nil {
+		return Summary{}, fmt.Errorf("reflow: %w", err)
+	}
+	// Live provenance requires a callable sidecar ObjectPutter on the resolved
+	// authority before any stream read, event emission, provider probe, or
+	// destination mutation: a locally knowable capability absence is
+	// refused up front, not discovered after the first main object has landed.
+	// Dry-run writes no sidecars, so it needs no putter.
+	if !r.cfg.DryRun && r.cfg.Provenance.Enabled() {
+		sidecarDst := r.cfg.Provenance.sidecarProvider(r.cfg.Destination.Provider)
+		if sidecarDst == nil {
+			return Summary{}, errors.New("reflow: provenance sidecar destination is not configured")
+		}
+		if _, ok := sidecarDst.(provider.ObjectPutter); !ok {
+			return Summary{}, errors.New("reflow: provenance sidecar destination does not support PutObject")
+		}
+	}
 	if !r.cfg.DryRun && src.Resolve == nil {
 		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
 	}
 	layout, err := ParseDestLayout(r.cfg.Destination.BaseURI)
 	if err != nil {
 		return Summary{}, err
+	}
+	// Verify a mirrored object-store sidecar root against the actual resolved
+	// destination before any I/O: a caller's SameBucketAsDest assertion is proven,
+	// not trusted, so a self-asserted same-bucket root that names a different
+	// bucket or provider is refused fail-closed rather than emitting a run echo
+	// that disagrees with the write authority.
+	if err := r.cfg.Provenance.ValidateAgainstDestination(layout.ProviderID, layout.Bucket); err != nil {
+		return Summary{}, fmt.Errorf("reflow: %w", err)
 	}
 	rewrite, err := r.compileRewrite()
 	if err != nil {
@@ -83,6 +112,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		Parallel:         r.cfg.Concurrency.RequestedCeiling,
 		ExecutionPath:    ExecutionPathEngine,
 		ConcurrencyStats: runConcurrency,
+		Provenance:       r.cfg.Provenance.RunConfig(),
 	}); err != nil {
 		return Summary{}, err
 	}
@@ -132,7 +162,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 				if poolCtx.Err() != nil {
 					continue // drain remaining tasks after cancellation
 				}
-				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, capability, limiter, arbiter, task.in, task.destKey, task.destURI); err != nil {
+				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, capability, limiter, arbiter, task.in, task.destRel, task.destKey, task.destURI); err != nil {
 					recordFatal(err)
 				}
 			}
@@ -373,6 +403,7 @@ func (e *ObjectErrorsError) Error() string {
 // implementations are never invoked concurrently) and carried to the worker.
 type plannedRecord struct {
 	in      reflowInput
+	destRel string
 	destKey string
 	destURI string
 	src     provider.Provider
@@ -397,7 +428,7 @@ func (r *Runner) planInputLine(ctx context.Context, layout DestLayout, rewrite *
 		return plannedRecord{}, false, r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Key: in.SourceKey, Message: FormatErrorMessage("destination mapping unavailable", err), Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI}})
 	}
 	destKey := layout.DestKey(destRel)
-	return plannedRecord{in: in, destKey: destKey, destURI: layout.DestURI(destKey)}, true, nil
+	return plannedRecord{in: in, destRel: destRel, destKey: destKey, destURI: layout.DestURI(destKey)}, true, nil
 }
 
 func validateSourceIdentity(current *string, in reflowInput) error {
@@ -418,7 +449,7 @@ func validateSourceIdentity(current *string, in reflowInput) error {
 	return nil
 }
 
-func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey, destURI string) error {
+func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destRel, destKey, destURI string) error {
 	sourceURI := sanitizeSourceURI(in.SourceURI)
 
 	if r.cfg.Checkpoint != nil {
@@ -510,7 +541,23 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	copyInput := in.withSourceMeta(sourceETag, sourceSize)
 	copyInput.SourceLastMod = sourceLastMod
 	copyInput.SourceSizeKnown = sourceSizeKnown
-	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, copyInput, destKey, putOptions)
+
+	// Per-key linearization for the enabled-provenance path: hold the
+	// destination-key gate across the land, the sidecar write, and the strict
+	// terminal so the final object and the durable sidecar describe the same
+	// winning operation under same-key fan-in. The gate is acquired only now
+	// (after the pre-copy source/metadata reads, which need no serialization) and
+	// released after the terminal record. The no-provenance path passes a nil gate
+	// and keeps copyWithCollision's own gate lifecycle (and read-only-resolution
+	// early release) unchanged — no concurrency regression.
+	var heldGate *destKeyGate
+	if r.cfg.Provenance.Enabled() {
+		var releaseHeld func()
+		heldGate, releaseHeld = arbiter.acquire(destKey)
+		defer releaseHeld()
+	}
+
+	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, copyInput, destKey, putOptions, heldGate)
 	if err != nil {
 		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
 		msg := "copy failed"
@@ -518,6 +565,23 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			msg = "collision"
 		}
 		return r.recordObjectError(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, msg, err, details, collision)
+	}
+
+	// Provenance sidecar for an eligible terminal, written inside the held gate
+	// and before the strict terminal, so a fail-policy write failure yields
+	// failed/provenance.write_failed and never a success ack. An
+	// undeliverable warn/error event aborts the run rather than silently
+	// completing.
+	var provenanceRef *ProvenanceRef
+	if r.cfg.Provenance.Enabled() {
+		ref, sidecarFatal, emitErr := r.writeItemProvenanceSidecar(ctx, copyInput, layout, limiter, destRel, destKey, destURI, status, reason, collision, putResult, bytes)
+		if emitErr != nil {
+			return emitErr
+		}
+		provenanceRef = ref
+		if sidecarFatal {
+			return r.finalizeProvenanceFailed(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, bytes, collision, provenanceRef)
+		}
 	}
 
 	if r.cfg.Checkpoint != nil {
@@ -542,6 +606,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			rec := in.withSourceMeta(sourceETag, sourceSize).record(destURI, destKey, "failed")
 			rec.Reason = "checkpoint.write_failed"
 			rec.Bytes = bytes
+			rec.Provenance = provenanceRef
 			rec = recordWithCollision(rec, collision)
 			stats.record(rec)
 			return r.emitRecord(ctx, rec)
@@ -551,12 +616,26 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	rec := in.withSourceMeta(sourceETag, sourceSize).record(destURI, destKey, status)
 	rec.Reason = reason
 	rec.Bytes = bytes
+	rec.Provenance = provenanceRef
 	rec = recordWithCollision(rec, collision)
 	stats.record(rec)
 	return r.emitRecord(ctx, rec)
 }
 
-func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+// copyWithCollision resolves the destination collision and lands the object. When
+// heldGate is non-nil the caller already holds the per-destination-key gate and
+// owns its release (the enabled-provenance linearization, which spans the land →
+// sidecar → terminal), so this function reuses it and never acquires or releases:
+// all inline releases become no-ops and every mode runs the whole resolution under
+// the held gate. When heldGate is nil it manages its own gate exactly as before,
+// with the read-only-resolution early release preserved for the no-provenance path.
+//
+// INVARIANT: destKeyGate.mu is a non-reentrant mutex. When heldGate is non-nil the
+// caller already holds it for destKey, so nothing on this call path (including
+// copyUnconditionalOverwrite) may call arbiter.acquire(destKey) again — that would
+// self-deadlock. Any future collision path that needs the gate must reuse heldGate,
+// never re-acquire.
+func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions, heldGate *destKeyGate) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	dst := r.cfg.Destination.Provider
 	if r.cfg.Collision.Mode == CollisionOverwrite {
 		return r.copyUnconditionalOverwrite(ctx, src, layout, limiter, in, destKey, opts)
@@ -571,7 +650,16 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	// critical section must span head + decision + conditional PUT: hold the gate
 	// for the whole resolution so a less-new same-run contender cannot win the
 	// If-Match first and durably strand the newer source as concurrent_mutation.
-	gate, release := arbiter.acquire(destKey)
+	var gate *destKeyGate
+	var release func()
+	if heldGate != nil {
+		// The caller holds the gate for the whole land → sidecar → terminal
+		// section and releases it; our inline releases become no-ops.
+		gate = heldGate
+		release = func() {}
+	} else {
+		gate, release = arbiter.acquire(destKey)
+	}
 	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
 		// Defer captures the real release (fired once at return); neutralizing the
 		// variable turns the paths' inline release() calls into no-ops so the gate

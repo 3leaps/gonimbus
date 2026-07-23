@@ -27,6 +27,9 @@ type Config struct {
 	ReadOnly bool
 	// Metadata controls destination metadata and storage-class PUT options.
 	Metadata MetadataPlan
+	// Provenance controls per-object provenance sidecar emission. The zero value
+	// (mode none) disables sidecars.
+	Provenance ProvenancePlan
 	// Checkpoint, when non-nil, enables resume via an embedder-supplied store.
 	Checkpoint CheckpointStore
 	// Events, when non-nil, receives typed redacted engine events.
@@ -56,8 +59,8 @@ type CollisionPolicy struct {
 // String returns a redacted summary; it never recurses into the injected
 // provider handle or the checkpoint/event sinks.
 func (c Config) String() string {
-	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, Metadata:%+v, Checkpoint:%s, Events:%s}",
-		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly, c.Metadata,
+	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, Metadata:%+v, Provenance:%s, Checkpoint:%s, Events:%s}",
+		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly, c.Metadata, c.Provenance,
 		ifacePresence(c.Checkpoint == nil), ifacePresence(c.Events == nil))
 }
 

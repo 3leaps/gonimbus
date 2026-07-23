@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,6 +115,7 @@ var (
 	reflowDryRun              bool
 	reflowResume              bool
 	reflowResumeRun           string
+	reflowRunID               string
 	reflowCheckpoint          string
 	reflowOverwrite           bool
 	reflowOnCollision         string
@@ -166,6 +168,7 @@ func init() {
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
 	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume a failed-resumable transfer reflow run by run id")
+	transferReflowCmd.Flags().StringVar(&reflowRunID, "run-id", "", "Use a specific run id for a new run (default: a generated id). Must be a single safe identifier segment (letters, digits, '.', '-', '_'; no path separators or '..'). Provenance run.run_id and the checkpoint key derive from it; reusing an id targets that run's existing checkpoint")
 	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Checkpoint DB path (sqlite)")
 	transferReflowCmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "Allow overwriting destination objects")
 	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer (log is a deprecated alias)")
@@ -243,13 +246,38 @@ func validateTransferReflowArgs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// reflowRunIDPattern bounds an operator-supplied run id to a single safe path
+// segment (letters, digits, '.', '-', '_'; must start alphanumeric; <=128 chars).
+var reflowRunIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// validateReflowRunID enforces that a caller-supplied --run-id is a single safe
+// identifier segment before it is joined into the checkpoint path or used as the
+// run identity. An empty value selects a generated id. It rejects path
+// separators, dot segments, traversal ('..'), absolute forms, control characters,
+// and over-long values, so --run-id cannot escape the run root.
+func validateReflowRunID(runID string) error {
+	if runID == "" {
+		return nil
+	}
+	if strings.Contains(runID, "..") || !reflowRunIDPattern.MatchString(runID) {
+		return fmt.Errorf("--run-id must be a single safe identifier segment (letters, digits, '.', '-', '_'; no path separators or '..'): %q", runID)
+	}
+	return nil
+}
+
 func runTransferReflow(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	resumeRun := strings.TrimSpace(reflowResumeRun)
 	if resumeRun != "" {
 		return runTransferReflowResume(ctx, cmd, resumeRun)
 	}
-	return runTransferReflowWithRunID(cmd, args, "")
+	runID := strings.TrimSpace(reflowRunID)
+	// Validate before any checkpoint-path resolution, state-store open, or provider
+	// construction, so an unsafe run id is refused with zero side effects.
+	if err := validateReflowRunID(runID); err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid --run-id", err)
+	}
+	return runTransferReflowWithRunID(cmd, args, runID)
 }
 
 func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string) error {
@@ -423,7 +451,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
-	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, destSpec, dstProv, collCfg, metaCfg, concurrencyCfg, state)
+	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, destSpec, dstProv, collCfg, metaCfg, provCfg, concurrencyCfg, state, jobID)
 	reflowInput = enginePlan.input
 	// Structural exclusivity: an enabled (plan-vetted) plan returns here, so the
 	// CLI-pool body below is reachable only for a disabled/fallback plan. The

@@ -422,6 +422,21 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 			probeResumeRunRoute(t)
 		}},
 	},
+	"run-id": {
+		note: "sets the run id for a new run (provenance run.run_id and the default checkpoint key derive from it); honored identically on both paths with no routing effect",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--run-id", "run-matrix-eng")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			require.Contains(t, stdout, "run-matrix-eng", "the run id flows into the emitted records")
+		}},
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.runPool(t, "--run-id", "run-matrix-pool")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			require.Contains(t, stdout, "run-matrix-pool", "the run id flows into the emitted records")
+		}},
+	},
 	"checkpoint": {
 		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
@@ -506,26 +521,33 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 	},
 
 	"provenance": {
-		note: "provenance sidecars not migrated",
-		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
+		note: "provenance sidecars migrated to the engine; honored on both paths",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
 			stdout, err := env.run(t, "--provenance", "sidecar")
-			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			require.True(t, env.dst.hasObject("data/source/file.xml"+provenanceSuffix))
 		}},
 		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t, "--provenance", "sidecar")
+			stdout, err := env.runPool(t, "--provenance", "sidecar")
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			require.True(t, env.dst.hasObject("data/source/file.xml"+provenanceSuffix))
 		}},
 	},
 	"provenance-sidecar-root": {
-		note: "companion of --provenance: the valid combination routes with provenance and selects mirrored-root placement on the pool; the root without sidecar mode refuses loudly (rejected-value subcase)",
-		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
-			// Valid combination: provenance routes, root rides along.
+		note: "companion of --provenance: the valid combination routes with provenance and selects mirrored-root placement on both paths; the root without sidecar mode refuses loudly (rejected-value subcase)",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			// Valid combination: provenance routes to the engine, root rides along.
 			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/")
-			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/run-01/")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			require.True(t, env.dst.hasObject("prov/run-01/source/file.xml"+provenanceSuffix),
+				"sidecar must be written under the requested mirrored root")
+			require.False(t, env.dst.hasObject("data/source/file.xml"+provenanceSuffix),
+				"sidecar must not fall back to adjacent placement")
+			run := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(run.Data), `"placement":{"mode":"mirrored-root","sidecar_root":"s3://dest-bucket/prov/run-01/"}`)
 
 			// Rejected-value subcase: the root without sidecar mode refuses
 			// loudly before any destination mutation.
@@ -533,7 +555,7 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/run-01/")
+			stdout, err := env.runPool(t, "--provenance", "sidecar", "--provenance-sidecar-root", "s3://dest-bucket/prov/run-01/")
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			// The root binds: the sidecar lands under the REQUESTED root (a
 			// dropped binding would fall back to adjacent placement and fail
@@ -556,7 +578,7 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
 			env := newFlagProbeEnv(t)
-			stdout, err := env.run(t, "--provenance", "sidecar", "--provenance-suffix", ".custom.json")
+			stdout, err := env.runPool(t, "--provenance", "sidecar", "--provenance-suffix", ".custom.json")
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			require.True(t, env.dst.hasObject("data/source/file.xml.custom.json"))
 		}},
@@ -613,7 +635,7 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 			require.Error(t, err, "unsafe suffix without the flag must refuse")
 
 			env2 := newFlagProbeEnv(t)
-			stdout, err := env2.run(t, "--provenance", "sidecar", "--provenance-suffix", ".xml", "--allow-unsafe-suffix")
+			stdout, err := env2.runPool(t, "--provenance", "sidecar", "--provenance-suffix", ".xml", "--allow-unsafe-suffix")
 			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
 			require.True(t, env2.dst.hasObject("data/source/file.xml.xml"), "unsafe suffix honored with the flag")
 		}},

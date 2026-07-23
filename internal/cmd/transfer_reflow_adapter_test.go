@@ -378,7 +378,7 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.True(t, plan.enabled, "live migrated stdin runs dispatch to the engine (reason=%q)", plan.reason)
 	require.Empty(t, plan.reason)
@@ -403,7 +403,7 @@ func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *tes
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.False(t, plan.enabled, "non-migrated source-failure policy must route to the CLI pool")
 	require.Equal(t, "source-failure policy not migrated", plan.reason)
@@ -427,7 +427,7 @@ func TestPlanTransferReflowEngineAdapter_DryRunKeepsEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil)
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.True(t, plan.enabled)
 	require.Empty(t, plan.reason)
