@@ -519,6 +519,80 @@ func TestRunnerCopyCollisionFailReturnsObjectError(t *testing.T) {
 	require.Equal(t, int64(1), summary.Collisions["conflict"])
 }
 
+// TestEngineFailedCollisionReasonConvergesAcrossSurfaces pins that a failed
+// collision reports the SAME specific reason on all three failure surfaces — the
+// emitted record, the error event details, and the durable checkpoint — so a
+// resume reading the checkpoint sees the reason a consumer saw on the record, not
+// the coarse error class. error_code still carries the class.
+func TestEngineFailedCollisionReasonConvergesAcrossSurfaces(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "new payload", "src-etag")
+	dst.putFixture("data/a/b.xml", "old payload", "old-etag")
+	ckpt := newMemCheckpoint()
+	sink := &collectSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Collision = CollisionPolicy{Mode: CollisionFail}
+	cfg.Checkpoint = ckpt
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":11,"dest_rel_key":"a/b.xml"}}`
+	_, runErr := runner.Run(context.Background(), copySource(src, line))
+	var objectErr *ObjectErrorsError
+	require.ErrorAs(t, runErr, &objectErr)
+
+	const wantReason = "collision.exists.conflict"
+	require.Equal(t, wantReason, lastRecord(t, sink).Reason, "emitted record reason")
+	require.Len(t, sink.errs, 1)
+	require.Equal(t, wantReason, sink.errs[0].Details["reason"], "error event details.reason")
+
+	item := lastCheckpointItem(t, ckpt, "data/a/b.xml")
+	require.Equal(t, "failed", item.Status)
+	require.Equal(t, wantReason, item.Reason, "durable checkpoint reason converges with the emitted reason")
+	require.Equal(t, "INTERNAL", item.ErrorCode, "durable error_code keeps the class")
+	require.NotEmpty(t, item.ErrorMessage, "durable checkpoint keeps the sanitized cause")
+}
+
+// TestRecordObjectErrorReasonIsAuthoritativeOverCallerDetails is the adversarial
+// guardrail for the single-reason invariant: even when a caller pre-populates
+// details["reason"] with a stale value, the derived collision reason wins on all
+// three surfaces (event details, durable checkpoint, record). No production caller
+// supplies that key today; this pins the invariant locally so a later caller or
+// refactor cannot silently reopen the split.
+func TestRecordObjectErrorReasonIsAuthoritativeOverCallerDetails(t *testing.T) {
+	dst := newCopyMemoryProvider()
+	ckpt := newMemCheckpoint()
+	sink := &collectSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Checkpoint = ckpt
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	in := reflowInput{SourceURI: "s3://source-bucket/a/b.xml", SourceKey: "a/b.xml"}
+	collision := &CollisionInfo{Kind: collisionConflict}
+	// A stale, conflicting caller-supplied reason that must be overridden.
+	details := map[string]any{
+		"reason":     "stale.caller.reason",
+		"source_uri": "s3://source-bucket/a/b.xml",
+		"dest_uri":   "s3://dest-bucket/data/a/b.xml",
+	}
+	copyErr := fmt.Errorf("destination key exists with different content")
+
+	rerr := runner.recordObjectError(context.Background(), newRunStats(), in,
+		"s3://dest-bucket/data/a/b.xml", "data/a/b.xml", "collision", copyErr, details, collision)
+	require.NoError(t, rerr)
+
+	const wantReason = "collision.exists.conflict"
+	require.Equal(t, wantReason, lastRecord(t, sink).Reason, "record reason")
+	require.Len(t, sink.errs, 1)
+	require.Equal(t, wantReason, sink.errs[0].Details["reason"],
+		"event details.reason wins over the stale caller-supplied value")
+	item := lastCheckpointItem(t, ckpt, "data/a/b.xml")
+	require.Equal(t, wantReason, item.Reason, "durable checkpoint reason")
+	require.Equal(t, "INTERNAL", item.ErrorCode, "durable error_code keeps the class")
+	require.NotEmpty(t, item.ErrorMessage, "durable checkpoint keeps the sanitized cause")
+}
+
 func TestRunnerProbeHeadThrottleRetriesAndCompletes(t *testing.T) {
 	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
 	src.putFixture("a/b.xml", "same payload", "src-etag")

@@ -545,22 +545,17 @@ func TestEngineProvenanceRecoveryMatrix(t *testing.T) {
 		require.Equal(t, wantReason, term.Reason)
 		secondCkpt := lastCheckpointItem(t, ckpt, mainKey)
 		require.Equal(t, wantStatus, secondCkpt.Status, "second-run persisted checkpoint status")
+		// The durable checkpoint reason now equals the emitted record reason on every
+		// row (the emitted-vs-durable split is closed): a failed collision persists
+		// the specific reason (e.g. collision.exists.duplicate), not the coarse class.
+		require.Equal(t, wantReason, secondCkpt.Reason,
+			"second-run persisted checkpoint reason equals the emitted reason")
 		if wantStatus == "failed" {
-			// The DURABLE failed-copy checkpoint records the coarse error CLASS,
-			// pinned here as LITERALS (not derived from the production
-			// reflowReasonForErrCode mapping, so the test is an independent oracle): a
-			// collision failure persists error_code "INTERNAL" / reason "internal"
-			// with the specific cause in error_message. The EMITTED record (asserted
-			// above as term.Reason == wantReason) carries the collision-specific
-			// reason instead. This emitted-vs-durable split is the pre-existing
-			// failed-copy taxonomy, pinned on both sides and dispositioned as
-			// intended for this slice (not a provenance change).
-			require.Equal(t, "INTERNAL", secondCkpt.ErrorCode, "durable failed error_code (literal)")
-			require.Equal(t, "internal", secondCkpt.Reason, "durable failed reason (literal error class)")
+			// error_code still carries the class, and the sanitized cause is retained,
+			// so the durable failed terminal stays fully diagnosable.
+			require.Equal(t, "INTERNAL", secondCkpt.ErrorCode, "durable failed error_code (class, literal)")
 			require.NotEmpty(t, secondCkpt.ErrorMessage, "durable failed terminal records a sanitized cause")
 		} else {
-			require.Equal(t, wantReason, secondCkpt.Reason,
-				"second-run persisted checkpoint reason equals the emitted reason")
 			require.Empty(t, secondCkpt.ErrorCode, "non-failed terminal carries no durable error code")
 		}
 		require.Equal(t, wantLands, dst.writeCount(mainKey), "second-run main-object land count")
