@@ -151,8 +151,11 @@ func ReclaimUnheldSetAuthorityLease(authorityRoot, indexSetID string) (ReclaimRe
 	}
 	defer func() { _ = root.Close() }()
 
-	// Holder attribution, readable even while another process holds the lock
-	// (advisory locks do not block reads).
+	// Holder attribution, best-effort. Where locks are advisory the doc stays
+	// readable while another process holds the lock, so a refused reclaim can
+	// name the holder. Where they are mandatory the held range is unreadable and
+	// attribution is simply absent until the holder exits. Either way this never
+	// touches the verdict — the lock decides that alone.
 	if doc, docErr := readSetAuthorityDoc(f); docErr == nil {
 		result.Holder = doc.Holder
 	}

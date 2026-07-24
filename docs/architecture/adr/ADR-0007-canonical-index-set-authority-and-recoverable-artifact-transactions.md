@@ -213,7 +213,11 @@ following pins.
   unheld. A holder document, job record, or process id is attribution only and
   MUST NOT manufacture an "unheld" verdict or authorize a removal. The lock
   proves that no process holds the file; it does not prove the artifact carries
-  the expected schema or set identity. Removal additionally requires exact-identity
+  the expected schema or set identity. Attribution is additionally best-effort
+  and platform-dependent: where file locks are mandatory rather than advisory the
+  holder document is unreadable while the lease is held, so attribution is absent
+  until the holder exits. Reporting MUST degrade to "unattributed" there and MUST
+  NOT let the difference reach the verdict. Removal additionally requires exact-identity
   proof — correct document type and an exact index-set id — validated under the
   acquired lock; a corrupt, wrong-type, or scope-mismatched document is invalid
   residue that fails closed and is retained for recovery, never reaped on lock

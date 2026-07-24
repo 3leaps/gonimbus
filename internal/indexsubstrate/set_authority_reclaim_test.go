@@ -49,7 +49,8 @@ func TestReclaim_HeldIsRefused(t *testing.T) {
 	require.ErrorIs(t, err, ErrSetAuthorityHeld, "a live holder must never be reclaimed")
 	require.False(t, res.Reclaimed)
 	require.Equal(t, LeaseHeld, res.Verdict)
-	require.Equal(t, "index-build-fixture-holder", res.Holder, "the refused holder must be named")
+	require.Equal(t, heldHolderAttribution("index-build-fixture-holder"), res.Holder,
+		"the refused holder must be named wherever the doc is readable under a live lock")
 	require.FileExists(t, path, "a held lease file must be left untouched")
 
 	// Still held afterward — the refused attempt changed nothing.
@@ -174,7 +175,19 @@ func TestUnlinkUnderHeldLock_RefusesSwappedBinding(t *testing.T) {
 	// hold the lock on A (models a successor having recreated the authority file).
 	successorPath := filepath.Join(resolved, name+".successor")
 	require.NoError(t, os.WriteFile(successorPath, []byte("successor-inode-B"), 0o600))
-	require.NoError(t, os.Rename(successorPath, filepath.Join(resolved, name)))
+	if swapErr := os.Rename(successorPath, filepath.Join(resolved, name)); swapErr != nil {
+		// Some platforms refuse to rebind a pathname whose file is open and
+		// locked, so the swap this test guards against cannot be constructed
+		// there: the kernel enforces at the OS layer what unlinkUnderHeldLock
+		// enforces in code. Release our own descriptor and the decoy so the temp
+		// dir can be torn down.
+		require.True(t, lockedRangeUnreadable(swapErr), "unexpected swap failure: %v", swapErr)
+		require.NoError(t, unlockFile(fdA))
+		require.NoError(t, fdA.Close())
+		require.NoError(t, root.Close())
+		require.NoError(t, os.Remove(successorPath))
+		t.Skip("platform refuses to rebind a held authority pathname; the swap is unconstructible here")
+	}
 
 	// The primitive must refuse to unlink the swapped-in successor inode.
 	removed, err := unlinkUnderHeldLock(root, name, fdA)

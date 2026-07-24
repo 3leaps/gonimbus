@@ -27,9 +27,15 @@ func TestSetAuthorityProbe_HeldThenUnheld(t *testing.T) {
 	held, err := ProbeSetAuthorityLease(authorityRoot, id)
 	require.NoError(t, err)
 	require.Equal(t, LeaseHeld, held.Verdict, "a live holder must probe as held")
-	require.Equal(t, "index-build-fixture-holder", held.Holder, "attribution must come from the on-disk doc")
-	require.Equal(t, setAuthorityDocType, held.DocType)
-	require.False(t, held.AcquiredAt.IsZero())
+	// Attribution comes from the on-disk doc wherever a live lock leaves it
+	// readable. Under a mandatory lock the doc is unreadable until the holder
+	// exits, so attribution is absent — but the verdict above is unchanged,
+	// because the lock alone decides held.
+	require.Equal(t, heldHolderAttribution("index-build-fixture-holder"), held.Holder)
+	if held.Holder != "" {
+		require.Equal(t, setAuthorityDocType, held.DocType)
+		require.False(t, held.AcquiredAt.IsZero())
+	}
 
 	holder.killAndWaitUnheld(authorityRoot, id)
 

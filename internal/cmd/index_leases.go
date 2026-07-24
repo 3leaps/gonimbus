@@ -36,7 +36,12 @@ the job registry for attribution. 'lease reap' removes provably-unheld residue.
 
 The held/unheld verdict is decided solely by a non-mutating lock probe. A job
 record, a PID, or a holder name is attribution only and never authorizes a
-removal: a live holder is never reclaimed.`,
+removal: a live holder is never reclaimed.
+
+Attribution for a held lease is best-effort and platform-dependent: where the
+platform's file locks are mandatory, the holder document cannot be read while
+the lease is held, so HOLDER is reported empty until the holder exits. The
+verdict is unaffected.`,
 	}
 
 	indexLeaseLsCmd = &cobra.Command{

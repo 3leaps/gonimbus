@@ -158,28 +158,64 @@ func writeLeaseWithDocID(t *testing.T, authorityRoot, fileID, docIndexSetID stri
 	return path
 }
 
+// heldHolderAttribution returns the holder string a probe can recover while the
+// lease is genuinely held.
+//
+// Unix advisory locks (flock) leave the doc readable by other processes, so
+// attribution survives while a holder is live. Windows LockFileEx is MANDATORY:
+// the held range is unreadable by anyone else, so attribution is unavailable
+// until the holder exits. The verdict is unaffected on either platform — the
+// lock alone decides held, and attribution never authorizes anything — so this
+// is a reporting difference, not a safety one.
+func heldHolderAttribution(want string) string {
+	if mandatoryFileLocks {
+		return ""
+	}
+	return want
+}
+
+// lockedRangeUnreadable reports whether err is the platform's specific refusal
+// to touch or rebind a range another handle holds locked — not merely any error
+// on a platform where such refusals exist.
+func lockedRangeUnreadable(err error) bool {
+	return err != nil && isLockedRangeError(err)
+}
+
 // docSnapshot captures the content, size, mode, and mtime of a lock file so a
-// test can prove a probe left every byte untouched.
+// test can prove a probe left every byte untouched. Content is captured only
+// when the file is readable: under a mandatory lock the bytes cannot be read at
+// all, so metadata carries the zero-mutation proof there.
 type docSnapshot struct {
-	content []byte
-	size    int64
-	mode    os.FileMode
-	modTime time.Time
+	content         []byte
+	contentReadable bool
+	size            int64
+	mode            os.FileMode
+	modTime         time.Time
 }
 
 func snapshotLockDoc(t *testing.T, path string) docSnapshot {
 	t.Helper()
-	content, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
-	require.NoError(t, err)
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	return docSnapshot{content: content, size: info.Size(), mode: info.Mode(), modTime: info.ModTime()}
+	snap := docSnapshot{size: info.Size(), mode: info.Mode(), modTime: info.ModTime()}
+	content, readErr := os.ReadFile(path) // #nosec G304 -- test-owned temp path
+	if readErr == nil {
+		snap.content = content
+		snap.contentReadable = true
+		return snap
+	}
+	// A mandatory lock blocking the read is expected on Windows; any other read
+	// failure is a real fixture problem.
+	require.True(t, lockedRangeUnreadable(readErr), "unexpected lock doc read failure: %v", readErr)
+	return snap
 }
 
 func (s docSnapshot) assertUnchanged(t *testing.T, path string) {
 	t.Helper()
 	after := snapshotLockDoc(t, path)
-	require.Equal(t, s.content, after.content, "lock doc content must be byte-identical after a read-only probe")
+	if s.contentReadable && after.contentReadable {
+		require.Equal(t, s.content, after.content, "lock doc content must be byte-identical after a read-only probe")
+	}
 	require.Equal(t, s.size, after.size, "lock doc size must be unchanged")
 	require.Equal(t, s.mode, after.mode, "lock doc mode must be unchanged")
 	require.Equal(t, s.modTime, after.modTime, "lock doc mtime must be unchanged")

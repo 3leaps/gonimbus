@@ -20,9 +20,15 @@ func TestSetAuthorityHeldMalformed_LockWins(t *testing.T) {
 	authorityRoot := authorityRootFor(t, segmentRoot)
 	path := filepath.Join(authorityRoot, id+".lock")
 
-	// Corrupt the doc while the holder still holds the advisory lock (writes do
-	// not require the lock; the lock stays held on the holder's descriptor).
-	require.NoError(t, os.WriteFile(path, []byte("{corrupt-but-held"), 0o600))
+	// Corrupt the doc while the holder still holds the lock. Under advisory
+	// locking the write lands (locks do not gate writes) and the probe then sees
+	// a garbage doc under a live lock. Under mandatory locking the write is
+	// refused outright and the doc is equally unusable to the probe. Either way
+	// the assertions below pin the same property: the verdict comes from the
+	// lock, never from the document.
+	if corruptErr := os.WriteFile(path, []byte("{corrupt-but-held"), 0o600); corruptErr != nil {
+		require.True(t, lockedRangeUnreadable(corruptErr), "unexpected corrupt-write failure: %v", corruptErr)
+	}
 
 	lease, err := ProbeSetAuthorityLease(authorityRoot, id)
 	require.NoError(t, err)
