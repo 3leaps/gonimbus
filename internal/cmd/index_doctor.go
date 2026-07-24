@@ -31,7 +31,12 @@ func newIndexDoctorCommand() *cobra.Command {
 		Short:   "Show and validate local index stores",
 		Long: `Inspect local index stores and their identity metadata.
 
-This is a read-only introspection command (it does not repair or modify indexes).
+Index-store inspection is read-only (it does not repair or modify indexes). The
+separate lease surface is reached with --leases (read-only lock-state report)
+and --release-stale (reclaims provably-unheld set-authority residue, a mutating
+operation gated by --confirm); those modes reject the index-store health and
+target flags rather than ignore them, and --confirm/--force are rejected without
+--release-stale. 'index lease' is the primary surface for lease operations.
 
 Format-aware: discovers sqlite-v1 (index.db) and durable-v2 (latest/complete/manifest
 trust chain). Durable-only sets without index.db are included.
@@ -79,6 +84,10 @@ Examples:
 	cmd.Flags().Bool("verbose", false, "Include identity payload details")
 	cmd.Flags().Bool("stats", false, "Include object counts (may be expensive on very large sqlite indexes)")
 	cmd.Flags().Bool("detail", false, "Show detailed JSON report for a single index (includes identity and manifest when present)")
+	cmd.Flags().Bool("leases", false, "Report index set-authority lease lock-state instead of index health (see 'index lease ls')")
+	cmd.Flags().Bool("release-stale", false, "Reclaim provably-unheld set-authority leases (see 'index lease reap'); requires --confirm")
+	cmd.Flags().Bool("confirm", false, "With --release-stale, perform the reclaim (otherwise a dry run)")
+	cmd.Flags().Bool("force", false, "With --release-stale, reclaim non-interactively (equivalent to --confirm; the held-lease and lock gates always apply)")
 
 	return cmd
 }
@@ -186,6 +195,25 @@ func runIndexDoctor(cmd *cobra.Command, args []string) error {
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	includeStats, _ := cmd.Flags().GetBool("stats")
 	detail, _ := cmd.Flags().GetBool("detail")
+
+	// The lease surface is a distinct concern (whole-set authority lock lifecycle)
+	// from index-store health; --leases/--release-stale short-circuit to it.
+	leases, _ := cmd.Flags().GetBool("leases")
+	releaseStale, _ := cmd.Flags().GetBool("release-stale")
+	// Fail closed on incompatible flags before any target resolution, listing, or
+	// reclaim — in every mode, so a lease-mutation opt-in is never silently
+	// accepted by the read-only index-store path either.
+	if err := guardDoctorLeaseFlags(cmd, leases, releaseStale); err != nil {
+		return err
+	}
+	if leases || releaseStale {
+		if releaseStale {
+			confirm, _ := cmd.Flags().GetBool("confirm")
+			force, _ := cmd.Flags().GetBool("force")
+			return reapLeases(cmd.OutOrStdout(), args, confirm || force, jsonOutput)
+		}
+		return listLeases(cmd.OutOrStdout(), jsonOutput)
+	}
 
 	target := ""
 	if len(args) > 0 {
