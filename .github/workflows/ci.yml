@@ -178,6 +178,16 @@ jobs:
       - name: Run native leased index GC recovery suite
         shell: pwsh
         run: go test ./internal/cmd ./internal/indexsubstrate -run '^(TestRunIndexGC|TestAcquireWriteLeaseForMaintenance)' -count=1 -v
+      # Set-authority lease detection and reclaim must be proven on native
+      # Windows, not merely cross-compiled. Reclaim unlinks the lock file while
+      # its descriptor still holds the lock, and Windows delete-while-open
+      # semantics (FILE_SHARE_DELETE, delete-pending directory entries) differ
+      # materially from Unix. The anti-split and adversarial
+      # reclaim-versus-acquire proofs are precisely the ones whose platform
+      # behavior cannot be inferred from a Linux run.
+      - name: Run native set-authority lease detect and reclaim suite
+        shell: pwsh
+        run: go test ./internal/indexsubstrate ./pkg/indexcoord ./internal/cmd -run '^(TestSetAuthority|TestReclaim_|TestUnlinkUnderHeldLock|TestLease|TestEnumerateLeases|TestInvalidLease|TestReclaimUnheldLease|TestIndexLease|TestIndexDoctorCommandPath|TestGuardDoctorLeaseFlags)' -count=1 -v
       - name: Run native registry security suite
         shell: pwsh
         run: go test ./pkg/jobregistry -count=1 -v
