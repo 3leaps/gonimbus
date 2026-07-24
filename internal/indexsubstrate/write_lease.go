@@ -29,8 +29,10 @@ const WriteLeaseFileName = ".durable-write.lock"
 const writeLeaseFileName = WriteLeaseFileName
 
 // WriteLease is an index-set-scoped exclusive lock for durable latest writers.
-// Mutual exclusion is provided by an OS advisory lock held on an open FD for
-// the lifetime of the critical section. Process crash releases the lock.
+// Mutual exclusion is provided by an OS file lock held on an open FD for the
+// lifetime of the critical section. Process crash releases the lock. Whether
+// that lock is advisory or mandatory is platform-dependent, so nothing here may
+// assume a held lease file stays readable to other processes.
 //
 // The lease is bound at acquisition to a canonical segment-set root and
 // index-set ID. PublishSnapshot must assert that binding against the latest
