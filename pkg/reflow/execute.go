@@ -125,14 +125,79 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	stats := newRunStats()
 	arbiter := newDestKeyArbiter()
 
-	// Worker pool honoring the resolved concurrency ceiling. The reader stage
-	// (this goroutine) parses, validates, and plans records serially so
-	// INVALID_INPUT events keep input order; plannable live copies fan out to
-	// EffectiveCeiling workers. The AIMD limiter remains the per-operation
-	// concurrency authority — workers still acquire per provider op. Contract:
-	// per-object transitions stay ordered, exactly one terminal record is
-	// emitted per accepted input, the summary follows worker join, and global
-	// input order is not promised.
+	// The record-stream source feeds the runner's worker pool through the producer
+	// seam: recordStreamProducer is the serial reader stage (parse/validate/plan,
+	// inline dry-run + INVALID_INPUT emission in input order, serial resolver), and
+	// drivePlannedRecords owns the task queue, the EffectiveCeiling worker pool,
+	// cancellation, and drain semantics. The AIMD limiter remains the per-operation
+	// concurrency authority. Contract: per-object transitions stay ordered, exactly
+	// one terminal record per accepted input, the summary follows worker join, and
+	// global input order is not promised.
+	producer := r.recordStreamProducer(src, layout, rewrite, stats)
+	if err := r.drivePlannedRecords(ctx, layout, stats, capability, limiter, arbiter, producer); err != nil {
+		return Summary{}, err
+	}
+
+	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, capability, limiter.Snapshot())
+	summary.ExecutionPath = ExecutionPathEngine
+	if err := r.emitSummary(ctx, summary); err != nil {
+		return Summary{}, err
+	}
+	if summary.InvalidInputs > 0 {
+		// Mirror the command path, which writes the summary and then exits non-zero
+		// on invalid inputs. The Summary is returned alongside the error.
+		return Summary{SummaryRecord: summary}, &InvalidInputsError{Count: summary.InvalidInputs}
+	}
+	if summary.Errors > 0 {
+		// Mirror the command path, which writes the summary and then exits non-zero
+		// when object-level errors occurred. The Summary is returned alongside the error.
+		return Summary{SummaryRecord: summary}, &ObjectErrorsError{Count: summary.Errors}
+	}
+	return Summary{SummaryRecord: summary}, nil
+}
+
+// recordProducer enumerates a source on the serial planning stage and hands
+// plannable live-copy records to the runner's worker pool via deps.dispatch. It
+// runs in the runner's calling goroutine — never concurrently with itself — so a
+// SourceResolver and per-source planning need no internal synchronization. The
+// runner drives it with the pool context, so a worker fatal or a context
+// cancellation interrupts context-aware enumeration and I/O promptly rather than
+// only at the next deps.stopped() poll.
+//
+// The contract carries two shutdown modes:
+//   - Stop-discovery-with-drain: the producer returns a non-nil error. Enumeration
+//     stops and the run fails with that error, but ADMITTED work drains — the
+//     runner closes the task queue and lets queued and in-flight copies finish. A
+//     producer-returned error never itself cancels admitted work.
+//   - Fatal cancellation: a worker's unrecoverable error, or context cancellation,
+//     cancels the pool; queued-but-unstarted copies are skipped. The producer
+//     observes it through the pool context (and deps.stopped()) and returns; the
+//     runner surfaces the fatal or context error, which outranks any producer
+//     return.
+type recordProducer func(ctx context.Context, deps producerDeps) error
+
+// producerDeps are the runner-owned queue operations a producer feeds. The runner
+// owns the task channel, worker pool, and cancellation; the producer only supplies
+// records and observes cancellation — it never owns the queue (ADR-0006
+// producer-seam contract).
+type producerDeps struct {
+	// dispatch queues one planned live-copy record for the worker pool. It blocks
+	// until the record is queued or the pool stops, returning false when the pool
+	// has stopped (the producer should cease enumerating).
+	dispatch func(plannedRecord) bool
+	// stopped reports whether the worker pool has been cancelled (a worker fatal or
+	// context cancellation). The producer polls it to break enumeration.
+	stopped func() bool
+}
+
+// drivePlannedRecords runs the records a producer enumerates through the worker
+// pool. The runner owns the task queue, the EffectiveCeiling worker pool,
+// cancellation, and drain semantics; the producer only feeds records via the deps
+// it is handed. Error precedence: a worker fatal outranks any producer return; a
+// producer reader/sink error outranks context cancellation; cancellation outranks
+// a scanner read error (the producer orders the last two at its scan completion).
+// See recordProducer for the two shutdown modes.
+func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, producer recordProducer) error {
 	poolCtx, cancelPool := context.WithCancel(ctx)
 	defer cancelPool()
 	workers := r.cfg.Concurrency.EffectiveCeiling
@@ -169,55 +234,22 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		}()
 	}
 
-	sourceIdentity := ""
-	scanner := bufio.NewScanner(src.Records)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	var readerErr error
-	for scanner.Scan() {
-		if poolCtx.Err() != nil {
-			break
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		task, ok, err := r.planInputLine(ctx, layout, rewrite, stats, &sourceIdentity, line)
-		if err != nil {
-			readerErr = err
-			break
-		}
-		if !ok {
-			continue
-		}
-		if r.cfg.DryRun {
-			rec := task.in.record(task.destURI, task.destKey, "planned")
-			stats.record(rec)
-			if err := r.emitRecord(ctx, rec); err != nil {
-				readerErr = err
-				break
+	deps := producerDeps{
+		dispatch: func(task plannedRecord) bool {
+			select {
+			case tasks <- task:
+				return true
+			case <-poolCtx.Done():
+				return false
 			}
-			continue
-		}
-		// Source resolution stays on the serial reader stage: SourceResolver
-		// implementations are never invoked concurrently, so the adapter's lazy
-		// provider cache needs no synchronization and library resolvers carry no
-		// hidden concurrency requirement. Identity validation (planInputLine)
-		// precedes resolution, so a divergent source root never resolves.
-		sourceProvider, resolveErr := src.Resolve(ctx, task.in.SourceURI)
-		if resolveErr != nil {
-			if err := r.recordObjectError(ctx, stats, task.in, task.destURI, task.destKey, "failed to connect to provider", resolveErr, map[string]any{"source_uri": sanitizeSourceURI(task.in.SourceURI), "dest_uri": task.destURI}, nil); err != nil {
-				readerErr = err
-				break
-			}
-			continue
-		}
-		task.src = sourceProvider
-		select {
-		case tasks <- task:
-		case <-poolCtx.Done():
-		}
+		},
+		stopped: func() bool { return poolCtx.Err() != nil },
 	}
-	scanErr := scanner.Err()
+	// Drive the producer with the pool context so a worker fatal (recordFatal →
+	// cancelPool) or a parent-context cancellation interrupts context-aware
+	// producer enumeration and I/O promptly, not only at the next stopped() poll.
+	// A producer-returned error does not cancel the pool, so admitted work drains.
+	producerErr := producer(poolCtx, deps)
 	close(tasks)
 	wg.Wait()
 
@@ -225,34 +257,87 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	firstErr := fatalErr
 	fatalMu.Unlock()
 	if firstErr == nil {
-		firstErr = readerErr
+		firstErr = producerErr
 	}
 	if firstErr != nil {
-		return Summary{}, firstErr
+		return firstErr
 	}
-	if err := ctx.Err(); err != nil {
-		return Summary{}, err
-	}
-	if scanErr != nil {
-		return Summary{}, scanErr
-	}
+	return ctx.Err()
+}
 
-	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, capability, limiter.Snapshot())
-	summary.ExecutionPath = ExecutionPathEngine
-	if err := r.emitSummary(ctx, summary); err != nil {
-		return Summary{}, err
+// recordStreamProducer is the producer for a RecordStreamSource: the serial
+// reader stage that scans the preselected reflow-input stream. It parses,
+// validates, and plans each record; emits dry-run "planned" records and
+// INVALID_INPUT events inline (so those keep input order); resolves the source
+// provider on this serial stage (the resolver is never invoked concurrently); and
+// dispatches plannable live copies to the worker pool. A parse/emit/resolve-emit
+// sink failure returns an error (stop-discovery-with-drain); scanner read errors
+// surface at loop end.
+func (r *Runner) recordStreamProducer(src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats) recordProducer {
+	return func(ctx context.Context, deps producerDeps) error {
+		sourceIdentity := ""
+		scanner := bufio.NewScanner(src.Records)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			if deps.stopped() {
+				break
+			}
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			task, ok, err := r.planInputLine(ctx, layout, rewrite, stats, &sourceIdentity, line)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if r.cfg.DryRun {
+				rec := task.in.record(task.destURI, task.destKey, "planned")
+				stats.record(rec)
+				if err := r.emitRecord(ctx, rec); err != nil {
+					return err
+				}
+				continue
+			}
+			// Source resolution stays on the serial reader stage: SourceResolver
+			// implementations are never invoked concurrently, so the adapter's lazy
+			// provider cache needs no synchronization and library resolvers carry no
+			// hidden concurrency requirement. Identity validation (planInputLine)
+			// precedes resolution, so a divergent source root never resolves.
+			sourceProvider, resolveErr := src.Resolve(ctx, task.in.SourceURI)
+			if resolveErr != nil {
+				// A resolve error caused by pool-context cancellation (a worker fatal
+				// or parent cancellation) is not an object failure: surface the
+				// context error and stop rather than manufacturing a failed record and
+				// error event for a source whose connection was never really attempted.
+				// Ordinary resolve errors with a live context still surface below.
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := r.recordObjectError(ctx, stats, task.in, task.destURI, task.destKey, "failed to connect to provider", resolveErr, map[string]any{"source_uri": sanitizeSourceURI(task.in.SourceURI), "dest_uri": task.destURI}, nil); err != nil {
+					return err
+				}
+				continue
+			}
+			task.src = sourceProvider
+			if !deps.dispatch(task) {
+				// Pool stopped (worker fatal or context cancellation): the enqueue
+				// did not happen; continue so the next stopped() check breaks the
+				// loop. Admitted work still drains.
+				continue
+			}
+		}
+		// Context cancellation outranks a scanner read error: when the pool context
+		// is done (worker fatal or parent cancellation), surface that rather than a
+		// scanner error observed on the same pass. Reader/sink errors returned above
+		// already outrank cancellation, so they are not reached here.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return scanner.Err()
 	}
-	if summary.InvalidInputs > 0 {
-		// Mirror the command path, which writes the summary and then exits non-zero
-		// on invalid inputs. The Summary is returned alongside the error.
-		return Summary{SummaryRecord: summary}, &InvalidInputsError{Count: summary.InvalidInputs}
-	}
-	if summary.Errors > 0 {
-		// Mirror the command path, which writes the summary and then exits non-zero
-		// when object-level errors occurred. The Summary is returned alongside the error.
-		return Summary{SummaryRecord: summary}, &ObjectErrorsError{Count: summary.Errors}
-	}
-	return Summary{SummaryRecord: summary}, nil
 }
 
 func recordStreamCopyCollisionModeSupported(mode string) bool {

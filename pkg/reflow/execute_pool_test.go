@@ -2,6 +2,7 @@ package reflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -289,6 +290,88 @@ func TestRunnerRecordStreamPoolMaxInFlight(t *testing.T) {
 	require.Len(t, terminalByKey, objects)
 	for key, count := range terminalByKey {
 		require.Equal(t, 1, count, "exactly one terminal record for %s", key)
+	}
+}
+
+// firstGetSignalProvider closes signal the first time any worker begins a
+// GetObject — i.e., the first dispatched record has reached a worker.
+type firstGetSignalProvider struct {
+	*copyMemoryProvider
+	once   sync.Once
+	signal chan struct{}
+}
+
+func (p *firstGetSignalProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	p.once.Do(func() { close(p.signal) })
+	return p.copyMemoryProvider.GetObject(ctx, key)
+}
+
+// gatedStreamReader serves the first record-stream line immediately, then blocks
+// every later Read until proceed is closed (or a deadline fails the read). A
+// producer that streams dispatches line 0, a worker starts its GetObject, proceed
+// closes, and the remaining lines flow. A producer that enumerates the whole
+// stream before dispatching blocks reading line 1 before any record reaches a
+// worker to close proceed, so the deadline errors the read.
+type gatedStreamReader struct {
+	lines    []string
+	idx      int
+	proceed  <-chan struct{}
+	deadline time.Duration
+}
+
+func (r *gatedStreamReader) Read(p []byte) (int, error) {
+	if r.idx >= len(r.lines) {
+		return 0, io.EOF
+	}
+	if r.idx >= 1 {
+		select {
+		case <-r.proceed:
+		case <-time.After(r.deadline):
+			return 0, fmt.Errorf("producer read line %d before any record was dispatched: stream-overlap broken", r.idx)
+		}
+	}
+	n := copy(p, r.lines[r.idx])
+	r.idx++
+	return n, nil
+}
+
+// TestRunnerRecordStreamProducerStreamsToPool is the producer-seam negative
+// control: it proves the reader stage dispatches records as it enumerates rather
+// than enumerating the whole stream first. A worker must begin processing record 0
+// before the producer can read record 1; an enumerate-then-dispatch regression
+// deadlocks the gated reader past its deadline and fails the run. (The existing
+// max-in-flight test does not catch this — buffering then dispatching all records
+// still reaches the fan-out floor.)
+func TestRunnerRecordStreamProducerStreamsToPool(t *testing.T) {
+	const objects = 8
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, objects)
+	signal := make(chan struct{})
+	src := &firstGetSignalProvider{copyMemoryProvider: srcBase, signal: signal}
+	dst := newCopyMemoryProvider()
+
+	lines := make([]string, objects)
+	for i := 0; i < objects; i++ {
+		lines[i] = fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/%02d.xml","source_key":"a/%02d.xml","source_etag":"etag-%02d","source_size_bytes":7,"dest_rel_key":"a/%02d.xml"}}`+"\n", i, i, i, i)
+	}
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(4)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	reader := &gatedStreamReader{lines: lines, proceed: signal, deadline: 2 * time.Second}
+	summary, err := runner.Run(context.Background(), RecordStreamSource{
+		Records: reader,
+		Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+	})
+	require.NoError(t, err, "producer must stream records to the pool as it enumerates (no enumerate-then-dispatch)")
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+	require.Zero(t, summary.Errors)
+	require.Zero(t, summary.InvalidInputs)
+	for i := 0; i < objects; i++ {
+		require.Equal(t, []byte("payload"), dst.body(fmt.Sprintf("data/a/%02d.xml", i)))
 	}
 }
 
@@ -729,4 +812,286 @@ func TestRunnerRecordStreamPoolCancellation(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, sink.summaries, "no terminal summary after cancellation")
+}
+
+var (
+	errSinkSentinel     = errors.New("sink sentinel fatal")
+	errProducerSentinel = errors.New("producer sentinel stop-discovery")
+)
+
+// failFirstOnRecordSink returns sentinel on the first OnRecord (the first
+// in_progress a worker emits), modelling a worker-fatal, and counts calls.
+type failFirstOnRecordSink struct {
+	collectSink
+	sentinel error
+	calls    atomic.Int32
+}
+
+func (s *failFirstOnRecordSink) OnRecord(ctx context.Context, rec Record) error {
+	if s.calls.Add(1) == 1 {
+		return s.sentinel
+	}
+	return s.collectSink.OnRecord(ctx, rec)
+}
+
+// blockThenErrorReader serves the first line, then blocks the next Read until
+// unblock is closed and returns err — used to coincide a scanner read error with
+// a cancelled context.
+type blockThenErrorReader struct {
+	line    string
+	served  bool
+	unblock <-chan struct{}
+	err     error
+}
+
+func (r *blockThenErrorReader) Read(p []byte) (int, error) {
+	if !r.served {
+		r.served = true
+		return copy(p, r.line), nil
+	}
+	<-r.unblock
+	return 0, r.err
+}
+
+// lineThenSentinelReader serves the first line, then returns sentinel on the next
+// Read — the producer stop-discovery-with-drain trigger. Before returning the
+// sentinel it waits for workerEntered (when set) so the admitted task is already
+// inside GetObject — a later cancellation cannot skip an unstarted task — then
+// closes errorReturned (when set).
+type lineThenSentinelReader struct {
+	line          string
+	served        bool
+	sentinel      error
+	workerEntered <-chan struct{}
+	errorReturned chan struct{}
+}
+
+func (r *lineThenSentinelReader) Read(p []byte) (int, error) {
+	if !r.served {
+		r.served = true
+		return copy(p, r.line), nil
+	}
+	// Wait until the admitted task is inside GetObject before the producer errors:
+	// a later cancel-on-producer-error mutation then cancels a task already started
+	// rather than skipping an unstarted one, so the guard fails promptly instead of
+	// hanging on an unstarted worker.
+	if r.workerEntered != nil {
+		<-r.workerEntered
+	}
+	// Close errorReturned immediately before handing the producer its sentinel, so
+	// a test can release the admitted GetObject only after the producer has begun
+	// returning its error — never a blind delay that could release the copy first.
+	if r.errorReturned != nil {
+		close(r.errorReturned)
+		r.errorReturned = nil
+	}
+	return 0, r.sentinel
+}
+
+// gatedThenCtxGetProvider signals getStarted on the first GetObject, blocks until
+// proceed is closed, then waits up to observeWindow for context cancellation
+// before reading. A drain-preserving runner never cancels the pool on a producer
+// error, so the wait elapses and the admitted GetObject completes; a runner that
+// (wrongly) cancels on producer error cancels the pool, the wait observes it, and
+// the object never lands — caught every run regardless of goroutine scheduling.
+type gatedThenCtxGetProvider struct {
+	*copyMemoryProvider
+	once          sync.Once
+	getStarted    chan struct{}
+	proceed       <-chan struct{}
+	observeWindow time.Duration
+}
+
+func (p *gatedThenCtxGetProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	p.once.Do(func() { close(p.getStarted) })
+	<-p.proceed
+	select {
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	case <-time.After(p.observeWindow):
+	}
+	return p.copyMemoryProvider.GetObject(ctx, key)
+}
+
+// TestRunnerRecordStreamWorkerFatalInterruptsBlockedProducer proves the producer
+// is driven with the pool context: a worker-fatal must interrupt a producer
+// blocked in context-aware enumeration/resolution promptly, not leave the run
+// hung until that call returns. Regression control for DR-4.1-1 — with the parent
+// context passed instead, the blocked resolver never observes the worker-fatal
+// cancellation and this test times out.
+func TestRunnerRecordStreamWorkerFatalInterruptsBlockedProducer(t *testing.T) {
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, 2)
+	dst := newCopyMemoryProvider()
+	sink := &failFirstOnRecordSink{sentinel: errSinkSentinel}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	var resolveCalls atomic.Int32
+	resolve := func(ctx context.Context, _ string) (provider.Provider, error) {
+		if resolveCalls.Add(1) == 1 {
+			return srcBase, nil // line 0 resolves and dispatches
+		}
+		<-ctx.Done() // line 1 blocks on the callback context until the pool cancels
+		return nil, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, e := runner.Run(context.Background(), RecordStreamSource{
+			Records: strings.NewReader(poolInputLines(2)),
+			Resolve: resolve,
+		})
+		done <- e
+	}()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, errSinkSentinel, "worker-fatal error must win precedence")
+		require.Empty(t, sink.summaries, "no terminal summary after a fatal")
+		// The line-1 resolver wakes with the cancellation the worker-fatal caused;
+		// that must not manufacture a "failed to connect" error/record after the
+		// fatal. Only the one rejected in_progress reaches the sink.
+		require.Equal(t, int32(1), sink.calls.Load(), "cancelled resolution must not emit a post-fatal record")
+		require.Empty(t, sink.records, "no record beyond the rejected in_progress")
+		require.Empty(t, sink.errs, "no spurious error event from the cancelled resolver")
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker-fatal did not interrupt the ctx-blocked producer (DR-4.1-1 regression)")
+	}
+}
+
+// TestRunnerRecordStreamCancelThenReadErrorPrecedence pins F1: when a parent
+// cancellation and a scanner read error coincide, the run returns
+// context.Canceled — cancellation outranks the scanner error, matching the inline
+// teardown. With the producer returning scanner.Err() before the context check,
+// the read error would win instead.
+func TestRunnerRecordStreamCancelThenReadErrorPrecedence(t *testing.T) {
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, 1)
+	signal := make(chan struct{})
+	src := &firstGetSignalProvider{copyMemoryProvider: srcBase, signal: signal}
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	unblock := make(chan struct{})
+	line0 := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/00.xml","source_key":"a/00.xml","source_etag":"etag-00","source_size_bytes":7,"dest_rel_key":"a/00.xml"}}` + "\n")
+	reader := &blockThenErrorReader{line: line0, unblock: unblock, err: errors.New("simulated scanner read failure")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-signal       // worker began line 0's GetObject; producer is blocked reading line 1
+		cancel()       // cancel the parent -> pool context cancels
+		close(unblock) // reader now returns its read error on the same pass
+	}()
+
+	_, err = runner.Run(ctx, RecordStreamSource{
+		Records: reader,
+		Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+	})
+	require.ErrorIs(t, err, context.Canceled, "cancellation must outrank a coincident scanner read error")
+	require.NotContains(t, err.Error(), "simulated scanner read failure")
+	require.Empty(t, sink.summaries, "no terminal summary after cancellation")
+}
+
+// TestRunnerRecordStreamProducerErrorDrainsAdmitted pins the stop-discovery-with-
+// drain mode (F2a): a producer-returned error stops enumeration and fails the run,
+// but an already-admitted copy still completes. A runner that cancels the pool on
+// a producer error would fail the admitted GetObject and drop the object.
+func TestRunnerRecordStreamProducerErrorDrainsAdmitted(t *testing.T) {
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, 1)
+	getStarted := make(chan struct{})
+	proceed := make(chan struct{})
+	errorReturned := make(chan struct{})
+	src := &gatedThenCtxGetProvider{copyMemoryProvider: srcBase, getStarted: getStarted, proceed: proceed, observeWindow: 200 * time.Millisecond}
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	line0 := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/00.xml","source_key":"a/00.xml","source_etag":"etag-00","source_size_bytes":7,"dest_rel_key":"a/00.xml"}}` + "\n")
+	reader := &lineThenSentinelReader{line: line0, sentinel: errProducerSentinel, workerEntered: getStarted, errorReturned: errorReturned}
+
+	done := make(chan error, 1)
+	go func() {
+		_, e := runner.Run(context.Background(), RecordStreamSource{
+			Records: reader,
+			Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+		})
+		done <- e
+	}()
+
+	// The reader gates the sentinel on getStarted, so errorReturned fires only after
+	// the admitted task is already inside GetObject: a wrongful cancel cannot skip it.
+	<-errorReturned // the producer is handing back its sentinel with the copy admitted
+	close(proceed)  // the admitted GetObject now waits its observe window for any (wrongful) cancellation
+
+	err = <-done
+	require.ErrorIs(t, err, errProducerSentinel, "producer stop-discovery error is returned")
+	require.Equal(t, []byte("payload"), dst.body("data/a/00.xml"), "admitted work must drain to completion")
+	require.Empty(t, sink.summaries, "no terminal summary when the run fails")
+}
+
+// TestRunnerRecordStreamWorkerFatalSkipsQueued pins the fatal-cancel mode (F2b):
+// with a single worker, the first in_progress fails with a sentinel while later
+// records are queued; the pool cancels, queued work is skipped, exactly one sink
+// record call occurs, nothing lands, and no summary is written.
+func TestRunnerRecordStreamWorkerFatalSkipsQueued(t *testing.T) {
+	const objects = 8
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, objects)
+	dst := newCopyMemoryProvider()
+	sink := &failFirstOnRecordSink{sentinel: errSinkSentinel}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(1) // single worker so later records queue behind the failing one
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	_, err = runner.Run(context.Background(), RecordStreamSource{
+		Records: strings.NewReader(poolInputLines(objects)),
+		Resolve: func(context.Context, string) (provider.Provider, error) { return srcBase, nil },
+	})
+	require.ErrorIs(t, err, errSinkSentinel)
+	require.Equal(t, int32(1), sink.calls.Load(), "worker-fatal must skip queued work: only the failing in_progress reaches the sink")
+	for i := 0; i < objects; i++ {
+		require.Empty(t, dst.body(fmt.Sprintf("data/a/%02d.xml", i)), "no object lands after the first-record fatal")
+	}
+	require.Empty(t, sink.summaries, "no terminal summary after a fatal")
+}
+
+// TestRunnerRecordStreamResolveErrorEmitsFailureWhenLive proves the DR-4.1-R2-1
+// guard is scoped to cancellation only: an ordinary resolve error with a live
+// context still surfaces the "failed to connect to provider" error event and a
+// failed terminal, exactly as before, and the run exits non-zero.
+func TestRunnerRecordStreamResolveErrorEmitsFailureWhenLive(t *testing.T) {
+	srcBase := newCopyMemoryProvider()
+	seedPoolFixtures(srcBase, 1)
+	dst := newCopyMemoryProvider()
+
+	sink := &serializedGuardSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Concurrency = poolConcurrency(2)
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	resolveErr := errors.New("provider unreachable")
+	_, err = runner.Run(context.Background(), RecordStreamSource{
+		Records: strings.NewReader(poolInputLines(1)),
+		Resolve: func(context.Context, string) (provider.Provider, error) { return nil, resolveErr },
+	})
+	var objErr *ObjectErrorsError
+	require.ErrorAs(t, err, &objErr, "a live-context resolve failure exits non-zero")
+	require.Len(t, sink.errs, 1, "the failure still emits an error event")
+	require.Equal(t, int64(1), sink.summaries[0].Errors, "and a counted object error")
+	require.False(t, sink.violated.Load())
 }
