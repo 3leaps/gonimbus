@@ -182,9 +182,15 @@ jobs:
       # Windows, not merely cross-compiled. Reclaim unlinks the lock file while
       # its descriptor still holds the lock, and Windows delete-while-open
       # semantics (FILE_SHARE_DELETE, delete-pending directory entries) differ
-      # materially from Unix. The anti-split and adversarial
-      # reclaim-versus-acquire proofs are precisely the ones whose platform
-      # behavior cannot be inferred from a Linux run.
+      # materially from Unix.
+      #
+      # What this step proves natively: the delete-while-open unlink of a
+      # provably-unheld lease, and the adversarial reclaim-versus-acquire race.
+      # What it does NOT prove: the anti-split binding-swap guard. Windows
+      # refuses to rebind a pathname whose file is open and locked, so that
+      # fixture is unconstructible and skips there — the OS prevents the swap
+      # rather than our revalidation refusing it. The application-level guard is
+      # exercised on Unix, where the swap can actually be staged.
       - name: Run native set-authority lease detect and reclaim suite
         shell: pwsh
         run: go test ./internal/indexsubstrate ./pkg/indexcoord ./internal/cmd -run '^(TestSetAuthority|TestReclaim_|TestUnlinkUnderHeldLock|TestLease|TestEnumerateLeases|TestInvalidLease|TestReclaimUnheldLease|TestIndexLease|TestIndexDoctorCommandPath|TestGuardDoctorLeaseFlags)' -count=1 -v

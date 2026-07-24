@@ -24,11 +24,11 @@ const MaxSetAuthorityDocBytes = 1 << 16
 type LeaseVerdict string
 
 const (
-	// LeaseHeld means a live process holds the advisory lock right now: a
+	// LeaseHeld means a live process holds the OS file lock right now: a
 	// non-blocking exclusive lock attempt would block. Never reclaim a held lease.
 	LeaseHeld LeaseVerdict = "held"
 	// LeaseUnheld means the lock file exists with a well-formed authority doc but
-	// no process holds the advisory lock: dead-holder residue, safe to reclaim.
+	// no process holds the OS file lock: dead-holder residue, safe to reclaim.
 	LeaseUnheld LeaseVerdict = "unheld"
 	// LeaseMissing means no lock file exists for the index set.
 	LeaseMissing LeaseVerdict = "missing"
@@ -97,7 +97,7 @@ func resolveAuthorityRootForRead(authorityRoot string) (string, error) {
 // openBoundSetAuthority opens an existing set-authority lock file inside a
 // freshly resolved, rooted authority directory and binds the returned fd to the
 // named inode. It opens read-only (no O_CREATE, no O_TRUNC, no write access):
-// advisory locking needs only read access, and reclaim unlinks through the root
+// locking needs only read access, and reclaim unlinks through the root
 // handle rather than the fd, so no path here ever writes the lock file. The
 // caller decides whether to lock, read, unlink, or simply close. On success the
 // caller owns both the *os.Root and the *os.File and must close them. A missing
@@ -255,7 +255,7 @@ func ProbeSetAuthorityLease(authorityRoot, indexSetID string) (SetAuthorityLease
 }
 
 // validSetAuthorityDoc reports whether a parsed authority doc is a well-formed,
-// exactly-scoped record for indexSetID. The advisory lock decides held vs
+// exactly-scoped record for indexSetID. The OS file lock decides held vs
 // unheld; it is not proof of artifact identity. This is the single schema/scope
 // gate shared by the read-only probe and the mutating reclaimer so their
 // invalid-vs-unheld verdicts can never diverge: a valid record needs the right

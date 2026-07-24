@@ -29,10 +29,10 @@ var (
 		Long: `Inspect and reclaim whole-set authority lock files.
 
 Each index build takes a stable, cross-process set-authority lock before it
-mutates a canonical index set. The lock is advisory: the OS drops it when the
-holder exits, but the lock file itself is left behind. 'lease ls' reports the
-live lock-state of each file (held / unheld / missing / invalid) and joins it to
-the job registry for attribution. 'lease reap' removes provably-unheld residue.
+mutates a canonical index set. The OS drops the lock when the holder exits, but
+the lock file itself is left behind. 'lease ls' reports the live lock-state of
+each file (held / unheld / missing / invalid) and joins it to the job registry
+for attribution. 'lease reap' removes provably-unheld residue.
 
 The held/unheld verdict is decided solely by a non-mutating lock probe. A job
 record, a PID, or a holder name is attribution only and never authorizes a
@@ -58,8 +58,9 @@ verdict is unaffected.`,
 		Long: `Reclaim provably-unheld set-authority lease residue.
 
 With no arguments, every unheld lease is targeted. With one or more idx_ IDs (or
-prefixes), only those leases are targeted. A held lease is always refused with
-its holder named — it is never removed.
+prefixes), only those leases are targeted. A held lease is always refused and is
+never removed; its holder is named where attribution is available (see 'index
+lease' for when it is not).
 
 Reaping mutates local state, so it requires explicit opt-in: without --confirm
 (or --force) the command performs a dry run and only reports what it would

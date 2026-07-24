@@ -64,6 +64,9 @@ type ReclaimReport struct {
 }
 
 // joinAttribution matches a lease holder against a byte-preserving job snapshot.
+// The holder itself is best-effort: where the platform's file locks are
+// mandatory it is unavailable while the lease is held, which surfaces here as an
+// empty holder and therefore an unmatched attribution — never as a verdict.
 // Holders are minted as "index-build-<jobID>" for managed builds and
 // "index-build-<uuid>" for foreground builds; only the former can match a job
 // record. An unmatched holder is reported honestly (Matched=false) — it may be a

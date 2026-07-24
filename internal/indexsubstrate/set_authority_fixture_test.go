@@ -181,10 +181,14 @@ func lockedRangeUnreadable(err error) bool {
 	return err != nil && isLockedRangeError(err)
 }
 
-// docSnapshot captures the content, size, mode, and mtime of a lock file so a
-// test can prove a probe left every byte untouched. Content is captured only
-// when the file is readable: under a mandatory lock the bytes cannot be read at
-// all, so metadata carries the zero-mutation proof there.
+// docSnapshot captures the content, size, mode, and mtime of a lock file.
+//
+// Where the bytes are readable, comparing them proves the probe left the doc
+// byte-identical. Where a mandatory lock makes a held doc unreadable, the byte
+// comparison simply does not execute: what remains is that the probe's
+// read-only-open code path ran to a verdict and left size, mode, and mtime
+// unchanged. That is real native evidence, but it is weaker than byte identity
+// and must not be described as proving it.
 type docSnapshot struct {
 	content         []byte
 	contentReadable bool

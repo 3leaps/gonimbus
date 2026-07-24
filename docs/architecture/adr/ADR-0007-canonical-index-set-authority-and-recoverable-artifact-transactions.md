@@ -209,8 +209,9 @@ following pins.
   authority in the mutating sense (it MUST NOT rewrite the holder document), so it
   never destroys the provenance it reports.
 - **The OS lock is the sole live-holder verdict; identity is separate proof.** A
-  non-blocking advisory-lock attempt is the only authority for held versus
-  unheld. A holder document, job record, or process id is attribution only and
+  non-blocking OS file-lock attempt is the only authority for held versus unheld.
+  Whether that lock is advisory or mandatory is a platform property that MUST NOT
+  change the verdict. A holder document, job record, or process id is attribution only and
   MUST NOT manufacture an "unheld" verdict or authorize a removal. The lock
   proves that no process holds the file; it does not prove the artifact carries
   the expected schema or set identity. Attribution is additionally best-effort
@@ -298,9 +299,18 @@ Every canonical state engine must cover, as applicable:
   mutation. Clean modes — list, dry run, and confirmed reclaim — still behave as
   specified;
 - an anti-split proof and an adversarial reclaim-versus-acquire race showing a
-  held successor's artifact is never removed; and
+  held successor's artifact is never removed. The anti-split guard is
+  platform-split and MUST be recorded as such rather than claimed uniformly:
+  where a pathname whose file is open and locked can be rebound, the swap is
+  staged and the application's under-lock revalidation is what refuses the
+  removal; where the platform refuses the rebind outright, that code path does
+  not execute and the OS is what prevents the split. The delete-while-open
+  unlink and the adversarial race MUST run natively on both;
 - Unix and native Windows locking, path, transaction, and recovery behavior,
-  plus supported release cross-compilation.
+  plus supported release cross-compilation. Evidence MUST record what a platform
+  could not execute rather than presenting partial coverage as uniform — a
+  byte-identity assertion that a mandatory lock prevents, for instance, is
+  reported as the code path plus unchanged metadata, not as byte proof.
 
 ## Consequences
 

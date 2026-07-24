@@ -9,7 +9,7 @@ import (
 )
 
 // reclaimAfterLockHook is a test-only seam invoked immediately after the reclaim
-// path acquires the advisory lock and before it re-reads the doc for validation.
+// path acquires the OS file lock and before it re-reads the doc for validation.
 // It lets a test prove the decisive read/validation happens under the lock:
 // mutating the doc here must change the outcome, which it can only do if the
 // validation runs after acquisition. Nil in production.
@@ -28,7 +28,7 @@ type ReclaimResult struct {
 }
 
 // unlinkUnderHeldLock removes name while the caller's descriptor still holds the
-// advisory lock, then unlocks and closes that descriptor. It is the single
+// OS file lock, then unlocks and closes that descriptor. It is the single
 // post-acquisition boundary shared by the reclaim path and (in a later change)
 // completion-path owner-cleanup.
 //
@@ -93,9 +93,10 @@ func unlinkUnderHeldLock(root *os.Root, name string, lockedFd *os.File) (removed
 
 // ReclaimUnheldSetAuthorityLease removes a provably-unheld set-authority lock
 // file for indexSetID. It opens the existing file (never creating it), takes the
-// advisory lock non-blocking, and only if that succeeds — proving no live holder
+// OS file lock non-blocking, and only if that succeeds — proving no live holder
 // exists — unlinks the file under the held lock. A held lease is refused with
-// ErrSetAuthorityHeld and its holder reported; the file is never touched. A
+// ErrSetAuthorityHeld and the file is never touched; its holder is reported
+// where attribution is available (see the note on the attribution read below). A
 // missing lease is reported as not-reclaimed with a nil error, so reclaim is
 // idempotent.
 //
