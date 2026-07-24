@@ -182,6 +182,60 @@ readers. It revalidates its immutable plan under that authority, persists
 intent outside all targets, moves/deletes only the exact bound artifacts, and
 recovers or finishes an interrupted transaction before allowing later access.
 
+### Whole-Set Authority Lease Observation and Recovery
+
+The whole-set authority lock file is itself a durable artifact. Its stale
+residue MUST be observable and recoverable without ever endangering a live
+holder. The lifecycle of lock-state observation and reclaim is governed by the
+following pins.
+
+- **Typed lock-state.** Observation classifies each authority lock into one of
+  four distinct, explicitly reported states — held, unheld, missing, or invalid
+  (indeterminate). "Unheld" is never conflated with "missing" or "invalid."
+  An artifact judged against the name, artifact-type, or schema/scope gates MUST
+  report the invalid state. For read-only observation that is a **successful
+  classification** — invalid with no error — because saying what an artifact is
+  IS the probe's job, not a failure of it. Where such a judgement does surface as
+  an error — a malformed target name, or any refusal on the mutating path — the
+  typed state MUST accompany that error rather than being replaced by an untyped
+  result. A failure of the surrounding infrastructure — an unusable authority
+  root, or an unexpected lock or unlink failure — MUST return an error WITHOUT
+  claiming any artifact state, because no verdict was reached and a manufactured
+  one would be indistinguishable from an observed one. The public wrapper MUST
+  NOT downgrade a typed state it received from the library.
+- **Read-only, byte-preserving probe.** Lock-state observation opens the existing
+  lock file without creating, truncating, or rewriting it, and leaves every byte
+  of its holder document identical before and after. Observation MUST NOT acquire
+  authority in the mutating sense (it MUST NOT rewrite the holder document), so it
+  never destroys the provenance it reports.
+- **The OS lock is the sole live-holder verdict; identity is separate proof.** A
+  non-blocking advisory-lock attempt is the only authority for held versus
+  unheld. A holder document, job record, or process id is attribution only and
+  MUST NOT manufacture an "unheld" verdict or authorize a removal. The lock
+  proves that no process holds the file; it does not prove the artifact carries
+  the expected schema or set identity. Removal additionally requires exact-identity
+  proof — correct document type and an exact index-set id — validated under the
+  acquired lock; a corrupt, wrong-type, or scope-mismatched document is invalid
+  residue that fails closed and is retained for recovery, never reaped on lock
+  alone. The public library and the CLI adapter MUST share this decision.
+- **Rooted same-file revalidation.** Exact-file probe and every mutation open the
+  authority lock through a no-follow rooted handle bound to the named inode, and
+  mutation revalidates that path-to-inode binding under the lock immediately
+  before any removal. Enumeration classifies directory entries by their listed
+  type and reports symlinked or non-regular lock artifacts as invalid without
+  following them.
+- **Unlink under the held lock.** Reclaim of a provably-unheld, exactly-identified
+  lock unlinks the file while the acquiring descriptor still holds the lock, then
+  releases — never unlink-after-release. Holding the lock across the unlink makes
+  a successor's acquire-then-lose-its-pathname race impossible, so authority is
+  never split across inodes.
+- **Reap is not process-stop.** Removing an unheld lock artifact and stopping a
+  live holder are separate authorities. No observation or reclaim operation
+  removes, overrides, or stops a held lease as a side effect; a force flag may
+  substitute only for the operator's explicit mutation opt-in, never for the lock
+  or identity gate. Stopping a live holder is an explicit, separately-authorized
+  operation.
+
 ### Legacy and Migration Posture
 
 Legacy artifacts satisfying a verifiable historical identity contract remain
@@ -208,7 +262,39 @@ Every canonical state engine must cover, as applicable:
 - discovery and recovery of every WAL, journal, temporary, alias, quarantine,
   intent, and receipt residue;
 - two-process reader/writer/resume/maintenance contention and stale authority;
-  and
+- a real-process authority-lease fixture that genuinely holds the lock and is
+  terminated to leave a real held-to-unheld residue transition;
+- a single shared invalid-artifact matrix — malformed document, wrong document
+  type, exact filename/document index-set mismatch including whitespace-padded
+  identity, a valid document prefix padded past the size bound, a non-canonical
+  or uppercase lease name, and a directory or symlink lock artifact — driven from
+  one fixture through the read-only probe, the direct library reclaim, the
+  coordination wrapper, and the CLI list/reap adapters. Every row reports the
+  typed invalid state, is never reclaimed, and survives unchanged — content and
+  metadata for a regular file, the entry itself and its link destination for a
+  non-regular one, plus any external symlink target, which proves no layer
+  follows the link. Each row's artifact MUST carry exactly one defect, so that no
+  row is kept green by an unrelated defect — a name-gate row, for example, must
+  not also be malformed, or weakening the name gate would leave the row passing on
+  the parse failure. Where several layers independently reject the same defect —
+  a non-regular lock artifact is refused by the explicit artifact-type check, by
+  rooted path resolution, and again by the under-lock binding check — that
+  redundancy is deliberate defense in depth; such a row asserts the outcome and
+  is not evidence about any single gate. The matrix runs against a canonical
+  valid-unheld positive control, and a mutation that reclassifies or reaps any
+  row at any layer must fail;
+- a control proving reclaim re-validates identity under the acquired lock and not
+  only at enumeration, mutation-verifiable in that moving the decisive read ahead
+  of lock acquisition fails it;
+- destructive-command-path flag hygiene proven through the real command, not a
+  helper: incompatible target/health flags, mode conflicts, and a mutation opt-in
+  supplied without its mutating mode are all rejected before any listing or
+  reclaim; a two-root control proves an explicitly named target never mutates the
+  default store; and removing the guard from the command path must fail on that
+  mutation. Clean modes — list, dry run, and confirmed reclaim — still behave as
+  specified;
+- an anti-split proof and an adversarial reclaim-versus-acquire race showing a
+  held successor's artifact is never removed; and
 - Unix and native Windows locking, path, transaction, and recovery behavior,
   plus supported release cross-compilation.
 
