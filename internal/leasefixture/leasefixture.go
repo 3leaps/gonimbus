@@ -116,7 +116,20 @@ func InvalidRows() []Row {
 // PlantValidUnheld writes a well-formed authority doc for id: the positive
 // control every layer must still reclaim.
 func PlantValidUnheld(authorityRoot, id string) (Planted, error) {
-	return writeDoc(authorityRoot, id, docFor(DocType, id, "index-build-valid"))
+	return PlantValidUnheldAs(authorityRoot, id, "index-build-valid")
+}
+
+// PlantValidUnheldAs is PlantValidUnheld with a caller-chosen holder string, for
+// tests that drive attribution (the job-record join) rather than the verdict.
+//
+// Planting is how unheld residue is produced above the substrate: an owner that
+// completes now removes its own lease, so an acquire/release pair leaves nothing
+// behind. Real residue comes from a holder that died without running any cleanup,
+// and what that leaves on disk is exactly this file. The substrate's own tests
+// reproduce it with a real killed child; layers above assert classification and
+// reporting, for which the artifact is the input that matters.
+func PlantValidUnheldAs(authorityRoot, id, holder string) (Planted, error) {
+	return writeDoc(authorityRoot, id, docFor(DocType, id, holder))
 }
 
 func plantMalformed(authorityRoot, id string) (Planted, error) {

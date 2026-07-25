@@ -57,7 +57,7 @@ func runWithHooks(ctx context.Context, cfg Config, hooks runHooks) (Result, erro
 	return run(ctx, cfg, hooks)
 }
 
-func run(ctx context.Context, cfg Config, hooks runHooks) (Result, error) {
+func run(ctx context.Context, cfg Config, hooks runHooks) (result Result, runErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -83,7 +83,15 @@ func run(ctx context.Context, cfg Config, hooks runHooks) (Result, error) {
 		return base, fmt.Errorf("index set authority: %w", err)
 	}
 	if authorityOwned {
-		defer func() { _ = authority.Release() }()
+		// A release failure means the authority artifact could not be removed —
+		// residue plus, on the refusal path, evidence that something rebound our
+		// lease pathname. Fold it into the result rather than discarding it; a
+		// borrowed authority stays the caller's to release.
+		defer func() {
+			if releaseErr := authority.Release(); releaseErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("release index set authority: %w", releaseErr))
+			}
+		}()
 	}
 
 	lease, err := indexsubstrate.AcquireWriteLease(cfg.SegmentSetRoot, cfg.IndexSetID, "enrich-"+uuid.NewString(), 0)

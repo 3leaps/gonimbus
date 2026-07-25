@@ -17,18 +17,15 @@ func TestReclaim_UnheldRemovesAndIsIdempotent(t *testing.T) {
 	authorityRoot := authorityRootFor(t, segmentRoot)
 	id := fixtureIndexSetID('a')
 
-	// Leave dead-holder residue: acquire then release (Release does not remove).
-	seed, err := AcquireSetAuthority(context.Background(), segmentRoot, id, "index-build-seed")
-	require.NoError(t, err)
-	require.NoError(t, seed.Release())
-	path := filepath.Join(authorityRoot, id+".lock")
-	require.FileExists(t, path)
+	// Leave dead-holder residue the way the field does: a real holder killed
+	// untrappably, so no cleanup path runs.
+	path := seedUnheldResidue(t, segmentRoot, authorityRoot, id)
 
 	res, err := ReclaimUnheldSetAuthorityLease(authorityRoot, id)
 	require.NoError(t, err)
 	require.True(t, res.Reclaimed)
 	require.Equal(t, LeaseUnheld, res.Verdict)
-	require.Equal(t, "index-build-seed", res.Holder, "reclaim reports the holder it reaped")
+	require.Equal(t, fixtureHolderName, res.Holder, "reclaim reports the holder it reaped")
 	require.NoFileExists(t, path)
 
 	// Idempotent: reclaiming an already-gone lease is a no-op success.
@@ -110,10 +107,7 @@ func TestReclaim_ValidatesUnderLock_Barrier(t *testing.T) {
 	authorityRoot := authorityRootFor(t, segmentRoot)
 	id := fixtureIndexSetID('a')
 
-	seed, err := AcquireSetAuthority(context.Background(), segmentRoot, id, "index-build-seed")
-	require.NoError(t, err)
-	require.NoError(t, seed.Release())
-	path := filepath.Join(authorityRoot, id+".lock")
+	path := seedUnheldResidue(t, segmentRoot, authorityRoot, id)
 
 	// Enumeration sees a valid, unheld lease.
 	pre, err := ProbeSetAuthorityLease(authorityRoot, id)
@@ -159,10 +153,8 @@ func TestUnlinkUnderHeldLock_RefusesSwappedBinding(t *testing.T) {
 	authorityRoot := authorityRootFor(t, segmentRoot)
 	id := fixtureIndexSetID('a')
 
-	// Create the original lease file (inode A) and hold its lock.
-	seed, err := AcquireSetAuthority(context.Background(), segmentRoot, id, "index-build-original")
-	require.NoError(t, err)
-	require.NoError(t, seed.Release())
+	// Create the original lease file (inode A); this test takes its own lock on it.
+	seedUnheldResidue(t, segmentRoot, authorityRoot, id)
 
 	resolved, err := resolveAuthorityRootForRead(authorityRoot)
 	require.NoError(t, err)
@@ -212,9 +204,7 @@ func TestReclaim_AdversarialRaceNeverDeletesHeldSuccessor(t *testing.T) {
 	id := fixtureIndexSetID('a')
 
 	// Seed initial unheld residue.
-	seed, err := AcquireSetAuthority(context.Background(), segmentRoot, id, "index-build-seed")
-	require.NoError(t, err)
-	require.NoError(t, seed.Release())
+	seedUnheldResidue(t, segmentRoot, authorityRoot, id)
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

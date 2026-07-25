@@ -48,6 +48,18 @@ func (l *Lease) AssertHeldFor(indexSetID, segmentSetRoot string) error {
 	return l.inner.AssertHeldFor(indexSetID, segmentSetRoot)
 }
 
+// Release drops whole-set authority and removes the lease artifact this holder
+// created, so a completed operation leaves nothing for recovery to collect. It is
+// idempotent.
+//
+// An error means the lock was released but its artifact could not be removed —
+// for example because the pathname no longer names the held lock, which Release
+// refuses to delete rather than removing whatever occupies the name. What
+// survives is observable through the lease surface either way, but the verdict
+// depends on the artifact: an intact original reports unheld and is reclaimable,
+// while a swapped-in replacement reports invalid and is never reaped
+// automatically. Untrappable termination bypasses Release entirely and leaves the
+// unheld kind.
 func (l *Lease) Release() error {
 	if l == nil || l.inner == nil {
 		return nil

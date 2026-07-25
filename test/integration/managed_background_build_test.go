@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/3leaps/gonimbus/internal/ownedproc"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 )
 
@@ -74,7 +75,8 @@ build:
 				t.Fatal(err)
 			}
 			args := []string{"index", "build", "--job", manifestPath, "--format", format, "--background", "--dedupe", "--name", "real-child-" + format, "--scope-warn-prefixes", "7", "--scope-max-prefixes", "9"}
-			start := exec.Command(binary, args...)
+			group := newManagedChildGroup(t)
+			start := group.launcher(binary, args...)
 			start.Env = managedTestEnv(dataRoot)
 			out, err := start.CombinedOutput()
 			if err != nil {
@@ -84,6 +86,7 @@ build:
 			if jobID == "" || strings.Contains(jobID, "\n") {
 				t.Fatalf("unexpected background output %q", string(out))
 			}
+			reapManagedJob(t, dataRoot, jobID, group)
 
 			record := waitForManagedJob(t, binary, dataRoot, jobID)
 			if record.State != jobregistry.JobStateSuccess {
@@ -144,17 +147,20 @@ build:
 	}
 
 	port := reserveLoopbackPort(t)
-	serve := exec.Command(binary, "--config", configPath, "--readonly", "serve", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
+	group := newManagedChildGroup(t)
+	serve := group.launcher(binary, "--config", configPath, "--readonly", "serve", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
 	serve.Env = managedTestProviderEnv()
 	var serveOutput bytes.Buffer
 	serve.Stdout = &serveOutput
 	serve.Stderr = &serveOutput
-	if err := serve.Start(); err != nil {
+	served, err := ownedproc.Start(serve)
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = serve.Process.Kill()
-		_ = serve.Wait()
+		if stopErr := served.Stop(15 * time.Second); stopErr != nil {
+			t.Errorf("stop server: %v", stopErr)
+		}
 	})
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	requireHTTPReady(t, baseURL+"/health", &serveOutput)
@@ -176,6 +182,7 @@ build:
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		t.Fatal(err)
 	}
+	reapManagedJob(t, dataRoot, envelope.Job.JobID, group)
 	record := waitForManagedJob(t, binary, dataRoot, envelope.Job.JobID)
 	if record.State != jobregistry.JobStateSuccess {
 		t.Fatalf("API managed state=%s\n%s", record.State, serveOutput.String())
@@ -213,13 +220,15 @@ build:
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	start := exec.Command(binary, "index", "build", "--job", manifestPath, "--background")
+	group := newManagedChildGroup(t)
+	start := group.launcher(binary, "index", "build", "--job", manifestPath, "--background")
 	start.Env = managedTestEnv(dataRoot)
 	out, err := start.CombinedOutput()
 	if err != nil {
 		t.Fatalf("enqueue managed failure: %v\n%s", err, out)
 	}
 	jobID := strings.TrimSpace(string(out))
+	reapManagedJob(t, dataRoot, jobID, group)
 	record := waitForManagedJob(t, binary, dataRoot, jobID)
 	if record.State != jobregistry.JobStateFailed {
 		t.Fatalf("failure fixture state=%s", record.State)
@@ -300,6 +309,132 @@ func managedTestProviderEnv() []string {
 		"AWS_EC2_METADATA_DISABLED=true",
 		"AWS_REGION=us-east-1",
 	)
+}
+
+// managedJobIDFlag is the internal flag the executor uses to hand a managed child
+// its job id. Spelled out rather than imported: this test pins what is actually
+// on the child's command line.
+const managedJobIDFlag = "--_managed-job-id"
+
+// afterReapIdentityCheck is a test-only seam between proving a managed child is
+// running and signalling it, used to prove the signal cannot be redirected by
+// anything that changes in that window.
+var afterReapIdentityCheck = func() {}
+
+// reapManagedJob terminates a leaked managed child on every exit path of the
+// test, including t.Fatal and a timed-out wait. This is test hygiene for leaked
+// test processes; it is not the production lease lifecycle.
+func reapManagedJob(t *testing.T, dataRoot, jobID string, group *managedChildGroup) {
+	t.Helper()
+	t.Cleanup(func() { reapManagedJobNow(t, dataRoot, jobID, group) })
+}
+
+// reapManagedJobNow signals the process group this test owns, only while that
+// group is still anchored, then confirms death. It reports whether it signalled.
+//
+// No target is derived from the job record: the record decides only whether the
+// job is still meant to be running, and the anchored group is what gets
+// signalled. Failures fail the test rather than being logged as success — a reap
+// that cannot confirm death has not reaped anything.
+func reapManagedJobNow(t *testing.T, dataRoot, jobID string, group *managedChildGroup) bool {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		// The managed-child integration tests do not run here, and both process
+		// groups and command-line inspection would need different mechanisms.
+		return false
+	}
+	if group == nil || group.pgid <= 0 {
+		return false
+	}
+	record, err := readManagedJobRecord(dataRoot, jobID)
+	if err != nil {
+		return false
+	}
+	switch record.State {
+	case jobregistry.JobStateQueued, jobregistry.JobStateRunning, jobregistry.JobStateStopping:
+	default:
+		// A terminal record means the child finished; nothing of ours is running.
+		return false
+	}
+	members := managedJobGroupMembers(t, group.pgid, jobID)
+	if len(members) == 0 {
+		t.Logf("not reaping group %d: no live member names job %s", group.pgid, jobID)
+		return false
+	}
+
+	afterReapIdentityCheck()
+
+	if !group.alive() {
+		// Without the anchor the group id is no longer ours to signal, whatever
+		// the enumeration above found a moment ago.
+		t.Errorf("refusing to signal group %d: its anchor is gone, so the id is no longer owned", group.pgid)
+		return false
+	}
+	if err := group.signal(); err != nil {
+		t.Errorf("kill managed child process group %d: %v", group.pgid, err)
+		return false
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(managedJobGroupMembers(t, group.pgid, jobID)) > 0 {
+		if time.Now().After(deadline) {
+			t.Errorf("managed child of job %s survived the group kill", jobID)
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Logf("reaped leaked managed child pids=%v job=%s group=%d", members, jobID, group.pgid)
+	return true
+}
+
+// managedJobGroupMembers returns the live processes in pgid whose command line
+// carries this job's id as the value of the managed-job flag.
+//
+// The flag and its value are matched as an adjacent pair rather than as two
+// substrings anywhere in the line, so an unrelated command that happens to
+// mention both cannot pass as the child.
+func managedJobGroupMembers(t *testing.T, pgid int, jobID string) []int {
+	t.Helper()
+	entries, err := listProcesses()
+	if err != nil {
+		t.Errorf("list processes: %v", err)
+		return nil
+	}
+	var members []int
+	for _, entry := range entries {
+		if entry.pgid != pgid {
+			continue
+		}
+		if commandLineNamesJob(entry.args, jobID) {
+			members = append(members, entry.pid)
+		}
+	}
+	return members
+}
+
+// commandLineNamesJob reports whether args pass the managed-job id as this job's
+// id, in either accepted spelling.
+func commandLineNamesJob(args []string, jobID string) bool {
+	for i, arg := range args {
+		if arg == managedJobIDFlag && i+1 < len(args) && args[i+1] == jobID {
+			return true
+		}
+		if arg == managedJobIDFlag+"="+jobID {
+			return true
+		}
+	}
+	return false
+}
+
+func readManagedJobRecord(dataRoot, jobID string) (jobregistry.JobRecord, error) {
+	var record jobregistry.JobRecord
+	body, err := os.ReadFile(filepath.Join(dataRoot, "jobs", "index-build", jobID, "job.json")) // #nosec G304 -- test-owned temp path
+	if err != nil {
+		return record, err
+	}
+	if err := json.Unmarshal(body, &record); err != nil {
+		return record, err
+	}
+	return record, nil
 }
 
 func waitForManagedJob(t *testing.T, binary, dataRoot, jobID string) jobregistry.JobRecord {

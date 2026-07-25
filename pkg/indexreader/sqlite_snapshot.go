@@ -73,24 +73,29 @@ func OpenSQLiteSnapshot(ctx context.Context, opts SQLiteSnapshotOptions) (*SQLit
 			return nil, fmt.Errorf("validate SQLite snapshot authority: %w", err)
 		}
 	}
-	releaseOnError := func() {
-		if authorityOwned {
-			_ = authority.Release()
+	// releaseOnError drops an authority this package acquired when a later step of
+	// the open fails. Its own failure is reported alongside the open error, never
+	// in place of it: the caller needs the reason the open failed.
+	releaseOnError := func() error {
+		if !authorityOwned {
+			return nil
 		}
+		if err := authority.Release(); err != nil {
+			return fmt.Errorf("release SQLite snapshot authority: %w", err)
+		}
+		return nil
 	}
 	if err := indexstore.RejectSQLiteTransactionSidecars(opts.Path); err != nil {
-		releaseOnError()
-		return nil, err
+		return nil, errors.Join(err, releaseOnError())
 	}
 	db, err := indexstore.OpenLocalReadOnly(ctx, opts.Path)
 	if err != nil {
-		releaseOnError()
-		return nil, err
+		return nil, errors.Join(err, releaseOnError())
 	}
 	if err := indexstore.ValidateCurrentSchemaReadOnly(ctx, db); err != nil {
-		_ = db.Close()
-		releaseOnError()
-		return nil, fmt.Errorf("local index schema is not current; run a guarded build/init migration before read: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("local index schema is not current; run a guarded build/init migration before read: %w", err),
+			db.Close(), releaseOnError())
 	}
 	s := &SQLiteSnapshot{
 		db: db, path: opts.Path, segmentSetRoot: opts.SegmentSetRoot,

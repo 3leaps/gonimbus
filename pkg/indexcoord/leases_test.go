@@ -1,13 +1,12 @@
 package indexcoord_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/internal/leasefixture"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/stretchr/testify/require"
@@ -15,13 +14,16 @@ import (
 
 func fullID(seed rune) string { return "idx_" + strings.Repeat(string(seed), 64) }
 
-// seedUnheldResidue acquires and releases a set authority, leaving dead-holder
-// residue (Release does not remove the file).
+// seedUnheldResidue plants the artifact a holder leaves behind when it dies
+// without running any cleanup. It is planted rather than produced by
+// acquire/release because a completing owner now removes its own lease; the
+// substrate package reproduces the same artifact with a real killed child.
 func seedUnheldResidue(t *testing.T, segmentSetRoot, indexSetID, holder string) {
 	t.Helper()
-	auth, err := indexsubstrate.AcquireSetAuthority(context.Background(), segmentSetRoot, indexSetID, holder)
+	authorityRoot, err := indexcoord.AuthorityRoot(segmentSetRoot)
 	require.NoError(t, err)
-	require.NoError(t, auth.Release())
+	_, err = leasefixture.PlantValidUnheldAs(authorityRoot, indexSetID, holder)
+	require.NoError(t, err)
 }
 
 func TestEnumerateLeases_AttributionJoin(t *testing.T) {

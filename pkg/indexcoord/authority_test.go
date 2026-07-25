@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,6 +37,38 @@ func TestAuthorityRemainsBoundAfterSegmentRootQuarantine(t *testing.T) {
 	require.NoError(t, err)
 	require.NoDirExists(t, canonical, "stable authority remains outside the canonical set root")
 	require.NoError(t, retry.Release())
+}
+
+// TestAcquireSurfacesContentionUnwrapped pins the wrapper half of the
+// acquisition error contract: every acquisition failure the substrate classifies
+// as contention reaches a library consumer as ErrHeld, unchanged.
+//
+// The substrate has two distinct contention paths — a live holder, and a
+// pathname churned under every bounded retry — and classifies both with the same
+// sentinel. This test pins the sentinel identity and that Acquire returns the
+// substrate's error verbatim rather than re-wrapping it in a wrapper taxonomy,
+// so both paths land on ErrHeld for a consumer. The churn path itself is driven
+// where it can be made deterministic: inside the substrate, which owns the
+// post-lock seam that opens the race window.
+func TestAcquireSurfacesContentionUnwrapped(t *testing.T) {
+	require.Equal(t, indexsubstrate.ErrSetAuthorityHeld, ErrHeld,
+		"ErrHeld must be the substrate's contention sentinel, not a wrapper-local copy")
+
+	parent := filepath.Join(t.TempDir(), "segments")
+	id := "idx_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	canonical := filepath.Join(parent, id)
+	require.NoError(t, os.MkdirAll(canonical, 0o700))
+
+	held, err := Acquire(context.Background(), canonical, id, "holder")
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+
+	_, substrateErr := indexsubstrate.AcquireSetAuthority(context.Background(), canonical, id, "substrate-contender")
+	contender, wrapperErr := Acquire(context.Background(), canonical, id, "wrapper-contender")
+	require.Nil(t, contender)
+	require.ErrorIs(t, wrapperErr, ErrHeld)
+	require.Equal(t, substrateErr.Error(), wrapperErr.Error(),
+		"the wrapper must surface the substrate's acquisition error unchanged")
 }
 
 func TestAuthorityDetectsCanonicalLockPathReplacement(t *testing.T) {

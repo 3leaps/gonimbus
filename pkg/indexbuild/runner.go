@@ -34,7 +34,7 @@ func NewRunner(config Config) *Runner {
 //
 // The index-set write lease is acquired before any ObservationSink mutation
 // (including SQLite dual-format sinks) and held through durable latest advance.
-func (r *Runner) Build(ctx context.Context) (Summary, error) {
+func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	cfg, err := normalizeConfig(r.config)
 	if err != nil {
 		return Summary{}, err
@@ -58,7 +58,7 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 		return Summary{}, fmt.Errorf("acquire index set authority: %w", err)
 	}
 	if authorityOwned {
-		defer func() { _ = authority.Release() }()
+		defer func() { buildErr = joinAuthorityRelease(buildErr, authority) }()
 	}
 	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-"+cfg.RunID, 0)
 	if err != nil {
@@ -200,7 +200,7 @@ func (r *Runner) Build(ctx context.Context) (Summary, error) {
 //
 // Public Retry always acquires the real OS write lease (callers cannot inject
 // a no-op guard). Build reuses its held lease via unexported retryWithLease.
-func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
+func Retry(ctx context.Context, cfg RetryConfig) (summary Summary, retryErr error) {
 	cfg, err := normalizeRetryConfig(cfg)
 	if err != nil {
 		return Summary{}, err
@@ -211,7 +211,7 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		return Summary{}, fmt.Errorf("acquire index set authority: %w", err)
 	}
 	if authorityOwned {
-		defer func() { _ = authority.Release() }()
+		defer func() { retryErr = joinAuthorityRelease(retryErr, authority) }()
 	}
 	lease, err := indexsubstrate.AcquireWriteLease(segmentRoot, cfg.IndexSetID, "build-publish-"+cfg.RunID, 0)
 	if err != nil {
@@ -251,6 +251,23 @@ func Retry(ctx context.Context, cfg RetryConfig) (Summary, error) {
 		return Summary{}, fmt.Errorf("retry coverage authority: %w", err)
 	}
 	return retryWithLease(ctx, cfg, plan, authority, lease)
+}
+
+// joinAuthorityRelease releases an authority this package owns and folds a
+// release failure into the operation's result.
+//
+// Release removes the lease artifact and reports a refusal when it cannot.
+// Discarding that would let an operation report success with residue behind it.
+// The operation's own error is preserved alongside, never replaced.
+//
+// Only authorities this package acquired are released here; a caller-supplied
+// lease stays the caller's to release.
+func joinAuthorityRelease(err error, authority *indexcoord.Lease) error {
+	releaseErr := authority.Release()
+	if releaseErr == nil {
+		return err
+	}
+	return errors.Join(err, fmt.Errorf("release index set authority: %w", releaseErr))
 }
 
 func acquireIndexSetAuthority(ctx context.Context, held *indexcoord.Lease, segmentRoot, indexSetID, holder string) (*indexcoord.Lease, bool, error) {

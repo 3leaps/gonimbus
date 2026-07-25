@@ -157,7 +157,7 @@ type enrichHeadResult struct {
 	err       error
 }
 
-func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
+func runIndexEnrichWithHead(cmd *cobra.Command, args []string) (runErr error) {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -180,7 +180,7 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("acquire index-set maintenance lease: %w", err)
 		}
-		defer func() { _ = maintenance.Release() }()
+		defer func() { releaseAuthorityInto(&runErr, maintenance) }()
 		ctx = maintenance.Context()
 	}
 
@@ -315,7 +315,7 @@ func runIndexEnrichWithHeadResume(ctx context.Context, cmd *cobra.Command, args 
 	return runIndexEnrichWithHeadResumeHeld(ctx, cmd, args, runID, nil)
 }
 
-func runIndexEnrichWithHeadResumeHeld(ctx context.Context, cmd *cobra.Command, args []string, runID string, maintenance *indexSetMaintenanceGuard) error {
+func runIndexEnrichWithHeadResumeHeld(ctx context.Context, cmd *cobra.Command, args []string, runID string, maintenance *indexSetMaintenanceGuard) (runErr error) {
 	opStore, err := openDefaultOperationCheckpointStore(ctx)
 	if err != nil {
 		return err
@@ -336,7 +336,7 @@ func runIndexEnrichWithHeadResumeHeld(ctx context.Context, cmd *cobra.Command, a
 		if err != nil {
 			return fmt.Errorf("acquire index-set maintenance lease: %w", err)
 		}
-		defer func() { _ = maintenance.Release() }()
+		defer func() { releaseAuthorityInto(&runErr, maintenance) }()
 	} else if err := maintenance.AssertHeldFor(payload.Config.IndexSetID); err != nil {
 		return err
 	}
