@@ -40,7 +40,7 @@ func init() {
 	indexInitCmd.Flags().StringVar(&indexDBPath, "db", "", "Index database path or libsql DSN (optional override)")
 }
 
-func runIndexInit(cmd *cobra.Command, args []string) error {
+func runIndexInit(cmd *cobra.Command, args []string) (runErr error) {
 	ctx := cmd.Context()
 
 	dbArg := strings.TrimSpace(indexDBPath)
@@ -68,7 +68,7 @@ func runIndexInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if maintenance != nil {
-		defer func() { _ = maintenance.Release() }()
+		defer func() { releaseAuthorityInto(&runErr, maintenance) }()
 		ctx = maintenance.Context()
 	}
 

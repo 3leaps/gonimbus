@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/internal/leasefixture"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 )
 
@@ -37,14 +38,25 @@ func setLeaseDataRoot(t *testing.T) string {
 func leaseFullID(seed rune) string { return "idx_" + strings.Repeat(string(seed), 64) }
 
 // acquireLeaseUnderCache acquires a set authority whose lock file lands under the
-// CLI's segment-cache authority root. The caller decides whether to release
-// (leaving unheld residue) or hold (a live holder).
+// CLI's segment-cache authority root, modelling a live holder. Releasing it now
+// removes the artifact (owner cleanup), so it is no longer a way to seed residue
+// — see plantLeaseResidueUnderCache.
 func acquireLeaseUnderCache(t *testing.T, segmentCacheRoot, id, holder string) *indexsubstrate.SetAuthority {
 	t.Helper()
 	segmentSetRoot := filepath.Join(segmentCacheRoot, id)
 	auth, err := indexsubstrate.AcquireSetAuthority(context.Background(), segmentSetRoot, id, holder)
 	require.NoError(t, err)
 	return auth
+}
+
+// plantLeaseResidueUnderCache seeds the artifact a holder leaves behind when it
+// dies without running any cleanup — the input the list/reap adapters classify.
+func plantLeaseResidueUnderCache(t *testing.T, segmentCacheRoot, id, holder string) string {
+	t.Helper()
+	authorityRoot := filepath.Join(segmentCacheRoot, indexsubstrate.SetAuthorityDirectoryName)
+	_, err := leasefixture.PlantValidUnheldAs(authorityRoot, id, holder)
+	require.NoError(t, err)
+	return leaseLockPath(segmentCacheRoot, id)
 }
 
 func leaseLockPath(segmentCacheRoot, id string) string {
@@ -54,8 +66,7 @@ func leaseLockPath(segmentCacheRoot, id string) string {
 func TestIndexLeaseLs_JSONReportsVerdicts(t *testing.T) {
 	scr := setLeaseDataRoot(t)
 	id := leaseFullID('a')
-	auth := acquireLeaseUnderCache(t, scr, id, "index-build-JOB1")
-	require.NoError(t, auth.Release()) // unheld residue
+	plantLeaseResidueUnderCache(t, scr, id, "index-build-JOB1") // dead-holder residue
 
 	var buf bytes.Buffer
 	require.NoError(t, listLeases(&buf, true))
@@ -72,9 +83,7 @@ func TestIndexLeaseLs_JSONReportsVerdicts(t *testing.T) {
 func TestIndexLeaseReap_DryRunThenConfirm(t *testing.T) {
 	scr := setLeaseDataRoot(t)
 	id := leaseFullID('a')
-	auth := acquireLeaseUnderCache(t, scr, id, "index-build-seed")
-	require.NoError(t, auth.Release())
-	lockPath := leaseLockPath(scr, id)
+	lockPath := plantLeaseResidueUnderCache(t, scr, id, "index-build-seed")
 	require.FileExists(t, lockPath)
 
 	// Dry run must not remove anything.
@@ -186,8 +195,7 @@ func TestIndexLeaseReap_CLIMatchesLibrary(t *testing.T) {
 	unheldID := leaseFullID('a')
 	heldID := leaseFullID('b')
 
-	unheld := acquireLeaseUnderCache(t, scr, unheldID, "index-build-dead")
-	require.NoError(t, unheld.Release())
+	plantLeaseResidueUnderCache(t, scr, unheldID, "index-build-dead")
 	held := acquireLeaseUnderCache(t, scr, heldID, "index-build-live")
 	t.Cleanup(func() { _ = held.Release() })
 

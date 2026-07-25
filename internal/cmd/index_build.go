@@ -11,11 +11,9 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -43,6 +41,10 @@ const operationIndexBuild = "index-build"
 // indexBuildAfterIdentityGuard is a test-only interposition point at the
 // durable validation-to-publication boundary. Production leaves it nil.
 var indexBuildAfterIdentityGuard func(path string) error
+
+// indexBuildAfterWork is a test-only interposition point between the end of a
+// build's work and its deferred authority cleanup. Production leaves it a no-op.
+var indexBuildAfterWork = func() {}
 
 var indexBuildCmd = &cobra.Command{
 	Use:   "build",
@@ -207,6 +209,12 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Interrupts become cancellation on every build path — foreground, resume,
+	// and the managed child, which until now was the only covered one. A build
+	// holds whole-set authority, and unwinding through its deferred release is
+	// what removes that authority artifact instead of leaving it behind.
+	ctx, stopSignals := withInterruptCancel(ctx)
+	defer stopSignals()
 
 	resumeRun := strings.TrimSpace(indexBuildResumeRun)
 	if indexBuildExperimentalEngine {
@@ -241,13 +249,6 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	indexBuildSpillResolved = spillResolution
 	if strings.TrimSpace(indexBuildJobPath) == "" {
 		return fmt.Errorf("--job is required")
-	}
-
-	// Managed mode: translate SIGTERM into context cancellation.
-	if strings.TrimSpace(indexBuildManagedJobID) != "" {
-		managedCtx, cancel := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
-		defer cancel()
-		ctx = managedCtx
 	}
 
 	// Background mode: start a managed child process and return.
@@ -427,7 +428,22 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		}
 		return fmt.Errorf("acquire index-set maintenance lease: %w", err)
 	}
-	defer func() { _ = maintenance.Release() }()
+	defer func() {
+		cleanupErr := releaseAuthorityErr(maintenance)
+		if cleanupErr == nil {
+			return
+		}
+		// A managed run records its terminal state inside the body, before this
+		// deferred cleanup runs, so the record follows the command rather than
+		// staying at success. The build receipt is left as written: it attests a
+		// snapshot that was committed. A correction that cannot be persisted is
+		// reported too, so a stale record never goes unremarked.
+		runErr = errors.Join(runErr, cleanupErr, demoteManagedJobOnCleanupFailure(store, job, cleanupErr))
+	}()
+	// Registered after the cleanup defer, so it runs before it: the window a test
+	// needs to reach the cleanup path through the real command. No-op in
+	// production.
+	defer indexBuildAfterWork()
 	ctx = maintenance.Context()
 
 	// Resolve the local compatibility target before format dispatch. Durable
@@ -965,7 +981,7 @@ func committedIndexBuildResultRecord(
 	}
 }
 
-func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) error {
+func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) (runErr error) {
 	if strings.TrimSpace(indexBuildJobPath) != "" {
 		return fmt.Errorf("--job is not accepted with --resume-run; resume uses checkpointed build config")
 	}
@@ -1007,7 +1023,7 @@ func runIndexBuildResume(ctx context.Context, cmd *cobra.Command, runID string) 
 	if err != nil {
 		return fmt.Errorf("acquire index-set maintenance lease: %w", err)
 	}
-	defer func() { _ = maintenance.Release() }()
+	defer func() { releaseAuthorityInto(&runErr, maintenance) }()
 	ctx = maintenance.Context()
 
 	resolved, err := findIndexRunInDefaultIndexes(ctx, runID, payload.Config.IndexSetID, maintenance)

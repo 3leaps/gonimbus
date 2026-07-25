@@ -125,6 +125,27 @@ func TestSetAuthorityHolderHelperProcess(t *testing.T) {
 	_ = auth.Release()
 }
 
+// seedUnheldResidue produces genuine dead-holder residue the way the field
+// produces it: a real child acquires the authority and is SIGKILLed, so no
+// cleanup path runs and the artifact survives its holder.
+//
+// This is the only honest producer now that the completion path removes the
+// owner's own lease — an acquire/release pair leaves nothing behind, which is
+// exactly the leak closure. Untrappable termination is what still leaves residue,
+// and it is what detection and reclaim exist for.
+func seedUnheldResidue(t *testing.T, segmentSetRoot, authorityRoot, indexSetID string) string {
+	t.Helper()
+	holder := spawnAuthorityHolder(t, segmentSetRoot, indexSetID)
+	holder.killAndWaitUnheld(authorityRoot, indexSetID)
+	path := filepath.Join(authorityRoot, indexSetID+".lock")
+	require.FileExists(t, path, "an untrappably killed holder must leave its lease behind")
+	return path
+}
+
+// fixtureHolderName is the holder string the re-exec child records in the doc it
+// leaves behind.
+const fixtureHolderName = "index-build-fixture-holder"
+
 // writeInvalidLease creates a lock file with an unparseable authority doc for a
 // valid index-set ID, reproducing corrupt residue.
 func writeInvalidLease(t *testing.T, authorityRoot, indexSetID string) string {

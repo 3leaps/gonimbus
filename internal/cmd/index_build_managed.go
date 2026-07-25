@@ -5,12 +5,56 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
 	"github.com/3leaps/gonimbus/pkg/manifest"
 )
 
 var afterManagedManifestRead = func() {}
+
+// managedJobAuthorityCleanupErrorKey records, on the job record, why a run that
+// finished its work is nonetheless not a success.
+const managedJobAuthorityCleanupErrorKey = "authority_cleanup_error"
+
+// demoteManagedJobOnCleanupFailure keeps a managed job record consistent with the
+// command's exit status when authority cleanup fails after the work finished, and
+// reports whether that correction reached disk.
+//
+// The record is written from inside the build, before the deferred cleanup runs,
+// so without this a run whose cleanup was refused would stay recorded as success
+// while the command exits non-zero. The terminal build receipt is left untouched:
+// it attests a snapshot that was committed, which the cleanup failure does not
+// change. The reason travels with the record.
+//
+// The correction is best-effort: terminal success is already on disk when cleanup
+// runs, so a rewrite that fails leaves the record stale. The returned error is
+// then the only signal that it is, and the caller must surface it.
+func demoteManagedJobOnCleanupFailure(store *jobregistry.Store, job *jobregistry.JobRecord, cleanupErr error) error {
+	if store == nil || job == nil || cleanupErr == nil {
+		return nil
+	}
+	switch job.State {
+	case jobregistry.JobStateSuccess, jobregistry.JobStatePartial:
+	default:
+		// Already non-success, or never terminal: the record does not claim
+		// success, and rewriting it would only lose detail.
+		return nil
+	}
+	job.State = jobregistry.JobStateFailed
+	if job.Metadata == nil {
+		job.Metadata = map[string]string{}
+	}
+	job.Metadata[managedJobAuthorityCleanupErrorKey] = cleanupErr.Error()
+	if job.EndedAt == nil {
+		ended := time.Now().UTC()
+		job.EndedAt = &ended
+	}
+	if err := store.Write(job); err != nil {
+		return fmt.Errorf("job record still reports success after failed authority cleanup: %w", err)
+	}
+	return nil
+}
 
 func currentIndexBuildInvocation() jobregistry.IndexBuildInvocation {
 	requestedFormat := strings.ToLower(strings.TrimSpace(indexBuildFormat))

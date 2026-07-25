@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -128,6 +129,36 @@ func (g *indexSetMaintenanceGuard) Authority() *indexcoord.Lease {
 		return nil
 	}
 	return g.authority
+}
+
+// releaseAuthorityErr releases a guard that owns whole-set authority and returns
+// any cleanup failure for the caller to fold into its result.
+//
+// Release removes the authority artifact this command created and reports a
+// refusal when it cannot. Discarding that would let the command exit zero with
+// residue behind it, so callers join it with their own error rather than
+// replacing it — a failed operation must still say why it failed.
+//
+// Guards holding only an operation checkpoint lease (no whole-set authority) are
+// out of scope here and keep their existing release behavior.
+func releaseAuthorityErr(guard *indexSetMaintenanceGuard) error {
+	if guard == nil {
+		return nil
+	}
+	ownsAuthority := guard.authority != nil
+	err := guard.Release()
+	if err == nil || !ownsAuthority {
+		return nil
+	}
+	return fmt.Errorf("release index-set authority: %w", err)
+}
+
+// releaseAuthorityInto is releaseAuthorityErr folded directly into a command's
+// named result, for the paths that have nothing else to do with the failure.
+func releaseAuthorityInto(runErr *error, guard *indexSetMaintenanceGuard) {
+	if err := releaseAuthorityErr(guard); err != nil {
+		*runErr = errors.Join(*runErr, err)
+	}
 }
 
 func (g *indexSetMaintenanceGuard) Release() error {

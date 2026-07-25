@@ -240,6 +240,55 @@ following pins.
   substitute only for the operator's explicit mutation opt-in, never for the lock
   or identity gate. Stopping a live holder is an explicit, separately-authorized
   operation.
+- **The holder cleans up after itself, through the descriptor it holds.** A
+  holder that reaches any trappable outcome — success, failure, or cancellation —
+  removes its own lock artifact as part of releasing it, so a completed run leaves
+  no residue for recovery to collect. That removal goes through the same
+  post-acquisition boundary as reclaim: it unlinks while the acquiring descriptor
+  still holds the lock. The holder MUST NOT reopen or re-lock its own artifact to
+  clean it up — an OS file lock belongs to an open-file description, not to a
+  process, so a second open contends with the holder itself — and MUST NOT unlink
+  after releasing. If the pathname no longer names the held inode, cleanup MUST
+  refuse to remove and report the refusal rather than deleting whatever occupies
+  the name; the lock MUST still be released on that path and on every other, so a
+  refused cleanup never strands authority. The reported refusal MUST reach the
+  operation's own result: a path that owns the authority it releases MUST join a
+  cleanup failure with its primary outcome — never replacing it, since a failed
+  operation must still say why it failed. A borrowed authority stays the lender's
+  to release. Removal on this path is authorized by possession of the held
+  descriptor plus the pathname-to-inode identity check, NOT by re-proving the
+  holder document's schema: the holder is removing its own artifact, not
+  reclaiming foreign residue. What a refused cleanup leaves behind is
+  operator-visible, but its typed verdict follows the artifact rather than the
+  failure: an intact original reports unheld and is reclaimable, while a
+  replacement swapped in over the pathname reports invalid and is never reaped
+  automatically.
+- **Operation outcome and artifact provenance are separate planes.** Cleanup
+  failure is an operational outcome: the operation returns an error, and job
+  lifecycle state follows the operation. It MUST NOT be back-propagated into
+  artifact provenance. A commit receipt attests that a snapshot was published, and
+  a later cleanup failure does not unmake that commit, so the receipt stands. The
+  two planes may therefore disagree — failed operation, committed artifact — and
+  each MUST report its own truth.
+- **Lifecycle correction is attempted, and its failure is reported.** Where a
+  terminal lifecycle state was already persisted, correcting it after a cleanup
+  failure is best-effort: correction MUST be attempted, and a correction that
+  cannot be persisted MUST be joined into the operation's result. This contract
+  does not guarantee that a persisted record never reports success after a failed
+  cleanup; it guarantees the operation says so.
+- **Owner cleanup is best-effort, and is never described as more.** Untrappable
+  termination runs no cleanup and leaves a real artifact behind. Trappable
+  interrupts MUST be translated into cancellation on operation paths that hold
+  authority so the release runs, and a repeated interrupt MUST NOT be absorbed by
+  that translation. Detection and reclaim remain the contract for residue cleanup
+  cannot reach, and documentation MUST NOT present owner cleanup as closing it.
+- **A departing owner's removal is not contention.** An acquirer may find the
+  pathname binding changed under its lock because a completing owner removed it.
+  Acquisition MUST re-attempt a bounded number of times, so a concurrent
+  same-scope operation resolves to either acquisition or the held-authority error.
+  Exhausting the bound MUST fail closed — no authority returned — and MUST report
+  the held-authority outcome, retaining the binding-change cause inside that error
+  rather than introducing a second taxonomy for callers to handle.
 
 ### Legacy and Migration Posture
 
@@ -291,6 +340,76 @@ Every canonical state engine must cover, as applicable:
 - a control proving reclaim re-validates identity under the acquired lock and not
   only at enumeration, mutation-verifiable in that moving the decisive read ahead
   of lock acquisition fails it;
+- a completion-path residue guard shipping with the completion-path behavior it
+  asserts, covering success, failure, and trappable cancellation, and proven
+  non-vacuous: the run is observed holding its authority artifact while it runs.
+  Skipping the holder's own removal MUST fail it;
+- an owner-cleanup negative control in which the lease pathname is rebound under
+  the held descriptor: cleanup refuses, the artifact occupying the name survives,
+  and the lock is still released so a successor can acquire. Reopening or
+  re-locking the artifact instead of using the held descriptor, and unlinking
+  after release instead of under the lock, MUST each fail it;
+- cleanup-refusal reporting proven at each boundary that owns a release, not only
+  where the refusal originates: the library entry point and the command both
+  return an error naming the failed release, and the job record and its commit
+  receipt are asserted together — record not reporting success, receipt still
+  reporting the artifact it committed. A discarded release error at any of those
+  boundaries MUST fail it, and a failed operation whose cleanup also failed MUST
+  carry its original cause asserted independently of the cleanup cause;
+- the compound case, driven through the real command: cleanup refused and the
+  lifecycle correction unpersistable. The result MUST carry both causes, and the
+  resulting state MUST be asserted as it stands — record reporting success, valid
+  commit receipt, failed command naming it. Discarding the caller-side correction
+  error MUST fail it;
+- interrupt-to-cancellation coverage on the command path: an interrupted run
+  verified to be holding its authority leaves no residue, and a repeated interrupt
+  terminates the process rather than being absorbed, including where the bridge
+  finishes on context cancellation rather than on a signal. Restricting the
+  translation to one execution mode, absorbing the second signal, and leaving the
+  handler installed on the cancellation branch MUST each fail it. Signalling a
+  running process is not portable to Windows, so this evidence does not execute
+  there and MUST NOT be presented as cross-platform;
+- a bounded-retry control for the completion race: an acquisition whose pathname
+  is removed between locking and binding revalidation still acquires, while a
+  pathname invalidated on every attempt fails closed within the bound and reports
+  the held-authority outcome with its binding-change cause still reachable;
+- for test harnesses that terminate spawned children on teardown, two rules that
+  differ by what the harness owns.
+
+  Descendants it does not directly own — a detached child of a child — MUST be
+  terminated through a process group the harness creates and keeps in existence
+  with a member of its own, live when the group is signalled and still unreaped
+  through confirmation. Such teardown MUST NOT derive a destructive target from a
+  job record, a process listing, or any other reconstructed identifier: neither a
+  process id nor a group id is identity once the thing it named is gone. Any
+  record is consulted only to decide whether to reap, and command-line identity is
+  matched as an exact flag-and-value pair.
+
+  A child the harness started directly MAY be signalled through its retained
+  process object, which is safe precisely while that process is unreaped. That
+  requires exactly one owner of its wait, established at start: teardown either
+  observes that the owner has completed and does nothing, or signals the retained
+  process and joins the owner. Teardown MUST NOT wait on the process itself, and
+  completion MUST be published before any result derived from it is observable,
+  so a caller that has seen an exit cannot leave teardown believing the child is
+  still running.
+
+  Evidence MUST cover: a record naming a live unrelated process (left running);
+  the target disappearing after verification, driven by releasing it to exit on
+  its own and confirmed absent BEFORE any signal, with the harness's member still
+  holding the group and an unrelated process untouched; a genuine leaked child
+  terminated and observed dead within a bound; group-owner cleanup terminating
+  every member of its group on a path that never reaches an explicit reap; and,
+  for directly owned children, both the already-completed case (teardown signals
+  nothing) and the teardown-before-completion case, each asserting exactly one
+  wait for the child's lifetime. The single-wait rule MUST additionally be
+  enforced against the implementation's shape rather than only its behavior: a
+  second waiter corrupts nothing until an id is reused, so no run is guaranteed to
+  observe one. An unanchored target, a target released only after the absence
+  check, anchor-only cleanup, a wait of any form in teardown, exposing a
+  wait-capable handle to callers, and publishing a result ahead of completion MUST
+  each fail that evidence;
+
 - destructive-command-path flag hygiene proven through the real command, not a
   helper: incompatible target/health flags, mode conflicts, and a mutation opt-in
   supplied without its mutating mode are all rejected before any listing or

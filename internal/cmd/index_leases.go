@@ -29,10 +29,12 @@ var (
 		Long: `Inspect and reclaim whole-set authority lock files.
 
 Each index build takes a stable, cross-process set-authority lock before it
-mutates a canonical index set. The OS drops the lock when the holder exits, but
-the lock file itself is left behind. 'lease ls' reports the live lock-state of
-each file (held / unheld / missing / invalid) and joins it to the job registry
-for attribution. 'lease reap' removes provably-unheld residue.
+mutates a canonical index set. A build that finishes — including one that fails
+or is interrupted — removes its own lock file on the way out. A holder that is
+killed outright, or whose machine goes away, cannot: the OS drops the lock, but
+the file survives it. 'lease ls' reports the live lock-state of each file
+(held / unheld / missing / invalid) and joins it to the job registry for
+attribution. 'lease reap' removes provably-unheld residue.
 
 The held/unheld verdict is decided solely by a non-mutating lock probe. A job
 record, a PID, or a holder name is attribution only and never authorizes a
