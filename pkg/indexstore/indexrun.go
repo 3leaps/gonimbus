@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -544,14 +545,62 @@ func RecordScopeViolation(ctx context.Context, db *sql.DB, runID string, key str
 	return RecordRunEvent(ctx, db, event)
 }
 
+// idClock is the time source for generated identifiers. It is a variable so a
+// test can pin it to a clock that does not advance, which is the condition these
+// identifiers have to survive.
+var idClock = time.Now
+
+// lastIssuedStamp is the highest stamp any identifier has been issued from in
+// this process.
+var lastIssuedStamp atomic.Int64
+
+// nextIDStamp returns a stamp strictly greater than every stamp already issued.
+//
+// A wall-clock reading alone is not a source of uniqueness. Its resolution is a
+// platform property — coarse enough on Windows that two identifiers minted in
+// the same tick read the same nanosecond — and run_id and event_id are both
+// PRIMARY KEY, so a repeat is a failed insert rather than a cosmetic collision.
+// Advancing past the last issued value keeps the stamp unique within the
+// process. A burst inside one tick leaves the stamp ahead of the clock by the
+// size of the burst; the clock reclaims it as soon as it passes that point, so
+// the value stays a nanosecond reading rather than drifting further with each
+// burst.
+//
+// This is uniqueness within one process, which is what the observed failure
+// needs: the identifiers are minted by a single writer holding the index-set
+// authority. It is not a distributed guarantee and is not offered as one.
+func nextIDStamp() int64 {
+	for {
+		stamp := idClock().UnixNano()
+		last := lastIssuedStamp.Load()
+		if stamp <= last {
+			stamp = last + 1
+		}
+		if lastIssuedStamp.CompareAndSwap(last, stamp) {
+			return stamp
+		}
+	}
+}
+
+// NewRunID returns an identifier for a new run, in the run_<digits> form the
+// hub layout and the SQLite schema both expect.
+func NewRunID() string {
+	return fmt.Sprintf("run_%d", nextIDStamp())
+}
+
+// NewEventID returns an identifier for a new run event.
+func NewEventID() string {
+	return fmt.Sprintf("evt_%d", nextIDStamp())
+}
+
 // generateRunID generates a unique run ID.
 func generateRunID() string {
-	return fmt.Sprintf("run_%d", time.Now().UnixNano())
+	return NewRunID()
 }
 
 // generateEventID generates a unique event ID.
 func generateEventID() string {
-	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	return NewEventID()
 }
 
 func stringPtr(s string) *string {

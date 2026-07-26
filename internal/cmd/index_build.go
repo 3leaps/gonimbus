@@ -568,7 +568,7 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 			SegmentSetRoot: segmentSetRoot,
 			IndexSetID:     identityResult.IndexSetID,
 			Authority:      maintenance.Authority(),
-			AttemptName:    fmt.Sprintf("run_%d", time.Now().UnixNano()),
+			AttemptName:    indexstore.NewRunID(),
 		})
 		if err != nil {
 			return err
