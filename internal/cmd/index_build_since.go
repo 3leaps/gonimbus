@@ -362,7 +362,7 @@ func indexBuildSinceEvents(runID string, plan *indexBuildSincePlan, at time.Time
 		category = string(indexstore.EventCategoryWarning)
 	}
 	return []indexstore.RunEvent{{
-		EventID:       fmt.Sprintf("evt_%d", at.UnixNano()),
+		EventID:       indexstore.NewEventID(),
 		RunID:         runID,
 		OccurredAt:    at,
 		EventType:     "since_plan",

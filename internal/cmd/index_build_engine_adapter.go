@@ -184,7 +184,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		return indexbuild.Summary{}, "", fmt.Errorf("index identity is required")
 	}
 	// Match SQLite/hub run-id contract: run_<digits> (not UUID-with-hyphens).
-	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
+	runID := indexstore.NewRunID()
 	baseBucket, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("parse base_uri: %w", err)
