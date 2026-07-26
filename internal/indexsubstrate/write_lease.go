@@ -1,6 +1,7 @@
 package indexsubstrate
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +58,20 @@ type writeLeaseDoc struct {
 	Acquired time.Time `json:"acquired_at"`
 }
 
+// newWriteLeaseToken returns a value that tells one acquisition apart from
+// another.
+//
+// A clock reading cannot do that. Its resolution is a platform property rather
+// than a guarantee, and two acquisitions inside one tick read the same
+// nanosecond. That sequence is ordinary here rather than exotic: the lease is
+// exclusive, so a handoff is a release followed by an acquire, and both can fall
+// in a single tick. Entropy rather than a process-local counter, because the
+// acquisitions being told apart are usually in different processes. The
+// acquisition time is already carried by acquired_at, so the token carries none.
+func newWriteLeaseToken() string {
+	return rand.Text()
+}
+
 // canonicalizeSegmentSetRoot returns an absolute, cleaned segment-set root.
 // Symlinks in the path are not resolved; both acquire and assert use the same
 // Abs+Clean policy so matching roots compare equal.
@@ -106,7 +121,7 @@ func AcquireWriteLease(segmentSetRoot, indexSetID, holder string, _ time.Duratio
 		return nil, fmt.Errorf("lock write lease: %w", err)
 	}
 	now := time.Now().UTC()
-	token := fmt.Sprintf("%d", now.UnixNano())
+	token := newWriteLeaseToken()
 	doc := writeLeaseDoc{
 		Type:     "gonimbus.index.durable_write_lease.v1",
 		IndexSet: indexSetID,
@@ -203,7 +218,7 @@ func AcquireWriteLeaseForMaintenance(segmentSetRoot, indexSetID, holder string) 
 		segmentSetRoot: root,
 		indexSetID:     indexSetID,
 		holder:         holder,
-		token:          fmt.Sprintf("maintenance-%d", time.Now().UTC().UnixNano()),
+		token:          "maintenance-" + newWriteLeaseToken(),
 	}, nil
 }
 
