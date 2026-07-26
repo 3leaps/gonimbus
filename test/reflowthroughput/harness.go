@@ -170,6 +170,105 @@ func requireMemoryArmInputs(spec ProfileSpec, opts Options) error {
 	return nil
 }
 
+// pointMeasurement is everything one completed point contributes to its report
+// row: the arm configuration it was asked to run under, the timings and counts
+// observed while running it, and the product output parsed from that run. Named
+// fields rather than positional arguments for the same reason pointRun uses
+// them — the row carries many independently meaningful strings, counts, and
+// rates that are otherwise easy to transpose silently.
+type pointMeasurement struct {
+	PointID          string
+	Shape            string
+	Parallel         int
+	ProbeConcurrency int
+	CheckpointClass  string
+	GOMEMLIMIT       string
+	MemoryBudget     string
+	MemoryEnvelope   string
+	NoAdaptive       bool
+
+	ElapsedSeconds         float64
+	CompletedObjects       int64
+	EndToEndRate           float64
+	ProbeDeliveredRate     float64
+	ProbeSaturationRate    float64
+	TapValidRows           int64
+	TapCopyIntervalSeconds float64
+
+	HonestyOK      *bool
+	HonestyMessage string
+
+	StageExitCodes map[string]int
+
+	// Parsed is the product's own reported telemetry for this point, as
+	// extracted from its stdout. It is empty for probe_drain, which runs no
+	// reflow.
+	Parsed ParsedReflowOutput
+}
+
+// buildPointReport assembles one report row from a completed measurement. It is
+// the measuring path's only PointReport construction site, and the only place a
+// point's product-reported telemetry — including the memory provenance tuple —
+// is populated.
+//
+// It is not the only place a row can acquire a value. Rows are still amended
+// after construction with harness-derived fields (content parity, occupancy),
+// and the parser that produces the ParsedReflowOutput consumed here could
+// synthesize upstream of it. So this covers the construction step, not every
+// route by which a report could come to carry something the product never
+// reported; the controls assert against the parser as well as the builder.
+//
+// It is a package-level function rather than a closure inside Run so that this
+// construction step is directly testable: a test can drive the real builder
+// with a real parse of product records that withhold a value, and observe what
+// the builder does with the absence.
+func buildPointReport(m pointMeasurement) PointReport {
+	pt := PointReport{
+		PointID:                m.PointID,
+		ExecutionShape:         m.Shape,
+		ProbeConcurrency:       m.ProbeConcurrency,
+		GOMEMLIMITSet:          m.GOMEMLIMIT != "",
+		GOMEMLIMITValue:        m.GOMEMLIMIT,
+		MemoryBudgetRequested:  m.MemoryBudget,
+		MemoryEnvelope:         m.MemoryEnvelope,
+		ElapsedSeconds:         m.ElapsedSeconds,
+		CompletedObjects:       m.CompletedObjects,
+		EndToEndRate:           m.EndToEndRate,
+		ProbeDeliveredRate:     m.ProbeDeliveredRate,
+		ProbeSaturationRate:    m.ProbeSaturationRate,
+		TapValidRows:           m.TapValidRows,
+		TapCopyIntervalSeconds: m.TapCopyIntervalSeconds,
+		HonestyOK:              m.HonestyOK,
+		HonestyMessage:         m.HonestyMessage,
+		StageExitCodes:         m.StageExitCodes,
+	}
+	if m.Shape != "probe_drain" {
+		pt.Parallel = m.Parallel
+		pt.CheckpointClass = m.CheckpointClass
+		// Memory provenance exactly as the product reported it. A missing
+		// source is a failure the report validator must catch, not
+		// something to paper over with a placeholder label.
+		pt.MemoryLimitSource = m.Parsed.MemoryLimitSource
+		pt.MemoryBudgetSource = m.Parsed.MemoryBudgetSource
+		pt.MemoryLimitBytes = m.Parsed.MemoryLimitBytes
+		pt.MemoryBudgetEffectiveBytes = m.Parsed.MemoryBudgetEffectiveBytes
+		pt.RetryBufferCapBytes = m.Parsed.RetryBufferCapBytes
+		pt.ConcurrencyTimeAvgActive = m.Parsed.SummaryTimeAvgActive
+		adaptiveMode := "adaptive"
+		if m.NoAdaptive {
+			adaptiveMode = "fixed"
+		}
+		pt.AdaptiveMode = adaptiveMode
+		pt.ConcurrencyRequested = intPtr(m.Parsed.Requested)
+		pt.ConcurrencyEffective = intPtr(m.Parsed.Effective)
+		pt.ConcurrencyReason = strPtr(m.Parsed.Reason)
+		pt.ConcurrencyMaxActive = intPtr(m.Parsed.MaxActive)
+		pt.ConcurrencyFinal = intPtr(m.Parsed.Final)
+		pt.AdaptiveEnabled = boolPtrVal(m.Parsed.AdaptiveEnabled)
+	}
+	return pt
+}
+
 // Run executes the named profile and returns a sanitized report.
 func Run(ctx context.Context, opts Options) (Report, error) {
 	spec, err := ResolveProfile(opts.Profile)
@@ -608,14 +707,16 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			stageCodes[k] = v.ExitCode
 		}
 
-		pt := PointReport{
+		pt := buildPointReport(pointMeasurement{
 			PointID:                pointID,
-			ExecutionShape:         shape,
+			Shape:                  shape,
+			Parallel:               parallel,
 			ProbeConcurrency:       probeConc,
-			GOMEMLIMITSet:          gomem != "",
-			GOMEMLIMITValue:        gomem,
-			MemoryBudgetRequested:  rp.MemoryBudget,
+			CheckpointClass:        ckClass,
+			GOMEMLIMIT:             gomem,
+			MemoryBudget:           rp.MemoryBudget,
 			MemoryEnvelope:         memEnvelope,
+			NoAdaptive:             spec.NoAdaptive,
 			ElapsedSeconds:         elapsedSec,
 			CompletedObjects:       fileCount,
 			EndToEndRate:           rate,
@@ -626,31 +727,8 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			HonestyOK:              honestyOK,
 			HonestyMessage:         honesty.Message,
 			StageExitCodes:         stageCodes,
-		}
-		if shape != "probe_drain" {
-			pt.Parallel = parallel
-			pt.CheckpointClass = ckClass
-			// Memory provenance exactly as the product reported it. A missing
-			// source is a failure the report validator must catch, not
-			// something to paper over with a placeholder label.
-			pt.MemoryLimitSource = parsed.MemoryLimitSource
-			pt.MemoryBudgetSource = parsed.MemoryBudgetSource
-			pt.MemoryLimitBytes = parsed.MemoryLimitBytes
-			pt.MemoryBudgetEffectiveBytes = parsed.MemoryBudgetEffectiveBytes
-			pt.RetryBufferCapBytes = parsed.RetryBufferCapBytes
-			pt.ConcurrencyTimeAvgActive = parsed.SummaryTimeAvgActive
-			adaptiveMode := "adaptive"
-			if spec.NoAdaptive {
-				adaptiveMode = "fixed"
-			}
-			pt.AdaptiveMode = adaptiveMode
-			pt.ConcurrencyRequested = intPtr(parsed.Requested)
-			pt.ConcurrencyEffective = intPtr(parsed.Effective)
-			pt.ConcurrencyReason = strPtr(parsed.Reason)
-			pt.ConcurrencyMaxActive = intPtr(parsed.MaxActive)
-			pt.ConcurrencyFinal = intPtr(parsed.Final)
-			pt.AdaptiveEnabled = boolPtrVal(parsed.AdaptiveEnabled)
-		}
+			Parsed:                 parsed,
+		})
 		report.Points = append(report.Points, pt)
 		return nil
 	}
