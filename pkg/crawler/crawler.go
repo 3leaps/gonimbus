@@ -20,7 +20,6 @@ import (
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
-	"golang.org/x/time/rate"
 )
 
 // Config configures crawler behavior.
@@ -90,8 +89,11 @@ type Crawler struct {
 
 	prefixes []string
 
-	// Rate limiter (nil if unlimited)
-	limiter *rate.Limiter
+	// budget is this crawler's handle on the request budget bounding its listing
+	// concurrency and request rate. It is leased from an injected RequestBudget
+	// when one is supplied, and otherwise from a private budget built from Config
+	// at Run, which keeps both ceilings per-crawler exactly as they are today.
+	budget *budgetLease
 
 	// Atomic counters for stats
 	objectsListed   atomic.Int64
@@ -131,11 +133,36 @@ func New(p provider.Provider, m *match.Matcher, w output.Writer, jobID string, c
 		jobID:    jobID,
 	}
 
-	// Set up rate limiter if configured
-	if cfg.RateLimit > 0 {
-		c.limiter = rate.NewLimiter(rate.Limit(cfg.RateLimit), 1)
-	}
+	return c
+}
 
+// WithRequestBudget shares a run-global request budget with this crawler,
+// replacing its own Config.Concurrency and Config.RateLimit ceilings.
+//
+// Use it when several crawlers make up one logical run: without a shared budget
+// each crawler enforces the configured ceilings independently, so N crawlers
+// issue N times the requested listing concurrency and N times the requested
+// request rate against the provider. Returns the crawler for method chaining.
+//
+// This crawler's share of the budget is reserved here, at construction, rather
+// than at Run. A permit is held for a whole paginated listing, so a crawler that
+// waited until Run to reserve could find its peers already holding every permit.
+// Construct every crawler in the run before starting any of them.
+//
+// Calling this more than once is safe: the crawler's previous share is returned
+// before a new one is taken, so rebinding cannot strand a permit that nothing
+// can reach again.
+func (c *Crawler) WithRequestBudget(b *RequestBudget) *Crawler {
+	if b == nil {
+		return c
+	}
+	// Retire before leasing, not after: taking the new reservation first would
+	// have this crawler holding two permits at once and could block on a budget
+	// its own outstanding lease is the reason for exhausting.
+	if c.budget != nil {
+		c.budget.retire()
+	}
+	c.budget = b.lease()
 	return c
 }
 
@@ -167,6 +194,19 @@ func (c *Crawler) WithPrefixes(prefixes []string) *Crawler {
 // and a partial summary is returned.
 func (c *Crawler) Run(ctx context.Context) (*Summary, error) {
 	startTime := time.Now()
+
+	// No injected budget means this crawler is the whole run, so it gets a
+	// private one carrying its own configured ceilings — the pre-budget behavior.
+	if c.budget == nil {
+		c.budget = NewRequestBudget(c.config.Concurrency, c.config.RateLimit).lease()
+	}
+	// Retire on every return path, not only the one through the listing stage.
+	// A refusal before listing begins — an initial progress write that fails, say
+	// — would otherwise return while still holding a reservation, permanently
+	// reducing the capacity of a budget its peers are still drawing on.
+	// Retirement is idempotent, so this composes with the earlier retirement the
+	// listing stage performs as soon as a crawler runs out of work.
+	defer c.budget.retire()
 
 	// Get prefixes to crawl
 	prefixes := c.prefixes
@@ -255,13 +295,10 @@ func (c *Crawler) writeError(ctx context.Context, code, message, prefix string) 
 	_ = c.writer.WriteError(ctx, errRec)
 }
 
-// waitForRateLimit blocks until the rate limiter allows a request.
+// waitForRateLimit blocks until the request budget allows a request to start.
 // Returns immediately if rate limiting is disabled.
 func (c *Crawler) waitForRateLimit(ctx context.Context) error {
-	if c.limiter == nil {
-		return nil
-	}
-	return c.limiter.Wait(ctx)
+	return c.budget.waitForRequest(ctx)
 }
 
 // objectItem represents an object flowing through the pipeline.
@@ -332,36 +369,31 @@ func (c *Crawler) runPipeline(ctx context.Context, prefixes []string) error {
 	}
 }
 
-// runListers runs listing operations for all prefixes with bounded concurrency.
+// runListers runs listing operations for all prefixes, bounded by the request
+// budget. The budget may be shared with other crawlers, in which case the
+// concurrency ceiling is the whole run's rather than this crawler's.
+//
+// The budget lease is retired once every prefix here has been listed, handing
+// this crawler's reserved permit back so crawlers still working can draw on the
+// full budget instead of only the permits nobody reserved.
 func (c *Crawler) runListers(ctx context.Context, prefixes []string, out chan<- objectItem) error {
-	// Use a semaphore to limit concurrency
-	sem := make(chan struct{}, c.config.Concurrency)
+	defer c.budget.retire()
 
 	var wg sync.WaitGroup
 	var firstErr error
 	var errOnce sync.Once
 
 	for _, prefix := range prefixes {
-		// Acquire semaphore or bail on cancellation.
-		// We must only release the semaphore if we successfully acquired it,
-		// so we use a select that either acquires or returns early.
-		select {
-		case <-ctx.Done():
-			// Context cancelled before we could acquire - exit the loop
-			// (break here only exits select, so we rely on the ctx.Err check below)
-		case sem <- struct{}{}:
-			// Successfully acquired semaphore - proceed to launch goroutine
-		}
-
-		// Check if we exited due to cancellation
-		if ctx.Err() != nil {
+		release, err := c.budget.acquireListSlot(ctx)
+		if err != nil {
+			// Context ended before a slot was available; no slot was taken.
 			break
 		}
 
 		wg.Add(1)
-		go func(p string) {
+		go func(p string, release func()) {
 			defer wg.Done()
-			defer func() { <-sem }() // Release semaphore we acquired above
+			defer release()
 
 			if err := c.listPrefix(ctx, p, out); err != nil {
 				// Capture first error
@@ -369,7 +401,7 @@ func (c *Crawler) runListers(ctx context.Context, prefixes []string, out chan<- 
 					firstErr = err
 				})
 			}
-		}(prefix)
+		}(prefix, release)
 	}
 
 	wg.Wait()

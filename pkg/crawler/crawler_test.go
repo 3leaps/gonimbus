@@ -191,7 +191,10 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, 4, c.config.Concurrency)
 	assert.Equal(t, 1000, c.config.ChannelBuffer)
 	assert.Equal(t, 1000, c.config.ProgressEvery)
-	assert.Nil(t, c.limiter) // No rate limit by default
+	assert.Equal(t, 0.0, c.config.RateLimit) // No rate limit by default
+	// No budget is leased until one is injected or Run builds the private one, so
+	// constructing a crawler reserves nothing from a shared budget.
+	assert.Nil(t, c.budget)
 }
 
 func TestNew_WithRateLimit(t *testing.T) {
@@ -204,7 +207,10 @@ func TestNew_WithRateLimit(t *testing.T) {
 
 	c := New(p, m, w, "job-123", cfg)
 
-	assert.NotNil(t, c.limiter)
+	assert.Equal(t, 10.0, c.config.RateLimit)
+	// A crawler with no injected budget builds a private one from its own Config
+	// at Run, which is where the configured rate ceiling takes effect.
+	assert.NotNil(t, NewRequestBudget(c.config.Concurrency, c.config.RateLimit).limiter)
 }
 
 func TestCrawler_Run_BasicCrawl(t *testing.T) {

@@ -26,6 +26,15 @@ type ParentToken struct {
 
 // Clock returns the current time for run metadata. Supplying a deterministic
 // clock makes retry identity and CLI/library parity byte-testable.
+//
+// A Clock must be safe for concurrent use. Experimental: a build stamps an
+// observation time per record, and a multi-lane build writes records from every
+// lane at once, so an injected Clock is called concurrently. This is a contract
+// on the implementation rather than a lock inside the engine deliberately —
+// guarding every per-record call would put a global lock on the hot path this
+// slice exists to widen, and a per-lane wrapper would break the determinism an
+// injectable clock is for. A closure over an immutable value is already safe; a
+// clock holding mutable state needs its own synchronization.
 type Clock func() time.Time
 
 // Source is the provider input for an index build. Provider construction and
@@ -152,6 +161,25 @@ type Config struct {
 	Match      MatchConfig
 	Filter     *match.CompositeFilter
 	Crawl      crawler.Config
+	// MaxJournalLanes bounds how many journal-writing lanes a build may split its
+	// crawl across. Experimental.
+	//
+	// A build funnels every observation through one journal writer, which becomes
+	// the ceiling once listing is no longer the constraint. Lanes give each a
+	// private crawl pipeline and journal, while one shared request budget keeps
+	// listing concurrency and request rate at their configured run-global values.
+	//
+	// Zero selects the resolved default; one keeps the single-journal form. Values
+	// above the engine ceiling are refused before any side effect rather than
+	// clamped. The effective lane count is the smallest of this value, the crawl
+	// concurrency, and the number of crawl-plan entries — so lanes require an
+	// explicit CrawlPrefixes plan with more than one entry, since a plan entry is
+	// the unit of coverage authority a lane attests.
+	//
+	// A multi-lane run seals several journals, each recording only the plan subset
+	// it observed. Recovery from such a run must be handed the complete set: an
+	// omitted journal narrows the derived plan and refuses whole-run coverage.
+	MaxJournalLanes int
 	// CrawlPrefixes, when supplied, is the exact provider-prefix observation
 	// plan. It lets CLI adapters pass a manifest scope plan into the engine
 	// without making the engine import manifest or command packages. Entries

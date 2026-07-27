@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,7 +197,7 @@ build:
 	var stdout strings.Builder
 	cmd.SetOut(&stdout)
 	require.NoError(t, runIndexBuild(cmd, nil))
-	require.Equal(t, 1, prov.listCalls)
+	require.Equal(t, 1, prov.listCallCount())
 
 	var report map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
@@ -271,7 +273,7 @@ build:
 	var stdout strings.Builder
 	cmd.SetOut(&stdout)
 	require.NoError(t, runIndexBuild(cmd, nil))
-	require.Equal(t, 1, prov.listCalls, "one crawl feeds both sinks")
+	require.Equal(t, 1, prov.listCallCount(), "one crawl feeds both sinks")
 
 	var report map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
@@ -629,7 +631,7 @@ func TestIndexBuildFormatBothRefusesPlantedVerificationSymlink(t *testing.T) {
 	cmd.SetOut(&stdout)
 	err = runIndexBuild(cmd, nil)
 	require.ErrorIs(t, err, indexreader.ErrVerificationProjectionTarget)
-	require.Zero(t, prov.listCalls, "refusal must happen before provider work")
+	require.Zero(t, prov.listCallCount(), "refusal must happen before provider work")
 	require.Empty(t, strings.TrimSpace(stdout.String()), "no report or receipt on refusal")
 
 	entries, err := os.ReadDir(outside)
@@ -689,7 +691,7 @@ func TestIndexBuildFormatBothRefusesRootSubstitutionAtVerificationCreate(t *test
 	cmd.SetOut(&stdout)
 	err := runIndexBuild(cmd, nil)
 	require.ErrorIs(t, err, indexreader.ErrVerificationProjectionTarget)
-	require.Zero(t, prov.listCalls, "refusal must happen before provider work")
+	require.Zero(t, prov.listCallCount(), "refusal must happen before provider work")
 	require.Empty(t, strings.TrimSpace(stdout.String()), "no report or receipt on refusal")
 
 	entries, err := os.ReadDir(outside)
@@ -718,7 +720,11 @@ func TestIndexBuildBothFormatsFailureReportCarriesProjectionSemantics(t *testing
 
 func TestIndexBuildFormatBothAcceptsMultiPrefixScopeWithFaithfulCoverage(t *testing.T) {
 	// Scoped --format both: one crawl, dual writers, coverage prefixes == plan
-	// prefixes exactly, Window nil, parity PASS.
+	// prefixes exactly, Window nil, parity PASS. Crawl concurrency below is 2 on
+	// purpose: effective lanes are min(concurrency, plan entries, max lanes), so
+	// at concurrency 1 this path would collapse to a single journal whatever the
+	// lane setting were, and the single-journal assertion at the end would hold
+	// vacuously.
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
 	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
@@ -740,7 +746,7 @@ build:
   match:
     includes: ["**"]
   crawl:
-    concurrency: 1
+    concurrency: 2
     progress_every: 100
 `), 0o600))
 
@@ -768,7 +774,7 @@ build:
 	cmd.SetOut(&stdout)
 	require.NoError(t, runIndexBuild(cmd, nil))
 	// Single crawl over two plan prefixes (not a third full-base list).
-	require.Equal(t, 2, prov.listCalls)
+	require.Equal(t, 2, prov.listCallCount())
 
 	var report map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &report))
@@ -801,6 +807,31 @@ build:
 	}
 	sort.Strings(got)
 	require.Equal(t, []string{"cold/", "hot/"}, got)
+
+	// The dual-format arm is pinned to the single-journal form: its SQLite sink is
+	// written synchronously on the observation path, so it cannot benefit from
+	// lanes, and it stays the compatibility arm the durable one is compared
+	// against. Assert the produced artifact, not the configured intent.
+	journals, err := filepath.Glob(filepath.Join(dataRoot, "journals", "*", "*", "shard-*.jsonl"))
+	require.NoError(t, err)
+	if len(journals) == 0 {
+		require.NoError(t, filepath.WalkDir(dataRoot, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !d.IsDir() && strings.HasPrefix(d.Name(), "shard-") && strings.HasSuffix(d.Name(), ".jsonl") {
+				journals = append(journals, path)
+			}
+			return nil
+		}))
+	}
+	require.Len(t, journals, 1, "dual-format must produce exactly one sealed journal")
+	journalSummary, err := indexsubstrate.ValidateJournalBounded(journals[0], indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
+	require.NoError(t, err, "the dual-format journal must be sealed and integrity-valid")
+	require.Empty(t, journalSummary.Header.CrawlPlanMode, "the single-journal form records no crawl plan mode")
+	require.Equal(t, "shard-0001", journalSummary.Header.Shard)
+	require.ElementsMatch(t, []string{"data/hot/", "data/cold/"}, journalSummary.Header.CrawlPrefixes,
+		"the single journal attests the whole run plan")
 }
 
 func TestIndexBuildFormatDurableRepeatedScopeContinuityMergesCoverage(t *testing.T) {
@@ -943,7 +974,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, "--format both does not support build.match.excludes in this slice")
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 }
 
 func TestIndexBuildEngineCoverageFaithfulSetEquality(t *testing.T) {
@@ -1098,7 +1129,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, `--format both supports only default build.match.includes "**" in this slice`)
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, globErr)
@@ -1140,7 +1171,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, `--format both supports only default build.match.includes "**" in this slice`)
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, globErr)
@@ -1183,7 +1214,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, "--format both does not support build.match.excludes in this slice")
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, globErr)
@@ -1228,7 +1259,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, "--format both does not support build.match.filters in this slice")
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, globErr)
@@ -1271,7 +1302,7 @@ build:
 	cmd.SetContext(context.Background())
 	err := runIndexBuild(cmd, nil)
 	require.ErrorContains(t, err, "--format durable does not support build.match.excludes in this slice")
-	require.Zero(t, prov.listCalls)
+	require.Zero(t, prov.listCallCount())
 
 	latestFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "cache", "segments", "*", "latest.json"))
 	require.NoError(t, globErr)
@@ -1349,12 +1380,27 @@ func (indexBuildEngineFakeProvider) Head(context.Context, string) (*provider.Obj
 func (indexBuildEngineFakeProvider) Close() error { return nil }
 
 type countingIndexBuildProvider struct {
-	objects   []provider.ObjectSummary
+	objects []provider.ObjectSummary
+
+	// mu guards listCalls. A provider is listed from several goroutines as soon as
+	// crawl concurrency exceeds one, so an unguarded counter here is a race in the
+	// fixture rather than in anything the fixture is testing.
+	mu        sync.Mutex
 	listCalls int
 }
 
+// listCallCount reports the listings observed. Read it after the crawl under the
+// same lock the writes take.
+func (p *countingIndexBuildProvider) listCallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.listCalls
+}
+
 func (p *countingIndexBuildProvider) List(_ context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	p.mu.Lock()
 	p.listCalls++
+	p.mu.Unlock()
 	var out []provider.ObjectSummary
 	for _, obj := range p.objects {
 		if strings.HasPrefix(obj.Key, opts.Prefix) {

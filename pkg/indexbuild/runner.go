@@ -96,23 +96,6 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	journalPath := filepath.Join(cfg.Paths.JournalDir, "shard-0001.jsonl")
-	writer, err := newJournalWriter(journalWriterConfig{
-		Path:          journalPath,
-		IndexSetID:    cfg.IndexSetID,
-		RunID:         cfg.RunID,
-		StartedAt:     cfg.RunStartedAt,
-		BaseURI:       cfg.BaseURI,
-		BasePrefix:    basePrefix,
-		CrawlPrefixes: journalPlan,
-		Now:           cfg.Clock,
-		Events:        cfg.Events,
-	})
-	if err != nil {
-		return Summary{}, err
-	}
-	observed := newObservationFanoutWriter(writer, cfg.ObservationSinks)
-
 	crawlCfg := cfg.Crawl
 	if crawlCfg.Concurrency <= 0 {
 		crawlCfg.Concurrency = crawler.DefaultConfig().Concurrency
@@ -123,9 +106,9 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	if crawlCfg.ProgressEvery <= 0 {
 		crawlCfg.ProgressEvery = crawler.DefaultConfig().ProgressEvery
 	}
-	c := crawler.New(cfg.Source.Provider, matcher, observed, cfg.RunID, crawlCfg)
-	if cfg.Filter != nil {
-		c = c.WithFilter(cfg.Filter)
+	maxLanes, err := resolveMaxJournalLanes(cfg.MaxJournalLanes)
+	if err != nil {
+		return Summary{}, err
 	}
 	prefixes := append([]string(nil), cfg.CrawlPrefixes...)
 	if len(prefixes) == 0 {
@@ -134,36 +117,21 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	if len(prefixes) == 0 {
 		prefixes = []string{""}
 	}
-	c = c.WithPrefixes(prefixes)
 
-	crawlSummary, crawlErr := c.Run(ctx)
-	if crawlErr != nil {
-		closeErr := observed.Close()
-		_ = emitEvent(context.Background(), cfg.Events, Event{
-			Type:    EventTypeCrawlError,
-			RunID:   cfg.RunID,
-			Message: crawlErr.Error(),
-		})
-		if closeErr != nil {
-			return Summary{}, fmt.Errorf("crawl failed: %w; close journal: %v", crawlErr, closeErr)
-		}
-		return Summary{}, fmt.Errorf("crawl failed: %w", crawlErr)
-	}
-	if writer.ErrorCount() > 0 {
-		if closeErr := observed.Close(); closeErr != nil {
-			return Summary{}, closeErr
-		}
-		return Summary{}, fmt.Errorf("crawl completed with %d errors; snapshot not published", writer.ErrorCount())
-	}
-	if err := writer.Seal(); err != nil {
-		_ = observed.Close()
+	crawlResult, err := runCrawlLanes(ctx, crawlLanesConfig{
+		build:       cfg,
+		basePrefix:  basePrefix,
+		matcher:     matcher,
+		crawl:       crawlCfg,
+		maxLanes:    maxLanes,
+		journalPlan: journalPlan,
+		prefixes:    prefixes,
+	})
+	if err != nil {
 		return Summary{}, err
 	}
-	if err := observed.Close(); err != nil {
-		return Summary{}, err
-	}
-	if crawlSummary != nil && len(crawlSummary.Prefixes) > 0 {
-		prefixes = crawlSummary.Prefixes
+	if len(crawlResult.prefixesCrawled) > 0 {
+		prefixes = crawlResult.prefixesCrawled
 	}
 
 	retryCfg := RetryConfig{
@@ -171,7 +139,7 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 		RunID:                cfg.RunID,
 		BaseURI:              cfg.BaseURI,
 		Paths:                cfg.Paths,
-		JournalPaths:         []string{journalPath},
+		JournalPaths:         crawlResult.journalPaths,
 		Coverage:             cfg.Coverage,
 		ExpectedParent:       cfg.ExpectedParent,
 		RunStartedAt:         cfg.RunStartedAt,
@@ -190,7 +158,7 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 		return Summary{}, err
 	}
 	result.PrefixesCrawled = append([]string(nil), prefixes...)
-	result.ObjectsObserved = writer.ObjectCount()
+	result.ObjectsObserved = crawlResult.objectsObserved
 	return result, nil
 }
 
@@ -832,16 +800,38 @@ func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, erro
 }
 
 // boundCrawlPlanFromJournals reads the sealed journal headers and returns the
-// single crawl-prefix plan they were built under. This is the observation
-// provenance that bounds recovery coverage authority, so every journal must:
+// crawl-prefix plan the supplied set attests. This is the observation provenance
+// that bounds recovery coverage authority, so every journal must:
 //   - be content-integrity verified (the bounded validator recomputes the footer
 //     ContentSHA256 over the header+records, so a post-seal header edit fails);
 //   - carry that sealed digest (a journal without one is not tamper-evident and
 //     fails closed — a plan added to an unauthenticated legacy journal is not
 //     provenance);
 //   - record a canonical, non-empty plan (leading slash / whitespace / empty /
-//     duplicate entries are invalid provenance, never trimmed into validity);
-//   - agree with every other journal on the exact plan (order-independent).
+//     duplicate entries are invalid provenance, never trimmed into validity).
+//
+// How the recorded plans combine is decided by the header's CrawlPlanMode
+// discriminator, which is integrity-bound by the same sealed digest, never by
+// the shape of the plan data itself. That distinction is the point: a defect
+// that corrupts lane plans into agreement must not be readable as the legacy
+// form, which is the accepting branch. Over the supplied set:
+//
+//  1. every mode absent — the legacy/single-lane form: every journal must record
+//     the exact same plan (order-independent), and that plan is returned;
+//  2. every mode lane-local — each journal attests only its own subset, so no
+//     exact plan entry may appear in more than one journal and the canonical
+//     union of the subsets is returned. Authority is therefore bounded by what
+//     was actually supplied: omitting a lane narrows the derived plan, and the
+//     caller's whole-run coverage then refuses rather than authorizing tombstones
+//     over rows no supplied journal observed;
+//  3. anything else — a mode mixed across the set, or a mode value this reader
+//     does not recognize — refuses. An unrecognized value is refused rather than
+//     defaulted, so a form written by a newer writer cannot be silently read
+//     under legacy rules.
+//
+// The mode is interpreted here, at the recovery trust boundary, rather than in
+// journal validation, so an additional future mode stays additive to the journal
+// format and fails closed only where its meaning matters.
 //
 // maxRecordBytes is the resolved record budget: every line read in this pass is
 // bounded, so an over-budget journal refuses with the typed
@@ -851,8 +841,11 @@ func boundCrawlPlanFromJournals(journalPaths []string, maxRecordBytes int64) ([]
 	if len(journalPaths) == 0 {
 		return nil, fmt.Errorf("journal paths are required")
 	}
-	var plan []string
-	var planKey string
+	type journalPlan struct {
+		mode     string
+		prefixes []string
+	}
+	plans := make([]journalPlan, 0, len(journalPaths))
 	for i, path := range journalPaths {
 		summary, err := indexsubstrate.ValidateJournalBounded(path, maxRecordBytes)
 		if err != nil {
@@ -867,17 +860,37 @@ func boundCrawlPlanFromJournals(journalPaths []string, maxRecordBytes int64) ([]
 		if err := validateJournalPlanCanonical(summary.Header.CrawlPrefixes); err != nil {
 			return nil, fmt.Errorf("%w: journal %d: %v", indexsubstrate.ErrStaleParent, i, err)
 		}
-		key := crawlPlanSetKey(summary.Header.CrawlPrefixes)
-		if i == 0 {
-			plan = append([]string(nil), summary.Header.CrawlPrefixes...)
-			planKey = key
-			continue
+		mode := summary.Header.CrawlPlanMode
+		if mode != "" && mode != indexsubstrate.CrawlPlanModeLaneLocal {
+			return nil, fmt.Errorf("%w: journal %d records unrecognized crawl_plan_mode %q; recovery cannot interpret its crawl-plan provenance", indexsubstrate.ErrStaleParent, i, mode)
 		}
-		if key != planKey {
+		if len(plans) > 0 && mode != plans[0].mode {
+			return nil, fmt.Errorf("%w: sealed journals mix legacy whole-plan and lane-local crawl-plan provenance", indexsubstrate.ErrStaleParent)
+		}
+		plans = append(plans, journalPlan{mode: mode, prefixes: append([]string(nil), summary.Header.CrawlPrefixes...)})
+	}
+	if plans[0].mode == indexsubstrate.CrawlPlanModeLaneLocal {
+		union := make([]string, 0, len(plans))
+		claimedBy := make(map[string]int, len(plans))
+		for i, p := range plans {
+			for _, prefix := range p.prefixes {
+				if j, dup := claimedBy[prefix]; dup {
+					return nil, fmt.Errorf("%w: crawl-plan entry %q is claimed by journals %d and %d; lane-local plans must be disjoint", indexsubstrate.ErrStaleParent, prefix, j, i)
+				}
+				claimedBy[prefix] = i
+				union = append(union, prefix)
+			}
+		}
+		sort.Strings(union)
+		return union, nil
+	}
+	planKey := crawlPlanSetKey(plans[0].prefixes)
+	for i := 1; i < len(plans); i++ {
+		if crawlPlanSetKey(plans[i].prefixes) != planKey {
 			return nil, fmt.Errorf("%w: sealed journals disagree on their crawl-prefix plan", indexsubstrate.ErrStaleParent)
 		}
 	}
-	return plan, nil
+	return append([]string(nil), plans[0].prefixes...), nil
 }
 
 // crawlPlanSetKey is an order-independent identity for a canonical plan so
@@ -1010,6 +1023,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, err
 	}
 	if err := validateDurableObservationSelector(cfg); err != nil {
+		return Config{}, err
+	}
+	// Refuse an out-of-range lane count here, before any event, sink, or crawl
+	// side effect, so an operator asking for more lanes than publication can stage
+	// learns that instead of silently receiving fewer.
+	if _, err := resolveMaxJournalLanes(cfg.MaxJournalLanes); err != nil {
 		return Config{}, err
 	}
 	effectivePlan, err := journalCrawlPlan(basePrefix, cfg.CrawlPrefixes)
