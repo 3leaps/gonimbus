@@ -428,6 +428,7 @@ func sealScopedJournalForRun(t *testing.T, setRoot, runID string, plan []string,
 		BaseURI:       "s3://bucket/data/",
 		BasePrefix:    "data/",
 		CrawlPrefixes: plan,
+		LaneOrdinal:   1,
 		Now:           func() time.Time { return started },
 	})
 	require.NoError(t, err)

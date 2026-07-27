@@ -298,9 +298,29 @@ Embedding contract highlights:
   writer-generated integrity checksum (`content_sha256`) over the header and
   records. A later `Retry` derives the plan from the journals (never a caller
   field), rejects a journal that lacks the checksum or records a non-canonical
-  plan, requires all journals to agree, and requires its `Coverage` to match that
-  plan; prior rows outside the attested plan are retained verbatim, and journals
-  without a recorded plan or checksum fail closed. Trust model: `Retry` consumes
+  plan, and requires its `Coverage` to match the derived plan; prior rows outside
+  the attested plan are retained verbatim, and journals without a recorded plan or
+  checksum fail closed.
+
+  How the recorded plans combine is decided by each header's `crawl_plan_mode`,
+  which is covered by the same `content_sha256` and is never inferred from the
+  plan data. With the mode absent — the form a single-journal build writes — the
+  journal records the whole run plan and every supplied journal must agree on it.
+  With `crawl_plan_mode: lane-local`, each journal attests only the subset it
+  observed: no plan entry may be claimed by two journals, and the derived plan is
+  the union of the journals actually supplied. Authority is therefore bounded by
+  what recovery was handed — omitting one journal of a multi-journal run narrows
+  the derived plan, so whole-run `Coverage` refuses rather than authorizing
+  tombstones over rows no supplied journal observed. A set mixing the two forms,
+  or carrying a mode this build does not recognize, fails closed.
+
+  Recovery diagnostics are not forward-compatible. A reader older than lane
+  support ignores `crawl_plan_mode`: handed a complete multi-journal set it
+  applies the all-journals-agree rule to disjoint plans and refuses, which is
+  fail-closed but reports a plan disagreement rather than the real cause.
+  Authority still holds in such a reader — handed one journal it derives only that
+  journal's local plan — but do not use a pre-lane reader for forward recovery.
+  Trust model: `Retry` consumes
   `JournalPaths` as **engine-produced recovery artifacts** in the engine's
   working storage, which is assumed trusted. The `content_sha256` is an unkeyed
   integrity checksum that detects corruption, truncation, and partial
@@ -308,6 +328,7 @@ Embedding contract highlights:
   streaming-compaction reopen); it is not a cryptographic authentication
   mechanism. Stronger authentication for deployments where recovery artifacts are
   not trusted storage is a tracked follow-up.
+
 - **Paths are caller-owned; continuity is canonical.** `PathConfig` points at
   journal/segment/manifest locations resolved by the adapter. The engine
   rejects journal/segment paths under a supplied `IndexDBDir` so v2 working

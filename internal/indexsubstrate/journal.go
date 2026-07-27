@@ -24,6 +24,11 @@ const (
 	ObjectRecordOpObserve ObjectRecordOp = "observe"
 	ObjectRecordOpEnrich  ObjectRecordOp = "enrich"
 
+	// CrawlPlanModeLaneLocal marks a journal whose CrawlPrefixes records only the
+	// subset of the run plan this journal attests, rather than the whole-run plan.
+	// See JournalHeader.CrawlPlanMode.
+	CrawlPlanModeLaneLocal = "lane-local"
+
 	IndexSchemaVersion = 8
 
 	truncateScanChunkSize = 64 * 1024
@@ -59,7 +64,31 @@ type JournalHeader struct {
 	// its caller-supplied coverage against this recorded plan and re-publishes
 	// only within the observed plan. Absent on legacy journals; recovery over
 	// such a journal fails closed rather than trusting caller coverage.
-	CrawlPrefixes      []string  `json:"crawl_prefixes,omitempty"`
+	CrawlPrefixes []string `json:"crawl_prefixes,omitempty"`
+	// CrawlPlanMode declares how CrawlPrefixes must be read across the sealed
+	// journal set of one run, and is the discriminator recovery uses to decide
+	// whether the journals it was handed are a complete observation set.
+	//
+	// Absent — the only form a single-lane run writes — is the legacy contract:
+	// CrawlPrefixes is the whole-run plan and every journal of the run must
+	// record it identically. CrawlPlanModeLaneLocal means CrawlPrefixes is only
+	// the subset this journal attests, so recovery authority is the union of the
+	// supplied lane plans; omitting a lane narrows that union instead of letting
+	// one lane attest whole-run coverage it never listed.
+	//
+	// The field is additive and deliberately does not move IndexSchemaVersion. It
+	// changes recovery interpretation of the multi-lane form only — object-record,
+	// segment, manifest, and boundary-row schemas are untouched — and bumping the
+	// shared epoch would either break the byte-identical single-lane journal or
+	// force journal/manifest/hub version work. The accepted cost is a reader older
+	// than lane support: handed the complete lane set it ignores this field,
+	// applies its identical-plan rule to disjoint lane plans, and refuses with a
+	// plan-disagreement message. That refusal is fail-closed but an imprecise
+	// diagnosis, so recovery diagnostics are not forward-compatible and a pre-lane
+	// reader must not be used for forward recovery. Authority still holds in such
+	// a reader: handed one lane it derives only that lane-local plan, so an
+	// omitted lane cannot widen coverage.
+	CrawlPlanMode      string    `json:"crawl_plan_mode,omitempty"`
 	IndexSchemaVersion int       `json:"index_schema_version"`
 	StartedAt          time.Time `json:"started_at"`
 }

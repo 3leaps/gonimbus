@@ -21,9 +21,19 @@ type journalWriterConfig struct {
 	BasePrefix string
 	// CrawlPrefixes is the canonical provider-key observation plan sealed into
 	// the journal header as coverage-authority provenance for recovery re-publish.
+	// Under CrawlPlanModeLaneLocal it is this lane's subset, not the whole-run plan.
 	CrawlPrefixes []string
-	Now           Clock
-	Events        EventSink
+	// CrawlPlanMode is the recovery discriminator sealed into the header. Empty is
+	// the legacy/single-lane whole-plan form; indexsubstrate.CrawlPlanModeLaneLocal
+	// marks a lane subset. See indexsubstrate.JournalHeader.CrawlPlanMode.
+	CrawlPlanMode string
+	// LaneOrdinal is the 1-based canonical lane position, which is what derives the
+	// stable journal ID and shard. It is never the lane's completion order: journal
+	// identity orders cross-journal conflict resolution during compaction, so it
+	// must not vary with scheduling.
+	LaneOrdinal int
+	Now         Clock
+	Events      EventSink
 }
 
 type journalWriter struct {
@@ -36,17 +46,32 @@ type journalWriter struct {
 }
 
 func newJournalWriter(cfg journalWriterConfig) (*journalWriter, error) {
+	if cfg.LaneOrdinal < 1 {
+		return nil, fmt.Errorf("journal lane ordinal must be 1 or greater, got %d", cfg.LaneOrdinal)
+	}
+	if cfg.CrawlPlanMode != "" && cfg.CrawlPlanMode != indexsubstrate.CrawlPlanModeLaneLocal {
+		return nil, fmt.Errorf("unrecognized journal crawl plan mode %q", cfg.CrawlPlanMode)
+	}
+	// Refuse an empty plan here, at admission, rather than letting it seal. A
+	// journal sealed with no plan is reported by recovery as predating crawl-plan
+	// provenance — a legacy diagnosis for what is actually a live lane-assignment
+	// bug. The lane arithmetic already guarantees every admitted lane owns at
+	// least one prefix; this makes the guarantee fail where it is violated.
+	if len(cfg.CrawlPrefixes) == 0 {
+		return nil, fmt.Errorf("journal lane %d admitted with an empty crawl-prefix plan", cfg.LaneOrdinal)
+	}
 	if err := ensureDir(filepath.Dir(cfg.Path)); err != nil {
 		return nil, err
 	}
 	jw, err := indexsubstrate.CreateJournal(cfg.Path, indexsubstrate.JournalHeader{
 		Type:               indexsubstrate.JournalHeaderType,
-		JournalID:          "jrn_" + cfg.RunID + "_0001",
+		JournalID:          fmt.Sprintf("jrn_%s_%04d", cfg.RunID, cfg.LaneOrdinal),
 		IndexSetID:         cfg.IndexSetID,
 		RunID:              cfg.RunID,
-		Shard:              "shard-0001",
+		Shard:              fmt.Sprintf("shard-%04d", cfg.LaneOrdinal),
 		Scope:              &indexsubstrate.Scope{Prefix: cfg.BasePrefix},
 		CrawlPrefixes:      append([]string(nil), cfg.CrawlPrefixes...),
+		CrawlPlanMode:      cfg.CrawlPlanMode,
 		IndexSchemaVersion: indexsubstrate.IndexSchemaVersion,
 		StartedAt:          cfg.StartedAt,
 	})
