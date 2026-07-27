@@ -16,13 +16,34 @@ type Source interface {
 }
 
 // ObjectSource reflows a single object addressed by URI from an injected provider.
+//
+// URI must be the object AS SPELLED, not a canonicalized form. Parsing is
+// escape-aware: an escaped metacharacter (`file\*.txt`) is a literal object-key
+// character, and a caller that canonicalizes the URI first would strip the
+// escape, leaving a spelling the engine reclassifies as a pattern and refuses.
 type ObjectSource struct {
 	Provider provider.Provider
 	URI      string
 }
 
-// PrefixSource reflows every object under a listing prefix from an injected
-// provider.
+// PrefixSource reflows every object under a listing prefix, optionally narrowed
+// by a glob pattern, from an injected provider.
+//
+// URI must be the selector AS SPELLED, for the reason ObjectSource states: the
+// parse is escape-aware, and a canonicalized spelling has already lost the
+// escapes that decide whether a metacharacter is a glob or a literal key
+// character. An exact-object URI is refused here — ObjectSource is that form —
+// because listing under a whole object key would also admit its prefix siblings.
+//
+// Provider is required for dry-run as well as copy, unlike ObjectSource. A
+// prefix names no object until it is listed, so List is the planning operation
+// itself and there is no plan to produce without it.
+//
+// Enumeration is page-streamed: each listed object is dispatched as it is read,
+// so a selector matching many objects does not accumulate a listing. A List
+// failure partway through stops enumeration and fails the run with a
+// SourceEnumerationError; see that type for what the run does and does not
+// report in that case.
 type PrefixSource struct {
 	Provider provider.Provider
 	URI      string

@@ -726,13 +726,22 @@ func TestRunnerDefersBeforeReading(t *testing.T) {
 		}
 	})
 
+	// ObjectSource and PrefixSource are no longer here: they execute. The form
+	// below is the one still deferred to the command layer, and it must defer
+	// before emitting.
 	t.Run("unsupported source form", func(t *testing.T) {
-		sink := &collectSink{}
-		runner, err := NewRunner(dryRunConfig(sink))
-		require.NoError(t, err)
-		_, err = runner.Run(context.Background(), ObjectSource{Provider: sentinelProvider{}, URI: "s3://b/k"})
-		require.True(t, errors.Is(err, ErrNotImplemented))
-		require.False(t, sink.emitted())
+		for name, src := range map[string]Source{
+			"file tree": FileTreeSource{Root: "/tmp/does-not-matter"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				sink := &collectSink{}
+				runner, err := NewRunner(dryRunConfig(sink))
+				require.NoError(t, err)
+				_, err = runner.Run(context.Background(), src)
+				require.True(t, errors.Is(err, ErrNotImplemented))
+				require.False(t, sink.emitted())
+			})
+		}
 	})
 }
 

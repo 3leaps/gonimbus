@@ -56,7 +56,7 @@ type reflowInput struct {
 func parseReflowInputLine(line string) (reflowInput, error) {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "{") {
-		return parseRawS3ObjectLine(line)
+		return parseRawS3ObjectLine(line, "RecordStreamSource raw URI input")
 	}
 	var env struct {
 		Type string          `json:"type"`
@@ -208,7 +208,14 @@ func parseIndexObjectInputData(raw json.RawMessage) (reflowInput, error) {
 	}, nil
 }
 
-func parseRawS3ObjectLine(line string) (reflowInput, error) {
+// parseRawS3ObjectLine parses an exact S3 object URI into the engine's internal
+// form. form names the caller for the refusal message, since both the record
+// stream's raw-URI line and a positional ObjectSource share this parser.
+//
+// Parsing is escape-aware: an escaped metacharacter is a literal object-key
+// character, so the caller must pass the URI AS SPELLED. A canonicalized
+// spelling would have lost the escapes and be reclassified here as a pattern.
+func parseRawS3ObjectLine(line, form string) (reflowInput, error) {
 	parsed, err := uri.ParseURI(line)
 	if err != nil {
 		return reflowInput{}, err
@@ -217,7 +224,7 @@ func parseRawS3ObjectLine(line string) (reflowInput, error) {
 		return reflowInput{}, fmt.Errorf("unsupported provider %q", parsed.Provider)
 	}
 	if parsed.IsPrefix() || parsed.IsPattern() {
-		return reflowInput{}, fmt.Errorf("RecordStreamSource raw URI input must be an exact object URI")
+		return reflowInput{}, fmt.Errorf("%s must be an exact object URI", form)
 	}
 	key := strings.TrimPrefix(strings.TrimSpace(parsed.Key), "/")
 	if key == "" {

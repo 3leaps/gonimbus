@@ -39,6 +39,43 @@ type CheckpointStore interface {
 	Close() error
 }
 
+// SourceRunMetadataStore is an optional CheckpointStore capability: a store that
+// records the run-level source a positional run resolved. Positional execution
+// type-asserts for it when wired and skips the write for a store that does not
+// implement it — absence is a clean no-op, not a deficiency, because a
+// record-stream run has no single positional selector to record. Experimental.
+//
+// This is run-level SELECTOR metadata. It is unrelated to the per-object source
+// metadata of metadata.go (user metadata copied or derived into destination PUT
+// options); the two share a word, not a contract.
+//
+// The write is run setup performed through the coordinator, ordered ahead of any
+// per-item authority write.
+type SourceRunMetadataStore interface {
+	// SetSourceRunMetadata records the resolved run-level source.
+	SetSourceRunMetadata(ctx context.Context, meta SourceRunMetadata) error
+}
+
+// SourceRunMetadata is the resolved run-level description of the source a
+// positional run selected, for persistence in a trusted checkpoint store. It
+// carries no credential, signed-URL, or raw-config material — but it is NOT an
+// event or log payload: Root and the selector can be disclosure-sensitive (a
+// local filesystem root on the file path) and a store records them verbatim.
+//
+// URI is the run-level source SELECTOR — for a prefix or pattern source it is
+// the prefix/pattern itself, which matches many objects and matches no single
+// one. It is never item resume authority: ItemDone, UpsertItem, collision, and
+// destination-source entries are keyed by each enumerated object's exact object
+// URI. Reconstructing one identity from the other would either make resume
+// lookups miss or make the run-level source record misdescribe what was
+// selected.
+type SourceRunMetadata struct {
+	Provider string
+	Bucket   string
+	Root     string
+	URI      string
+}
+
 // CheckpointItem is the sanitized per-item record an engine hands to a
 // CheckpointStore. It carries no credential, signed-URL, or raw-config material.
 type CheckpointItem struct {
