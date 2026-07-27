@@ -378,12 +378,14 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, "", dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.True(t, plan.enabled, "live migrated stdin runs dispatch to the engine (reason=%q)", plan.reason)
 	require.Empty(t, plan.reason)
 	require.False(t, plan.cfg.DryRun)
-	require.NotNil(t, plan.source.Resolve, "live plan carries a source resolver")
+	stream, isStream := plan.source.(reflowpkg.RecordStreamSource)
+	require.True(t, isStream, "a stdin plan carries a record stream source")
+	require.NotNil(t, stream.Resolve, "live plan carries a source resolver")
 	if plan.close != nil {
 		plan.close()
 	}
@@ -403,7 +405,7 @@ func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *tes
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, "", dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.False(t, plan.enabled, "non-migrated source-failure policy must route to the CLI pool")
 	require.Equal(t, "source-failure policy not migrated", plan.reason)
@@ -427,7 +429,7 @@ func TestPlanTransferReflowEngineAdapter_DryRunKeepsEngine(t *testing.T) {
 		BaseURI:  "s3://dest-bucket/data/",
 	}
 	input := reflowInputLine("source/a.xml", "etag", 1, "", "") + "\n"
-	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
+	plan := planTransferReflowEngineAdapter(context.Background(), strings.NewReader(input), firstRecordEngineReady, "", dest, dst, collisionConfig{Mode: reflowCollisionSkip}, reflowMetadataConfig{}, provenanceConfig{}, reflowpkg.ConcurrencyConfig{EffectiveCeiling: 8}, nil, "test-job")
 
 	require.True(t, plan.enabled)
 	require.Empty(t, plan.reason)
@@ -1207,6 +1209,89 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	// all attempts IfAbsent, no unconditional writes.
 	dst.requireExactlyOneLandPerKey(t, expectedKeys)
 }
+
+// sourceRunMetadataRecordingState captures the positional source-run-metadata
+// setup write without a backing store. The embedded interface is nil: any call
+// other than SetSourceMetadata panics, which is the point — it proves the
+// capability path touches nothing else.
+type sourceRunMetadataRecordingState struct {
+	reflowStateStore
+	provider, bucket, root, sourceURI string
+	calls                             int
+	err                               error
+}
+
+func (s *sourceRunMetadataRecordingState) SetSourceMetadata(_ context.Context, provider, bucket, root, sourceURI string) error {
+	s.calls++
+	s.provider, s.bucket, s.root, s.sourceURI = provider, bucket, root, sourceURI
+	return s.err
+}
+
+// TestReflowCheckpointAdapterSourceRunMetadataCapability pins the engine's
+// optional SourceRunMetadataStore capability at the CLI checkpoint adapter: the
+// adapter implements it, the SourceRunMetadata value reaches the store field for
+// field, and a store error is returned at this boundary rather than swallowed
+// here (the runner decides the swallow, so the adapter must not pre-empt it).
+func TestReflowCheckpointAdapterSourceRunMetadataCapability(t *testing.T) {
+	state := &sourceRunMetadataRecordingState{}
+	store := checkpointAdapter(state, false)
+	require.NotNil(t, store)
+
+	capable, ok := store.(reflowpkg.SourceRunMetadataStore)
+	require.True(t, ok, "CLI checkpoint adapter must implement the SourceRunMetadataStore capability")
+
+	meta := reflowpkg.SourceRunMetadata{
+		Provider: "s3",
+		Bucket:   "example-bucket",
+		Root:     "",
+		URI:      "s3://example-bucket/prefix/",
+	}
+	require.NoError(t, capable.SetSourceRunMetadata(context.Background(), meta))
+	require.Equal(t, 1, state.calls)
+	require.Equal(t, meta.Provider, state.provider)
+	require.Equal(t, meta.Bucket, state.bucket)
+	require.Equal(t, meta.Root, state.root)
+	require.Equal(t, meta.URI, state.sourceURI, "the run-level selector must reach the store unaltered")
+
+	state.err = fmt.Errorf("injected source metadata failure")
+	require.ErrorContains(t, capable.SetSourceRunMetadata(context.Background(), meta), "injected source metadata failure")
+	require.Equal(t, 2, state.calls)
+}
+
+// TestReflowCheckpointStoreWithoutSourceRunMetadataCapability pins capability
+// DETECTION only: a CheckpointStore that does not implement the capability does
+// not satisfy the interface, so a caller can distinguish absence.
+//
+// It does NOT prove any runner no-op — no engine code type-asserts this
+// capability at this head. The wired skip, and its negative control, land with
+// positional execution.
+func TestReflowCheckpointStoreWithoutSourceRunMetadataCapability(t *testing.T) {
+	var store reflowpkg.CheckpointStore = capabilityLessCheckpointStore{}
+	_, ok := store.(reflowpkg.SourceRunMetadataStore)
+	require.False(t, ok, "a store without the capability must not satisfy SourceRunMetadataStore")
+}
+
+// capabilityLessCheckpointStore satisfies the required CheckpointStore surface
+// and nothing more.
+type capabilityLessCheckpointStore struct{}
+
+func (capabilityLessCheckpointStore) ItemDone(context.Context, string, string) (bool, string, error) {
+	return false, "", nil
+}
+func (capabilityLessCheckpointStore) UpsertItem(context.Context, reflowpkg.CheckpointItem) error {
+	return nil
+}
+func (capabilityLessCheckpointStore) DestKeyObserved(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (capabilityLessCheckpointStore) MarkDestKeyObserved(context.Context, string) error { return nil }
+func (capabilityLessCheckpointStore) NoteDestKeySource(context.Context, string, string, string, int64) error {
+	return nil
+}
+func (capabilityLessCheckpointStore) NoteCollision(context.Context, reflowpkg.CheckpointCollision) error {
+	return nil
+}
+func (capabilityLessCheckpointStore) Close() error { return nil }
 
 // upsertFailingReflowState fails terminal item upserts while passing all other
 // store operations through, for the dual-path checkpoint-failure disposition.

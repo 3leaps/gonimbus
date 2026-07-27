@@ -60,6 +60,39 @@ const (
 	flagNotApplicable = "not-applicable"
 )
 
+// Matrix column names, used to tie an observed execution path back to the
+// disposition its own cell declares.
+const (
+	columnEngine  = "engine"
+	columnCLIPool = "cliPool"
+)
+
+// resumeRunScenario selects the checkpointed source shape a resume probe
+// replays. Dispatch under --resume-run is decided by that shape alone, since
+// resume refuses extra flags and the usual routing vehicle cannot be appended.
+type resumeRunScenario int
+
+const (
+	resumeExactObjectSource resumeRunScenario = iota
+	resumeFileTreeSource
+)
+
+// declaredExecutionPath maps a cell's disposition to the execution path it
+// promises an observer. Dispositions that make no dispatch claim return "".
+func declaredExecutionPath(disposition, column string) string {
+	switch disposition {
+	case flagRoutesCLIPool:
+		return reflowpkg.ExecutionPathCLIPool
+	case flagHonored:
+		if column == columnCLIPool {
+			return reflowpkg.ExecutionPathCLIPool
+		}
+		return reflowpkg.ExecutionPathEngine
+	default:
+		return ""
+	}
+}
+
 type flagPathCell struct {
 	disposition string
 	probe       func(t *testing.T)
@@ -160,13 +193,20 @@ func (e *flagProbeEnv) runInput(t *testing.T, input string, extra ...string) (st
 // runRaw executes the command with fully caller-controlled input and args.
 func (e *flagProbeEnv) runRaw(t *testing.T, in *strings.Reader, args ...string) (string, error) {
 	t.Helper()
+	return e.runRawContext(t, context.Background(), in, args...)
+}
+
+// runRawContext is runRaw under a caller-owned context, so a control can cancel
+// a run in flight and observe the disposition the command reports.
+func (e *flagProbeEnv) runRawContext(t *testing.T, ctx context.Context, in *strings.Reader, args ...string) (string, error) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
 	cmd := newTransferReflowTestCommand()
 	cmd.SetIn(in)
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(args)
-	execErr := cmd.Execute()
+	execErr := cmd.ExecuteContext(ctx)
 	return stdout.String(), execErr
 }
 
@@ -414,12 +454,12 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 		}},
 	},
 	"resume-run": {
-		note: "run-id resume replays a checkpointed positional run (stdin runs are not checkpoint-eligible), so the resumed execution is a pool shape; unknown ids refuse loudly",
-		engine: flagPathCell{disposition: flagRoutesCLIPool, probe: func(t *testing.T) {
-			probeResumeRunRoute(t)
+		note: "run-id resume replays a checkpointed positional run (stdin runs are not checkpoint-eligible); an exact-object source resumes on the engine and resume stays source-independent, while the pool arm routes with the genuine vehicle; unknown ids refuse loudly",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			probeResumeRunRoute(t, resumeExactObjectSource, reflowpkg.ExecutionPathEngine)
 		}},
 		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
-			probeResumeRunRoute(t)
+			probeResumeRunRoute(t, resumeFileTreeSource, reflowpkg.ExecutionPathCLIPool)
 		}},
 	},
 	"run-id": {
@@ -1048,16 +1088,31 @@ func probeSidecarRootRejected(t *testing.T) {
 }
 
 // probeResumeRunRoute builds a genuine failed-resumable checkpoint for a
-// positional run, resumes it by id, and observes the CLI-pool execution path —
-// plus the loud refusal of an unknown id.
-func probeResumeRunRoute(t *testing.T) {
+// positional run, resumes it by id, and observes the execution path its column
+// declares — plus the loud refusal of an unknown id.
+//
+// Dispatch under --resume-run is decided entirely by the CHECKPOINTED source
+// shape: resume refuses extra flags, so the usual routing vehicle cannot be
+// appended. The engine column therefore checkpoints an exact object (migrated),
+// and the pool column checkpoints a FILE TREE — the shape that is still
+// pool-owned now that object-store prefixes and patterns execute on the engine.
+// Each column observes a genuine dispatch rather than an asserted one. Resume
+// itself stays source-independent: the store is consulted per item either way.
+// The SCENARIO is chosen by the caller and is independent of wantPath, so a
+// declaration that disagrees with observed dispatch fails rather than silently
+// selecting a scenario that satisfies itself.
+func probeResumeRunRoute(t *testing.T, scenario resumeRunScenario, wantPath string) {
 	t.Helper()
+	sourceURI := "s3://source-bucket/a.txt"
+	if scenario == resumeFileTreeSource {
+		sourceURI = "file://" + t.TempDir()
+	}
 	env := newFlagProbeEnv(t)
 	env.src.putFixture("a.txt", "payload", "src-etag", time.Time{})
 
 	ctx := context.Background()
 	cfg := transferReflowCheckpointConfig{
-		SourceURI:               "s3://source-bucket/a.txt",
+		SourceURI:               sourceURI,
 		Dest:                    "s3://dest-bucket/data/",
 		RewriteFrom:             "{key}",
 		RewriteTo:               "{key}",
@@ -1096,9 +1151,16 @@ func probeResumeRunRoute(t *testing.T) {
 
 	stdout, err := env.runRaw(t, strings.NewReader(""), "--resume-run", "run_matrix_probe")
 	require.NoError(t, err, "resuming a failed-resumable positional run must succeed")
-	require.Equal(t, reflowpkg.ExecutionPathCLIPool, executionPathOf(t, stdout),
-		"a resumed positional run executes on the CLI pool")
-	require.True(t, env.dst.hasObject("data/a.txt"))
+	require.Equal(t, wantPath, executionPathOf(t, stdout),
+		"resumed positional run must dispatch as its matrix cell declares")
+	if scenario == resumeExactObjectSource {
+		require.True(t, env.dst.hasObject("data/a.txt"),
+			"the resumed exact object must land")
+	}
+	// The pool arm deliberately asserts dispatch only. Its checkpointed source is
+	// an empty file tree, so copying zero objects is the correct outcome rather
+	// than a weakened assertion — the exact-object landing behavior is pinned on
+	// the engine arm above.
 
 	// Unknown id: loud refusal, no execution, no destination mutation.
 	env2 := newFlagProbeEnv(t)

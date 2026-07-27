@@ -23,7 +23,7 @@ type transferReflowEnginePlan struct {
 	enabled bool
 	reason  string
 	cfg     reflowpkg.Config
-	source  reflowpkg.RecordStreamSource
+	source  reflowpkg.Source
 	input   io.Reader
 	close   func()
 }
@@ -66,17 +66,28 @@ const (
 // here rather than read and retained in full.
 const maxReflowFirstRecordSniffBytes = 1 << 20
 
-func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, firstClass firstRecordClass, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, provCfg provenanceConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore, jobID string) transferReflowEnginePlan {
+func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, firstClass firstRecordClass, positionalSource string, destSpec *reflowDestSpec, dst provider.Provider, collCfg collisionConfig, metaCfg reflowMetadataConfig, provCfg provenanceConfig, concurrencyCfg reflowpkg.ConcurrencyConfig, state reflowStateStore, jobID string) transferReflowEnginePlan {
 	plan := transferReflowEnginePlan{input: input}
+	// A positional argument selects a source shape. Every object-store shape —
+	// exact object, prefix, and pattern — is migrated; a file tree still falls
+	// through to the CLI pool.
+	var positional *uri.ObjectURI
 	if !reflowStdin {
-		plan.reason = "positional source path not migrated"
-		return plan
-	}
-	// Unsupported first records are refused before this adapter runs (see
-	// classifyTransferReflowFirstRecord at the command dispatch); any record
-	// reaching here that is not engine-ready is a migrate-pending form that
-	// still falls through to the CLI pool.
-	if firstClass != firstRecordEngineReady {
+		parsed, err := uri.ParseURI(positionalSource)
+		if err != nil {
+			plan.reason = "positional source path not migrated"
+			return plan
+		}
+		if parsed.Provider != string(provider.ProviderS3) {
+			plan.reason = "positional source path not migrated"
+			return plan
+		}
+		positional = parsed
+	} else if firstClass != firstRecordEngineReady {
+		// Unsupported first records are refused before this adapter runs (see
+		// classifyTransferReflowFirstRecord at the command dispatch); any record
+		// reaching here that is not engine-ready is a migrate-pending form that
+		// still falls through to the CLI pool.
 		plan.reason = "stdin record stream not migrated"
 		return plan
 	}
@@ -160,9 +171,32 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		Provenance:  provCfg.enginePlan(jobID),
 		Checkpoint:  checkpointAdapter(state, reflowResume),
 	}
-	plan.source = reflowpkg.RecordStreamSource{
-		Records: input,
-		Resolve: srcResolver,
+	if positional != nil {
+		// The pool resolves the source provider for a positional argument in both
+		// dry-run and copy, so a credential or endpoint failure surfaces the same
+		// way on either path.
+		p, err := newSourceProvider(ctx, positional, concurrencyCfg)
+		if err != nil {
+			plan.enabled = false
+			plan.reason = "source provider unavailable"
+			return plan
+		}
+		srcProv = p
+		// Hand the engine the source AS SPELLED, not the canonical parsed form.
+		// ObjectURI.String() emits the UNESCAPED key, so an escaped literal
+		// metacharacter — a supported exact-object spelling the pool copies today —
+		// would reclassify as a pattern when the engine parses it and be refused.
+		// The parsed value still builds the provider, and selects the source form.
+		if positional.IsPrefix() || positional.IsPattern() {
+			plan.source = reflowpkg.PrefixSource{Provider: p, URI: positionalSource}
+		} else {
+			plan.source = reflowpkg.ObjectSource{Provider: p, URI: positionalSource}
+		}
+	} else {
+		plan.source = reflowpkg.RecordStreamSource{
+			Records: input,
+			Resolve: srcResolver,
+		}
 	}
 	plan.close = func() {
 		if srcProv != nil {
@@ -170,6 +204,15 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		}
 	}
 	return plan
+}
+
+// positionalReflowSource returns the positional source argument, or "" when the
+// command was invoked without one.
+func positionalReflowSource(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }
 
 // classifyTransferReflowFirstRecord performs the bounded, replayable first-record
@@ -306,6 +349,14 @@ func runTransferReflowViaEngine(ctx context.Context, plan transferReflowEnginePl
 }
 
 func transferReflowEngineTerminalError(err error) error {
+	// A source that could not be enumerated is an external-service failure, not an
+	// invalid input and not a per-object error: the run never obtained the listing
+	// it was asked to reflow. The engine carries a typed identity for it, so this
+	// mapping does not depend on the provider's message text.
+	var enumErr *reflowpkg.SourceEnumerationError
+	if errors.As(err, &enumErr) {
+		return exitError(foundry.ExitExternalServiceUnavailable, "reflow could not enumerate the source", enumErr)
+	}
 	var invalidErr *reflowpkg.InvalidInputsError
 	if errors.As(err, &invalidErr) {
 		return exitError(foundry.ExitInvalidArgument, "reflow completed with invalid inputs", fmt.Errorf("invalid_inputs=%d", invalidErr.Count))
@@ -371,6 +422,13 @@ func (a transferReflowCheckpointAdapter) Close() error {
 		return nil
 	}
 	return a.state.Close()
+}
+
+// SetSourceRunMetadata implements the engine's optional SourceRunMetadataStore
+// capability over the CLI's sqlite-backed store, whose own method keeps its
+// established name.
+func (a transferReflowCheckpointAdapter) SetSourceRunMetadata(ctx context.Context, meta reflowpkg.SourceRunMetadata) error {
+	return a.state.SetSourceMetadata(ctx, meta.Provider, meta.Bucket, meta.Root, meta.URI)
 }
 
 func (a transferReflowCheckpointAdapter) ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error) {

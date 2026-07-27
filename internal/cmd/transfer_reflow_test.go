@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -4559,6 +4560,22 @@ type reflowMemoryProvider struct {
 	// throttleGetsRemaining, when > 0, makes the next N GetObject calls return
 	// provider.ErrThrottled before serving normally.
 	throttleGetsRemaining int
+	// listPageSize, when > 0, makes List actually enumerate the stored objects in
+	// pages of this size. It is OPT-IN: the zero value keeps List returning an
+	// empty result, which is what every pre-existing caller of this fixture
+	// relies on. Enable it with enableListing.
+	listPageSize int
+	// listOpts records each List invocation so a control can pin pagination.
+	listOpts []provider.ListOptions
+	// listErrAfter, when > 0, fails the Nth List call with listErr, modelling a
+	// provider that stops serving pages partway through an enumeration.
+	listErrAfter int
+	listErr      error
+	// listBlockAfter, when > 0, makes the Nth List call announce itself on
+	// listBlocked and then wait for the context, modelling a context-aware
+	// provider whose in-flight listing is interrupted by cancellation.
+	listBlockAfter int
+	listBlocked    chan struct{}
 }
 
 func newReflowMemoryProvider() *reflowMemoryProvider {
@@ -4639,8 +4656,124 @@ func (p *reflowMemoryProvider) metaSnapshot(key string) provider.ObjectMeta {
 	return p.meta[key]
 }
 
-func (p *reflowMemoryProvider) List(context.Context, provider.ListOptions) (*provider.ListResult, error) {
-	return &provider.ListResult{}, nil
+// enableListing turns on real, paginated enumeration with the given page size.
+// Opt-in by design: callers that predate it keep the empty-listing behavior they
+// were written against.
+func (p *reflowMemoryProvider) enableListing(pageSize int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listPageSize = pageSize
+}
+
+// failListAfter makes the Nth List call return err, so a control can drive a
+// mid-enumeration source failure through the real command.
+func (p *reflowMemoryProvider) failListAfter(n int, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listErrAfter = n
+	p.listErr = err
+}
+
+func (p *reflowMemoryProvider) listCallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.listOpts)
+}
+
+// listOptsSnapshot returns the recorded List invocations, so a control can pin
+// the prefix a selector actually listed under rather than only its object set.
+func (p *reflowMemoryProvider) listOptsSnapshot() []provider.ListOptions {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]provider.ListOptions(nil), p.listOpts...)
+}
+
+// writeCountFor counts attempted writes at a destination key across both put
+// paths, so a resume control can assert that an object was NOT written again
+// rather than only that it still exists.
+func (p *reflowMemoryProvider) writeCountFor(key string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	count := 0
+	for _, k := range p.putCalls {
+		if k == key {
+			count++
+		}
+	}
+	for _, k := range p.conditionalPutCalls {
+		if k == key {
+			count++
+		}
+	}
+	return count
+}
+
+// List enumerates the stored objects under opts.Prefix in key order, in pages of
+// listPageSize, using the offset of the next key as the continuation token. Key
+// order makes pagination deterministic, which is what lets a control assert the
+// page boundary rather than merely the total.
+func (p *reflowMemoryProvider) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	p.mu.Lock()
+	p.listOpts = append(p.listOpts, opts)
+	call := len(p.listOpts)
+	blockHere := p.listBlockAfter > 0 && call >= p.listBlockAfter
+	blocked := p.listBlocked
+	p.mu.Unlock()
+
+	if blockHere {
+		// A context-aware provider surfaces the cancellation that interrupted its
+		// in-flight listing. Announce once, then wait for the context.
+		select {
+		case blocked <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listErrAfter > 0 && call >= p.listErrAfter {
+		return nil, p.listErr
+	}
+	if p.listPageSize <= 0 {
+		return &provider.ListResult{}, nil
+	}
+
+	keys := make([]string, 0, len(p.objects))
+	for key := range p.objects {
+		if strings.HasPrefix(key, opts.Prefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	start := 0
+	if opts.ContinuationToken != "" {
+		parsed, err := strconv.Atoi(opts.ContinuationToken)
+		if err != nil {
+			return nil, fmt.Errorf("unexpected continuation token %q", opts.ContinuationToken)
+		}
+		start = parsed
+	}
+	if start > len(keys) {
+		start = len(keys)
+	}
+	end := start + p.listPageSize
+	if end > len(keys) {
+		end = len(keys)
+	}
+
+	objects := make([]provider.ObjectSummary, 0, end-start)
+	for _, key := range keys[start:end] {
+		objects = append(objects, p.meta[key].ObjectSummary)
+	}
+	res := &provider.ListResult{Objects: objects}
+	if end < len(keys) {
+		res.IsTruncated = true
+		res.ContinuationToken = strconv.Itoa(end)
+	}
+	return res, nil
 }
 
 func (p *reflowMemoryProvider) Head(_ context.Context, key string) (*provider.ObjectMeta, error) {

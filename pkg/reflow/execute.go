@@ -9,8 +9,10 @@ import (
 	"sync"
 
 	"github.com/3leaps/gonimbus/internal/reflowprobe"
+	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
+	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
 // run dispatches a Source to its execution path. Deferral to the command layer
@@ -23,8 +25,12 @@ func (r *Runner) run(ctx context.Context, src Source) (Summary, error) {
 	switch s := src.(type) {
 	case RecordStreamSource:
 		return r.runRecordStream(ctx, s)
+	case ObjectSource:
+		return r.runObjectSource(ctx, s)
+	case PrefixSource:
+		return r.runPrefixSource(ctx, s)
 	default:
-		// ObjectSource/PrefixSource/FileTreeSource execution lands in later slices.
+		// FileTreeSource execution lands in a later slice.
 		return Summary{}, ErrNotImplemented
 	}
 }
@@ -43,22 +49,397 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if !r.cfg.DryRun && r.cfg.ReadOnly {
 		return Summary{}, errors.New("reflow: Config.ReadOnly requires DryRun for RecordStreamSource copy execution")
 	}
+	if err := r.validateRunGates(); err != nil {
+		return Summary{}, err
+	}
+	if !r.cfg.DryRun && src.Resolve == nil {
+		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
+	}
+	plan, err := r.prepareRun(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	layout, capability, limiter, stats := plan.layout, plan.capability, plan.limiter, plan.stats
+
+	// The record-stream source feeds the runner's worker pool through the producer
+	// seam: recordStreamProducer is the serial reader stage (parse/validate/plan,
+	// inline dry-run + INVALID_INPUT emission in input order, serial resolver), and
+	// drivePlannedRecords owns the task queue, the EffectiveCeiling worker pool,
+	// cancellation, and drain semantics. The AIMD limiter remains the per-operation
+	// concurrency authority. Contract: per-object transitions stay ordered, exactly
+	// one terminal record per accepted input, the summary follows worker join, and
+	// global input order is not promised.
+	producer := r.recordStreamProducer(src, layout, plan.rewrite, stats)
+	if err := r.drivePlannedRecords(ctx, layout, stats, capability, limiter, plan.arbiter, producer); err != nil {
+		return Summary{}, err
+	}
+
+	return r.finishRun(ctx, plan)
+}
+
+// finishRun emits the terminal summary and maps it to the run's error, shared by
+// every source form so one summary and terminal contract cannot drift between
+// execution paths.
+func (r *Runner) finishRun(ctx context.Context, plan runPlan) (Summary, error) {
+	summary := plan.stats.summary(plan.layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, plan.capability, plan.limiter.Snapshot())
+	summary.ExecutionPath = ExecutionPathEngine
+	if err := r.emitSummary(ctx, summary); err != nil {
+		return Summary{}, err
+	}
+	if summary.InvalidInputs > 0 {
+		// Mirror the command path, which writes the summary and then exits non-zero
+		// on invalid inputs. The Summary is returned alongside the error.
+		return Summary{SummaryRecord: summary}, &InvalidInputsError{Count: summary.InvalidInputs}
+	}
+	if summary.Errors > 0 {
+		// Mirror the command path, which writes the summary and then exits non-zero
+		// when object-level errors occurred. The Summary is returned alongside the error.
+		return Summary{SummaryRecord: summary}, &ObjectErrorsError{Count: summary.Errors}
+	}
+	return Summary{SummaryRecord: summary}, nil
+}
+
+// positionalSource is a resolved positional selector: the run-level identity a
+// positional run reports and records, plus the producer that enumerates it.
+//
+// selector is the run-level SOURCE SELECTOR. For an exact object it is that
+// object's URI; for a prefix or pattern it is the prefix/pattern, which matches
+// many objects and no single one. It is never item resume authority — each
+// enumerated object carries its own exact object URI on the planned input.
+type positionalSource struct {
+	provider string
+	bucket   string
+	selector string
+	producer func(runPlan) recordProducer
+}
+
+// runPositional executes a positional source: the run setup shared with every
+// source form, then the positional run events, then enumeration through the
+// producer seam.
+//
+// Ordering is load-bearing and mirrors the command path: the source-independent
+// refusals (validateRunGates) and the caller's source-form checks have already
+// run; then prepareRun emits the run record; then OnSource; then the
+// source-run-metadata setup write; then enumeration. A failed OnSource aborts
+// before the metadata write, before enumeration, and before any source provider
+// operation.
+func (r *Runner) runPositional(ctx context.Context, src positionalSource) (Summary, error) {
+	plan, err := r.prepareRun(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := r.emitSource(ctx, SourceRunRecord{
+		Provider: src.provider,
+		Bucket:   src.bucket,
+		URI:      src.selector,
+	}); err != nil {
+		return Summary{}, err
+	}
+	r.setSourceRunMetadata(ctx, SourceRunMetadata{
+		Provider: src.provider,
+		Bucket:   src.bucket,
+		URI:      src.selector,
+	})
+	if err := r.drivePlannedRecords(ctx, plan.layout, plan.stats, plan.capability, plan.limiter, plan.arbiter, src.producer(plan)); err != nil {
+		return Summary{}, err
+	}
+	return r.finishRun(ctx, plan)
+}
+
+// setSourceRunMetadata performs the run-level source setup write through the
+// coordinator when the configured checkpoint store implements the optional
+// SourceRunMetadataStore capability. A store without the capability is a clean
+// no-op.
+//
+// The returned error is deliberately not propagated: the command path's direct
+// call logs and continues, and this preserves that. It is a narrow claim — the
+// run does not fail SOLELY AND IMMEDIATELY on this return. It is NOT a claim
+// that a coordinator failure cannot fail the run: the writer is globally
+// fail-closed, so a poisoned statement may still surface at a later
+// strict-authority request.
+func (r *Runner) setSourceRunMetadata(ctx context.Context, meta SourceRunMetadata) {
+	if r.cfg.Checkpoint == nil {
+		return
+	}
+	store, ok := r.cfg.Checkpoint.(SourceRunMetadataStore)
+	if !ok {
+		return
+	}
+	_ = store.SetSourceRunMetadata(ctx, meta)
+}
+
+// runObjectSource executes a single exact object addressed by URI — the engine
+// form of the command's exact-object positional argument.
+//
+// The object is planned from the URI alone: no HEAD is issued to recover an
+// etag, size, or last-modified, matching the command path, which enqueues an
+// exact-object task carrying only provider, bucket, URI, and key. A later stage
+// heads the source when a metadata or collision policy actually needs it.
+func (r *Runner) runObjectSource(ctx context.Context, src ObjectSource) (Summary, error) {
+	if strings.TrimSpace(src.URI) == "" {
+		return Summary{}, errors.New("reflow: ObjectSource.URI is required")
+	}
+	if !r.cfg.DryRun && r.cfg.ReadOnly {
+		return Summary{}, errors.New("reflow: Config.ReadOnly requires DryRun for ObjectSource copy execution")
+	}
+	if err := r.validateRunGates(); err != nil {
+		return Summary{}, err
+	}
+	// The same parser the record stream applies to a raw URI line: s3-only and
+	// exact-object, so a prefix or pattern reaching ObjectSource is refused here
+	// rather than silently reflowing one object named like a prefix.
+	//
+	// URI must be the source AS SPELLED. Parsing is escape-aware, so an escaped
+	// metacharacter is a literal key character; a caller that canonicalizes first
+	// would strip the escape and have its exact object reclassified as a pattern.
+	in, err := parseRawS3ObjectLine(src.URI, "ObjectSource.URI")
+	if err != nil {
+		return Summary{}, fmt.Errorf("reflow: %w", err)
+	}
+	if !r.cfg.DryRun && src.Provider == nil {
+		return Summary{}, errors.New("reflow: ObjectSource.Provider is required for copy execution")
+	}
+	return r.runPositional(ctx, positionalSource{
+		provider: in.SourceProvider,
+		bucket:   in.SourceBucket,
+		// For an exact object the run-level selector and the object's own URI
+		// coincide. They are still populated from one place each: a prefix source
+		// sets a selector that matches no single object.
+		selector: in.SourceURI,
+		producer: func(plan runPlan) recordProducer {
+			return r.objectSourceProducer(in, src.Provider, plan)
+		},
+	})
+}
+
+// objectSourceProducer is the producer for an ObjectSource: a single planned
+// record, dispatched through the same seam every other source uses. The source
+// provider is injected by the caller, so there is no resolver stage.
+func (r *Runner) objectSourceProducer(in reflowInput, sourceProvider provider.Provider, plan runPlan) recordProducer {
+	return func(ctx context.Context, deps producerDeps) error {
+		if deps.stopped() {
+			return nil
+		}
+		return r.planAndDispatch(ctx, in, sourceProvider, plan, deps)
+	}
+}
+
+// planAndDispatch plans one already-parsed input and hands it to the worker
+// pool, or emits it as a dry-run "planned" record. Both positional producers
+// share it so the destination mapping, the dry-run branch, and the INVALID_INPUT
+// disposition cannot drift between one object and one listed page.
+//
+// A destination the rewrite cannot map is a per-object INVALID_INPUT event and
+// not a producer failure: the caller continues enumerating. The returned error
+// is a sink failure.
+func (r *Runner) planAndDispatch(ctx context.Context, in reflowInput, sourceProvider provider.Provider, plan runPlan, deps producerDeps) error {
+	destRel, err := planDestRel(in, plan.rewrite)
+	if err != nil {
+		plan.stats.recordInvalidInput()
+		return r.emitError(ctx, ErrorEvent{
+			Code:    ErrCodeInvalidInput,
+			Key:     in.SourceKey,
+			Message: FormatErrorMessage("destination mapping unavailable", err),
+			Details: map[string]any{"error": err.Error(), "source_uri": in.SourceURI},
+		})
+	}
+	destKey := plan.layout.DestKey(destRel)
+	task := plannedRecord{
+		in:      in,
+		destRel: destRel,
+		destKey: destKey,
+		destURI: plan.layout.DestURI(destKey),
+		src:     sourceProvider,
+	}
+	if r.cfg.DryRun {
+		rec := task.in.record(task.destURI, task.destKey, "planned")
+		plan.stats.record(rec)
+		return r.emitRecord(ctx, rec)
+	}
+	deps.dispatch(task)
+	return nil
+}
+
+// runPrefixSource executes a listing prefix or glob pattern — the engine form of
+// the command's prefix and pattern positional arguments.
+//
+// The source-form checks keep ObjectSource's established position relative to
+// the shared gates, with one difference the form itself forces: the provider is
+// required on both the dry and live paths, because List is how a prefix is
+// planned at all. Every refusal here precedes prepareRun, so it precedes the run
+// record, the resolved-source event, the source-run-metadata write, and any
+// provider call.
+func (r *Runner) runPrefixSource(ctx context.Context, src PrefixSource) (Summary, error) {
+	if strings.TrimSpace(src.URI) == "" {
+		return Summary{}, errors.New("reflow: PrefixSource.URI is required")
+	}
+	if !r.cfg.DryRun && r.cfg.ReadOnly {
+		return Summary{}, errors.New("reflow: Config.ReadOnly requires DryRun for PrefixSource copy execution")
+	}
+	if err := r.validateRunGates(); err != nil {
+		return Summary{}, err
+	}
+	// URI must be the source AS SPELLED: the parse is escape-aware, so an escaped
+	// metacharacter stays a literal key character and only an unescaped one derives
+	// a pattern. A caller that canonicalized first would have already collapsed
+	// that distinction.
+	parsed, matcher, err := parsePrefixSelector(src.URI)
+	if err != nil {
+		return Summary{}, fmt.Errorf("reflow: %w", err)
+	}
+	if src.Provider == nil {
+		return Summary{}, errors.New("reflow: PrefixSource.Provider is required, in dry-run as well as copy, because List is the planning operation")
+	}
+	return r.runPositional(ctx, positionalSource{
+		provider: parsed.Provider,
+		bucket:   parsed.Bucket,
+		// The run-level selector is the prefix or pattern itself. Unlike an exact
+		// object it matches many objects and no single one, so it is never item
+		// resume authority — each listed object carries its own exact URI onto its
+		// planned input. The canonical spelling is what the command path records for
+		// the same argument.
+		selector: parsed.String(),
+		producer: func(plan runPlan) recordProducer {
+			return r.prefixSourceProducer(parsed, matcher, src.Provider, plan)
+		},
+	})
+}
+
+// parsePrefixSelector parses a positional prefix or pattern selector and builds
+// its matcher.
+//
+// The matcher is built ONLY for a pattern, from the full glob, matching the
+// command path. A plain prefix therefore has no matcher and admits every listed
+// object, rather than being re-tested against a pattern derived from itself.
+func parsePrefixSelector(rawURI string) (*uri.ObjectURI, *match.Matcher, error) {
+	parsed, err := uri.ParseURI(rawURI)
+	if err != nil {
+		return nil, nil, err
+	}
+	if parsed.Provider != string(provider.ProviderS3) {
+		return nil, nil, fmt.Errorf("unsupported provider %q", parsed.Provider)
+	}
+	if !parsed.IsPrefix() && !parsed.IsPattern() {
+		return nil, nil, errors.New("PrefixSource.URI must be a prefix or pattern URI")
+	}
+	if !parsed.IsPattern() {
+		return parsed, nil, nil
+	}
+	matcher, err := match.New(match.Config{Includes: []string{parsed.Pattern}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return parsed, matcher, nil
+}
+
+// prefixSourceProducer is the producer for a PrefixSource: paginated List,
+// optional pattern filtering, and per-object dispatch from inside the page loop.
+//
+// Dispatch happens as each object is read, never after the listing completes, so
+// the retained working set is one page rather than the whole selector and copies
+// begin while later pages are still being listed. Objects are planned from the
+// listing itself — etag, size, and last-modified come from List, so planning
+// issues no HEAD.
+//
+// A List failure returns a SourceEnumerationError, which is the producer seam's
+// stop-discovery-with-drain mode: no later page is requested and no later object
+// is admitted, while work already admitted still drains to its own terminals.
+func (r *Runner) prefixSourceProducer(parsed *uri.ObjectURI, matcher *match.Matcher, sourceProvider provider.Provider, plan runPlan) recordProducer {
+	selector := sanitizeSourceURI(parsed.String())
+	return func(ctx context.Context, deps producerDeps) error {
+		var token string
+		for {
+			if deps.stopped() {
+				return nil
+			}
+			res, err := sourceProvider.List(ctx, provider.ListOptions{Prefix: parsed.Key, ContinuationToken: token})
+			// Cancellation outranks the enumeration-failure classification. A
+			// context-aware provider returns ctx.Err() from a List the pool context
+			// cancelled, and a producer-returned error outranks ctx.Err() at the seam,
+			// so wrapping unconditionally would retype a cancelled run as an unlistable
+			// source and hand the command the wrong disposition. Checked before both the
+			// error and the nil-result branches, since either can be what a cancelled
+			// provider returns. With a live context it is a no-op: a genuine List
+			// failure stays the typed enumeration failure.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if err != nil {
+				return &SourceEnumerationError{Selector: selector, Err: err}
+			}
+			if res == nil {
+				return &SourceEnumerationError{Selector: selector, Err: errors.New("provider returned no list result")}
+			}
+			for _, obj := range res.Objects {
+				if deps.stopped() {
+					return nil
+				}
+				// The pattern is matched against the FULL object key, not a key made
+				// relative to the derived listing prefix.
+				if matcher != nil && !matcher.Match(obj.Key) {
+					continue
+				}
+				if err := r.planAndDispatch(ctx, listedObjectInput(parsed, obj), sourceProvider, plan, deps); err != nil {
+					return err
+				}
+			}
+			// Both stop signals terminate, so a provider that reports truncation
+			// without a token cannot keep the producer re-listing the same page.
+			if !res.IsTruncated || res.ContinuationToken == "" {
+				return nil
+			}
+			token = res.ContinuationToken
+		}
+	}
+}
+
+// listedObjectInput builds the planned input for one listed object.
+//
+// The object URI is the item's own exact address — the value that becomes its
+// checkpoint authority — and never the selector it was listed under. Size is
+// marked known because List measured it, so a listed zero-byte object is a
+// measured zero rather than the unknown-size sentinel.
+func listedObjectInput(parsed *uri.ObjectURI, obj provider.ObjectSummary) reflowInput {
+	return reflowInput{
+		SourceProvider:  parsed.Provider,
+		SourceBucket:    parsed.Bucket,
+		SourceURI:       fmt.Sprintf("%s://%s/%s", parsed.Provider, parsed.Bucket, obj.Key),
+		SourceKey:       obj.Key,
+		SourceETag:      obj.ETag,
+		SourceSize:      obj.Size,
+		SourceSizeKnown: true,
+		SourceLastMod:   obj.LastModified,
+		RoutingClass:    "normal",
+	}
+}
+
+// validateRunGates runs the source-independent pre-read refusals every source
+// form owes a caller: collision-mode support, the collision write-precondition
+// capability, and the provenance plan (including a callable sidecar putter).
+// They are shared rather than copied per source form so the fail-closed boundary
+// cannot drift between execution paths — the one place drift would be least
+// visible and least acceptable.
+//
+// Source-form checks (a record stream's Records/Resolve, a positional source's
+// URI and provider) are NOT here: they stay with their source, in that source's
+// established order relative to these gates.
+func (r *Runner) validateRunGates() error {
 	if !r.cfg.DryRun && !recordStreamCopyCollisionModeSupported(r.cfg.Collision.Mode) {
-		return Summary{}, ErrNotImplemented
+		return ErrNotImplemented
 	}
 	// The library owns the collision write-precondition capability check (ADR-0006
 	// authority), before any stream read, event emission, IfAbsent probe, or
 	// destination mutation — a direct embedder must be refused the same way the
 	// command adapter refuses it, not left to fail only on the first conflict.
 	if err := r.validateCollisionCapability(); err != nil {
-		return Summary{}, err
+		return err
 	}
 	// The provenance plan is validated in the library (the ADR-0006 authority)
 	// before any stream read, event emission, provider probe, or destination
 	// mutation, so a direct embedder is refused the same way the command adapter
 	// is — never left to fail only when the first sidecar write is attempted.
 	if err := r.cfg.Provenance.Validate(); err != nil {
-		return Summary{}, fmt.Errorf("reflow: %w", err)
+		return fmt.Errorf("reflow: %w", err)
 	}
 	// Live provenance requires a callable sidecar ObjectPutter on the resolved
 	// authority before any stream read, event emission, provider probe, or
@@ -68,18 +449,35 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if !r.cfg.DryRun && r.cfg.Provenance.Enabled() {
 		sidecarDst := r.cfg.Provenance.sidecarProvider(r.cfg.Destination.Provider)
 		if sidecarDst == nil {
-			return Summary{}, errors.New("reflow: provenance sidecar destination is not configured")
+			return errors.New("reflow: provenance sidecar destination is not configured")
 		}
 		if _, ok := sidecarDst.(provider.ObjectPutter); !ok {
-			return Summary{}, errors.New("reflow: provenance sidecar destination does not support PutObject")
+			return errors.New("reflow: provenance sidecar destination does not support PutObject")
 		}
 	}
-	if !r.cfg.DryRun && src.Resolve == nil {
-		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
-	}
+	return nil
+}
+
+// runPlan is the source-independent execution plan prepareRun resolves: the
+// destination binding, the compiled rewrite, the IfAbsent capability, and the
+// run-scoped concurrency/accounting state the worker pool and summary share.
+type runPlan struct {
+	layout     DestLayout
+	rewrite    *transfer.ReflowRewrite
+	capability IfAbsentCapability
+	limiter    *ConcurrencyLimiter
+	stats      *runStats
+	arbiter    *destKeyArbiter
+}
+
+// prepareRun resolves the source-independent execution plan and emits the run
+// event, after validateRunGates and after the caller's own source-form checks.
+// It performs the first destination I/O of a live run (the IfAbsent capability
+// probe), so every locally knowable refusal must already have happened.
+func (r *Runner) prepareRun(ctx context.Context) (runPlan, error) {
 	layout, err := ParseDestLayout(r.cfg.Destination.BaseURI)
 	if err != nil {
-		return Summary{}, err
+		return runPlan{}, err
 	}
 	// Verify a mirrored object-store sidecar root against the actual resolved
 	// destination before any I/O: a caller's SameBucketAsDest assertion is proven,
@@ -87,11 +485,11 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	// bucket or provider is refused fail-closed rather than emitting a run echo
 	// that disagrees with the write authority.
 	if err := r.cfg.Provenance.ValidateAgainstDestination(layout.ProviderID, layout.Bucket); err != nil {
-		return Summary{}, fmt.Errorf("reflow: %w", err)
+		return runPlan{}, fmt.Errorf("reflow: %w", err)
 	}
 	rewrite, err := r.compileRewrite()
 	if err != nil {
-		return Summary{}, err
+		return runPlan{}, err
 	}
 
 	var capability IfAbsentCapability
@@ -114,46 +512,22 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 		ConcurrencyStats: runConcurrency,
 		Provenance:       r.cfg.Provenance.RunConfig(),
 	}); err != nil {
-		return Summary{}, err
+		return runPlan{}, err
 	}
 	if w := fallbackWarning(r.cfg.Destination.ProviderID, r.cfg.Collision.Mode, capability); w != nil {
 		if err := r.emitWarning(ctx, *w); err != nil {
-			return Summary{}, err
+			return runPlan{}, err
 		}
 	}
 
-	stats := newRunStats()
-	arbiter := newDestKeyArbiter()
-
-	// The record-stream source feeds the runner's worker pool through the producer
-	// seam: recordStreamProducer is the serial reader stage (parse/validate/plan,
-	// inline dry-run + INVALID_INPUT emission in input order, serial resolver), and
-	// drivePlannedRecords owns the task queue, the EffectiveCeiling worker pool,
-	// cancellation, and drain semantics. The AIMD limiter remains the per-operation
-	// concurrency authority. Contract: per-object transitions stay ordered, exactly
-	// one terminal record per accepted input, the summary follows worker join, and
-	// global input order is not promised.
-	producer := r.recordStreamProducer(src, layout, rewrite, stats)
-	if err := r.drivePlannedRecords(ctx, layout, stats, capability, limiter, arbiter, producer); err != nil {
-		return Summary{}, err
-	}
-
-	summary := stats.summary(layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, capability, limiter.Snapshot())
-	summary.ExecutionPath = ExecutionPathEngine
-	if err := r.emitSummary(ctx, summary); err != nil {
-		return Summary{}, err
-	}
-	if summary.InvalidInputs > 0 {
-		// Mirror the command path, which writes the summary and then exits non-zero
-		// on invalid inputs. The Summary is returned alongside the error.
-		return Summary{SummaryRecord: summary}, &InvalidInputsError{Count: summary.InvalidInputs}
-	}
-	if summary.Errors > 0 {
-		// Mirror the command path, which writes the summary and then exits non-zero
-		// when object-level errors occurred. The Summary is returned alongside the error.
-		return Summary{SummaryRecord: summary}, &ObjectErrorsError{Count: summary.Errors}
-	}
-	return Summary{SummaryRecord: summary}, nil
+	return runPlan{
+		layout:     layout,
+		rewrite:    rewrite,
+		capability: capability,
+		limiter:    limiter,
+		stats:      newRunStats(),
+		arbiter:    newDestKeyArbiter(),
+	}, nil
 }
 
 // recordProducer enumerates a source on the serial planning stage and hands
@@ -482,6 +856,33 @@ type ObjectErrorsError struct{ Count int64 }
 func (e *ObjectErrorsError) Error() string {
 	return fmt.Sprintf("reflow: completed with %d object error(s)", e.Count)
 }
+
+// SourceEnumerationError reports that listing a source selector failed partway
+// through: the engine stopped requesting pages, the work it had already admitted
+// drained to its own terminal records and checkpoint dispositions, and the run
+// then failed WITHOUT emitting a terminal summary.
+//
+// The withheld summary is the point. A summary accounts for a whole selector,
+// and a run that stopped enumerating mid-selector has no such accounting to
+// offer; emitting one invites a consumer to read a partial count as a complete
+// one. This is a deliberate divergence from the CLI pool, which writes its
+// summary after the same drain.
+//
+// It is a run-level failure, not an object terminal: no per-object error event
+// is synthesized for the objects that were never listed. Selector names what was
+// being enumerated (sanitized), and Unwrap exposes the provider's own error, so
+// a caller classifies the cause with errors.Is/errors.As rather than by matching
+// message text.
+type SourceEnumerationError struct {
+	Selector string
+	Err      error
+}
+
+func (e *SourceEnumerationError) Error() string {
+	return fmt.Sprintf("reflow: source enumeration failed for %s: %v", e.Selector, e.Err)
+}
+
+func (e *SourceEnumerationError) Unwrap() error { return e.Err }
 
 // plannedRecord is a reader-stage-planned input ready for worker execution. The
 // source provider handle is resolved in the serial reader stage (SourceResolver
@@ -1199,6 +1600,19 @@ func (r *Runner) emitRun(ctx context.Context, rec RunRecord) error {
 	r.emitMu.Lock()
 	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnRun(ctx, rec)
+}
+
+// emitSource reports the resolved positional source. A sink failure is fatal,
+// as it is for every other engine event: EventSink's contract is that a sink
+// which cannot write or persist an event surfaces that to the engine. It is
+// emitted only for positional sources — a record stream has no single selector.
+func (r *Runner) emitSource(ctx context.Context, rec SourceRunRecord) error {
+	if r.cfg.Events == nil {
+		return nil
+	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return r.cfg.Events.OnSource(ctx, rec)
 }
 
 func (r *Runner) emitRecord(ctx context.Context, rec Record) error {

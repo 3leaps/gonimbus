@@ -118,12 +118,20 @@ func requireReflowSummaryParity(t *testing.T, engineStdout, poolStdout string) {
 }
 
 // requireReflowTerminalEqual asserts two terminal records carry identical
-// semantic fields — status, reason, byte count, keys, and the full collision
-// decision (kind, path, reason, observed dest etag/size, source/dest
-// timestamps). Presentation-only differences (URIs are already sanitized
-// identically) are not in scope.
+// semantic fields — source and destination identity, status, reason, byte count,
+// keys, and the full collision decision (kind, path, reason, observed dest
+// etag/size, source/dest timestamps).
+//
+// The URI fields are compared rather than waved through as presentation. They
+// ARE identity: source_uri is what the checkpoint stores as per-item resume
+// authority, so a path that rewrites it is not displaying the same object
+// differently, it is recording a different object. An earlier revision excluded
+// them on the assumption that both paths sanitized identically — that assumption
+// is precisely what let a divergence go unobserved.
 func requireReflowTerminalEqual(t *testing.T, engine, pool testReflowData) {
 	t.Helper()
+	require.Equal(t, pool.SourceURI, engine.SourceURI, "source identity must match across paths")
+	require.Equal(t, pool.DestURI, engine.DestURI, "destination identity must match across paths")
 	require.Equal(t, pool.Status, engine.Status, "status must match across paths")
 	require.Equal(t, pool.Reason, engine.Reason, "reason must match across paths")
 	require.Equal(t, pool.Bytes, engine.Bytes, "byte count must match across paths")

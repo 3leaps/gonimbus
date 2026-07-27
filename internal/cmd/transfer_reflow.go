@@ -451,7 +451,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return exitError(foundry.ExitExternalServiceUnavailable, "Destination write preflight failed", err)
 		}
 	}
-	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, destSpec, dstProv, collCfg, metaCfg, provCfg, concurrencyCfg, state, jobID)
+	enginePlan := planTransferReflowEngineAdapter(ctx, reflowInput, firstRecordClass, positionalReflowSource(args), destSpec, dstProv, collCfg, metaCfg, provCfg, concurrencyCfg, state, jobID)
 	reflowInput = enginePlan.input
 	// Structural exclusivity: an enabled (plan-vetted) plan returns here, so the
 	// CLI-pool body below is reachable only for a disabled/fallback plan. The
