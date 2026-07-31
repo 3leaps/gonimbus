@@ -11,8 +11,11 @@ import (
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/gcs"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/runbudget"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
+
+const quotaDomainVersion = 1
 
 // S3Options contains command-supplied S3 construction options.
 type S3Options struct {
@@ -44,6 +47,22 @@ type SourceOptions struct {
 	FileRootlessReadMode  string
 	FileSelectionMode     string
 	FileSelectionManifest string
+}
+
+// SourceBinding pairs a provider handle with the quota domains its requests
+// consume. Keeping the values side-by-side preserves the provider's concrete
+// dynamic type, including optional capabilities; wrapping the provider behind a
+// new type would hide those capabilities from type assertions.
+//
+// QuotaDomains are conservative service-wide domains. They intentionally do not
+// include bucket, endpoint, profile, project, or credential-derived values:
+// provider endpoint resolution may be ambient, and splitting an unresolved
+// service into narrower identities could let one run multiply load against the
+// same real quota. Conservative sharing can reduce utilization but cannot
+// exceed the configured run ceiling.
+type SourceBinding struct {
+	Provider     provider.Provider
+	QuotaDomains []runbudget.Domain
 }
 
 // DestinationOptions contains destination-provider construction policy.
@@ -104,12 +123,26 @@ func UseFactoriesForTest(next Factories) func() {
 
 // NewSource constructs a provider for a parsed source URI.
 func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (provider.Provider, error) {
+	binding, err := NewSourceBinding(ctx, src, opts)
+	if err != nil {
+		return nil, err
+	}
+	return binding.Provider, nil
+}
+
+// NewSourceBinding constructs a source provider and its provider-supplied quota
+// identity for consumers that enforce a shared run budget.
+func NewSourceBinding(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (*SourceBinding, error) {
 	if src == nil {
 		return nil, fmt.Errorf("%s source URI is nil", commandName(opts.Command))
 	}
+	var (
+		p   provider.Provider
+		err error
+	)
 	switch src.Provider {
 	case string(provider.ProviderS3):
-		return factories.S3(ctx, s3.Config{
+		p, err = factories.S3(ctx, s3.Config{
 			Bucket:              src.Bucket,
 			Region:              opts.S3.Region,
 			Endpoint:            opts.S3.Endpoint,
@@ -119,7 +152,7 @@ func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (pro
 			MaxConnsPerHost:     opts.S3.MaxConnsPerHost,
 		})
 	case string(provider.ProviderGCS):
-		return factories.GCS(ctx, gcs.Config{
+		p, err = factories.GCS(ctx, gcs.Config{
 			Bucket:               src.Bucket,
 			Project:              opts.GCS.Project,
 			Anonymous:            opts.GCS.Anonymous,
@@ -132,13 +165,44 @@ func NewSource(ctx context.Context, src *uri.ObjectURI, opts SourceOptions) (pro
 		if baseDir == "" {
 			baseDir = src.Key
 		}
-		return factories.File(providerfile.Config{
+		p, err = factories.File(providerfile.Config{
 			BaseDir:               baseDir,
 			MetadataSidecarSuffix: opts.FileMetadataSidecar,
 			SymlinkPolicy:         opts.FileSymlinkPolicy,
 		})
 	default:
 		return nil, unsupportedProviderError(opts.Command, "source", src.Provider)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, fmt.Errorf("%s source provider %q constructor returned no provider", commandName(opts.Command), src.Provider)
+	}
+	domain, ok := sourceQuotaDomain(src.Provider)
+	if !ok {
+		// The provider switch and domain catalog must advance together. Refuse if
+		// they drift rather than constructing a provider whose requests bypass
+		// shared admission.
+		_ = p.Close()
+		return nil, fmt.Errorf("%s source provider %q has no quota-domain adapter", commandName(opts.Command), src.Provider)
+	}
+	return &SourceBinding{
+		Provider:     p,
+		QuotaDomains: []runbudget.Domain{domain},
+	}, nil
+}
+
+func sourceQuotaDomain(providerName string) (runbudget.Domain, bool) {
+	switch providerName {
+	case string(provider.ProviderS3):
+		return runbudget.Domain{Version: quotaDomainVersion, ID: "s3-service"}, true
+	case string(provider.ProviderGCS):
+		return runbudget.Domain{Version: quotaDomainVersion, ID: "gcs-service"}, true
+	case string(provider.ProviderFile):
+		return runbudget.Domain{Version: quotaDomainVersion, ID: "file-service"}, true
+	default:
+		return runbudget.Domain{}, false
 	}
 }
 

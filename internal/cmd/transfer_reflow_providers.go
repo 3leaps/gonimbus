@@ -2,15 +2,19 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providergcs "github.com/3leaps/gonimbus/pkg/provider/gcs"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
+	"github.com/3leaps/gonimbus/pkg/runbudget"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -47,10 +51,18 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 }
 
 func newSourceProvider(ctx context.Context, src *uri.ObjectURI, concurrency reflowpkg.ConcurrencyConfig) (provider.Provider, error) {
+	binding, err := newSourceBinding(ctx, src, concurrency)
+	if err != nil {
+		return nil, err
+	}
+	return binding.Provider, nil
+}
+
+func newSourceBinding(ctx context.Context, src *uri.ObjectURI, concurrency reflowpkg.ConcurrencyConfig) (*providerdispatch.SourceBinding, error) {
 	if src == nil {
 		return nil, fmt.Errorf("source URI is nil")
 	}
-	return providerdispatch.NewSource(ctx, src, providerdispatch.SourceOptions{
+	return providerdispatch.NewSourceBinding(ctx, src, providerdispatch.SourceOptions{
 		Command:             operationTransferReflow,
 		FileMetadataSidecar: reflowMetaSuffix,
 		FileSymlinkPolicy:   reflowSymlinks,
@@ -68,6 +80,55 @@ func newSourceProvider(ctx context.Context, src *uri.ObjectURI, concurrency refl
 			MaxConnsPerHost:     concurrency.EffectiveCeiling,
 		},
 	})
+}
+
+func newPrefixLaneEnumerator(src *uri.ObjectURI, selector string, binding *providerdispatch.SourceBinding, concurrency reflowpkg.ConcurrencyConfig) (producer.LaneEnumerator, *partition.Authority, error) {
+	if src == nil {
+		return nil, nil, fmt.Errorf("source URI is nil")
+	}
+	if binding == nil || binding.Provider == nil {
+		return nil, nil, fmt.Errorf("source provider binding is nil")
+	}
+	// The partition contract refuses an empty prefix because it names a whole
+	// scope rather than an explicit partition. Preserve the standing
+	// unpartitioned whole-bucket path until a scope compiler supplies explicit
+	// partitions for it.
+	if src.Key == "" {
+		return nil, nil, nil
+	}
+
+	ceiling := concurrency.EffectiveCeiling
+	if ceiling < 1 {
+		ceiling = 1
+	}
+	budget, err := runbudget.New(runbudget.Limits{
+		InFlight: map[runbudget.OpClass]int{runbudget.OpList: ceiling},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	fingerprint := sha256.Sum256([]byte("transfer-reflow-prefix-enumeration-v1\x00" + selector))
+	authority, err := partition.CompileAuthority(partition.PlanRequest{
+		Prefixes:          []string{src.Key},
+		Coverage:          partition.CoverageComplete,
+		BaseIdentity:      reflowSourceIdentity(src),
+		ConfigFingerprint: fmt.Sprintf("%x", fingerprint),
+		MaxLanes:          1,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	executor, err := producer.NewLaneExecutor(producer.LaneExecutorConfig{
+		Authority:     authority,
+		Provider:      binding.Provider,
+		Budget:        budget,
+		Domains:       binding.QuotaDomains,
+		QueueCapacity: ceiling * 2,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return executor, authority, nil
 }
 
 func reflowSourceIdentity(src *uri.ObjectURI) string {

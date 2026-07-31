@@ -871,7 +871,7 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret-that-must-not-sign")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 
-	reqs := make(chan *http.Request, 5)
+	reqs := make(chan *http.Request, 6)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqs <- r.Clone(context.Background())
 		w.Header().Set("ETag", `"read-etag"`)
@@ -890,6 +890,11 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 			w.Header().Set("Content-Length", "3")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("ell"))
+		case r.Method == "GET" && r.Header.Get("If-Match") != "":
+			require.Equal(t, "read-etag", r.Header.Get("If-Match"))
+			w.Header().Set("Content-Length", "5")
+			w.Header().Set("ETag", `"read-etag"`)
+			_, _ = w.Write([]byte("hello"))
 		case r.Method == "GET":
 			w.Header().Set("Content-Length", "5")
 			w.Header().Set("Content-Type", "text/plain")
@@ -925,6 +930,13 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 	require.NoError(t, body.Close())
 	require.Equal(t, "hello", string(gotBody))
 
+	revisionBody, revisionMeta, err := p.GetObjectRevision(context.Background(), "object.txt", provider.SourceRevision{
+		Kind: provider.RevisionETag, Value: list.Objects[0].ETag,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "read-etag", revisionMeta.ETag)
+	require.NoError(t, revisionBody.Close())
+
 	versionedBody, versionedMeta, err := p.GetObjectVersioned(context.Background(), "object.txt")
 	require.NoError(t, err)
 	require.Equal(t, int64(5), versionedMeta.Size)
@@ -938,7 +950,7 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 	require.NoError(t, rangeBody.Close())
 	require.Equal(t, "ell", string(gotRange))
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		req := receiveRequest(t, reqs, fmt.Sprintf("anonymous read request %d", i+1))
 		require.Empty(t, req.Header.Get("Authorization"), "anonymous request was signed: %s", req.Header.Get("Authorization"))
 	}

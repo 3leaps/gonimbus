@@ -71,6 +71,10 @@ type ObjectSummary struct {
 	// ETag is the entity tag, typically an MD5 hash of the object.
 	ETag string
 
+	// Revision is a provider-native immutable version or generation returned by
+	// LIST, when available. It is opaque outside the provider adapter.
+	Revision string
+
 	// LastModified is when the object was last modified.
 	LastModified time.Time
 

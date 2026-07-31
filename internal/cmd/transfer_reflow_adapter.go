@@ -13,6 +13,8 @@ import (
 	"github.com/fulmenhq/gofulmen/foundry"
 
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
@@ -175,12 +177,13 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		// The pool resolves the source provider for a positional argument in both
 		// dry-run and copy, so a credential or endpoint failure surfaces the same
 		// way on either path.
-		p, err := newSourceProvider(ctx, positional, concurrencyCfg)
+		binding, err := newSourceBinding(ctx, positional, concurrencyCfg)
 		if err != nil {
 			plan.enabled = false
 			plan.reason = "source provider unavailable"
 			return plan
 		}
+		p := binding.Provider
 		srcProv = p
 		// Hand the engine the source AS SPELLED, not the canonical parsed form.
 		// ObjectURI.String() emits the UNESCAPED key, so an escaped literal
@@ -188,7 +191,20 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 		// would reclassify as a pattern when the engine parses it and be refused.
 		// The parsed value still builds the provider, and selects the source form.
 		if positional.IsPrefix() || positional.IsPattern() {
-			plan.source = reflowpkg.PrefixSource{Provider: p, URI: positionalSource}
+			enumerator, authority, enumErr := newPrefixLaneEnumerator(positional, positionalSource, binding, concurrencyCfg)
+			if enumErr != nil {
+				_ = p.Close()
+				srcProv = nil
+				plan.enabled = false
+				plan.reason = "partitioned source unavailable"
+				return plan
+			}
+			plan.source = reflowpkg.PrefixSource{
+				Provider:   p,
+				URI:        positionalSource,
+				Enumerator: enumerator,
+				Authority:  authority,
+			}
 		} else {
 			plan.source = reflowpkg.ObjectSource{Provider: p, URI: positionalSource}
 		}
@@ -438,6 +454,15 @@ func (a transferReflowCheckpointAdapter) ItemDone(ctx context.Context, sourceURI
 	return a.state.ItemDone(ctx, sourceURI, destURI)
 }
 
+func (a transferReflowCheckpointAdapter) UnitDone(ctx context.Context, unitKey string) (bool, string, error) {
+	if !a.resume {
+		return false, "", nil
+	}
+	return a.state.UnitDone(ctx, unitKey)
+}
+
+func (a transferReflowCheckpointAdapter) ResumeEnabled() bool { return a.resume }
+
 func (a transferReflowCheckpointAdapter) UpsertItem(ctx context.Context, item reflowpkg.CheckpointItem) error {
 	return a.state.UpsertItem(ctx, reflowstate.UpsertItemParams{
 		SourceURI:    item.SourceURI,
@@ -452,6 +477,42 @@ func (a transferReflowCheckpointAdapter) UpsertItem(ctx context.Context, item re
 		ErrorCode:    item.ErrorCode,
 		ErrorMessage: item.ErrorMessage,
 	})
+}
+
+func (a transferReflowCheckpointAdapter) CheckpointUnit(ctx context.Context, item reflowpkg.CheckpointItem, unitKey string) error {
+	return a.state.CheckpointUnit(ctx, reflowstate.UpsertItemParams{
+		SourceURI:    item.SourceURI,
+		DestURI:      item.DestURI,
+		SourceKey:    item.SourceKey,
+		DestKey:      item.DestKey,
+		SourceETag:   item.SourceETag,
+		SourceSize:   item.SourceSize,
+		Status:       item.Status,
+		Bytes:        item.Bytes,
+		Reason:       item.Reason,
+		ErrorCode:    item.ErrorCode,
+		ErrorMessage: item.ErrorMessage,
+	}, unitKey)
+}
+
+func (a transferReflowCheckpointAdapter) PersistAdmissions(ctx context.Context, admissions []producer.Admission, replay bool) ([]producer.AdmissionRefusal, error) {
+	return a.state.PersistAdmissions(ctx, admissions, replay)
+}
+
+func (a transferReflowCheckpointAdapter) PersistDurableBatch(ctx context.Context, batch producer.DurableBatch) error {
+	return a.state.PersistDurableBatch(ctx, batch)
+}
+
+func (a transferReflowCheckpointAdapter) MarkLaneEOF(ctx context.Context, lanes []partition.LaneRef) error {
+	return a.state.MarkLaneEOF(ctx, lanes)
+}
+
+func (a transferReflowCheckpointAdapter) AcknowledgeTerminals(ctx context.Context, acks []producer.TerminalAck) error {
+	return a.state.AcknowledgeTerminals(ctx, acks)
+}
+
+func (a transferReflowCheckpointAdapter) LaneStatus(ctx context.Context, lane partition.LaneRef) (producer.LaneStatus, error) {
+	return a.state.LaneStatus(ctx, lane)
 }
 
 func (a transferReflowCheckpointAdapter) DestKeyObserved(ctx context.Context, destKey string) (bool, error) {

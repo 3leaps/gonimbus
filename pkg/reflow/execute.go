@@ -10,6 +10,8 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -290,6 +292,17 @@ func (r *Runner) runPrefixSource(ctx context.Context, src PrefixSource) (Summary
 	if src.Provider == nil {
 		return Summary{}, errors.New("reflow: PrefixSource.Provider is required, in dry-run as well as copy, because List is the planning operation")
 	}
+	if interfaceContainsTypedNil(src.Enumerator) {
+		return Summary{}, errors.New("reflow: PrefixSource.Enumerator contains a typed nil implementation")
+	}
+	if (src.Enumerator == nil) != (src.Authority == nil) {
+		return Summary{}, errors.New("reflow: PrefixSource.Enumerator and PrefixSource.Authority must be supplied together")
+	}
+	if src.Enumerator != nil && !r.cfg.DryRun {
+		if _, ok := r.cfg.Checkpoint.(LaneCheckpointStore); !ok {
+			return Summary{}, errors.New("reflow: live partitioned PrefixSource requires a keyed lane checkpoint store")
+		}
+	}
 	return r.runPositional(ctx, positionalSource{
 		provider: parsed.Provider,
 		bucket:   parsed.Bucket,
@@ -300,7 +313,7 @@ func (r *Runner) runPrefixSource(ctx context.Context, src PrefixSource) (Summary
 		// the same argument.
 		selector: parsed.String(),
 		producer: func(plan runPlan) recordProducer {
-			return r.prefixSourceProducer(parsed, matcher, src.Provider, plan)
+			return r.prefixSourceProducer(parsed, matcher, src.Provider, src.Enumerator, src.Authority, plan)
 		},
 	})
 }
@@ -344,9 +357,12 @@ func parsePrefixSelector(rawURI string) (*uri.ObjectURI, *match.Matcher, error) 
 // A List failure returns a SourceEnumerationError, which is the producer seam's
 // stop-discovery-with-drain mode: no later page is requested and no later object
 // is admitted, while work already admitted still drains to its own terminals.
-func (r *Runner) prefixSourceProducer(parsed *uri.ObjectURI, matcher *match.Matcher, sourceProvider provider.Provider, plan runPlan) recordProducer {
+func (r *Runner) prefixSourceProducer(parsed *uri.ObjectURI, matcher *match.Matcher, sourceProvider provider.Provider, enumerator producer.LaneEnumerator, authority *partition.Authority, plan runPlan) recordProducer {
 	selector := sanitizeSourceURI(parsed.String())
 	return func(ctx context.Context, deps producerDeps) error {
+		if enumerator != nil {
+			return r.partitionedPrefixSourceProducer(ctx, parsed, matcher, sourceProvider, enumerator, authority, plan, deps, selector)
+		}
 		var token string
 		for {
 			if deps.stopped() {
@@ -391,6 +407,159 @@ func (r *Runner) prefixSourceProducer(parsed *uri.ObjectURI, matcher *match.Matc
 			token = res.ContinuationToken
 		}
 	}
+}
+
+func (r *Runner) partitionedPrefixSourceProducer(
+	ctx context.Context,
+	parsed *uri.ObjectURI,
+	matcher *match.Matcher,
+	sourceProvider provider.Provider,
+	enumerator producer.LaneEnumerator,
+	authority *partition.Authority,
+	plan runPlan,
+	deps producerDeps,
+	selector string,
+) error {
+	enumCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	objects, errc := enumerator.Stream(enumCtx)
+	if r.cfg.DryRun {
+		for item := range objects {
+			if deps.stopped() {
+				return nil
+			}
+			if err := authority.AuthorizeLane(item.Lane); err != nil {
+				return fmt.Errorf("reflow: partitioned source object carries unauthorized lane identity: %w", err)
+			}
+			if matcher != nil && !matcher.Match(item.Object.Key) {
+				continue
+			}
+			if err := r.planAndDispatch(ctx, listedObjectInput(parsed, item.Object), sourceProvider, plan, deps); err != nil {
+				return err
+			}
+		}
+		if enumErr := <-errc; enumErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return &SourceEnumerationError{Selector: selector, Err: enumErr}
+		}
+		return nil
+	}
+
+	laneStore := r.cfg.Checkpoint.(LaneCheckpointStore)
+	coordinator, err := producer.NewCoordinator(authority, laneStore, laneStore.ResumeEnabled())
+	if err != nil {
+		return err
+	}
+	batch := make([]producer.LaneObject, 0, producer.DurableBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		admitted, err := coordinator.AdmitBatch(ctx, batch)
+		if err != nil {
+			return err
+		}
+		err = persistThenDispatchBatch(ctx, coordinator, admitted, matcher, func(item durableDispatchItem) error {
+			in := listedObjectInput(parsed, item.object)
+			in.UnitKey = item.unit.UnitKey
+			in.SourceRevision = item.revision
+			in.AdmissionError = item.refusal
+			return r.planAndDispatch(ctx, in, sourceProvider, plan, deps)
+		})
+		if err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
+	for item := range objects {
+		if deps.stopped() {
+			return nil
+		}
+		batch = append(batch, item)
+		if len(batch) == producer.DurableBatchSize {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	if enumErr := <-errc; enumErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return &SourceEnumerationError{Selector: selector, Err: enumErr}
+	}
+	return coordinator.MarkEOF(ctx)
+}
+
+type durableDispatchItem struct {
+	object   provider.ObjectSummary
+	unit     producer.WorkUnit
+	revision provider.SourceRevision
+	refusal  error
+}
+
+// persistThenDispatchBatch is the source-to-worker durability barrier. The
+// callback cannot run until every emitting outcome and work unit in the batch
+// has committed. Keeping dispatch inside this seam makes the crash ordering
+// directly testable without relying on worker scheduling.
+func persistThenDispatchBatch(
+	ctx context.Context,
+	coordinator *producer.Coordinator,
+	admitted []producer.AdmittedObject,
+	matcher *match.Matcher,
+	dispatch func(durableDispatchItem) error,
+) error {
+	durable := producer.DurableBatch{
+		Outcomes:  make([]producer.ProbeOutcome, 0, len(admitted)),
+		WorkUnits: make([]producer.WorkUnit, 0, len(admitted)),
+	}
+	dispatchItems := make([]durableDispatchItem, 0, len(admitted))
+	for _, admittedObject := range admitted {
+		if admittedObject.Refusal != nil {
+			dispatchItems = append(dispatchItems, durableDispatchItem{
+				object:  admittedObject.Item.Object,
+				refusal: admittedObject.Refusal,
+			})
+			continue
+		}
+		if matcher != nil && !matcher.Match(admittedObject.Item.Object.Key) {
+			durable.Outcomes = append(durable.Outcomes, producer.ProbeOutcome{
+				AdmissionKey: admittedObject.Admission.AdmissionKey,
+				Outcome:      producer.OutcomeFiltered,
+			})
+			continue
+		}
+		unit, err := coordinator.WorkUnit(admittedObject.Admission, "reflow")
+		if err != nil {
+			return err
+		}
+		durable.Outcomes = append(durable.Outcomes, producer.ProbeOutcome{
+			AdmissionKey: admittedObject.Admission.AdmissionKey,
+			Outcome:      producer.OutcomeEmitted,
+		})
+		durable.WorkUnits = append(durable.WorkUnits, unit)
+		dispatchItems = append(dispatchItems, durableDispatchItem{
+			object:   admittedObject.Item.Object,
+			unit:     unit,
+			revision: admittedObject.Admission.SourceRevision,
+		})
+	}
+	if err := coordinator.PersistDurableBatch(ctx, durable); err != nil {
+		return err
+	}
+	for _, item := range dispatchItems {
+		if err := dispatch(item); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // listedObjectInput builds the planned input for one listed object.
@@ -938,24 +1107,53 @@ func validateSourceIdentity(current *string, in reflowInput) error {
 func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destRel, destKey, destURI string) error {
 	sourceURI := sanitizeSourceURI(in.SourceURI)
 
+	if in.AdmissionError != nil {
+		return r.recordObjectError(ctx, stats, in, destURI, destKey, "source replay refused", in.AdmissionError, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+	}
+
 	if r.cfg.Checkpoint != nil {
-		done, status, err := r.cfg.Checkpoint.ItemDone(ctx, sourceURI, destURI)
-		if err != nil {
-			return r.recordObjectError(ctx, stats, in, destURI, destKey, "checkpoint read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
-		}
-		if done {
-			rec := in.record(destURI, destKey, "skipped")
-			rec.Reason = "resume." + status
-			stats.record(rec)
-			// The item's terminal state is already durable from the prior run;
-			// failing to refresh it as a resume-skip warns rather than failing
-			// an object whose destination state is settled.
-			if err := r.checkpointItem(ctx, in, destURI, destKey, "skipped", rec.Reason, 0, "", ""); err != nil {
-				if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, err); werr != nil {
-					return werr
+		if in.UnitKey != "" {
+			laneStore := r.cfg.Checkpoint.(LaneCheckpointStore)
+			done, status, err := laneStore.UnitDone(ctx, in.UnitKey)
+			if err != nil {
+				return r.recordObjectError(ctx, stats, in, destURI, destKey, "checkpoint read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+			}
+			if done {
+				if err := laneStore.AcknowledgeTerminals(ctx, []producer.TerminalAck{{UnitKey: in.UnitKey, Status: status}}); err != nil {
+					return r.recordObjectError(ctx, stats, in, destURI, destKey, "checkpoint reconciliation failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+				}
+				rec := in.record(destURI, destKey, "skipped")
+				rec.Reason = "resume." + status
+				stats.record(rec)
+				return r.emitRecord(ctx, rec)
+			}
+			if laneStore.ResumeEnabled() {
+				if err := in.SourceRevision.Validate(); err != nil {
+					return r.recordObjectError(ctx, stats, in, destURI, destKey, "source replay refused", provider.ErrReplayUnverifiable, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+				}
+				if _, ok := sourceProvider.(provider.RevisionGetter); !ok {
+					return r.recordObjectError(ctx, stats, in, destURI, destKey, "source replay refused", provider.ErrReplayUnverifiable, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
 				}
 			}
-			return r.emitRecord(ctx, rec)
+		} else {
+			done, status, err := r.cfg.Checkpoint.ItemDone(ctx, sourceURI, destURI)
+			if err != nil {
+				return r.recordObjectError(ctx, stats, in, destURI, destKey, "checkpoint read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
+			}
+			if done {
+				rec := in.record(destURI, destKey, "skipped")
+				rec.Reason = "resume." + status
+				stats.record(rec)
+				// The item's terminal state is already durable from the prior run;
+				// failing to refresh it as a resume-skip warns rather than failing
+				// an object whose destination state is settled.
+				if err := r.checkpointItem(ctx, in, destURI, destKey, "skipped", rec.Reason, 0, "", ""); err != nil {
+					if werr := r.emitCheckpointWriteWarning(ctx, warningCodeCheckpointWrite, destKey, destURI, err); werr != nil {
+						return werr
+					}
+				}
+				return r.emitRecord(ctx, rec)
+			}
 		}
 	}
 
@@ -1210,7 +1408,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 			}
 			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback, opts)
 		case provider.IsNotFound(headErr):
-			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
 			if err == nil {
 				err = markObserved()
 			}
@@ -1222,7 +1420,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		}
 	}
 
-	bytes, result, err := limitedCopyConditional(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts, in.SourceRevision)
 	if err == nil {
 		markErr := markObserved()
 		release()
@@ -1272,7 +1470,7 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 	default:
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts)
+	bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
 	return bytes, provider.PutResult{}, collision, "complete", "", err
 }
 
@@ -1364,7 +1562,7 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 
 	collision := newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 	etag := dstMeta.ETag
-	bytes, result, err := limitedCopyConditional(ctx, limiter, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts, in.SourceRevision)
 	if err != nil {
 		if isConditionalExists(err) {
 			concurrent := newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
@@ -1452,7 +1650,7 @@ func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Pr
 	})
 }
 
-func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions) (int64, error) {
+func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions, revision provider.SourceRevision) (int64, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, err
@@ -1463,12 +1661,17 @@ func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.
 		return 0, err
 	}
 	defer release()
-	bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts)
+	var bytes int64
+	if _, ok := src.(provider.RevisionGetter); ok && revision.Validate() == nil {
+		bytes, err = transfer.CopyObjectRevisionWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts, revision)
+	} else {
+		bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts)
+	}
 	limiter.ObserveProviderResult(err)
 	return bytes, err
 }
 
-func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision) (int64, provider.PutResult, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, provider.PutResult{}, err
@@ -1479,7 +1682,15 @@ func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, sr
 		return 0, provider.PutResult{}, err
 	}
 	defer release()
-	bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts)
+	var (
+		bytes  int64
+		result provider.PutResult
+	)
+	if _, ok := src.(provider.RevisionGetter); ok && revision.Validate() == nil {
+		bytes, result, err = transfer.CopyObjectRevisionConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts, revision)
+	} else {
+		bytes, result, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts)
+	}
 	limiter.ObserveProviderResult(err)
 	return bytes, result, err
 }
@@ -1488,6 +1699,12 @@ func failedRecordReason(err error, code string, collision *CollisionInfo) string
 	var collisionErr *collisionResolveError
 	if errors.As(err, &collisionErr) && collisionErr.reason != "" {
 		return collisionErr.reason
+	}
+	if provider.IsSourceChanged(err) {
+		return "source_changed"
+	}
+	if provider.IsReplayUnverifiable(err) {
+		return "replay_unverifiable"
 	}
 	if collision == nil {
 		return reflowReasonForErrCode(code)
@@ -1499,10 +1716,10 @@ func failedRecordReason(err error, code string, collision *CollisionInfo) string
 }
 
 func (r *Runner) checkpointItem(ctx context.Context, in reflowInput, destURI, destKey, status, reason string, bytes int64, errorCode, errorMessage string) error {
-	if r.cfg.Checkpoint == nil {
+	if r.cfg.Checkpoint == nil || in.AdmissionError != nil {
 		return nil
 	}
-	return r.cfg.Checkpoint.UpsertItem(ctx, CheckpointItem{
+	item := CheckpointItem{
 		SourceURI:    sanitizeSourceURI(in.SourceURI),
 		DestURI:      sanitizeSourceURI(destURI),
 		SourceKey:    in.SourceKey,
@@ -1514,7 +1731,11 @@ func (r *Runner) checkpointItem(ctx context.Context, in reflowInput, destURI, de
 		Bytes:        bytes,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
-	})
+	}
+	if in.UnitKey != "" {
+		return r.cfg.Checkpoint.(LaneCheckpointStore).CheckpointUnit(ctx, item, in.UnitKey)
+	}
+	return r.cfg.Checkpoint.UpsertItem(ctx, item)
 }
 
 func (r *Runner) noteCollision(ctx context.Context, destKey, kind string, in reflowInput, dstMeta *provider.ObjectMeta) error {

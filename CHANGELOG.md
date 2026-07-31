@@ -100,6 +100,15 @@ changes.
   CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
   their historical warn-and-continue terminal behavior until they migrate to
   the engine.
+- **Keyed durability for partitioned reflow.** Live partitioned-prefix runs now
+  persist source-revision-bound admissions before selection, persist an outcome
+  for every admitted object and a deterministic work-unit key before handoff,
+  and mark lane EOF only after clean enumeration. Reflow checkpoints and
+  work-unit terminal acknowledgement commit atomically; resume reconciles by
+  work-unit key before mutation. On resume, a changed source is refused as
+  `source_changed`; a fresh non-resume run supersedes that source slot instead.
+  Replay without an enforceable provider revision is refused as
+  `replay_unverifiable`.
 - **Failed-copy checkpoints record the specific failure reason.** On the
   record-stream engine path, a failed collision now persists the same specific
   reason on the durable checkpoint, the error event, and the emitted record
@@ -146,6 +155,11 @@ changes.
   that do not implement the reporter are treated as unable to prove If-Match and
   are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
   refusal.
+- **Added (compatible): source-revision reads.** `provider.ObjectSummary` now
+  carries an optional opaque provider-native `Revision`, and the new
+  `provider.SourceRevision` and `provider.RevisionGetter` contracts let callers
+  request exactly an admitted version or generation. Providers that cannot
+  enforce a replay validator need not implement the optional interface.
 
 ### Known limits (stated, not claimed)
 

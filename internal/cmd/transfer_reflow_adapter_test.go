@@ -391,6 +391,95 @@ func TestPlanTransferReflowEngineAdapter_LiveCopyPlansEngine(t *testing.T) {
 	}
 }
 
+func TestPlanTransferReflowEngineAdapter_PositionalPrefixWiresPartitionedEnumerator(t *testing.T) {
+	withTransferReflowTestState(t)
+	reflowStdin = false
+	reflowDryRun = true
+
+	src := newReflowMemoryProvider()
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "source-bucket", cfg.Bucket)
+			return src, nil
+		},
+	})
+	dst := newReflowMemoryProvider()
+	dest := &reflowDestSpec{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "dest-bucket",
+		Prefix:   "data/",
+		BaseURI:  "s3://dest-bucket/data/",
+	}
+	plan := planTransferReflowEngineAdapter(
+		context.Background(),
+		strings.NewReader(""),
+		firstRecordFallback,
+		"s3://source-bucket/a/",
+		dest,
+		dst,
+		collisionConfig{Mode: reflowCollisionSkip},
+		reflowMetadataConfig{},
+		provenanceConfig{},
+		reflowpkg.ConcurrencyConfig{EffectiveCeiling: 4},
+		nil,
+		"test-job",
+	)
+	require.True(t, plan.enabled, "reason=%q", plan.reason)
+	prefix, ok := plan.source.(reflowpkg.PrefixSource)
+	require.True(t, ok)
+	require.Same(t, src, prefix.Provider)
+	require.NotNil(t, prefix.Enumerator,
+		"an explicit positional prefix must use the provider-domain-bound lane executor")
+	require.NotNil(t, prefix.Authority,
+		"the workflow must hold the validated authority independently of the enumerator")
+	if plan.close != nil {
+		plan.close()
+	}
+}
+
+func TestPlanTransferReflowEngineAdapter_WholeScopeKeepsSerialEnumerator(t *testing.T) {
+	withTransferReflowTestState(t)
+	reflowStdin = false
+	reflowDryRun = true
+
+	src := newReflowMemoryProvider()
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			require.Equal(t, "source-bucket", cfg.Bucket)
+			return src, nil
+		},
+	})
+	dst := newReflowMemoryProvider()
+	dest := &reflowDestSpec{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "dest-bucket",
+		Prefix:   "data/",
+		BaseURI:  "s3://dest-bucket/data/",
+	}
+	plan := planTransferReflowEngineAdapter(
+		context.Background(),
+		strings.NewReader(""),
+		firstRecordFallback,
+		"s3://source-bucket/",
+		dest,
+		dst,
+		collisionConfig{Mode: reflowCollisionSkip},
+		reflowMetadataConfig{},
+		provenanceConfig{},
+		reflowpkg.ConcurrencyConfig{EffectiveCeiling: 4},
+		nil,
+		"test-job",
+	)
+	require.True(t, plan.enabled, "reason=%q", plan.reason)
+	prefix, ok := plan.source.(reflowpkg.PrefixSource)
+	require.True(t, ok)
+	require.True(t, prefix.Enumerator == nil, "whole-scope compatibility must select the serial provider-page path")
+	require.Nil(t, prefix.Authority, "the unpartitioned path carries no lane authority")
+	if plan.close != nil {
+		plan.close()
+	}
+}
+
 func TestPlanTransferReflowEngineAdapter_SourceFailurePolicyRoutesCLIPool(t *testing.T) {
 	withTransferReflowTestState(t)
 	reflowStdin = true

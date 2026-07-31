@@ -13,6 +13,7 @@ import (
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/gcs"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	"github.com/3leaps/gonimbus/pkg/runbudget"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
@@ -124,6 +125,98 @@ func TestNewSourceBuildsGCSProviderFromParsedURI(t *testing.T) {
 	require.True(t, got.Anonymous)
 	require.Equal(t, 32, got.MaxIdleConnsPerHost)
 	require.Equal(t, 64, got.MaxConnsPerHost)
+}
+
+func TestNewSourceBindingReturnsConservativeProviderQuotaDomain(t *testing.T) {
+	restore := UseFactoriesForTest(Factories{
+		S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) {
+			return dispatchTestPutter{}, nil
+		},
+		GCS: func(_ context.Context, _ gcs.Config) (provider.Provider, error) {
+			return dispatchTestProvider{}, nil
+		},
+		File: func(_ providerfile.Config) (provider.Provider, error) {
+			return dispatchTestProvider{}, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	tests := []struct {
+		name   string
+		src    *uri.ObjectURI
+		opts   SourceOptions
+		domain runbudget.Domain
+	}{
+		{
+			name: "s3 custom endpoint and profile do not enter identity",
+			src:  &uri.ObjectURI{Provider: string(provider.ProviderS3), Bucket: "bucket-a", Key: "prefix/"},
+			opts: SourceOptions{S3: S3Options{
+				Endpoint: "https://storage-a.example.test",
+				Profile:  "principal-a",
+				Region:   "region-a",
+			}},
+			domain: runbudget.Domain{Version: quotaDomainVersion, ID: "s3-service"},
+		},
+		{
+			name:   "gcs project does not enter identity",
+			src:    &uri.ObjectURI{Provider: string(provider.ProviderGCS), Bucket: "bucket-b", Key: "prefix/"},
+			opts:   SourceOptions{GCS: GCSOptions{Project: "project-b"}},
+			domain: runbudget.Domain{Version: quotaDomainVersion, ID: "gcs-service"},
+		},
+		{
+			name:   "file root does not enter identity",
+			src:    &uri.ObjectURI{Provider: string(provider.ProviderFile), Key: "testdata/source"},
+			domain: runbudget.Domain{Version: quotaDomainVersion, ID: "file-service"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binding, err := NewSourceBinding(context.Background(), tc.src, tc.opts)
+			require.NoError(t, err)
+			require.NotNil(t, binding.Provider)
+			require.Equal(t, []runbudget.Domain{tc.domain}, binding.QuotaDomains)
+			require.NoError(t, binding.QuotaDomains[0].Validate())
+		})
+	}
+}
+
+func TestNewSourceBindingPreservesOptionalProviderCapabilities(t *testing.T) {
+	putter := dispatchTestPutter{}
+	restore := UseFactoriesForTest(Factories{
+		S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) {
+			return putter, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	binding, err := NewSourceBinding(context.Background(),
+		&uri.ObjectURI{Provider: string(provider.ProviderS3), Bucket: "bucket", Key: "prefix/"},
+		SourceOptions{})
+	require.NoError(t, err)
+
+	_, ok := binding.Provider.(provider.ObjectPutter)
+	require.True(t, ok, "binding must not wrap away optional provider capabilities")
+}
+
+func TestNewSourceBindingSharesOneDomainAcrossS3TopologyHints(t *testing.T) {
+	restore := UseFactoriesForTest(Factories{
+		S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) {
+			return dispatchTestProvider{}, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	first, err := NewSourceBinding(context.Background(),
+		&uri.ObjectURI{Provider: string(provider.ProviderS3), Bucket: "bucket-a"},
+		SourceOptions{S3: S3Options{Endpoint: "https://one.example.test", Profile: "one", Region: "one"}})
+	require.NoError(t, err)
+	second, err := NewSourceBinding(context.Background(),
+		&uri.ObjectURI{Provider: string(provider.ProviderS3), Bucket: "bucket-b"},
+		SourceOptions{S3: S3Options{Endpoint: "https://two.example.test", Profile: "two", Region: "two"}})
+	require.NoError(t, err)
+
+	require.Equal(t, first.QuotaDomains, second.QuotaDomains,
+		"unresolved topology hints must conservatively share one run domain")
 }
 
 func TestNewDestinationBuildsS3Provider(t *testing.T) {

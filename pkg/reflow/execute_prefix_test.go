@@ -8,11 +8,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/pkg/partition"
+	producerpkg "github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -221,6 +224,331 @@ func recordKeys(records []Record) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+type scriptedLaneEnumerator struct {
+	objects   []producerpkg.LaneObject
+	streamErr error
+}
+
+func (e *scriptedLaneEnumerator) Stream(ctx context.Context) (<-chan producerpkg.LaneObject, <-chan error) {
+	objects := make(chan producerpkg.LaneObject)
+	errc := make(chan error, 1)
+	go func() {
+		defer close(objects)
+		defer close(errc)
+		for _, object := range e.objects {
+			select {
+			case objects <- object:
+			case <-ctx.Done():
+				errc <- ctx.Err()
+				return
+			}
+		}
+		if e.streamErr != nil {
+			errc <- e.streamErr
+		}
+	}()
+	return objects, errc
+}
+
+func laneAuthority(t *testing.T, fingerprint string) (*partition.Authority, partition.LaneRef) {
+	t.Helper()
+	authority, err := partition.CompileAuthority(partition.PlanRequest{
+		Prefixes:          []string{"a/"},
+		Coverage:          partition.CoverageComplete,
+		BaseIdentity:      "s3:test-source",
+		ConfigFingerprint: fingerprint,
+		MaxLanes:          1,
+	})
+	require.NoError(t, err)
+	ref, err := authority.LaneRef(1)
+	require.NoError(t, err)
+	return authority, ref
+}
+
+func TestPrefixSourceConsumesPartitionedEnumerator(t *testing.T) {
+	sink := &collectSink{}
+	src := singlePage()
+	authority, ref := laneAuthority(t, "test-config")
+	enumerator := &scriptedLaneEnumerator{
+		objects: []producerpkg.LaneObject{
+			{Lane: ref, Object: obj("a/one.xml", "etag-1", 3)},
+			{Lane: ref, Object: obj("a/two.txt", "etag-2", 4)},
+		},
+	}
+	runner, err := NewRunner(prefixDryRunConfig(sink))
+	require.NoError(t, err)
+
+	_, err = runner.Run(context.Background(), PrefixSource{
+		Provider:   src,
+		URI:        patternSelectorURI,
+		Enumerator: enumerator,
+		Authority:  authority,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"a/one.xml"}, recordKeys(sink.records),
+		"the workflow must retain its full-key matcher over partitioned enumeration")
+	require.Zero(t, src.calls(), "the injected enumerator, not the legacy serial path, owns LIST")
+}
+
+func TestPrefixSourceRefusesUnauthorizedLaneBeforeDestinationMutation(t *testing.T) {
+	src := singlePage()
+	authority, _ := laneAuthority(t, "run-config")
+	_, foreignRef := laneAuthority(t, "foreign-config")
+	enumerator := &scriptedLaneEnumerator{
+		objects: []producerpkg.LaneObject{
+			{Lane: foreignRef, Object: obj("a/one.xml", "etag-1", 3)},
+		},
+	}
+	dst := newCopyMemoryProvider()
+	sink := &collectSink{}
+	runner, err := NewRunner(positionalCopyConfig(t, dst, sink, newMemCheckpoint()))
+	require.NoError(t, err)
+
+	_, runErr := runner.Run(context.Background(), PrefixSource{
+		Provider:   src,
+		URI:        prefixSelectorURI,
+		Enumerator: enumerator,
+		Authority:  authority,
+	})
+	require.ErrorContains(t, runErr, "claim digest")
+	require.Zero(t, dst.writeCount("data/a/one.xml"),
+		"an unauthorized lane claim must be refused before worker dispatch can mutate")
+	require.Zero(t, src.operations(), "an unauthorized claim must not reach source object operations")
+}
+
+func TestPartitionedPrefixSourceChangedRefusesBeforeDestinationMutation(t *testing.T) {
+	authority, ref := laneAuthority(t, "source-changed")
+	enumerator := &scriptedLaneEnumerator{objects: []producerpkg.LaneObject{{
+		Lane: ref, Object: obj("a/one.xml", "admitted-etag", 3),
+	}}}
+	src := newCopyMemoryProvider()
+	src.putFixture("a/one.xml", "new", "changed-etag")
+	dst := newCopyMemoryProvider()
+	checkpoint := newMemCheckpoint()
+	sink := &collectSink{}
+	runner, err := NewRunner(positionalCopyConfig(t, dst, sink, checkpoint))
+	require.NoError(t, err)
+
+	_, runErr := runner.Run(context.Background(), PrefixSource{
+		Provider: src, URI: prefixSelectorURI, Enumerator: enumerator, Authority: authority,
+	})
+	require.Error(t, runErr)
+	terminal := terminalRecord(t, sink.records, "a/one.xml")
+	require.Equal(t, "failed", terminal.Status)
+	require.Equal(t, "source_changed", terminal.Reason)
+	require.Zero(t, dst.writeCount("data/a/one.xml"))
+
+	status, err := checkpoint.LaneStatus(context.Background(), ref)
+	require.NoError(t, err)
+	require.True(t, status.EOF)
+	require.True(t, status.Terminal, "the failed work unit still has a keyed durable terminal")
+}
+
+type durabilityOrderSource struct {
+	*copyMemoryProvider
+	checkpoint *memCheckpoint
+	checked    atomic.Bool
+	violated   atomic.Bool
+}
+
+func (p *durabilityOrderSource) GetObjectRevision(
+	ctx context.Context,
+	key string,
+	revision provider.SourceRevision,
+) (io.ReadCloser, provider.ObjectMeta, error) {
+	p.checkpoint.mu.Lock()
+	durable := false
+	for admissionKey, admission := range p.checkpoint.admissions {
+		if admission.SourceKey != key {
+			continue
+		}
+		if p.checkpoint.outcomes[admissionKey] != producerpkg.OutcomeEmitted {
+			continue
+		}
+		for _, unit := range p.checkpoint.units {
+			if unit.AdmissionKey == admissionKey {
+				durable = true
+				break
+			}
+		}
+	}
+	p.checkpoint.mu.Unlock()
+	p.checked.Store(true)
+	if !durable {
+		p.violated.Store(true)
+	}
+	return p.copyMemoryProvider.GetObjectRevision(ctx, key, revision)
+}
+
+func TestPartitionedPrefixPersistsAdmissionOutcomeAndUnitBeforeSourceRead(t *testing.T) {
+	authority, ref := laneAuthority(t, "durability-order")
+	enumerator := &scriptedLaneEnumerator{objects: []producerpkg.LaneObject{{
+		Lane: ref, Object: obj("a/one.xml", "etag-1", 3),
+	}}}
+	checkpoint := newMemCheckpoint()
+	base := newCopyMemoryProvider()
+	base.putFixture("a/one.xml", "one", "etag-1")
+	src := &durabilityOrderSource{copyMemoryProvider: base, checkpoint: checkpoint}
+	dst := newCopyMemoryProvider()
+	runner, err := NewRunner(positionalCopyConfig(t, dst, &collectSink{}, checkpoint))
+	require.NoError(t, err)
+
+	_, err = runner.Run(context.Background(), PrefixSource{
+		Provider: src, URI: prefixSelectorURI, Enumerator: enumerator, Authority: authority,
+	})
+	require.NoError(t, err)
+	require.True(t, src.checked.Load(), "the control must observe a revision-bound source read")
+	require.False(t, src.violated.Load(),
+		"admission, emitting outcome, and unit must all be durable before source read")
+}
+
+func TestPersistThenDispatchBatchCrossesDurableBarrierBeforeCallback(t *testing.T) {
+	authority, ref := laneAuthority(t, "deterministic-durability-order")
+	checkpoint := newMemCheckpoint()
+	coordinator, err := producerpkg.NewCoordinator(authority, checkpoint, false)
+	require.NoError(t, err)
+	admitted, err := coordinator.AdmitBatch(context.Background(), []producerpkg.LaneObject{{
+		Lane: ref, Object: obj("a/one.xml", "etag-1", 3),
+	}})
+	require.NoError(t, err)
+
+	dispatched := false
+	err = persistThenDispatchBatch(
+		context.Background(),
+		coordinator,
+		admitted,
+		nil,
+		func(item durableDispatchItem) error {
+			checkpoint.mu.Lock()
+			defer checkpoint.mu.Unlock()
+			require.Equal(t, producerpkg.OutcomeEmitted,
+				checkpoint.outcomes[item.unit.AdmissionKey],
+				"dispatch must not observe an uncommitted outcome")
+			require.Equal(t, item.unit, checkpoint.units[item.unit.UnitKey],
+				"dispatch must not observe an uncommitted work unit")
+			dispatched = true
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, dispatched, "the control must cross the dispatch seam")
+}
+
+func TestPartitionedPrefixFilteredOutcomeParticipatesInTerminality(t *testing.T) {
+	authority, ref := laneAuthority(t, "filtered-terminality")
+	enumerator := &scriptedLaneEnumerator{objects: []producerpkg.LaneObject{
+		{Lane: ref, Object: obj("a/one.xml", "etag-1", 3)},
+		{Lane: ref, Object: obj("a/two.txt", "etag-2", 3)},
+	}}
+	src := newCopyMemoryProvider()
+	src.putFixture("a/one.xml", "one", "etag-1")
+	src.putFixture("a/two.txt", "two", "etag-2")
+	dst := newCopyMemoryProvider()
+	checkpoint := newMemCheckpoint()
+	sink := &collectSink{}
+	runner, err := NewRunner(positionalCopyConfig(t, dst, sink, checkpoint))
+	require.NoError(t, err)
+
+	_, err = runner.Run(context.Background(), PrefixSource{
+		Provider: src, URI: patternSelectorURI, Enumerator: enumerator, Authority: authority,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "complete", terminalRecord(t, sink.records, "a/one.xml").Status)
+	for _, rec := range sink.records {
+		require.NotEqual(t, "a/two.txt", rec.SourceKey,
+			"the filtered object owns a durable outcome but no downstream record")
+	}
+	status, err := checkpoint.LaneStatus(context.Background(), ref)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), status.Admissions)
+	require.Equal(t, int64(2), status.Outcomes)
+	require.Equal(t, int64(1), status.WorkUnits)
+	require.Equal(t, int64(1), status.DurableTerminals)
+	require.True(t, status.Terminal,
+		"the non-emitting object needs its own durable outcome before lane terminality")
+}
+
+type nonRevisionSource struct{ base *copyMemoryProvider }
+
+func (p nonRevisionSource) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	return p.base.List(ctx, opts)
+}
+func (p nonRevisionSource) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	return p.base.Head(ctx, key)
+}
+func (p nonRevisionSource) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	return p.base.GetObject(ctx, key)
+}
+func (p nonRevisionSource) Close() error { return nil }
+
+func TestPartitionedPrefixResumeWithoutRevisionEnforcementRefuses(t *testing.T) {
+	authority, ref := laneAuthority(t, "unverifiable-replay")
+	enumerator := &scriptedLaneEnumerator{objects: []producerpkg.LaneObject{{
+		Lane: ref, Object: obj("a/one.xml", "admitted-etag", 3),
+	}}}
+	base := newCopyMemoryProvider()
+	base.putFixture("a/one.xml", "old", "admitted-etag")
+	dst := newCopyMemoryProvider()
+	checkpoint := newMemCheckpoint()
+	checkpoint.resume = true
+	sink := &collectSink{}
+	runner, err := NewRunner(positionalCopyConfig(t, dst, sink, checkpoint))
+	require.NoError(t, err)
+
+	_, runErr := runner.Run(context.Background(), PrefixSource{
+		Provider: nonRevisionSource{base: base},
+		URI:      prefixSelectorURI, Enumerator: enumerator, Authority: authority,
+	})
+	require.Error(t, runErr)
+	terminal := terminalRecord(t, sink.records, "a/one.xml")
+	require.Equal(t, "failed", terminal.Status)
+	require.Equal(t, "replay_unverifiable", terminal.Reason)
+	require.Zero(t, dst.writeCount("data/a/one.xml"))
+}
+
+func TestPrefixSourcePartitionedEnumerationFailureKeepsTypedDisposition(t *testing.T) {
+	listErr := errors.New("partitioned listing failed")
+	src := singlePage()
+	authority, _ := laneAuthority(t, "test-config")
+	enumerator := &scriptedLaneEnumerator{streamErr: listErr}
+	sink := &collectSink{}
+	runner, err := NewRunner(prefixDryRunConfig(sink))
+	require.NoError(t, err)
+
+	_, runErr := runner.Run(context.Background(), PrefixSource{
+		Provider:   src,
+		URI:        prefixSelectorURI,
+		Enumerator: enumerator,
+		Authority:  authority,
+	})
+	var enumErr *SourceEnumerationError
+	require.ErrorAs(t, runErr, &enumErr)
+	require.ErrorIs(t, runErr, listErr)
+	require.Empty(t, sink.summaries, "an incomplete partitioned enumeration has no terminal summary")
+}
+
+func TestPartitionedPrefixEnumerationFailureDoesNotMarkEOF(t *testing.T) {
+	listErr := errors.New("partitioned listing failed")
+	src := newCopyMemoryProvider()
+	authority, ref := laneAuthority(t, "live-enumeration-failure")
+	enumerator := &scriptedLaneEnumerator{streamErr: listErr}
+	checkpoint := newMemCheckpoint()
+	sink := &collectSink{}
+	runner, err := NewRunner(positionalCopyConfig(t, newCopyMemoryProvider(), sink, checkpoint))
+	require.NoError(t, err)
+
+	_, runErr := runner.Run(context.Background(), PrefixSource{
+		Provider: src, URI: prefixSelectorURI, Enumerator: enumerator, Authority: authority,
+	})
+	var enumErr *SourceEnumerationError
+	require.ErrorAs(t, runErr, &enumErr)
+	status, err := checkpoint.LaneStatus(context.Background(), ref)
+	require.NoError(t, err)
+	require.False(t, status.EOF, "failed enumeration cannot produce a durable EOF claim")
+	require.False(t, status.Terminal)
+	require.Empty(t, sink.summaries)
 }
 
 // TestPrefixSourceSelectorAndItemAuthorityAreDistinct is the cardinality control
@@ -1080,6 +1408,56 @@ func TestPrefixSourceRequiresProviderOnBothPaths(t *testing.T) {
 	})
 }
 
+func TestPrefixSourceRequiresEnumeratorAndAuthorityTogether(t *testing.T) {
+	authority, _ := laneAuthority(t, "test-config")
+	tests := []struct {
+		name string
+		src  PrefixSource
+	}{
+		{
+			name: "enumerator without authority",
+			src: PrefixSource{
+				Provider:   singlePage(),
+				URI:        prefixSelectorURI,
+				Enumerator: &scriptedLaneEnumerator{},
+			},
+		},
+		{
+			name: "authority without enumerator",
+			src: PrefixSource{
+				Provider:  singlePage(),
+				URI:       prefixSelectorURI,
+				Authority: authority,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &eventLog{}
+			runner, err := NewRunner(prefixDryRunConfig(&orderSink{log: log}))
+			require.NoError(t, err)
+			_, err = runner.Run(context.Background(), tc.src)
+			require.ErrorContains(t, err, "must be supplied together")
+			require.Empty(t, log.snapshot(), "identity-contract refusal must precede run events")
+		})
+	}
+}
+
+func TestPrefixSourceRefusesTypedNilEnumeratorAccurately(t *testing.T) {
+	var executor *producerpkg.LaneExecutor
+	log := &eventLog{}
+	runner, err := NewRunner(prefixDryRunConfig(&orderSink{log: log}))
+	require.NoError(t, err)
+
+	_, err = runner.Run(context.Background(), PrefixSource{
+		Provider:   singlePage(),
+		URI:        prefixSelectorURI,
+		Enumerator: executor,
+	})
+	require.ErrorContains(t, err, "typed nil implementation")
+	require.Empty(t, log.snapshot(), "typed-nil refusal must precede run events and method dispatch")
+}
+
 // TestPrefixSourcePlanningIssuesNoHead pins that enumeration enriches from List
 // alone. It is the counterpart of ObjectSource's no-HEAD control, differing only
 // in metadata richness: both plan without a HEAD, and only the prefix form gets
@@ -1169,10 +1547,20 @@ func TestPrefixSourceReadOnlyRequiresDryRun(t *testing.T) {
 // PrefixSource becomes executable: the injected provider handle may hold
 // credential material and must never be formatted by value.
 func TestPrefixSourceRedactionUnchanged(t *testing.T) {
-	s := PrefixSource{Provider: newCopyMemoryProvider(), URI: prefixSelectorURI}
+	authority, _ := laneAuthority(t, "test-config")
+	s := PrefixSource{
+		Provider:   newCopyMemoryProvider(),
+		URI:        prefixSelectorURI,
+		Enumerator: &scriptedLaneEnumerator{},
+		Authority:  authority,
+	}
 	rendered := fmt.Sprintf("%v %#v", s, s)
 	require.Contains(t, rendered, prefixSelectorURI)
 	require.Contains(t, rendered, "<redacted>")
+	require.Contains(t, rendered, "Enumerator:<set>")
+	require.Contains(t, rendered, "Authority:<set>")
 	require.False(t, strings.Contains(rendered, "copyMemoryProvider{"),
 		"the provider handle must not be formatted by value")
+	require.False(t, strings.Contains(rendered, "scriptedLaneEnumerator{"),
+		"the enumerator may close over provider handles and must not be formatted by value")
 }

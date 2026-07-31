@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/stretchr/testify/require"
 )
@@ -135,11 +137,18 @@ func (s *serializedGuardSink) OnSummary(ctx context.Context, rec SummaryRecord) 
 // observed-mark and one terminal upsert per established object) and supports
 // per-operation failure injection for the checkpoint-failure disposition tests.
 type memCheckpoint struct {
-	mu        sync.Mutex
-	done      map[string]string // sourceURI|destURI -> status
-	items     []CheckpointItem
-	observed  map[string]bool
-	markCalls map[string]int
+	mu         sync.Mutex
+	done       map[string]string // sourceURI|destURI -> status
+	items      []CheckpointItem
+	observed   map[string]bool
+	markCalls  map[string]int
+	admissions map[string]producer.Admission
+	outcomes   map[string]producer.Outcome
+	units      map[string]producer.WorkUnit
+	unitDone   map[string]string
+	acks       map[string]string
+	eof        map[partition.LaneRef]bool
+	resume     bool
 
 	failMark   error
 	failUpsert error
@@ -147,7 +156,12 @@ type memCheckpoint struct {
 }
 
 func newMemCheckpoint() *memCheckpoint {
-	return &memCheckpoint{done: map[string]string{}, observed: map[string]bool{}, markCalls: map[string]int{}}
+	return &memCheckpoint{
+		done: map[string]string{}, observed: map[string]bool{}, markCalls: map[string]int{},
+		admissions: map[string]producer.Admission{}, outcomes: map[string]producer.Outcome{},
+		units: map[string]producer.WorkUnit{}, unitDone: map[string]string{},
+		acks: map[string]string{}, eof: map[partition.LaneRef]bool{},
+	}
 }
 
 func (m *memCheckpoint) key(sourceURI, destURI string) string { return sourceURI + "|" + destURI }
@@ -173,6 +187,120 @@ func (m *memCheckpoint) UpsertItem(_ context.Context, item CheckpointItem) error
 	}
 	m.items = append(m.items, item)
 	return nil
+}
+
+func (m *memCheckpoint) UnitDone(_ context.Context, unitKey string) (bool, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status, ok := m.unitDone[unitKey]
+	return ok, status, nil
+}
+
+func (m *memCheckpoint) ResumeEnabled() bool { return m.resume }
+
+func (m *memCheckpoint) CheckpointUnit(_ context.Context, item CheckpointItem, unitKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failUpsert != nil {
+		return m.failUpsert
+	}
+	m.items = append(m.items, item)
+	m.unitDone[unitKey] = item.Status
+	m.acks[unitKey] = item.Status
+	return nil
+}
+
+func (m *memCheckpoint) PersistAdmissions(_ context.Context, admissions []producer.Admission, replay bool) ([]producer.AdmissionRefusal, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	refusals := make([]producer.AdmissionRefusal, 0)
+	for _, admission := range admissions {
+		if replay {
+			if _, exact := m.admissions[admission.AdmissionKey]; exact {
+				continue
+			}
+			changed := false
+			for _, existing := range m.admissions {
+				if existing.Lane.Equal(admission.Lane) &&
+					existing.SourceProvider == admission.SourceProvider &&
+					existing.BaseIdentity == admission.BaseIdentity &&
+					existing.SourceKey == admission.SourceKey {
+					changed = true
+					break
+				}
+			}
+			if changed {
+				refusals = append(refusals, producer.AdmissionRefusal{
+					AdmissionKey: admission.AdmissionKey,
+					Err:          provider.ErrSourceChanged,
+				})
+				continue
+			}
+		}
+		m.admissions[admission.AdmissionKey] = admission
+	}
+	return refusals, nil
+}
+
+func (m *memCheckpoint) PersistDurableBatch(_ context.Context, batch producer.DurableBatch) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, outcome := range batch.Outcomes {
+		m.outcomes[outcome.AdmissionKey] = outcome.Outcome
+	}
+	for _, unit := range batch.WorkUnits {
+		m.units[unit.UnitKey] = unit
+	}
+	return nil
+}
+
+func (m *memCheckpoint) MarkLaneEOF(_ context.Context, lanes []partition.LaneRef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, lane := range lanes {
+		m.eof[lane] = true
+	}
+	return nil
+}
+
+func (m *memCheckpoint) AcknowledgeTerminals(_ context.Context, acks []producer.TerminalAck) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ack := range acks {
+		m.acks[ack.UnitKey] = ack.Status
+	}
+	return nil
+}
+
+func (m *memCheckpoint) LaneStatus(_ context.Context, lane partition.LaneRef) (producer.LaneStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var status producer.LaneStatus
+	status.EOF = m.eof[lane]
+	for key, admission := range m.admissions {
+		if !admission.Lane.Equal(lane) {
+			continue
+		}
+		status.Admissions++
+		if _, ok := m.outcomes[key]; ok {
+			status.Outcomes++
+		} else {
+			status.MissingOutcomes++
+		}
+		for unitKey, unit := range m.units {
+			if unit.AdmissionKey != key {
+				continue
+			}
+			status.WorkUnits++
+			if _, ok := m.acks[unitKey]; ok {
+				status.DurableTerminals++
+			} else {
+				status.MissingTerminals++
+			}
+		}
+	}
+	status.Terminal = status.EOF && status.MissingOutcomes == 0 && status.MissingTerminals == 0
+	return status, nil
 }
 
 func (m *memCheckpoint) DestKeyObserved(_ context.Context, destKey string) (bool, error) {
