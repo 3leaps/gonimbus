@@ -168,6 +168,20 @@ func TestTransferReflowDualPath_PrefixPositional(t *testing.T) {
 	require.Equal(t, prefixProbeSelector, storedURI)
 }
 
+func TestTransferReflowWholeScopePositionalRunsOnSerialPath(t *testing.T) {
+	env := newPrefixProbeEnv(t, 2)
+	stdout, err := env.runRaw(t, strings.NewReader(""),
+		prefixProbeArgs(env, "s3://source-bucket/")...,
+	)
+	require.NoError(t, err)
+	require.Equal(t, reflowpkg.ExecutionPathEngine, executionPathOf(t, stdout))
+	require.GreaterOrEqual(t, env.src.listCallCount(), 2,
+		"the whole-scope compatibility control must genuinely paginate")
+	for _, key := range prefixProbeKeys {
+		require.True(t, env.dst.hasObject("data/"+key), "whole-scope run must land %s", key)
+	}
+}
+
 // TestTransferReflowDualPath_PatternPositional pins the pattern cell: the glob
 // selects the same strict subset on both paths, and the source record carries
 // the pattern as spelled rather than the prefix it was derived from.

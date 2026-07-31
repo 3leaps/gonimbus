@@ -1,6 +1,10 @@
 package reflow
 
-import "context"
+import (
+	"context"
+
+	"github.com/3leaps/gonimbus/pkg/producer"
+)
 
 // CheckpointStore is the minimal resume interface the engine needs. The CLI wraps
 // its storageful (sqlite-backed) implementation behind this interface so the
@@ -37,6 +41,23 @@ type CheckpointStore interface {
 	NoteCollision(ctx context.Context, collision CheckpointCollision) error
 	// Close releases store resources.
 	Close() error
+}
+
+// LaneCheckpointStore is the optional keyed durability capability required by
+// live partitioned sources. It combines producer state with the downstream
+// checkpoint so one transaction can record an item terminal and acknowledge
+// its stable work-unit key. Experimental.
+type LaneCheckpointStore interface {
+	CheckpointStore
+	producer.DurableStore
+
+	// UnitDone reconciles a previously committed terminal by stable unit key.
+	UnitDone(ctx context.Context, unitKey string) (done bool, status string, err error)
+	// ResumeEnabled reports whether this scoped store is being used for replay.
+	ResumeEnabled() bool
+	// CheckpointUnit atomically records the terminal item and acknowledges the
+	// unit. It returns only after the shared durable transaction commits.
+	CheckpointUnit(ctx context.Context, item CheckpointItem, unitKey string) error
 }
 
 // SourceRunMetadataStore is an optional CheckpointStore capability: a store that

@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -18,16 +19,21 @@ func CopyObject(ctx context.Context, src provider.Provider, dst provider.Provide
 // CopyObjectWithOptions streams a single object from srcKey to dstKey using
 // provider-specific destination metadata options when requested.
 func CopyObjectWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, opts provider.PutOptions) (bytesTransferred int64, err error) {
-	getter, ok := src.(provider.ObjectGetter)
-	if !ok {
-		return 0, errors.New("source provider does not support GetObject")
-	}
+	return copyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, retryBufferMaxMemoryBytes, opts, nil)
+}
+
+// CopyObjectRevisionWithOptions streams exactly the admitted source revision.
+func CopyObjectRevisionWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, opts provider.PutOptions, revision provider.SourceRevision) (bytesTransferred int64, err error) {
+	return copyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, retryBufferMaxMemoryBytes, opts, &revision)
+}
+
+func copyObjectWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, opts provider.PutOptions, revision *provider.SourceRevision) (bytesTransferred int64, err error) {
 	putter, ok := dst.(provider.ObjectPutter)
 	if !ok {
 		return 0, errors.New("target provider does not support PutObject")
 	}
 
-	body, gotSize, err := getter.GetObject(ctx, srcKey)
+	body, gotSize, err := getSourceObject(ctx, src, srcKey, revision)
 	if err != nil {
 		return 0, err
 	}
@@ -60,10 +66,16 @@ func CopyObjectConditional(ctx context.Context, src provider.Provider, dst provi
 // using an atomic provider write precondition and destination metadata options
 // when requested.
 func CopyObjectConditionalWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, precond provider.PutPrecondition, opts provider.PutOptions) (bytesTransferred int64, result provider.PutResult, err error) {
-	getter, ok := src.(provider.ObjectGetter)
-	if !ok {
-		return 0, provider.PutResult{}, errors.New("source provider does not support GetObject")
-	}
+	return copyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, retryBufferMaxMemoryBytes, precond, opts, nil)
+}
+
+// CopyObjectRevisionConditionalWithOptions streams exactly the admitted source
+// revision using an atomic destination write precondition.
+func CopyObjectRevisionConditionalWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision) (bytesTransferred int64, result provider.PutResult, err error) {
+	return copyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, retryBufferMaxMemoryBytes, precond, opts, &revision)
+}
+
+func copyObjectConditionalWithOptions(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, retryBufferMaxMemoryBytes int64, precond provider.PutPrecondition, opts provider.PutOptions, revision *provider.SourceRevision) (bytesTransferred int64, result provider.PutResult, err error) {
 	if _, ok := dst.(provider.ConditionalPutter); !ok {
 		return 0, provider.PutResult{}, errors.New("target provider does not support conditional PutObject")
 	}
@@ -72,7 +84,7 @@ func CopyObjectConditionalWithOptions(ctx context.Context, src provider.Provider
 		return 0, provider.PutResult{}, errors.New("target provider does not support PutObject")
 	}
 
-	body, gotSize, err := getter.GetObject(ctx, srcKey)
+	body, gotSize, err := getSourceObject(ctx, src, srcKey, revision)
 	if err != nil {
 		return 0, provider.PutResult{}, err
 	}
@@ -93,4 +105,20 @@ func CopyObjectConditionalWithOptions(ctx context.Context, src provider.Provider
 	}
 
 	return uploadResult.Bytes, provider.PutResult{ETag: uploadResult.ETag, Version: uploadResult.Version}, nil
+}
+
+func getSourceObject(ctx context.Context, src provider.Provider, key string, revision *provider.SourceRevision) (io.ReadCloser, int64, error) {
+	if revision != nil {
+		getter, ok := src.(provider.RevisionGetter)
+		if !ok {
+			return nil, 0, provider.ErrReplayUnverifiable
+		}
+		body, meta, err := getter.GetObjectRevision(ctx, key, *revision)
+		return body, meta.Size, err
+	}
+	getter, ok := src.(provider.ObjectGetter)
+	if !ok {
+		return nil, 0, errors.New("source provider does not support GetObject")
+	}
+	return getter.GetObject(ctx, key)
 }

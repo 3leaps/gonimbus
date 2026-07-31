@@ -118,6 +118,23 @@ func TestGetObjectVersionedReturnsOpaqueLocalVersion(t *testing.T) {
 	require.NotEmpty(t, meta.ETag)
 }
 
+func TestGetObjectRevisionRefusesChangedLocalFile(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	p, err := New(Config{BaseDir: baseDir})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "object.txt"), []byte("first"), 0o600))
+
+	objects, err := p.List(ctx, provider.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, objects.Objects, 1)
+	revision := provider.SourceRevision{Kind: provider.RevisionNative, Value: objects.Objects[0].Revision}
+
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "object.txt"), []byte("changed-size"), 0o600))
+	_, _, err = p.GetObjectRevision(ctx, "object.txt", revision)
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+}
+
 func TestListSkipsSymlinksByDefault(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()

@@ -2041,6 +2041,89 @@ func TestTransferReflowCommand_FileSourceResumeUsesRelativeCheckpointIdentityAcr
 	require.Equal(t, fileURI(filepath.Join(srcRootB, "file.txt")), skipped.SourceURI)
 }
 
+func TestTransferReflowCommand_PrefixResumeReportsChangedRevisionAndContinues(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	src.enableListing(100)
+	src.putFixture("data/changed.txt", "old", "etag-old", time.Now().UTC())
+	src.putFixture("data/stable.txt", "stable", "etag-stable", time.Now().UTC())
+	src.putFixture("data/steady.json", "steady", "etag-steady", time.Now().UTC())
+	dst := newReflowMemoryProvider()
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			switch cfg.Bucket {
+			case "source-bucket":
+				return src, nil
+			case "dest-bucket":
+				return dst, nil
+			default:
+				return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+			}
+		},
+	})
+	checkpoint := filepath.Join(t.TempDir(), "state.db")
+
+	run := func(resume bool) (string, error) {
+		var stdout bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetOut(&stdout)
+		args := []string{
+			"s3://source-bucket/data/",
+			"--dest", "s3://dest-bucket/out/",
+			"--rewrite-from", "data/{file}",
+			"--rewrite-to", "{file}",
+			"--checkpoint", checkpoint,
+			"--parallel", "1",
+		}
+		if resume {
+			args = append(args, "--resume")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		return stdout.String(), err
+	}
+
+	_, err := run(false)
+	require.NoError(t, err)
+	require.Equal(t, "old", string(dst.mustObject("out/changed.txt")))
+
+	src.putFixture("data/changed.txt", "new-and-longer", "etag-new", time.Now().UTC())
+	stdout, err := run(true)
+	require.ErrorContains(t, err, "reflow completed with errors")
+	records := requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "failed", "source_changed", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "resume.complete", 2)
+	require.NotEmpty(t, requireRecord(t, stdout, reflowpkg.SummaryRecordType, ""),
+		"a recoverable replay refusal must still produce the run summary")
+	require.Equal(t, "old", string(dst.mustObject("out/changed.txt")),
+		"the refused revision must not mutate the destination")
+
+	stdout, err = run(false)
+	require.ErrorContains(t, err, "reflow completed with errors")
+	records = requireReflowRecords(t, stdout)
+	requireReflowStatusReasonCount(t, records, "failed", "collision.exists.conflict", 1)
+	requireReflowStatusReasonCount(t, records, "skipped", "collision.duplicate", 2)
+	requireReflowStatusReasonCount(t, records, "failed", "checkpoint.write_failed", 0)
+	requireReflowStatusReasonCount(t, records, "failed", "internal", 0)
+	require.NotEmpty(t, requireRecord(t, stdout, reflowpkg.SummaryRecordType, ""),
+		"a request-local checkpoint refusal must not prevent the run summary")
+	require.Equal(t, "old", string(dst.mustObject("out/changed.txt")),
+		"the genuine destination conflict must preserve the existing object")
+
+	db, err := indexstore.Open(context.Background(), indexstore.Config{Path: checkpoint})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	var admissions int
+	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM reflow_admissions`).Scan(&admissions))
+	require.Equal(t, 3, admissions, "source revisions must supersede rather than accumulate")
+	var currentRevision string
+	require.NoError(t, db.QueryRowContext(context.Background(), `
+		SELECT revision_value FROM reflow_admissions WHERE source_key = ?
+	`, "data/changed.txt").Scan(&currentRevision))
+	require.Equal(t, "etag-new", currentRevision)
+}
+
 func TestTransferReflowCommand_FileSourceSkipsHiddenPathsByDefault(t *testing.T) {
 	withTransferReflowTestState(t)
 
@@ -4807,6 +4890,32 @@ func (p *reflowMemoryProvider) GetObject(_ context.Context, key string) (io.Read
 		return nil, 0, &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 	}
 	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), nil
+}
+
+func (p *reflowMemoryProvider) GetObjectRevision(_ context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	body, ok := p.objects[key]
+	if !ok {
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderS3, Key: key, Err: provider.ErrSourceChanged}
+	}
+	meta := p.meta[key]
+	if err := revision.Validate(); err != nil {
+		return nil, provider.ObjectMeta{}, err
+	}
+	switch revision.Kind {
+	case provider.RevisionETag:
+		if meta.ETag != revision.Value {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderS3, Key: key, Err: provider.ErrSourceChanged}
+		}
+	case provider.RevisionNative:
+		if meta.Revision != revision.Value {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderS3, Key: key, Err: provider.ErrSourceChanged}
+		}
+	default:
+		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
+	}
+	return io.NopCloser(bytes.NewReader(body)), meta, nil
 }
 
 func (p *reflowMemoryProvider) PutObject(_ context.Context, key string, body io.Reader, contentLength int64) error {

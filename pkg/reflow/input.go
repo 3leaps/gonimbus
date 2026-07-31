@@ -32,6 +32,12 @@ type reflowInput struct {
 	SourceKey      string
 	SourceETag     string
 	SourceSize     int64
+	SourceRevision provider.SourceRevision
+	UnitKey        string
+	// AdmissionError is a recoverable producer refusal. It is dispatched so the
+	// normal worker accounting emits one failed object record and summary, but it
+	// must never create a checkpoint for a revision that was not admitted.
+	AdmissionError error
 	// SourceSizeKnown distinguishes a measured/declared source size (including a
 	// verified zero-byte source) from an absent one. It gates the source-newer
 	// equal-timestamp size tie-breaker so an unknown size (numeric-zero sentinel)

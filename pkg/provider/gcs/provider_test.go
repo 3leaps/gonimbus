@@ -55,6 +55,17 @@ func TestProviderReadOperationsWithFakeServer(t *testing.T) {
 	require.Equal(t, "COLDLINE", meta.StorageClass)
 	require.NotEmpty(t, meta.Version)
 
+	listedObject, err := p.List(ctx, provider.ListOptions{Prefix: "objects/with-attrs.txt"})
+	require.NoError(t, err)
+	require.Len(t, listedObject.Objects, 1)
+	require.NotEmpty(t, listedObject.Objects[0].Revision)
+	revisionBody, revisionMeta, err := p.GetObjectRevision(ctx, "objects/with-attrs.txt", provider.SourceRevision{
+		Kind: provider.RevisionNative, Value: listedObject.Objects[0].Revision,
+	})
+	require.NoError(t, err)
+	require.Equal(t, listedObject.Objects[0].Revision, revisionMeta.Version)
+	require.NoError(t, revisionBody.Close())
+
 	body, n, err := p.GetObject(ctx, "objects/with-attrs.txt")
 	require.NoError(t, err)
 	require.Equal(t, int64(6), n)

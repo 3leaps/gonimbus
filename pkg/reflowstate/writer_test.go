@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
+	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
 func mustOpen(t *testing.T) *Store {
@@ -222,6 +223,29 @@ func TestCoordinatorRealStatementFailureRollsBackAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCoordinatorSharedFailureDoesNotInheritRequestClassification(t *testing.T) {
+	c := newCoordinator(nil)
+	c.injectCommit = func() error {
+		return fmt.Errorf("request-local refusal: %w", provider.ErrSourceChanged)
+	}
+	first := &writeRequest{kind: reqExec, done: make(chan error, 1)}
+	second := &writeRequest{kind: reqExec, done: make(chan error, 1)}
+	c.execCh <- second
+
+	if ok := c.serveBatch(first); ok {
+		t.Fatal("serveBatch returned true; the injected commit failure must fail the batch")
+	}
+	for name, req := range map[string]*writeRequest{"first": first, "second": second} {
+		err := <-req.done
+		if !errors.Is(err, ErrWriterFailed) {
+			t.Fatalf("%s waiter error = %v, want ErrWriterFailed", name, err)
+		}
+		if errors.Is(err, provider.ErrSourceChanged) {
+			t.Fatalf("%s waiter inherited another request's source-changed classification: %v", name, err)
+		}
+	}
+}
+
 // TestCoordinatorMidBatchStatementFailureCommitsNoSubset closes the E-A3-I4 proof
 // gap: TestCoordinatorRealStatementFailureRollsBackAndFailsClosed drives a
 // one-request batch, so it proves the real rollback path but cannot prove that a
@@ -321,6 +345,89 @@ func TestCoordinatorMidBatchStatementFailureCommitsNoSubset(t *testing.T) {
 	}
 	if landed != 0 {
 		t.Fatalf("mid-batch failure committed a subset: %d of {A,C} rows present, want 0", landed)
+	}
+}
+
+func TestCoordinatorRequestRefusalRollsBackOnlyItsSavepoint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	seed, err := Open(ctx, Config{Path: path})
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	db, err := indexstore.Open(ctx, indexstore.Config{Path: path, SynchronousFull: true})
+	if err != nil {
+		t.Fatalf("reopen durable db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	c := newCoordinator(db)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin conn: %v", err)
+	}
+	if err := indexstore.ConfigureDurableConn(ctx, conn); err != nil {
+		t.Fatalf("configure durable conn: %v", err)
+	}
+	c.conn = conn
+	c.baseCtx = context.Background()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insert := func(source string) func(context.Context, *sql.Tx) error {
+		return func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO reflow_items (source_uri, dest_uri, status, updated_at)
+				VALUES (?, ?, ?, ?)
+			`, source, "s3://dest-bucket/item", "complete", now)
+			return err
+		}
+	}
+	refusal := errors.New("designed item identity refusal")
+	refusedExec := insert("s3://source-bucket/refused")
+	refused := &writeRequest{
+		kind: reqExec,
+		exec: func(ctx context.Context, tx *sql.Tx) error {
+			if err := refusedExec(ctx, tx); err != nil {
+				return err
+			}
+			return refuseRequest(refusal)
+		},
+		done: make(chan error, 1),
+	}
+	accepted := &writeRequest{
+		kind: reqExec,
+		exec: insert("s3://source-bucket/accepted"),
+		done: make(chan error, 1),
+	}
+	c.execCh <- accepted
+
+	if ok := c.serveBatch(refused); !ok {
+		t.Fatal("serveBatch failed the writer for a request-local refusal")
+	}
+	if got := <-refused.done; !errors.Is(got, refusal) || errors.Is(got, ErrWriterFailed) {
+		t.Fatalf("refused waiter error = %v, want only its logical refusal", got)
+	}
+	if got := <-accepted.done; got != nil {
+		t.Fatalf("accepted waiter error = %v, want nil", got)
+	}
+	if got := c.err(); got != nil {
+		t.Fatalf("coordinator failed after request-local refusal: %v", got)
+	}
+
+	var refusedRows, acceptedRows int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM reflow_items WHERE source_uri = ?`, "s3://source-bucket/refused").Scan(&refusedRows); err != nil {
+		t.Fatalf("count refused rows: %v", err)
+	}
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM reflow_items WHERE source_uri = ?`, "s3://source-bucket/accepted").Scan(&acceptedRows); err != nil {
+		t.Fatalf("count accepted rows: %v", err)
+	}
+	if refusedRows != 0 || acceptedRows != 1 {
+		t.Fatalf("savepoint result refused=%d accepted=%d, want 0 and 1", refusedRows, acceptedRows)
 	}
 }
 

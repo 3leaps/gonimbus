@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -233,6 +234,60 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 	reader, err := obj.Generation(attrs.Generation).NewReader(ctx)
 	if err != nil {
 		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectVersioned", key, err)
+	}
+	return reader, *objectMetaFromAttrs(attrs), nil
+}
+
+// GetObjectRevision downloads exactly the admitted generation or ETag.
+func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
+	if err := revision.Validate(); err != nil {
+		return nil, provider.ObjectMeta{}, err
+	}
+	obj := p.client.Bucket(p.bucket).Object(key)
+	var generation int64
+	switch revision.Kind {
+	case provider.RevisionNative:
+		parsed, err := strconv.ParseInt(revision.Value, 10, 64)
+		if err != nil || parsed == 0 {
+			return nil, provider.ObjectMeta{}, fmt.Errorf("%w: invalid GCS generation", provider.ErrReplayUnverifiable)
+		}
+		generation = parsed
+	case provider.RevisionETag:
+		attrs, err := obj.Attrs(ctx)
+		if err != nil {
+			return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
+		}
+		if attrs.Etag != revision.Value {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		generation = attrs.Generation
+	default:
+		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
+	}
+	versioned := obj.Generation(generation)
+	attrs, err := versioned.Attrs(ctx)
+	if err != nil {
+		wrapped := p.wrapError("GetObjectRevision", key, err)
+		if provider.IsNotFound(wrapped) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		return nil, provider.ObjectMeta{}, wrapped
+	}
+	reader, err := versioned.NewReader(ctx)
+	if err != nil {
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
 	}
 	return reader, *objectMetaFromAttrs(attrs), nil
 }
@@ -530,6 +585,7 @@ func objectSummaryFromAttrs(attrs *storage.ObjectAttrs) provider.ObjectSummary {
 		Key:          attrs.Name,
 		Size:         attrs.Size,
 		ETag:         attrs.Etag,
+		Revision:     generationString(attrs.Generation),
 		LastModified: attrs.Updated,
 		StorageClass: attrs.StorageClass,
 	}

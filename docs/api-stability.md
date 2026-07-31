@@ -36,16 +36,19 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/opcheckpoint`  | Experimental | Sensitive local operation-checkpoint substrate.                                                                        |
 | `github.com/3leaps/gonimbus/pkg/preflight`     | Experimental | Operator preflight checks.                                                                                             |
 | `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                                                                        |
-| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, and capability interfaces.                                                         |
+| `github.com/3leaps/gonimbus/pkg/partition`     | Experimental | Canonical hashed enumeration plans, the validated run authority over one, and the lane identity it issues.             |
+| `github.com/3leaps/gonimbus/pkg/producer`      | Experimental | Bounded provider-page lane enumeration plus revision-bound admission, outcome, and work-unit coordination.             |
+| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, capability interfaces, and optional revision-bound reads.                          |
 | `github.com/3leaps/gonimbus/pkg/provider/file` | Stable       | Local filesystem provider construction with `Config` and `New`.                                                        |
 | `github.com/3leaps/gonimbus/pkg/provider/gcs`  | Experimental | GCS provider contract surface while provider support matures.                                                          |
 | `github.com/3leaps/gonimbus/pkg/provider/s3`   | Stable       | AWS S3 and S3-compatible provider construction with `Config` and `New`.                                                |
 | `github.com/3leaps/gonimbus/pkg/reflow`        | Experimental | Reflow workflow engine for the migrated stdin subset, records, adaptive concurrency, and redaction helpers.            |
-| `github.com/3leaps/gonimbus/pkg/reflowstate`   | Experimental | Reflow checkpoint state substrate.                                                                                     |
+| `github.com/3leaps/gonimbus/pkg/reflowstate`   | Experimental | Keyed producer state, set-derived lane terminality, and atomic reflow checkpoint acknowledgement.                      |
+| `github.com/3leaps/gonimbus/pkg/runbudget`     | Experimental | Shared provider admission: quota-domain-keyed rate, per-class concurrency, open bodies, memory, and throttle response. |
 | `github.com/3leaps/gonimbus/pkg/scope`         | Experimental | Scope compilation substrate.                                                                                           |
 | `github.com/3leaps/gonimbus/pkg/shard`         | Experimental | Prefix shard discovery substrate.                                                                                      |
 | `github.com/3leaps/gonimbus/pkg/stream`        | Experimental | Language-neutral stream framing substrate.                                                                             |
-| `github.com/3leaps/gonimbus/pkg/transfer`      | Experimental | Transfer and reflow implementation substrate.                                                                          |
+| `github.com/3leaps/gonimbus/pkg/transfer`      | Experimental | Transfer and reflow substrate, including optional revision-bound source reads.                                         |
 | `github.com/3leaps/gonimbus/pkg/uri`           | Stable       | Object URI parsing for `s3://` and supported `file://` forms.                                                          |
 
 ## Breakage Notification Protocol

@@ -38,6 +38,8 @@ func reflowErrCode(err error) string {
 		return collisionErr.code
 	case errors.As(err, &budgetErr):
 		return ErrCodeInvalidInput
+	case provider.IsSourceChanged(err), provider.IsReplayUnverifiable(err):
+		return ErrCodeInvalidInput
 	case provider.IsNotFound(err):
 		return ErrCodeNotFound
 	case provider.IsAccessDenied(err):

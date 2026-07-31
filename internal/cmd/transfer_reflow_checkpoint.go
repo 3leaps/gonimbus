@@ -19,6 +19,8 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/output"
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 )
@@ -29,7 +31,14 @@ type reflowStateStore interface {
 	SetOperationCheckpointIdentity(ctx context.Context, operation, fingerprint string) error
 	OperationCheckpointFingerprint(ctx context.Context, operation string) (string, error)
 	ItemDone(ctx context.Context, sourceURI, destURI string) (bool, string, error)
+	UnitDone(ctx context.Context, unitKey string) (bool, string, error)
 	UpsertItem(ctx context.Context, p reflowstate.UpsertItemParams) error
+	CheckpointUnit(ctx context.Context, p reflowstate.UpsertItemParams, unitKey string) error
+	PersistAdmissions(ctx context.Context, admissions []producer.Admission, replay bool) ([]producer.AdmissionRefusal, error)
+	PersistDurableBatch(ctx context.Context, batch producer.DurableBatch) error
+	MarkLaneEOF(ctx context.Context, lanes []partition.LaneRef) error
+	AcknowledgeTerminals(ctx context.Context, acks []producer.TerminalAck) error
+	LaneStatus(ctx context.Context, lane partition.LaneRef) (producer.LaneStatus, error)
 	NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error
 	NoteCollision(ctx context.Context, destKey string, kind reflowstate.CollisionKind, sourceURI, sourceETag string, sourceSize int64, destETag string, destSize int64) error
 	DestKeyObserved(ctx context.Context, destKey string) (bool, error)

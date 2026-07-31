@@ -348,6 +348,60 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 	return out.Body, meta, nil
 }
 
+// GetObjectRevision downloads exactly the admitted native version or ETag.
+func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
+	if err := revision.Validate(); err != nil {
+		return nil, provider.ObjectMeta{}, err
+	}
+	input := &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)}
+	switch revision.Kind {
+	case provider.RevisionNative:
+		input.VersionId = aws.String(revision.Value)
+	case provider.RevisionETag:
+		input.IfMatch = aws.String(revision.Value)
+	default:
+		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
+	}
+	out, err := p.client.GetObject(ctx, input)
+	if err != nil {
+		wrapped := p.wrapError("GetObjectRevision", key, err)
+		if isPreconditionFailure(err) || provider.IsNotFound(wrapped) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		return nil, provider.ObjectMeta{}, wrapped
+	}
+	meta := provider.ObjectMeta{
+		ObjectSummary: provider.ObjectSummary{
+			Key:          key,
+			Size:         aws.ToInt64(out.ContentLength),
+			ETag:         cleanETag(aws.ToString(out.ETag)),
+			Revision:     aws.ToString(out.VersionId),
+			LastModified: aws.ToTime(out.LastModified),
+		},
+		Version:      aws.ToString(out.VersionId),
+		ContentType:  aws.ToString(out.ContentType),
+		Metadata:     out.Metadata,
+		StorageClass: normalizeStorageClassString(string(out.StorageClass)),
+	}
+	if revision.Kind == provider.RevisionETag && meta.ETag != cleanETag(revision.Value) {
+		_ = out.Body.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	return out.Body, meta, nil
+}
+
 // GetRange downloads an object byte range as a stream.
 //
 // Caller must close the returned body.

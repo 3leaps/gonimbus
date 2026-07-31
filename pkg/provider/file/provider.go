@@ -40,6 +40,7 @@ var (
 	_ provider.ConditionalPutter   = (*Provider)(nil)
 	_ provider.MetadataAwarePutter = (*Provider)(nil)
 	_ provider.ObjectDeleter       = (*Provider)(nil)
+	_ provider.RevisionGetter      = (*Provider)(nil)
 )
 
 type Config struct {
@@ -140,7 +141,10 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 		if err != nil || st.IsDir() {
 			continue
 		}
-		objects = append(objects, provider.ObjectSummary{Key: k, Size: st.Size(), LastModified: st.ModTime()})
+		revision := fileVersionToken(st)
+		objects = append(objects, provider.ObjectSummary{
+			Key: k, Size: st.Size(), ETag: revision, Revision: revision, LastModified: st.ModTime(),
+		})
 	}
 
 	res := &provider.ListResult{Objects: objects}
@@ -220,6 +224,38 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 		meta.Metadata = sidecar.UserMetadata
 		meta.StorageClass = sidecar.StorageClass
 	}
+	return f, meta, nil
+}
+
+// GetObjectRevision opens the file and refuses if its admitted local revision
+// token no longer matches the opened file.
+func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
+	_ = ctx
+	if err := revision.Validate(); err != nil {
+		return nil, provider.ObjectMeta{}, err
+	}
+	if revision.Kind != provider.RevisionETag && revision.Kind != provider.RevisionNative {
+		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
+	}
+	f, st, err := p.openReadPath(key)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderFile, Key: key, Err: provider.ErrSourceChanged}
+		}
+		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
+	}
+	token := fileVersionToken(st)
+	if token != revision.Value {
+		_ = f.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderFile, Key: key, Err: provider.ErrSourceChanged}
+	}
+	meta := provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{
+		Key:          strings.TrimPrefix(key, "/"),
+		Size:         st.Size(),
+		ETag:         token,
+		Revision:     token,
+		LastModified: st.ModTime(),
+	}}
 	return f, meta, nil
 }
 

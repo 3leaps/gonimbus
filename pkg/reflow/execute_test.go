@@ -153,6 +153,32 @@ func (p *copyMemoryProvider) GetObject(_ context.Context, key string) (io.ReadCl
 	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), nil
 }
 
+func (p *copyMemoryProvider) GetObjectRevision(_ context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	body, ok := p.objects[key]
+	if !ok {
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: p.providerType, Key: key, Err: provider.ErrSourceChanged}
+	}
+	meta := p.meta[key]
+	if err := revision.Validate(); err != nil {
+		return nil, provider.ObjectMeta{}, err
+	}
+	switch revision.Kind {
+	case provider.RevisionETag:
+		if meta.ETag != revision.Value {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: p.providerType, Key: key, Err: provider.ErrSourceChanged}
+		}
+	case provider.RevisionNative:
+		if meta.Revision != revision.Value {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: p.providerType, Key: key, Err: provider.ErrSourceChanged}
+		}
+	default:
+		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
+	}
+	return io.NopCloser(bytes.NewReader(body)), meta, nil
+}
+
 func (p *copyMemoryProvider) PutObject(_ context.Context, key string, body io.Reader, contentLength int64) error {
 	data, err := io.ReadAll(body)
 	if err != nil {

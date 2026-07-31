@@ -43,8 +43,39 @@ type writeRequest struct {
 	kind  reqKind
 	stmt  string
 	args  []any
+	exec  func(ctx context.Context, tx *sql.Tx) error
 	query func(ctx context.Context, conn *sql.Conn) error
 	done  chan error
+}
+
+// requestRefusal marks a designed state conflict rather than a durability
+// failure. The coordinator rolls only that request back to its savepoint,
+// commits the rest of the batch, and returns the underlying error to that
+// request's waiter without poisoning the writer.
+type requestRefusal struct {
+	err error
+}
+
+func (e *requestRefusal) Error() string { return e.err.Error() }
+func (e *requestRefusal) Unwrap() error { return e.err }
+
+func refuseRequest(err error) error {
+	if err == nil {
+		return nil
+	}
+	var refusal *requestRefusal
+	if errors.As(err, &refusal) {
+		return err
+	}
+	return &requestRefusal{err: err}
+}
+
+func requestRefusalError(err error) (error, bool) {
+	var refusal *requestRefusal
+	if !errors.As(err, &refusal) {
+		return nil, false
+	}
+	return refusal.err, true
 }
 
 // coordinator owns the single state.db write connection and is the sole
@@ -193,7 +224,11 @@ flush:
 	if c.onBatchAssembled != nil {
 		c.onBatchAssembled(len(batch))
 	}
-	if err := c.commit(batch); err != nil {
+	results, err := c.commit(batch)
+	if err != nil {
+		// ErrWriterFailed is the shared batch disposition. Keep the underlying
+		// statement text diagnostic-only: wrapping a request-local logical error
+		// would make unrelated coalesced callers inherit its typed classification.
 		wrapped := fmt.Errorf("%w: %v", ErrWriterFailed, err)
 		for _, req := range batch {
 			req.done <- wrapped
@@ -201,8 +236,8 @@ flush:
 		c.fail(wrapped)
 		return false
 	}
-	for _, req := range batch {
-		req.done <- nil
+	for i, req := range batch {
+		req.done <- results[i]
 	}
 	return true
 }
@@ -215,25 +250,59 @@ func (c *coordinator) serveQuery(req *writeRequest) {
 }
 
 // commit executes the batch inside a single transaction on the pinned
-// connection. A statement error rolls the whole batch back (no subset commits)
-// and is reported to every batched caller as a failure.
-func (c *coordinator) commit(batch []*writeRequest) error {
+// connection. Each request has a savepoint so a designed logical refusal can
+// roll back only that request while unrelated requests still cross the same
+// durable COMMIT barrier. SQL, savepoint, and commit errors remain fatal: they
+// roll the whole batch back and are reported to every batched caller.
+func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 	if c.injectCommit != nil {
 		if err := c.injectCommit(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	tx, err := c.conn.BeginTx(c.baseCtx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, req := range batch {
-		if _, err := tx.ExecContext(c.baseCtx, req.stmt, req.args...); err != nil {
+	results := make([]error, len(batch))
+	for i, req := range batch {
+		savepoint := fmt.Sprintf("reflow_request_%d", i)
+		if _, err := tx.ExecContext(c.baseCtx, "SAVEPOINT "+savepoint); err != nil {
 			_ = tx.Rollback()
-			return err
+			return nil, err
+		}
+		var err error
+		if req.exec != nil {
+			err = req.exec(c.baseCtx, tx)
+		} else {
+			_, err = tx.ExecContext(c.baseCtx, req.stmt, req.args...)
+		}
+		if err != nil {
+			refusal, ok := requestRefusalError(err)
+			if !ok {
+				_ = tx.Rollback()
+				return nil, err
+			}
+			if _, rollbackErr := tx.ExecContext(c.baseCtx, "ROLLBACK TO SAVEPOINT "+savepoint); rollbackErr != nil {
+				_ = tx.Rollback()
+				return nil, rollbackErr
+			}
+			if _, releaseErr := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); releaseErr != nil {
+				_ = tx.Rollback()
+				return nil, releaseErr
+			}
+			results[i] = refusal
+			continue
+		}
+		if _, err := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+			_ = tx.Rollback()
+			return nil, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // fail records the terminal writer error once and closes the failed channel so
@@ -262,6 +331,17 @@ func (c *coordinator) err() error {
 // never deadlock a caller.
 func (c *coordinator) exec(ctx context.Context, stmt string, args ...any) error {
 	req := &writeRequest{kind: reqExec, stmt: stmt, args: args, done: make(chan error, 1)}
+	return c.submitExec(ctx, req)
+}
+
+// execTx submits several keyed mutations as one request. It shares the same
+// group commit and post-COMMIT barrier as a single-statement mutation.
+func (c *coordinator) execTx(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
+	req := &writeRequest{kind: reqExec, exec: fn, done: make(chan error, 1)}
+	return c.submitExec(ctx, req)
+}
+
+func (c *coordinator) submitExec(ctx context.Context, req *writeRequest) error {
 	select {
 	case c.execCh <- req:
 	case <-c.failed:

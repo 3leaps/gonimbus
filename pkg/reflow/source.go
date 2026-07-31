@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 
+	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
@@ -44,9 +47,18 @@ type ObjectSource struct {
 // failure partway through stops enumeration and fails the run with a
 // SourceEnumerationError; see that type for what the run does and does not
 // report in that case.
+//
+// Enumerator and Authority are optional only as a pair. When both are nil the
+// standing serial provider-page path remains active. When both are set,
+// Enumerator supplies partitioned objects and the Runner independently checks
+// every carried LaneRef against Authority before worker dispatch. The caller,
+// not the enumerator, owns that authority so an identity claim cannot authorize
+// itself.
 type PrefixSource struct {
-	Provider provider.Provider
-	URI      string
+	Provider   provider.Provider
+	URI        string
+	Enumerator producer.LaneEnumerator
+	Authority  *partition.Authority
 }
 
 // FileTreeSource reflows a local filesystem tree rooted at Root.
@@ -98,7 +110,12 @@ func (s ObjectSource) GoString() string { return s.String() }
 // String returns a redacted summary that never exposes the injected provider
 // handle, which may hold credential material.
 func (s PrefixSource) String() string {
-	return fmt.Sprintf("reflow.PrefixSource{URI:%q, Provider:%s}", s.URI, providerPresence(s.Provider == nil))
+	return fmt.Sprintf("reflow.PrefixSource{URI:%q, Provider:%s, Enumerator:%s, Authority:%s}",
+		s.URI,
+		providerPresence(s.Provider == nil),
+		interfacePresence(s.Enumerator == nil),
+		pointerPresence(s.Authority == nil),
+	)
 }
 
 // GoString implements fmt %#v with the same redaction as String.
@@ -131,6 +148,33 @@ func readerPresence(isNil bool) string {
 }
 
 func funcPresence(isNil bool) string {
+	if isNil {
+		return "<nil>"
+	}
+	return "<set>"
+}
+
+func interfacePresence(isNil bool) string {
+	if isNil {
+		return "<nil>"
+	}
+	return "<set>"
+}
+
+func interfaceContainsTypedNil(value any) bool {
+	if value == nil {
+		return false
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func pointerPresence(isNil bool) string {
 	if isNil {
 		return "<nil>"
 	}
