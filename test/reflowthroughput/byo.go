@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -68,15 +70,25 @@ func LoadBYOS3Config() (cfg BYOS3Config, ok bool) {
 
 // ProviderConfig maps to the S3 provider constructor (ambient credential chain
 // for real BYO; optional static keys for moto only).
+//
+// The connection pool is sized to the upload fan-out. Left at zero the provider
+// returns a nil HTTP client and the AWS SDK falls back to Go's default
+// transport, which keeps only net/http.DefaultMaxIdleConnsPerHost (2) idle
+// connections per host: every request past the second re-dials and repeats the
+// TLS handshake. Concurrent staging without this is mostly handshake, and the
+// fan-out above would not deliver.
 func (c BYOS3Config) ProviderConfig() providers3.Config {
+	pool := CorpusUploadConcurrency()
 	return providers3.Config{
-		Bucket:          c.Bucket,
-		Endpoint:        c.Endpoint,
-		Region:          c.Region,
-		Profile:         c.Profile,
-		ForcePathStyle:  c.ForcePathStyle,
-		AccessKeyID:     c.AccessKeyID,
-		SecretAccessKey: c.SecretAccessKey,
+		Bucket:              c.Bucket,
+		Endpoint:            c.Endpoint,
+		Region:              c.Region,
+		Profile:             c.Profile,
+		ForcePathStyle:      c.ForcePathStyle,
+		AccessKeyID:         c.AccessKeyID,
+		SecretAccessKey:     c.SecretAccessKey,
+		MaxIdleConnsPerHost: pool,
+		MaxConnsPerHost:     pool,
 	}
 }
 
@@ -118,40 +130,194 @@ func OpenS3Provider(ctx context.Context, cfg BYOS3Config) (*providers3.Provider,
 	return providers3.New(ctx, cfg.ProviderConfig())
 }
 
+// DefaultCorpusUploadConcurrency bounds the corpus upload fan-out.
+//
+// Corpus upload is setup, not measurement, but it is priced in round trips: a
+// serial Put+Head loop costs two round trips per object and cannot exceed
+// 1/(2*RTT) no matter how much capacity the lane has. Against a real S3
+// endpoint that measured ~4.5 objects/s while the same lane sustained ~85/s at
+// concurrency 16 -- so a 50k corpus spent roughly three hours uploading before
+// the first measurement point, and a run budget sized for the measurement
+// expired during setup.
+//
+// Concurrency here changes only how fast the fixture is staged. It does not
+// touch the measured child, which is a separate process invoked afterwards.
+const DefaultCorpusUploadConcurrency = 16
+
+// CorpusUploadConcurrency resolves the upload fan-out, allowing an operator
+// override for lanes that want a gentler staging rate.
+func CorpusUploadConcurrency() int {
+	raw := strings.TrimSpace(os.Getenv("GONIMBUS_THROUGHPUT_UPLOAD_CONCURRENCY"))
+	if raw == "" {
+		return DefaultCorpusUploadConcurrency
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 {
+		return DefaultCorpusUploadConcurrency
+	}
+	return v
+}
+
 // UploadCorpusToS3 puts each local corpus object under sourcePrefix and returns
 // a rewritten reflow.input.jsonl path using s3:// source URIs + dest_rel_key.
+//
+// Uploads run concurrently; the emitted input file stays in manifest order so
+// the reflow input is byte-identical to what the serial form produced. Order is
+// preserved by writing each result into its own slot rather than appending, so
+// completion order cannot leak into the fixture.
 func UploadCorpusToS3(ctx context.Context, p *providers3.Provider, cfg BYOS3Config, corpus GeneratedCorpus, sourcePrefix string, outInputPath string) error {
-	var lines []string
-	for _, e := range corpus.Manifest.Entries {
-		abs := filepath.Join(corpus.Root, filepath.FromSlash(e.RelativeKey))
-		body, err := os.ReadFile(abs) // #nosec G304 -- harness-owned corpus path
-		if err != nil {
-			return err
-		}
-		key := sourcePrefix + e.RelativeKey
-		if err := p.PutObjectWithOptions(ctx, key, bytes.NewReader(body), int64(len(body)), provider.PutOptions{
-			ContentType: "application/xml",
-		}); err != nil {
-			return fmt.Errorf("put source object: %w", err)
-		}
-		meta, err := p.Head(ctx, key)
-		if err != nil {
-			return fmt.Errorf("head source object: %w", err)
-		}
-		line, err := marshalReflowInputLine(cfg.ObjectURI(key), e.RelativeKey, meta.Size, meta.ETag)
-		if err != nil {
-			return err
-		}
-		// Prefer content size from local if head omits.
-		if meta.Size == 0 {
-			line, err = marshalReflowInputLine(cfg.ObjectURI(key), e.RelativeKey, e.SizeBytes, meta.ETag)
-			if err != nil {
-				return err
-			}
-		}
-		lines = append(lines, line)
+	return uploadCorpus(ctx, s3Stager{p: p}, cfg, corpus, sourcePrefix, outInputPath, CorpusUploadConcurrency())
+}
+
+// corpusStager is the one operation corpus staging needs from a backend. It
+// exists so the fan-out and ordering discipline below can be driven by controls
+// without a provider or a network -- a control that reimplements the loop would
+// still pass if this function were reverted to its serial form, and so would
+// prove nothing.
+type corpusStager interface {
+	Stage(ctx context.Context, key string, body []byte) (size int64, etag string, err error)
+}
+
+type s3Stager struct{ p *providers3.Provider }
+
+func (s s3Stager) Stage(ctx context.Context, key string, body []byte) (int64, string, error) {
+	if err := s.p.PutObjectWithOptions(ctx, key, bytes.NewReader(body), int64(len(body)), provider.PutOptions{
+		ContentType: "application/xml",
+	}); err != nil {
+		return 0, "", fmt.Errorf("put source object: %w", err)
 	}
-	return os.WriteFile(outInputPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	meta, err := s.p.Head(ctx, key)
+	if err != nil {
+		return 0, "", fmt.Errorf("head source object: %w", err)
+	}
+	return meta.Size, meta.ETag, nil
+}
+
+func uploadCorpus(ctx context.Context, stager corpusStager, cfg BYOS3Config, corpus GeneratedCorpus, sourcePrefix string, outInputPath string, conc int) error {
+	entries := corpus.Manifest.Entries
+	lines := make([]string, len(entries))
+
+	if conc > len(entries) {
+		conc = len(entries)
+	}
+	if conc < 1 {
+		conc = 1
+	}
+
+	// A failing upload cancels its siblings: the first error is what the caller
+	// reports, and letting the rest run would only add residue to clean up.
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		errMu   sync.Mutex
+		firstEr error
+	)
+	fail := func(err error) {
+		errMu.Lock()
+		if firstEr == nil {
+			firstEr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < conc; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				e := entries[i]
+				abs := filepath.Join(corpus.Root, filepath.FromSlash(e.RelativeKey))
+				body, err := os.ReadFile(abs) // #nosec G304 -- harness-owned corpus path
+				if err != nil {
+					fail(err)
+					return
+				}
+				key := sourcePrefix + e.RelativeKey
+				size, etag, err := stager.Stage(uploadCtx, key, body)
+				if err != nil {
+					fail(err)
+					return
+				}
+				// Prefer content size from local if head omits.
+				if size == 0 {
+					size = e.SizeBytes
+				}
+				line, err := marshalReflowInputLine(cfg.ObjectURI(key), e.RelativeKey, size, etag)
+				if err != nil {
+					fail(err)
+					return
+				}
+				lines[i] = line
+			}
+		}()
+	}
+
+dispatch:
+	for i := range entries {
+		select {
+		case work <- i:
+		case <-uploadCtx.Done():
+			// Stop dispatching. Continuing the loop here would drain the
+			// range without staging anything and then fall through to a
+			// successful return with empty slots.
+			break dispatch
+		}
+	}
+	close(work)
+	wg.Wait()
+
+	if firstEr != nil {
+		return firstEr
+	}
+	// Cancellation that did not come from a staging failure — a parent budget
+	// expiring mid-staging — must not be reported as success.
+	if err := uploadCtx.Err(); err != nil {
+		return fmt.Errorf("corpus staging interrupted: %w", err)
+	}
+	// Defensive invariant: the emitted fixture is what the measured child
+	// consumes, so a gap in it would silently change the measurement rather
+	// than fail the run.
+	for i, l := range lines {
+		if l == "" {
+			return fmt.Errorf("corpus staging incomplete: no input line for entry %d of %d", i, len(lines))
+		}
+	}
+	return writeFileAtomic(outInputPath, []byte(strings.Join(lines, "\n")+"\n"))
+}
+
+// writeFileAtomic publishes the input file by rename so a failed or partial
+// write cannot leave a truncated fixture in place of a complete one.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = ""
+	return nil
 }
 
 // CountS3Prefix counts objects under prefix (for post-run dest object count).
@@ -178,23 +344,126 @@ func DeleteS3PrefixVerified(ctx context.Context, p *providers3.Provider, prefix 
 	if prefix == "" || prefix == "/" {
 		return fmt.Errorf("refusing to delete empty or root prefix")
 	}
-	token := ""
-	for {
-		res, err := p.List(ctx, provider.ListOptions{Prefix: prefix, ContinuationToken: token})
-		if err != nil {
-			return fmt.Errorf("list for delete: %w", err)
-		}
-		for _, obj := range res.Objects {
-			if err := p.DeleteObject(ctx, obj.Key); err != nil {
-				return fmt.Errorf("delete %s: %w", obj.Key, err)
-			}
-		}
-		if !res.IsTruncated || res.ContinuationToken == "" {
-			break
-		}
-		token = res.ContinuationToken
+	return deletePrefixVerified(ctx, prefixLister{p}, prefix, CorpusUploadConcurrency())
+}
+
+// prefixDeleter is the pair of operations teardown needs, extracted so the
+// concurrency and verification discipline can be driven by controls without a
+// provider.
+type prefixDeleter interface {
+	ListPage(ctx context.Context, prefix, token string) (keys []string, next string, err error)
+	Delete(ctx context.Context, key string) error
+	Count(ctx context.Context, prefix string) (int64, error)
+}
+
+type prefixLister struct{ p *providers3.Provider }
+
+func (l prefixLister) ListPage(ctx context.Context, prefix, token string) ([]string, string, error) {
+	res, err := l.p.List(ctx, provider.ListOptions{Prefix: prefix, ContinuationToken: token})
+	if err != nil {
+		return nil, "", fmt.Errorf("list for delete: %w", err)
 	}
-	left, err := CountS3Prefix(ctx, p, prefix)
+	keys := make([]string, 0, len(res.Objects))
+	for _, o := range res.Objects {
+		keys = append(keys, o.Key)
+	}
+	next := ""
+	if res.IsTruncated {
+		next = res.ContinuationToken
+	}
+	return keys, next, nil
+}
+
+func (l prefixLister) Delete(ctx context.Context, key string) error {
+	if err := l.p.DeleteObject(ctx, key); err != nil {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	return nil
+}
+
+func (l prefixLister) Count(ctx context.Context, prefix string) (int64, error) {
+	return CountS3Prefix(ctx, l.p, prefix)
+}
+
+// deletePrefixVerified removes a prefix with a bounded worker pool.
+//
+// Teardown was one DeleteObject at a time, which is priced the same way staging
+// was: a measured 50k run spent about two and a half hours deleting roughly 94k
+// objects after the measurement had already finished. That cost is paid on
+// every run, including failed ones, so it bounds how often the experiment can
+// be repeated.
+func deletePrefixVerified(ctx context.Context, d prefixDeleter, prefix string, conc int) error {
+	if conc < 1 {
+		conc = 1
+	}
+	delCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		errMu   sync.Mutex
+		firstEr error
+	)
+	fail := func(err error) {
+		errMu.Lock()
+		if firstEr == nil {
+			firstEr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+
+	work := make(chan string)
+	var wg sync.WaitGroup
+	for w := 0; w < conc; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := range work {
+				if err := d.Delete(delCtx, k); err != nil {
+					fail(err)
+					return
+				}
+			}
+		}()
+	}
+
+	listErr := func() error {
+		token := ""
+		for {
+			keys, next, err := d.ListPage(delCtx, prefix, token)
+			if err != nil {
+				return err
+			}
+			for _, k := range keys {
+				select {
+				case work <- k:
+				case <-delCtx.Done():
+					return nil
+				}
+			}
+			if next == "" {
+				return nil
+			}
+			token = next
+		}
+	}()
+	close(work)
+	wg.Wait()
+
+	if firstEr != nil {
+		return firstEr
+	}
+	if listErr != nil {
+		return listErr
+	}
+	if err := delCtx.Err(); err != nil {
+		return fmt.Errorf("prefix teardown interrupted: %w", err)
+	}
+
+	// The verification is the point of this helper: a teardown that reports
+	// success while objects remain would let a run claim zero residue it never
+	// achieved.
+	left, err := d.Count(ctx, prefix)
 	if err != nil {
 		return fmt.Errorf("post-delete list: %w", err)
 	}
@@ -220,6 +489,27 @@ func CLIProviderFlags(cfg BYOS3Config) []string {
 	add("--dest-region", cfg.Region)
 	add("--dest-profile", cfg.Profile)
 	add("--dest-endpoint", cfg.Endpoint)
+	return args
+}
+
+// CLIProbeProviderFlags returns the provider flags `content probe` accepts.
+//
+// Deliberately separate from CLIProviderFlags rather than reusing it. That
+// helper emits the transfer command's paired --src-*/--dest-* flags, which
+// probe does not accept: probe reads one source and has no destination. Handing
+// the transfer set to a probe child would fail on an unknown flag, and handing
+// it a union would give it flags that mean nothing there.
+func CLIProbeProviderFlags(cfg BYOS3Config) []string {
+	var args []string
+	add := func(flag, val string) {
+		if strings.TrimSpace(val) == "" {
+			return
+		}
+		args = append(args, flag, val)
+	}
+	add("--region", cfg.Region)
+	add("--profile", cfg.Profile)
+	add("--endpoint", cfg.Endpoint)
 	return args
 }
 
@@ -260,4 +550,54 @@ func CreateMotoBucket(ctx context.Context, name string) error {
 	}
 	_, err = c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(name)})
 	return err
+}
+
+// SnapshotS3DestPrefix returns a sorted content-identity multiset for objects
+// under prefix, matching SnapshotDestTree's shape.
+//
+// It exists so the fullpipe A/B parity check keeps its meaning on an object
+// store. The local check walks a destination directory, which a cloud point
+// does not have; skipping it there would quietly drop the guarantee the "ab"
+// in the profile name refers to, on exactly the runs the attribution depends on.
+//
+// Identity is the provider ETag rather than a recomputed content hash. Both
+// arms are listed the same way and compared only with each other, so the ETag
+// is a sufficient identity for parity without re-downloading the corpus twice.
+func SnapshotS3DestPrefix(ctx context.Context, p *providers3.Provider, prefix string) ([]LandedObjectID, error) {
+	// Same refusal as DeleteS3PrefixVerified, for the same reason: an unset
+	// prefix would silently widen to the entire bucket. On a delete that is
+	// destruction; here it is a parity check that compares unrelated objects
+	// and reports a mismatch that has nothing to do with the run.
+	if strings.TrimSpace(prefix) == "" || prefix == "/" {
+		return nil, fmt.Errorf("refusing to snapshot an empty or root prefix")
+	}
+	var out []LandedObjectID
+	token := ""
+	for {
+		res, err := p.List(ctx, provider.ListOptions{Prefix: prefix, ContinuationToken: token})
+		if err != nil {
+			return nil, fmt.Errorf("list dest prefix: %w", err)
+		}
+		for _, obj := range res.Objects {
+			out = append(out, LandedObjectID{
+				RelKey: strings.TrimPrefix(strings.TrimPrefix(obj.Key, prefix), "/"),
+				Size:   obj.Size,
+				Digest: strings.Trim(obj.ETag, "\""),
+			})
+		}
+		if !res.IsTruncated || res.ContinuationToken == "" {
+			break
+		}
+		token = res.ContinuationToken
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RelKey != out[j].RelKey {
+			return out[i].RelKey < out[j].RelKey
+		}
+		if out[i].Size != out[j].Size {
+			return out[i].Size < out[j].Size
+		}
+		return out[i].Digest < out[j].Digest
+	})
+	return out, nil
 }

@@ -73,7 +73,16 @@ func TestHarnessMakeEntry(t *testing.T) {
 	sizeBytes := intEnv(t, "GONIMBUS_THROUGHPUT_SIZE_BYTES", "SIZE_BYTES")
 	partitions := intEnv(t, "GONIMBUS_THROUGHPUT_PARTITIONS", "PARTITIONS")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	budgets, err := ResolveBudgets(os.Getenv)
+	if err != nil {
+		t.Fatalf("harness budgets: %v", err)
+	}
+	deadline, hasDeadline := t.Deadline()
+	if err := validateRunBudgetDeadline(time.Until(deadline), budgets.Run, hasDeadline); err != nil {
+		t.Fatalf("harness budgets: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), budgets.Run)
 	defer cancel()
 	report, err := Run(ctx, Options{
 		Binary:                bin,
@@ -85,7 +94,7 @@ func TestHarnessMakeEntry(t *testing.T) {
 		MemoryBudget:          memoryBudget,
 		TmpfsCheckpointRoot:   tmpfsRoot,
 		Keep:                  keep,
-		PointTimeout:          10 * time.Minute,
+		PointTimeout:          budgets.Point,
 		RecipeObjectCount:     objectCount,
 		RecipeSizeBytes:       sizeBytes,
 		RecipePartitions:      partitions,

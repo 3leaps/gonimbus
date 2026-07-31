@@ -230,6 +230,46 @@ type FullPipeOpts struct {
 	// the flag so the product derives the budget from the detected limit.
 	MemoryBudget string
 	StdoutPath   string
+
+	// ProviderClass labels the point in the report. Carried rather than
+	// assumed, so a cloud run is not reported as a local one.
+	ProviderClass string
+	// ProbeExtraArgs are provider flags for the probe child only. Kept separate
+	// from ReflowExtraArgs because the two commands do not accept the same
+	// flags: probe takes --region/--profile/--endpoint, transfer takes the
+	// paired --src-*/--dest-* set. One shared slice would hand each child flags
+	// the other needs and the command would refuse them.
+	ProbeExtraArgs []string
+	// ReflowExtraArgs are provider flags for the reflow child only.
+	ReflowExtraArgs []string
+	// ChildExtraEnv is appended to both children's environment. Static
+	// credentials belong here only for a backend that requires them; a real BYO
+	// backend stays ambient or profile-based.
+	ChildExtraEnv []string
+	// RewriteFrom/RewriteTo map probe output, which carries no dest_rel_key,
+	// onto destination keys. They are caller-supplied because the source key
+	// shape is not the same on every backend: a local corpus root yields the
+	// bare hive key, while an object store prefixes it with the minted run
+	// prefix, so a fixed template matches on one and rejects every record on
+	// the other. Empty falls back to the bare four-segment identity.
+	RewriteFrom string
+	RewriteTo   string
+}
+
+// ProbeDrainOpts configures a probe-only point with a draining sink.
+//
+// Named fields for the same reason as FullPipeOpts: the positional form had
+// grown a run of adjacent strings a caller can transpose without the compiler
+// noticing, and provider support adds more of them.
+type ProbeDrainOpts struct {
+	Binary         string
+	SourcePrefix   string
+	ProbeConfig    string
+	ProbeConc      int
+	GOMEMLIMIT     string
+	ProviderClass  string
+	ProbeExtraArgs []string
+	ChildExtraEnv  []string
 }
 
 // RunFullPipe supervises probe | tap | reflow without a shell.
@@ -239,10 +279,8 @@ func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
 	binary := opts.Binary
 	sourcePrefix := opts.SourcePrefix
 	probeConfig := opts.ProbeConfig
-	destURI := opts.DestURI
 	probeConc := opts.ProbeConc
 	reflowParallel := opts.ReflowParallel
-	checkpointPath := opts.CheckpointPath
 	gomemlimit := opts.GOMEMLIMIT
 	stdoutPath := opts.StdoutPath
 	pr := PointResult{
@@ -250,7 +288,7 @@ func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
 		ProbeConcurrency: probeConc,
 		GOMEMLIMIT:       gomemlimit,
 		MemoryBudget:     opts.MemoryBudget,
-		ProviderClass:    ProviderFile,
+		ProviderClass:    providerClassOrFile(opts.ProviderClass),
 		Stages:           map[string]StageResult{},
 		CheckpointClass:  "disk",
 		StdoutPath:       stdoutPath,
@@ -273,23 +311,9 @@ func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
 	// Probe does not emit dest_rel_key. Reflow rewrite is segment-based (not
 	// whole-key {key}): synthetic hive keys are always 4 segments
 	// (entity/device/date/object), so identity rewrite is 4 captures.
-	reflowArgs := []string{
-		"transfer", "reflow",
-		"--stdin",
-		"--dest", destURI,
-		"--on-collision", "skip-if-duplicate",
-		"--parallel", fmt.Sprintf("%d", reflowParallel),
-		"--rewrite-from", "{entity}/{device}/{date}/{object}",
-		"--rewrite-to", "{entity}/{device}/{date}/{object}",
-	}
-	if checkpointPath != "" {
-		reflowArgs = append(reflowArgs, "--checkpoint", checkpointPath)
-	}
-	if strings.TrimSpace(opts.MemoryBudget) != "" {
-		reflowArgs = append(reflowArgs, "--memory-budget", strings.TrimSpace(opts.MemoryBudget))
-	}
+	reflowArgs := FullPipeReflowArgs(opts)
 	reflowCmd := exec.CommandContext(ctx, binary, reflowArgs...)
-	reflowCmd.Env = ChildEnv(nil, gomemlimit)
+	reflowCmd.Env = ChildEnv(nil, gomemlimit, opts.ChildExtraEnv...)
 	reflowCmd.Stdin = reflowR
 	stdoutW, _, err := openStdoutSink(stdoutPath)
 	if err != nil {
@@ -303,15 +327,9 @@ func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
 	reflowCmd.Stdout = stdoutW
 	reflowCmd.Stderr = &limitedBuffer{max: MaxCapturedStderr, buf: &reflowStderr}
 
-	probeArgs := []string{
-		"content", "probe",
-		sourcePrefix,
-		"--config", probeConfig,
-		"--emit", "reflow-input",
-		"--concurrency", fmt.Sprintf("%d", probeConc),
-	}
+	probeArgs := ProbeArgs(sourcePrefix, probeConfig, probeConc, opts.ProbeExtraArgs)
 	probeCmd := exec.CommandContext(ctx, binary, probeArgs...)
-	probeCmd.Env = ChildEnv(nil, gomemlimit)
+	probeCmd.Env = ChildEnv(nil, gomemlimit, opts.ChildExtraEnv...)
 	probeCmd.Stdout = probeW
 	var probeStderr bytes.Buffer
 	probeCmd.Stderr = &limitedBuffer{max: MaxCapturedStderr, buf: &probeStderr}
@@ -393,11 +411,16 @@ func RunFullPipe(ctx context.Context, opts FullPipeOpts) (PointResult, error) {
 
 // RunProbeDrain runs content probe into a draining tap sink (no reflow).
 // This is the methodology-faithful producer-only probe saturation shape.
-func RunProbeDrain(ctx context.Context, binary string, sourcePrefix string, probeConfig string, probeConc int, gomemlimit string) (PointResult, error) {
+func RunProbeDrain(ctx context.Context, opts ProbeDrainOpts) (PointResult, error) {
+	binary := opts.Binary
+	sourcePrefix := opts.SourcePrefix
+	probeConfig := opts.ProbeConfig
+	probeConc := opts.ProbeConc
+	gomemlimit := opts.GOMEMLIMIT
 	pr := PointResult{
 		ProbeConcurrency: probeConc,
 		GOMEMLIMIT:       gomemlimit,
-		ProviderClass:    ProviderFile,
+		ProviderClass:    providerClassOrFile(opts.ProviderClass),
 		Stages:           map[string]StageResult{},
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -408,15 +431,9 @@ func RunProbeDrain(ctx context.Context, binary string, sourcePrefix string, prob
 		return pr, err
 	}
 
-	probeArgs := []string{
-		"content", "probe",
-		sourcePrefix,
-		"--config", probeConfig,
-		"--emit", "reflow-input",
-		"--concurrency", fmt.Sprintf("%d", probeConc),
-	}
+	probeArgs := ProbeArgs(sourcePrefix, probeConfig, probeConc, opts.ProbeExtraArgs)
 	probeCmd := exec.CommandContext(ctx, binary, probeArgs...)
-	probeCmd.Env = ChildEnv(nil, gomemlimit)
+	probeCmd.Env = ChildEnv(nil, gomemlimit, opts.ChildExtraEnv...)
 	probeCmd.Stdout = probeW
 	var probeStderr bytes.Buffer
 	probeCmd.Stderr = &limitedBuffer{max: MaxCapturedStderr, buf: &probeStderr}
@@ -577,4 +594,62 @@ func walkDir(root string, fn func(string)) error {
 		}
 	}
 	return nil
+}
+
+// providerClassOrFile defaults an unset provider class to the local backend,
+// so an existing caller that does not set it keeps its current labeling.
+func providerClassOrFile(class string) string {
+	if strings.TrimSpace(class) == "" {
+		return ProviderFile
+	}
+	return class
+}
+
+// defaultHiveRewrite is the identity mapping for the synthetic corpus, whose
+// keys are always entity/device/date/object.
+const defaultHiveRewrite = "{entity}/{device}/{date}/{object}"
+
+// ProbeArgs builds the content-probe child's argv.
+//
+// Pure and exported so a control can pin the exact argv without executing a
+// child or reaching a provider. Lifting the cloud guards without proving what
+// each child is actually invoked with would produce an instrument that looks
+// runnable and is misconfigured.
+func ProbeArgs(sourcePrefix, probeConfig string, probeConc int, extra []string) []string {
+	args := []string{
+		"content", "probe",
+		sourcePrefix,
+		"--config", probeConfig,
+		"--emit", "reflow-input",
+		"--concurrency", fmt.Sprintf("%d", probeConc),
+	}
+	return append(args, extra...)
+}
+
+// FullPipeReflowArgs builds the reflow child's argv for a full-pipe point.
+func FullPipeReflowArgs(opts FullPipeOpts) []string {
+	rewriteFrom := opts.RewriteFrom
+	if strings.TrimSpace(rewriteFrom) == "" {
+		rewriteFrom = defaultHiveRewrite
+	}
+	rewriteTo := opts.RewriteTo
+	if strings.TrimSpace(rewriteTo) == "" {
+		rewriteTo = defaultHiveRewrite
+	}
+	args := []string{
+		"transfer", "reflow",
+		"--stdin",
+		"--dest", opts.DestURI,
+		"--on-collision", "skip-if-duplicate",
+		"--parallel", fmt.Sprintf("%d", opts.ReflowParallel),
+		"--rewrite-from", rewriteFrom,
+		"--rewrite-to", rewriteTo,
+	}
+	if opts.CheckpointPath != "" {
+		args = append(args, "--checkpoint", opts.CheckpointPath)
+	}
+	if strings.TrimSpace(opts.MemoryBudget) != "" {
+		args = append(args, "--memory-budget", strings.TrimSpace(opts.MemoryBudget))
+	}
+	return append(args, opts.ReflowExtraArgs...)
 }
