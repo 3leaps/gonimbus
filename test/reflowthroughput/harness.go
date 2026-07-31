@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -269,8 +270,17 @@ func buildPointReport(m pointMeasurement) PointReport {
 	return pt
 }
 
+func joinCleanup(runErr, cleanupErr error) error {
+	if cleanupErr == nil {
+		return runErr
+	}
+	// Join rather than replace: a cleanup failure must never hide why the run
+	// failed, and a run that succeeded but left residue is not a success.
+	return errors.Join(runErr, fmt.Errorf("cleanup: %w", cleanupErr))
+}
+
 // Run executes the named profile and returns a sanitized report.
-func Run(ctx context.Context, opts Options) (Report, error) {
+func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	spec, err := ResolveProfile(opts.Profile)
 	if err != nil {
 		return Report{}, err
@@ -362,8 +372,29 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		s3SourcePrefix string
 		s3InputPath    string
 		s3ExtraArgs    []string
-		s3DestPrefixes []string
 	)
+	// Register provider close before ledger cleanup so LIFO defer order keeps
+	// the provider usable while minted prefixes are deleted and verified.
+	defer func() {
+		if s3Prov != nil {
+			_ = s3Prov.Close()
+		}
+	}()
+	// Ownership ledger of everything this run mints. Installed before the
+	// provider switch below, which mints the source prefix and then uploads to
+	// it: registering ownership only after a successful upload leaves the whole
+	// upload window uncovered, and the mint and the first PUT are separated by
+	// an entire corpus.
+	ledger := &CleanupLedger{Keep: opts.Keep}
+	cleanup := ledger.Run
+
+	// The error is surfaced rather than discarded. A cleanup that silently
+	// failed would leave residue in a bucket while the run reported success,
+	// which is the condition this exists to prevent.
+	defer func() {
+		runErr = joinCleanup(runErr, cleanup())
+	}()
+
 	switch providerClass {
 	case ProviderS3Compatible:
 		var ok bool
@@ -375,10 +406,16 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if err != nil {
 			return Report{}, fmt.Errorf("open BYO S3 provider: %w", err)
 		}
-		defer func() { _ = s3Prov.Close() }()
-		s3SourcePrefix = byoS3.MintUniquePrefix("src-" + invID[:8])
+		ledger.DeletePrefix = func(c context.Context, prefix string) error {
+			return DeleteS3PrefixVerified(c, s3Prov, prefix)
+		}
 		s3InputPath = filepath.Join(opts.RunRoot, "reflow.input.s3.jsonl")
-		if err := UploadCorpusToS3(ctx, s3Prov, byoS3, corpus, s3SourcePrefix, s3InputPath); err != nil {
+		s3SourcePrefix, err = PrepareSourcePrefix(ledger,
+			func() string { return byoS3.MintUniquePrefix("src-" + invID[:8]) },
+			func(prefix string) error {
+				return UploadCorpusToS3(ctx, s3Prov, byoS3, corpus, prefix, s3InputPath)
+			})
+		if err != nil {
 			return Report{}, fmt.Errorf("upload synthetic corpus to BYO prefix: %w", err)
 		}
 		s3ExtraArgs = CLIProviderFlags(byoS3)
@@ -409,86 +446,40 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if err != nil {
 			return Report{}, fmt.Errorf("open moto provider: %w", err)
 		}
-		defer func() { _ = s3Prov.Close() }()
-		s3SourcePrefix = byoS3.MintUniquePrefix("src-" + invID[:8])
+		// Same ownership lifecycle as the s3-compatible lane. Without an
+		// installed DeletePrefix the ledger holds registrations it cannot act
+		// on, so neither the source nor the destinations are ever removed;
+		// registering the source before the first PUT is what covers the
+		// upload window itself.
+		ledger.DeletePrefix = func(c context.Context, prefix string) error {
+			return DeleteS3PrefixVerified(c, s3Prov, prefix)
+		}
 		s3InputPath = filepath.Join(opts.RunRoot, "reflow.input.s3.jsonl")
-		if err := UploadCorpusToS3(ctx, s3Prov, byoS3, corpus, s3SourcePrefix, s3InputPath); err != nil {
+		s3SourcePrefix, err = PrepareSourcePrefix(ledger,
+			func() string { return byoS3.MintUniquePrefix("src-" + invID[:8]) },
+			func(prefix string) error {
+				return UploadCorpusToS3(ctx, s3Prov, byoS3, corpus, prefix, s3InputPath)
+			})
+		if err != nil {
 			return Report{}, fmt.Errorf("upload corpus to moto: %w", err)
 		}
 		s3ExtraArgs = CLIProviderFlags(byoS3)
 		providerClass = ProviderMoto
 	}
 
-	report := NewReport(spec.Name, providerClass, invID, binSHA, corpus.Manifest.Compact(), opts.Keep)
+	report = NewReport(spec.Name, providerClass, invID, binSHA, corpus.Manifest.Compact(), opts.Keep)
 	report.BinaryVersion = binVer
 	report.BinaryCommit = binCommit
 	report.OS = runtime.GOOS
 	report.Arch = runtime.GOARCH
 
-	// Ownership ledger of minted destination/checkpoint relative names.
-	type minted struct {
-		destDir        string
-		s3DestPrefix   string
-		checkpointPath string
-	}
-	var mintedPoints []minted
-
-	cleanup := func() error {
-		if opts.Keep {
-			return nil
-		}
-		var first error
-		if s3Prov != nil {
-			if s3SourcePrefix != "" {
-				if err := DeleteS3PrefixVerified(context.Background(), s3Prov, s3SourcePrefix); err != nil && first == nil {
-					first = fmt.Errorf("source prefix cleanup: %w", err)
-				}
-			}
-			for _, pref := range s3DestPrefixes {
-				if err := DeleteS3PrefixVerified(context.Background(), s3Prov, pref); err != nil && first == nil {
-					first = fmt.Errorf("dest prefix cleanup: %w", err)
-				}
-			}
-		}
-		for _, m := range mintedPoints {
-			if m.destDir != "" {
-				if err := os.RemoveAll(m.destDir); err != nil && first == nil {
-					first = err
-				}
-			}
-			if m.checkpointPath != "" {
-				if err := os.Remove(m.checkpointPath); err != nil && !os.IsNotExist(err) && first == nil {
-					first = fmt.Errorf("checkpoint remove: %w", err)
-				}
-				if _, err := os.Stat(m.checkpointPath); !os.IsNotExist(err) {
-					if first == nil {
-						first = fmt.Errorf("checkpoint still present after cleanup")
-					}
-				}
-			}
-		}
-		// Verify local dests gone.
-		for _, m := range mintedPoints {
-			if m.destDir == "" {
-				continue
-			}
-			if _, err := os.Stat(m.destDir); !os.IsNotExist(err) {
-				if first == nil {
-					first = fmt.Errorf("cleanup left destination %s", filepath.Base(m.destDir))
-				}
-			}
-		}
-		return first
-	}
-	defer func() {
-		// Best-effort fallback if caller ignores cleanup error path.
-		_ = cleanup()
-	}()
-
 	pointOrdinal := 0
 	// lastDestDir is the local destination of the most recent reflow/full_pipe point
 	// (for content-parity snapshots).
 	var lastDestDir string
+	// lastS3DestPrefix is the cloud analogue of lastDestDir, so the A/B parity
+	// check has something to compare on an object store.
+	var lastS3DestPrefix string
 	runPoint := func(rp pointRun) error {
 		parallel := rp.Parallel
 		probeConc := rp.ProbeConcurrency
@@ -519,24 +510,23 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		inputPath := corpus.ReflowInputPath
 		useCloud := providerClass == ProviderS3Compatible || providerClass == ProviderMoto
 
-		if useCloud {
-			if shape == "full_pipe" {
-				return fmt.Errorf("point %s: full_pipe on %s not in this cut (reflow-only BYO first; file fullpipe-ab remains)", pointID, providerClass)
-			}
-			if shape == "probe_drain" {
-				return fmt.Errorf("point %s: probe_drain is file-local only", pointID)
-			}
+		// probe_drain has no destination, so it mints none on any backend.
+		if useCloud && shape == "probe_drain" {
+			inputPath = s3InputPath
+			extraArgs = s3ExtraArgs
+		} else if useCloud {
 			s3DestPrefix = byoS3.MintUniquePrefix("dst-" + pointID)
 			if n, err := CountS3Prefix(ctx, s3Prov, s3DestPrefix); err != nil {
 				return fmt.Errorf("point %s dest list: %w", pointID, err)
 			} else if n != 0 {
 				return fmt.Errorf("point %s: destination prefix not empty", pointID)
 			}
-			s3DestPrefixes = append(s3DestPrefixes, s3DestPrefix)
+			ledger.RegisterDestPrefix(s3DestPrefix)
+			lastS3DestPrefix = s3DestPrefix
 			destURI = byoS3.ObjectURI(s3DestPrefix)
 			extraArgs = s3ExtraArgs
 			inputPath = s3InputPath
-			mintedPoints = append(mintedPoints, minted{s3DestPrefix: s3DestPrefix, checkpointPath: ckPath})
+			ledger.RegisterPoint(MintedPoint{CheckpointPath: ckPath})
 		} else if shape != "probe_drain" {
 			destDir = filepath.Join(opts.RunRoot, "dest-"+pointID)
 			if err := EnsureEmptyDir(destDir); err != nil {
@@ -547,10 +537,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			}
 			destURI = fileURIFromAbs(destDir) + "/"
 			lastDestDir = destDir
-			mintedPoints = append(mintedPoints, minted{destDir: destDir, checkpointPath: ckPath})
+			ledger.RegisterPoint(MintedPoint{DestDir: destDir, CheckpointPath: ckPath})
 		} else {
 			// probe_drain: no destination; still track a throwaway checkpoint path absence.
-			mintedPoints = append(mintedPoints, minted{checkpointPath: ckPath})
+			ledger.RegisterPoint(MintedPoint{CheckpointPath: ckPath})
 		}
 
 		pctx, cancel := context.WithTimeout(ctx, opts.PointTimeout)
@@ -563,21 +553,52 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		switch shape {
 		case "full_pipe":
 			srcPrefix := fileURIFromAbs(corpus.Root) + "/"
+			var probeArgs []string
+			var rewriteFrom string
+			if useCloud {
+				srcPrefix = byoS3.ObjectURI(s3SourcePrefix)
+				probeArgs = CLIProbeProviderFlags(byoS3)
+				// Probe emits the full object key, which on an object store is
+				// prefixed by the minted run prefix. The bare four-segment
+				// template matches none of them, so carry the prefix as literal
+				// leading segments and map back to the bare key at the
+				// destination.
+				rewriteFrom = strings.TrimSuffix(s3SourcePrefix, "/") + "/" + defaultHiveRewrite
+			}
 			pr, runErr = RunFullPipe(pctx, FullPipeOpts{
-				Binary:         absBin,
-				SourcePrefix:   srcPrefix,
-				ProbeConfig:    corpus.ProbeConfigPath,
-				DestURI:        destURI,
-				ProbeConc:      probeConc,
-				ReflowParallel: parallel,
-				CheckpointPath: ckPath,
-				GOMEMLIMIT:     gomem,
-				MemoryBudget:   rp.MemoryBudget,
-				StdoutPath:     stdoutPath,
+				Binary:          absBin,
+				SourcePrefix:    srcPrefix,
+				ProbeConfig:     corpus.ProbeConfigPath,
+				DestURI:         destURI,
+				ProbeConc:       probeConc,
+				ReflowParallel:  parallel,
+				CheckpointPath:  ckPath,
+				GOMEMLIMIT:      gomem,
+				MemoryBudget:    rp.MemoryBudget,
+				StdoutPath:      stdoutPath,
+				ProviderClass:   providerClass,
+				ProbeExtraArgs:  probeArgs,
+				ReflowExtraArgs: extraArgs,
+				ChildExtraEnv:   byoS3.ChildAWSEnv(),
+				RewriteFrom:     rewriteFrom,
 			})
 		case "probe_drain":
 			srcPrefix := fileURIFromAbs(corpus.Root) + "/"
-			pr, runErr = RunProbeDrain(pctx, absBin, srcPrefix, corpus.ProbeConfigPath, probeConc, gomem)
+			var probeArgs []string
+			if useCloud {
+				srcPrefix = byoS3.ObjectURI(s3SourcePrefix)
+				probeArgs = CLIProbeProviderFlags(byoS3)
+			}
+			pr, runErr = RunProbeDrain(pctx, ProbeDrainOpts{
+				Binary:         absBin,
+				SourcePrefix:   srcPrefix,
+				ProbeConfig:    corpus.ProbeConfigPath,
+				ProbeConc:      probeConc,
+				GOMEMLIMIT:     gomem,
+				ProviderClass:  providerClass,
+				ProbeExtraArgs: probeArgs,
+				ChildExtraEnv:  byoS3.ChildAWSEnv(),
+			})
 		default:
 			childEnv := byoS3.ChildAWSEnv()
 			pr, runErr = RunReflowOnly(pctx, StageRunOpts{
@@ -754,15 +775,22 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			if err := runPoint(armRun); err != nil {
 				return report, err
 			}
-			destA := lastDestDir
-			snapA, err := SnapshotDestTree(destA)
+			// A cloud point lands in a minted object prefix, not a local tree, so
+			// the snapshot has to follow the destination rather than assume one.
+			snapshotLanded := func() ([]LandedObjectID, error) {
+				if providerClass == ProviderS3Compatible || providerClass == ProviderMoto {
+					return SnapshotS3DestPrefix(ctx, s3Prov, lastS3DestPrefix)
+				}
+				return SnapshotDestTree(lastDestDir)
+			}
+			snapA, err := snapshotLanded()
 			if err != nil {
 				return report, fmt.Errorf("fullpipe arm A snapshot: %w", err)
 			}
 			if err := runPoint(armRun); err != nil {
 				return report, err
 			}
-			snapB, err := SnapshotDestTree(lastDestDir)
+			snapB, err := snapshotLanded()
 			if err != nil {
 				return report, fmt.Errorf("fullpipe arm B snapshot: %w", err)
 			}
@@ -892,9 +920,6 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if err := cleanup(); err != nil {
 		return report, fmt.Errorf("cleanup: %w", err)
 	}
-	// Prevent deferred double-clean issues: clear minted after successful cleanup.
-	mintedPoints = nil
-
 	return report, nil
 }
 

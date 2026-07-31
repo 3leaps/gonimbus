@@ -369,12 +369,25 @@ MOTO_ENDPOINT ?= http://localhost:$(MOTO_PORT)
 #   for driving the single-writer wall — raise OBJECT_COUNT for a full measurement.
 PROFILE ?= smoke
 PROVIDER ?= file
+# Go's test timeout must outlast RUN_BUDGET plus the harness's verified-cleanup
+# allowance; it aborts the process and would otherwise strand minted prefixes.
+TEST_TIMEOUT ?= 45m
+# CHILD_BINARY pins the measured artifact to a prebuilt binary instead of
+# rebuilding from this worktree. Required when the instrument and the measured
+# product are deliberately at different commits: the harness provenance and the
+# product provenance are separate fields and must not be conflated.
+CHILD_BINARY ?=
 test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput harness (PROFILE=smoke by default)
 	@set -e; \
 	echo "→ Reflow throughput harness profile=$(PROFILE) provider=$(PROVIDER)"; \
 	mkdir -p bin; \
-	go build -ldflags "$(LDFLAGS)" -o bin/gonimbus-throughput ./cmd/gonimbus; \
-	BIN="$$(cd bin && pwd)/gonimbus-throughput"; \
+	if [ -n "$(CHILD_BINARY)" ]; then \
+		BIN="$(CHILD_BINARY)"; \
+		echo "→ using prebuilt child binary (measured artifact is NOT this worktree)"; \
+	else \
+		go build -ldflags "$(LDFLAGS)" -o bin/gonimbus-throughput ./cmd/gonimbus; \
+		BIN="$$(cd bin && pwd)/gonimbus-throughput"; \
+	fi; \
 	SHA="$$(shasum -a 256 "$$BIN" | awk '{print $$1}')"; \
 	echo "→ binary $$BIN sha256=$$SHA"; \
 	RUN_ROOT="$(RUN_ROOT)"; \
@@ -393,8 +406,11 @@ test-reflow-throughput: sync-embedded-identity ## On-demand reflow throughput ha
 	export GONIMBUS_THROUGHPUT_OBJECT_COUNT="$(OBJECT_COUNT)"; \
 	export GONIMBUS_THROUGHPUT_SIZE_BYTES="$(SIZE_BYTES)"; \
 	export GONIMBUS_THROUGHPUT_PARTITIONS="$(PARTITIONS)"; \
-	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestGenerate|TestTap|TestCheck|TestResolve|TestChild|TestReport|TestParse|TestEnsure|TestLoadBYO|TestCLIProvider' && \
-	$(GOTEST) ./test/reflowthroughput -count=1 -timeout 30m -run 'TestSmokeProfileEndToEnd|TestHarnessMakeEntry|TestProfile' -v
+	export GONIMBUS_THROUGHPUT_RUN_BUDGET="$(RUN_BUDGET)"; \
+	export GONIMBUS_THROUGHPUT_POINT_TIMEOUT="$(POINT_TIMEOUT)"; \
+	export GONIMBUS_THROUGHPUT_UPLOAD_CONCURRENCY="$(UPLOAD_CONCURRENCY)"; \
+	$(GOTEST) ./test/reflowthroughput -count=1 -timeout $(TEST_TIMEOUT) -run 'TestGenerate|TestTap|TestCheck|TestResolve|TestChild|TestReport|TestParse|TestEnsure|TestLoadBYO|TestCLIProvider' && \
+	$(GOTEST) ./test/reflowthroughput -count=1 -timeout $(TEST_TIMEOUT) -run 'TestSmokeProfileEndToEnd|TestHarnessMakeEntry|TestProfile' -v
 
 test-cloud: sync-embedded-identity ## Run tests including cloud integration (requires moto)
 	@if ! curl -sf $(MOTO_ENDPOINT)/moto-api/ > /dev/null 2>&1; then \
