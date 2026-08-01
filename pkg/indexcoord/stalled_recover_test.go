@@ -191,11 +191,15 @@ func TestRecoverManagedStalled_PositiveEndToEndChild(t *testing.T) {
 		_ = auth.Release()
 		t.Fatal(err)
 	}
-	// Lease still held by this test process → expect signalled stop + lease-still-held
-	// OR signalled-stopped with lease-still-held outcome.
-	if !result.Signalled && result.Outcome != OutcomeSignalled && result.Outcome != OutcomeLeaseStillHeld {
+	// Test process still holds the flock: identity-bound signal must fire, but
+	// W2 must refuse unlink while held (no false finalize).
+	if !result.Signalled {
 		_ = auth.Release()
-		t.Fatalf("expected signal path, got %#v", result)
+		t.Fatalf("expected identity-bound signal, got %#v", result)
+	}
+	if result.Outcome != OutcomeLeaseStillHeld {
+		_ = auth.Release()
+		t.Fatalf("expected lease-still-held while test holds flock, got %#v", result)
 	}
 	// Child must be dead.
 	done := make(chan error, 1)
@@ -210,15 +214,40 @@ func TestRecoverManagedStalled_PositiveEndToEndChild(t *testing.T) {
 		_ = auth.Release()
 		t.Fatal("child pid still alive after recover")
 	}
-	_ = auth.Release()
+	mid, err := store.GetReadOnlyStrict(jobID)
+	if err != nil {
+		_ = auth.Release()
+		t.Fatal(err)
+	}
+	if mid.State == jobregistry.JobStateStopped {
+		_ = auth.Release()
+		t.Fatalf("must not finalize while lease still held: %#v", mid)
+	}
 
-	// Job record should be stopped.
+	// Drop holder (simulates OS drop after managed process exit + cleanup).
+	if err := auth.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume: death already proven path → W2 unheld reclaim + finalize.
+	result2, err := RecoverManagedStalled(store, jobID, RecoverStalledOptions{
+		AuthorityRoot: authorityRoot,
+		Confirm:       true,
+		WaitTimeout:   30 * time.Second,
+		PollInterval:  50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result2.Outcome != OutcomeReapedOnly && result2.Outcome != OutcomeSignalled && result2.Outcome != OutcomeAlreadyStopped {
+		t.Fatalf("after lease release want reaped/signalled/already-stopped, got %#v", result2)
+	}
 	final, err := store.GetReadOnlyStrict(jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if final.State != jobregistry.JobStateStopped {
-		t.Fatalf("expected stopped, got %s (%#v)", final.State, result)
+		t.Fatalf("expected stopped after unheld resume, got %s (%#v)", final.State, result2)
 	}
 }
 

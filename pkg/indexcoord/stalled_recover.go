@@ -937,11 +937,15 @@ func finishAfterDeath(store *jobregistry.Store, res RecoverStalledResult, rec *j
 		res.Outcome = OutcomeLeaseStillHeld
 		res.Detail = "process terminated but lease still held; no unlink; not finalized"
 		res.ForcedKill = forced
+		// Death is proven (phase may be death-observed). Release exclusive signal
+		// claim so a later attempt can reclaim after the holder exits; keep fence.
+		_, _ = store.FailStalledRecovery(res.JobID, fenceOwner, attemptID, res.Detail)
 		return res, nil
 	case LeaseInvalid:
 		res.Outcome = OutcomeInvalidResidue
 		res.Detail = "process terminated; invalid lease residue preserved; not finalized"
 		res.ForcedKill = forced
+		_, _ = store.FailStalledRecovery(res.JobID, fenceOwner, attemptID, res.Detail)
 		return res, nil
 	case LeaseUnheld:
 		wantHolder := "index-build-" + res.JobID
