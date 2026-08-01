@@ -94,11 +94,13 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 		InvocationFingerprint: fingerprint,
 	}
 	if err := e.store.withStartLock(func() error {
-		if err := recoverExpiredQueuedJobs(e.store, now); err != nil {
+		// Under the start lock: never call List/Get/Write — they may take the
+		// same flock on a second fd and self-deadlock. Use strict reads + writeRecord.
+		if err := recoverExpiredQueuedJobsLocked(e.store, now); err != nil {
 			return err
 		}
 		if opts.Dedupe {
-			existing, err := e.store.List()
+			existing, err := e.store.ListReadOnlyStrict()
 			if err != nil {
 				return err
 			}
@@ -108,7 +110,7 @@ func (e *Executor) StartIndexBuildBackground(manifestPath string, name string, o
 				}
 			}
 		}
-		return e.store.Write(rec)
+		return e.store.writeRecord(rec)
 	}); err != nil {
 		return nil, err
 	}
@@ -176,8 +178,10 @@ func activeJobState(state JobState) bool {
 	return state == JobStateQueued || state == JobStateRunning || state == JobStateStopping
 }
 
-func recoverExpiredQueuedJobs(store *Store, now time.Time) error {
-	jobs, err := store.List()
+// recoverExpiredQueuedJobsLocked fails expired queued jobs. Caller must hold
+// withStartLock; uses writeRecord only.
+func recoverExpiredQueuedJobsLocked(store *Store, now time.Time) error {
+	jobs, err := store.ListReadOnlyStrict()
 	if err != nil {
 		return err
 	}
@@ -190,7 +194,7 @@ func recoverExpiredQueuedJobs(store *Store, now time.Time) error {
 		rec.EndedAt = &now
 		rec.EnqueueOwnerPID = 0
 		rec.EnqueueExpiresAt = nil
-		if err := store.Write(rec); err != nil {
+		if err := store.writeRecord(rec); err != nil {
 			return fmt.Errorf("recover expired queued job %s: %w", rec.JobID, err)
 		}
 	}

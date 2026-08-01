@@ -260,3 +260,40 @@ func resolveJobID(store *jobregistry.Store, input string) (string, error) {
 	}
 	return matches[0], nil
 }
+
+// resolveJobIDStrict resolves a job id using only non-mutating, non-creating
+// registry reads. plan-stalled / recover-stalled must use this so a dead running
+// record is not demoted to unknown (and its heartbeat rewritten) before the
+// strict planner sees the contradiction evidence.
+func resolveJobIDStrict(store *jobregistry.Store, input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", fmt.Errorf("job_id is required")
+	}
+	if store == nil {
+		return "", fmt.Errorf("job registry store is nil")
+	}
+
+	// Exact match first — GetReadOnlyStrict never demotes or rewrites.
+	if _, err := store.GetReadOnlyStrict(input); err == nil {
+		return input, nil
+	}
+
+	jobs, err := store.ListReadOnlyStrict()
+	if err != nil {
+		return "", err
+	}
+	matches := make([]string, 0, 2)
+	for _, j := range jobs {
+		if strings.HasPrefix(j.JobID, input) {
+			matches = append(matches, j.JobID)
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("job not found: %s", input)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("job id prefix is ambiguous (%d matches); use full job_id or --json", len(matches))
+	}
+	return matches[0], nil
+}

@@ -294,11 +294,35 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 		}
 
 		managedJobID := strings.TrimSpace(indexBuildManagedJobID)
+		var stopHeartbeat func()
 		if managedJobID != "" {
 			job, loadedManagedManifest, err = claimManagedIndexBuildJob(store, managedJobID)
 			if err != nil {
 				return err
 			}
+			// Heartbeat begins immediately after claim — not after CreateIndexRun —
+			// so a healthy pre-authority build cannot look stalled by silence.
+			// Dual persist failure cancels THIS context tree (used by crawl/
+			// provider/publish and passed into maintenance), so work stops and
+			// deferred authority release runs on unwind. Terminal job state is
+			// written only on the main path after work returns — not by a racer.
+			var buildCancel context.CancelFunc
+			ctx, buildCancel = context.WithCancel(ctx)
+			defer buildCancel()
+			var hbFatal <-chan error
+			stopHeartbeat, hbFatal = startManagedHeartbeat(ctx, buildCancel, store, job, 0)
+			defer func() {
+				if stopHeartbeat != nil {
+					stopHeartbeat()
+				}
+			}()
+			go func() {
+				if err, ok := <-hbFatal; ok && err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "managed build aborting: %v\n", err)
+					// buildCancel already invoked by heartbeat; do not Write terminal
+					// state here (main path owns terminalization after work returns).
+				}
+			}()
 		} else {
 			now := time.Now().UTC()
 			jobID := uuid.New().String()
@@ -412,6 +436,15 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 			return err
 		}
 		return showIndexBuildPlan(ctx, cmd, m, identity, buildFilters, sincePlan, identityResult, scopeHash)
+	}
+
+	// Persist IndexSetID as soon as it is computed and before authority acquire,
+	// so a recovery plan can correlate the held lease to this managed job.
+	if store != nil && job != nil {
+		job.IndexSetID = identityResult.IndexSetID
+		if err := store.Write(job); err != nil {
+			return fmt.Errorf("persist index set identity on job record: %w", err)
+		}
 	}
 
 	maintenanceHolder := "index-build-" + uuid.NewString()
@@ -674,20 +707,13 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	}
 	cmd.SilenceUsage = true
 
-	var stopHeartbeat func()
 	if store != nil && job != nil {
 		job.RunID = run.RunID
 		job.PID = os.Getpid()
 		_ = store.Write(job)
-		if strings.TrimSpace(indexBuildManagedJobID) != "" {
-			stopHeartbeat = startManagedHeartbeat(ctx, store, job)
-		}
+		// Managed heartbeat already started at claim; keep it through authority
+		// cleanup (deferred with the claim). Do not start a second ticker here.
 	}
-	defer func() {
-		if stopHeartbeat != nil {
-			stopHeartbeat()
-		}
-	}()
 
 	_, _ = fmt.Fprintf(os.Stderr, "Started IndexRun: %s\n", run.RunID)
 	_, _ = fmt.Fprintf(os.Stderr, "  base_uri: %s\n", indexSet.BaseURI)

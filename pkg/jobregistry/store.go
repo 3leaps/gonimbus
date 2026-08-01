@@ -101,31 +101,18 @@ func (s *Store) Write(record *JobRecord) error {
 	if err := validateJobID(jobID); err != nil {
 		return err
 	}
-	if err := s.ensureRoot(); err != nil {
-		return err
-	}
-
-	b, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal job record: %w", err)
-	}
-	b = append(b, '\n')
-
-	// Busy Windows runners can fail atomic replace when a concurrent Get holds
-	// job.json open. Retry transient sharing/lock errors so helper completion
-	// and production writers do not silently stall as queued forever.
-	var lastErr error
-	for attempt := 0; attempt < 10; attempt++ {
-		lastErr = writeJobRecordAtomic(s.root, jobID, b)
-		if lastErr == nil {
-			return nil
+	// Recovery fence + persist share the start lock so a concurrent
+	// BeginStalledRecovery cannot race a read-check-write that misses the fence.
+	// Internal recovery/heartbeat paths use writeRecord under the same lock and
+	// must not call Write (non-reentrant flock).
+	return s.withStartLock(func() error {
+		if existing, err := s.getReadOnlyStrict(jobID); err == nil {
+			if fenceErr := recoveryFenceViolation(existing, record); fenceErr != nil {
+				return fenceErr
+			}
 		}
-		if !isTransientRegistryIOError(lastErr) {
-			return lastErr
-		}
-		time.Sleep(time.Duration(5*(attempt+1)) * time.Millisecond)
-	}
-	return lastErr
+		return s.writeRecord(record)
+	})
 }
 
 func mkdirSecure(path string) error {
@@ -183,6 +170,22 @@ func (s *Store) Get(jobID string) (*JobRecord, error) {
 	}
 
 	return &record, nil
+}
+
+// GetReadOnlyStrict returns one job record without demoting state, updating
+// heartbeats, creating directories, or otherwise mutating the registry. Recovery
+// planners must use this surface so a dead-PID "zombie" demotion cannot erase the
+// terminal-contradiction evidence the plan is meant to judge.
+func (s *Store) GetReadOnlyStrict(jobID string) (*JobRecord, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, fmt.Errorf("job_id is required")
+	}
+	root := strings.TrimSpace(s.root)
+	if root == "" {
+		return nil, fmt.Errorf("job registry root dir is empty")
+	}
+	return s.getReadOnlyStrict(jobID)
 }
 
 // ListReadOnlyStrict returns a byte-preserving snapshot of every registry job.
@@ -393,7 +396,9 @@ func (s *Store) OpenLogRead(jobID, name string) (*os.File, error) {
 func (s *Store) ClaimQueued(jobID string, pid int, validate func(*JobRecord) error) (*JobRecord, error) {
 	var claimed *JobRecord
 	err := s.withStartLock(func() error {
-		rec, err := s.Get(jobID)
+		// Strict read: Get may Write (zombie demotion) and would deadlock under
+		// the start lock now that Write also takes the lock for fence CAS.
+		rec, err := s.getReadOnlyStrict(jobID)
 		if err != nil {
 			return err
 		}
@@ -406,7 +411,8 @@ func (s *Store) ClaimQueued(jobID string, pid int, validate func(*JobRecord) err
 			rec.EndedAt = &now
 			rec.EnqueueOwnerPID = 0
 			rec.EnqueueExpiresAt = nil
-			if writeErr := s.Write(rec); writeErr != nil {
+			// writeRecord: already under withStartLock (Write would deadlock).
+			if writeErr := s.writeRecord(rec); writeErr != nil {
 				return fmt.Errorf("%v; persist failed claim: %w", cause, writeErr)
 			}
 			return cause
@@ -424,15 +430,83 @@ func (s *Store) ClaimQueued(jobID string, pid int, validate func(*JobRecord) err
 		rec.PID = pid
 		rec.StartedAt = &now
 		rec.LastHeartbeat = &now
+		rec.HeartbeatPersistError = ""
+		// Capture OS process birth identity at claim. Missing identity is not a
+		// claim failure — the recovery planner refuses indeterminate records —
+		// but we never invent a token.
+		if id := observeProcessIdentity(pid); id.Proven {
+			ApplyProcessIdentity(rec, id)
+		} else {
+			rec.ProcessStartTimeUnixMS = nil
+			rec.ProcessBootID = ""
+			rec.ProcessTokenVersion = 0
+			rec.ProcessStartTicks = 0
+			rec.ProcessStartSec = 0
+			rec.ProcessStartUsec = 0
+			rec.ProcessFiletime = 0
+		}
 		rec.EnqueueOwnerPID = 0
 		rec.EnqueueExpiresAt = nil
-		if err := s.Write(rec); err != nil {
+		if err := s.writeRecord(rec); err != nil {
 			return err
 		}
 		claimed = rec
 		return nil
 	})
 	return claimed, err
+}
+
+// TouchHeartbeat persists a heartbeat for a still-running job using a
+// start-lock-serialized re-read so a concurrent stop/recovery transition is not
+// overwritten from a stale in-memory snapshot. It refuses when the record is no
+// longer running or the PID/birth identity no longer match the caller.
+//
+// recover-stalled recovery fencing will share this lock; terminal writers that must not be
+// clobbered by a heartbeat should also enter withStartLock (or a future CAS).
+func (s *Store) TouchHeartbeat(jobID string, expectedPID int, expectedStartMS *uint64, expectedBootID string) error {
+	return s.withStartLock(func() error {
+		rec, err := s.getReadOnlyStrict(jobID)
+		if err != nil {
+			return err
+		}
+		if rec.State != JobStateRunning {
+			return fmt.Errorf("job %s is not running (state=%s)", jobID, rec.State)
+		}
+		if rec.PID != expectedPID || expectedPID <= 0 {
+			return fmt.Errorf("job %s pid changed during heartbeat", jobID)
+		}
+		if expectedStartMS != nil {
+			if rec.ProcessStartTimeUnixMS == nil || *rec.ProcessStartTimeUnixMS != *expectedStartMS {
+				return fmt.Errorf("job %s process identity changed during heartbeat", jobID)
+			}
+		}
+		if expectedBootID != "" && rec.ProcessBootID != expectedBootID {
+			return fmt.Errorf("job %s process boot identity changed during heartbeat", jobID)
+		}
+		now := time.Now().UTC()
+		rec.LastHeartbeat = &now
+		rec.HeartbeatPersistError = ""
+		return s.writeRecord(rec)
+	})
+}
+
+// RecordHeartbeatPersistError records that a heartbeat write failed so planners
+// can refuse to treat heartbeat age as stop authority.
+func (s *Store) RecordHeartbeatPersistError(jobID string, persistErr error) error {
+	if persistErr == nil {
+		return nil
+	}
+	return s.withStartLock(func() error {
+		rec, err := s.getReadOnlyStrict(jobID)
+		if err != nil {
+			return err
+		}
+		if rec.State != JobStateRunning {
+			return nil
+		}
+		rec.HeartbeatPersistError = persistErr.Error()
+		return s.writeRecord(rec)
+	})
 }
 
 func jobSortTime(r JobRecord) time.Time {
