@@ -236,6 +236,52 @@ is a **producer-only drain** (no reflow). GCS BYO is named in the provider map
 but returns a clear not-implemented error (no silent skip) until a dedicated
 GCS transport follow-on lands.
 
+### Stalled recovery evidence (opt-in, non-CI)
+
+Developer harness for managed **stalled-plan / recover-stalled** protocol
+and release evidence. Same contract as BYO cloud and reflow throughput lanes:
+
+- **Not** part of default `make test` / CI
+- **Opt-in or skip** when env is unset (never hard-fail absence)
+- **No** hard-coded bucket, account, profile, or client identifiers in tree
+- Credentials and private bucket names stay out of repo content and sanitized
+  reports (use ambient chain / operator env only if a future cloud-adjacent
+  extension reuses `GONIMBUS_S3_TEST_*` / `GONIMBUS_GCS_TEST_*` from
+  `test/cloudtest`)
+
+```bash
+# Default developer lane (local process + set-authority leases; no cloud required)
+GONIMBUS_STALLED_EVIDENCE=1 make test-stalled-evidence
+
+# Fail closed on platforms without instance-stable Bind (forces Linux/Windows runners)
+GONIMBUS_STALLED_EVIDENCE=1 GONIMBUS_STALLED_EVIDENCE_STRICT=1 make test-stalled-evidence
+
+# Optional external root for large/long runs
+GONIMBUS_STALLED_EVIDENCE=1 GONIMBUS_STALLED_EVIDENCE_ROOT=/path/to/scratch make test-stalled-evidence
+```
+
+| Variable                                | Purpose                                                       |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `GONIMBUS_STALLED_EVIDENCE`             | Opt-in the non-CI evidence suite (`1`/`true`; absent → skip)  |
+| `GONIMBUS_STALLED_EVIDENCE_STRICT`      | Fail instead of skip when destructive Bind is unsupported     |
+| `GONIMBUS_STALLED_EVIDENCE_ROOT`        | Optional operator root for minted temp dirs                   |
+| `GONIMBUS_STALLED_EVIDENCE_KEEP`        | Retain minted roots for debugging                             |
+| `GONIMBUS_STALLED_EVIDENCE_CONCURRENCY` | Concurrent recovery stress count (default 128; range 1–10000) |
+
+Package: `test/stalledrecovery/`. Always-on unit coverage for recovery protocol
+remains under `pkg/jobregistry` and `pkg/indexcoord`; the opt-in harness is for
+heavier child-process / stress / multi-OS evidence developers run before panel
+pins.
+
+**Rules of interpretation**
+
+- Local/Darwin results prove refuse paths and non-transport gates; they are not
+  a substitute for live Linux pidfd / Windows hard-stop runners when those ACs
+  are required.
+- Bucket names, endpoints, and profiles must never be committed or printed in
+  public reports; if a future extension uses real object storage, reuse the
+  existing `GONIMBUS_S3_TEST_*` / `GONIMBUS_GCS_TEST_*` env lane only.
+
 ### CLI Integration Tests
 
 CLI tests in `internal/cmd/inspect_cloudintegration_test.go` run the built binary via `exec.Command`. This approach:

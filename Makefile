@@ -1,7 +1,7 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo test-libsql build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity validate-roles
-.PHONY: test-cloud test-cloud-real test-reflow-throughput moto-start moto-stop moto-status
+.PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
 
@@ -425,6 +425,13 @@ test-cloud: sync-embedded-identity ## Run tests including cloud integration (req
 test-cloud-real: sync-embedded-identity ## Run opt-in real-cloud tests; skips when BYO env is unset
 	@echo "Running opt-in real-cloud integration tests..."
 	$(GOTEST) ./... -v -tags=cloudintegration -run 'RealCloud|RealGCS|RealS3'
+
+test-stalled-evidence: sync-embedded-identity ## Opt-in stalled-recovery evidence (needs GONIMBUS_STALLED_EVIDENCE=1)
+	@echo "Running opt-in stalled-recovery evidence harness..."
+	@echo "  Opt-in: GONIMBUS_STALLED_EVIDENCE=1 (skips when unset, same contract as cloud BYO)"
+	@echo "  Strict: GONIMBUS_STALLED_EVIDENCE_STRICT=1 fails if Bind unsupported"
+	@echo "  Root:   GONIMBUS_STALLED_EVIDENCE_ROOT (optional external temp root)"
+	GONIMBUS_STALLED_EVIDENCE=$${GONIMBUS_STALLED_EVIDENCE:-1} $(GOTEST) ./test/stalledrecovery/ ./pkg/jobregistry/ ./pkg/indexcoord/ -count=1 -timeout 30m -run 'Evidence|OptIn|Deadline|Concurrent|Successor|Fabricated|Authority|Platform'
 
 test-cloud-real-s3-release-stress: sync-embedded-identity ## Run opt-in real S3 >5GiB release stress validation
 	@echo "Running opt-in real S3 release stress validation..."
