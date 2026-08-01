@@ -47,12 +47,6 @@ func classify(expected Identity) Liveness {
 	return LiveMismatched
 }
 
-// instanceGone is true only for proven Gone. LiveMismatched is not "gone"
-// for pre-bind death authority (use Classify at call sites).
-func instanceGone(expected Identity) bool {
-	return classify(expected) == Gone
-}
-
 func probeAddressable(pid int) (addressable bool, indeterminate bool) {
 	process, err := os.FindProcess(pid)
 	if err != nil {

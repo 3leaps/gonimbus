@@ -21,7 +21,8 @@ func observe(pid int) Identity {
 	if sec == 0 && usec == 0 {
 		return Identity{PID: pid, UnavailableReason: "process start time unavailable"}
 	}
-	startMS := uint64(sec)*1000 + uint64(usec)/1000 // display only
+	// #nosec G115 -- display-only ms derived from positive proc start time components
+	startMS := uint64(sec)*1000 + uint64(usec)/1000
 	return Identity{
 		PID:             pid,
 		StartTimeUnixMS: startMS,

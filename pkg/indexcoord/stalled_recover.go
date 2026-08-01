@@ -817,8 +817,8 @@ func recoverSignalCandidate(store *jobregistry.Store, res RecoverStalledResult, 
 }
 
 // finishAfterIdentityLostSession handles ErrIdentityLost without claiming a false signal delivery.
+// Signalled is left as-is: true only if a prior syscall was accepted on this result.
 func finishAfterIdentityLostSession(store *jobregistry.Store, res RecoverStalledResult, rec *jobregistry.JobRecord, fenceOwner, attemptID string, opts RecoverStalledOptions, sess *jobregistry.SignalSession) (RecoverStalledResult, error) {
-	res.Signalled = res.Signalled // only true if a prior syscall was accepted
 	if sess != nil {
 		done, err := sess.Terminated()
 		if err == nil && done {
@@ -914,7 +914,6 @@ func finishAfterDeath(store *jobregistry.Store, res RecoverStalledResult, rec *j
 			res.ForcedKill = forced
 			return res, nil
 		}
-		phase = jobregistry.RecoveryPhaseDeathObserved
 	}
 	// E4 test-only: death-observed durably persisted (hook nil in production).
 	evidencePark("death-observed")
@@ -1073,18 +1072,6 @@ func finalizeFromReceipt(store *jobregistry.Store, res RecoverStalledResult, rec
 	return res, nil
 }
 
-func leaseUnheldOrMissing(authorityRoot, indexSetID string) bool {
-	indexSetID = strings.TrimSpace(indexSetID)
-	if strings.TrimSpace(authorityRoot) == "" || indexSetID == "" {
-		return false
-	}
-	lease, err := ProbeLease(authorityRoot, indexSetID, nil)
-	if err != nil && lease.Verdict == "" {
-		return false
-	}
-	return lease.Verdict == LeaseUnheld || lease.Verdict == LeaseMissing
-}
-
 func authHeartbeatEqual(a, b *time.Time) bool {
 	if a == nil && b == nil {
 		return true
@@ -1168,14 +1155,4 @@ func destructiveRecoveryPreflight(store *jobregistry.Store, jobID string, plan S
 		return true, "destructive recovery preflight: plan birth token drifted before fence"
 	}
 	return false, ""
-}
-
-// leaseFileIdentity best-effort captures platform file identity for W2 receipts.
-// Returns zeros when the path is missing or the platform cannot expose dev/ino.
-func leaseFileIdentity(path string) (dev, ino uint64) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return 0, 0
-	}
-	return procidentity.FileDevIno(path)
 }

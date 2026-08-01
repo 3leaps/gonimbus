@@ -743,7 +743,7 @@ func (s *Store) recordAcceptedSignalAndAdvance(jobID, fenceOwner, attemptID stri
 		if rec.RecoveryGeneration != expectedGeneration {
 			return fmt.Errorf("recovery generation mismatch on delivery mark")
 		}
-		if rec.RecoveryPhase != from && !(from == RecoveryPhaseKillSent && rec.RecoveryPhase == RecoveryPhaseKillSent) {
+		if rec.RecoveryPhase != from {
 			return fmt.Errorf("recovery phase mismatch: have %q want %q", rec.RecoveryPhase, from)
 		}
 		if !BoundTargetMatches(rec) {

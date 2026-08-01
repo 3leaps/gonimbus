@@ -102,7 +102,7 @@ func MintRoot(t *testing.T, cfg Config, slug string) string {
 		base = t.TempDir()
 		return filepath.Join(base, slug)
 	}
-	if err := os.MkdirAll(base, 0o755); err != nil {
+	if err := os.MkdirAll(base, 0o750); err != nil {
 		t.Fatalf("create evidence root: %v", err)
 	}
 	dir, err := os.MkdirTemp(base, "stalled-"+slug+"-*")

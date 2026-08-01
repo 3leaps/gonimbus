@@ -58,7 +58,8 @@ func SpawnSleepChild(t *testing.T, seconds int) *exec.Cmd {
 	}
 	ready := filepath.Join(t.TempDir(), "sleep-ready")
 	// -test.run must match only the helper; park duration is soft (parent Kill ends it).
-	cmd := exec.Command(os.Args[0], "-test.run=TestSpawnSleepChildHelper$", "-test.timeout=5m") // #nosec G204
+	// #nosec G204,G702 -- re-exec of this test binary only; argv is fixed, not user-controlled
+	cmd := exec.Command(os.Args[0], "-test.run=TestSpawnSleepChildHelper$", "-test.timeout=5m")
 	cmd.Env = append(os.Environ(),
 		"GONIMBUS_STALLED_SLEEP_HELPER=1",
 		"GONIMBUS_STALLED_SLEEP_READY="+ready,
@@ -97,7 +98,7 @@ func SeedFencedChildJob(t *testing.T, cfg Config, cmd *exec.Cmd) *SeededChild {
 	root := MintRoot(t, cfg, "job")
 	store := jobregistry.NewStore(filepath.Join(root, "jobs"))
 	authRoot := filepath.Join(root, "authority")
-	if err := os.MkdirAll(authRoot, 0o755); err != nil {
+	if err := os.MkdirAll(authRoot, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()

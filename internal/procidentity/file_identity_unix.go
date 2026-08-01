@@ -20,5 +20,6 @@ func FileDevIno(path string) (dev, ino uint64) {
 	if !ok || st == nil {
 		return 0, 0
 	}
+	// #nosec G115 -- platform device/inode identifiers are non-negative on supported systems
 	return uint64(st.Dev), uint64(st.Ino)
 }

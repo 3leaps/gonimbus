@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -77,15 +76,6 @@ func writeSelfRunning(t *testing.T, store *Store, hb time.Time) (*JobRecord, Pro
 		t.Fatal(err)
 	}
 	return rec, obs
-}
-
-func authRootForTest(t *testing.T) string {
-	t.Helper()
-	segmentRoot := t.TempDir()
-	// AuthorityRoot layout: segmentRoot/.gonimbus/set-authority or similar via indexcoord —
-	// plant under a temp path and pass that path; Probe needs real authority root.
-	// Use leasefixture which takes authorityRoot directly.
-	return filepath.Join(segmentRoot, "authority")
 }
 
 func TestBeginStalledRecoveryRefusesUnsupportedPlatform(t *testing.T) {
