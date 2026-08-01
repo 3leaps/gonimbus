@@ -50,7 +50,7 @@ type SeededChild struct {
 
 // SpawnSleepChild starts a long-lived child for signal/deadline evidence.
 // Portable: re-execs this package's test binary (no Unix sleep/bash dependency),
-// so Linux and native Windows runners share one harness .
+// so Linux and native Windows runners share one harness.
 func SpawnSleepChild(t *testing.T, seconds int) *exec.Cmd {
 	t.Helper()
 	if seconds < 1 {
