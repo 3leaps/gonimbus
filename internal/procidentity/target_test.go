@@ -55,7 +55,17 @@ func TestBindRefusesMismatchedBirthToken(t *testing.T) {
 		t.Skip("self unproven")
 	}
 	bad := id
-	bad.StartTimeUnixMS = 1
+	// Corrupt the platform-authoritative native field (v1 Match ignores display MS).
+	switch {
+	case id.StartTicks != 0:
+		bad.StartTicks = id.StartTicks + 1
+	case id.Filetime != 0:
+		bad.Filetime = id.Filetime + 1
+	case id.StartSec != 0 || id.StartUsec != 0:
+		bad.StartSec = id.StartSec + 1
+	default:
+		bad.StartTimeUnixMS = 1
+	}
 	if _, err := Bind(bad); err == nil {
 		t.Fatal("expected bind to refuse mismatched token")
 	}

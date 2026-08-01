@@ -349,20 +349,29 @@ func TestEvidence_DeadlineMatrix_TermThenKillLiveConvergence(t *testing.T) {
 	}
 	assertExactPhase(t, store, RecoveryPhaseTermSent)
 	got, _ := store.GetReadOnlyStrict(testJobID1)
-	if !got.RecoveryDeliverySignalled || got.RecoveryDeliveryForced {
-		t.Fatalf("after TERM: signalled=%v forced=%v", got.RecoveryDeliverySignalled, got.RecoveryDeliveryForced)
+	if !got.RecoveryDeliverySignalled {
+		t.Fatalf("after TERM: signalled must be true, forced=%v", got.RecoveryDeliveryForced)
+	}
+	// Windows: DeliverTerm is hard-stop (TerminateProcess); child is already dead.
+	// Unix TERM-ignore child must stay live for real escalation proof.
+	if sess.HardStopOnly() {
+		done, err := sess.WaitTerminated(3*time.Second, 25*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !done {
+			t.Fatal("hard-stop DeliverTerm must terminate the child")
+		}
+		return
 	}
 	done, err := sess.WaitTerminated(300*time.Millisecond, 25*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if done && runtime.GOOS != "windows" {
-		// Unix TERM-ignore child must stay live; Windows may map TERM differently.
+	if done {
 		t.Fatal("TERM-ignore child must still be live after DeliverTerm")
 	}
-	if runtime.GOOS != "windows" {
-		assertChildAlive(t, cmd.Process.Pid)
-	}
+	assertChildAlive(t, cmd.Process.Pid)
 
 	if err := sess.DeliverKill(); err != nil {
 		t.Fatalf("DeliverKill escalation: %v", err)

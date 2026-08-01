@@ -68,6 +68,15 @@ func (t *windowsTarget) signal(sig signalKind) error {
 		// is the supported hard stop. Stalled recovery must report ForcedKill /
 		// hard-stop honesty (never graceful TERM / forced_kill=false).
 		if err := windows.TerminateProcess(t.handle, 1); err != nil {
+			// Already-exited instance: second stop (escalation / replay) is not a
+			// delivery failure — surface as already-gone for callers.
+			var code uint32
+			if e2 := windows.GetExitCodeProcess(t.handle, &code); e2 == nil {
+				const stillActive = 259
+				if code != stillActive {
+					return fmt.Errorf("%w: process already exited", ErrAlreadyGone)
+				}
+			}
 			return fmt.Errorf("terminate process: %w", err)
 		}
 		return nil

@@ -60,8 +60,21 @@ func (t *pidfdTarget) terminated() (bool, error) {
 	if t == nil || t.fd < 0 {
 		return false, ErrNotBound
 	}
-	// Death proof comes from the stable pidfd, not a fresh raw-PID classifier.
-	err := unix.PidfdSendSignal(t.fd, 0, nil, 0)
+	// Prefer poll on the pidfd (Linux 5.10+): readable when the process exits.
+	// PidfdSendSignal(0) still "succeeds" for unreaped zombies, so signal-0 alone
+	// never proves exit for WaitTerminated after SIGKILL.
+	pfd := []unix.PollFd{{Fd: int32(t.fd), Events: unix.POLLIN}} // #nosec G115 -- fd is a non-negative pidfd
+	n, err := unix.Poll(pfd, 0)
+	if err != nil && err != unix.EINTR {
+		// Fall through to signal-0 probe on unexpected poll errors.
+	} else if n > 0 {
+		rev := pfd[0].Revents
+		if rev&unix.POLLIN != 0 || rev&unix.POLLHUP != 0 || rev&unix.POLLERR != 0 {
+			return true, nil
+		}
+	}
+	// Fallback: pidfd signal 0 (ESRCH after full reaping / older kernels).
+	err = unix.PidfdSendSignal(t.fd, 0, nil, 0)
 	if err == nil {
 		return false, nil
 	}

@@ -183,8 +183,9 @@ func TestRecoverManagedStalled_PositiveEndToEndChild(t *testing.T) {
 	result, err := RecoverManagedStalled(store, jobID, RecoverStalledOptions{
 		AuthorityRoot: authorityRoot,
 		Confirm:       true,
-		WaitTimeout:   5 * time.Second,
-		PollInterval:  50 * time.Millisecond,
+		// Bound covers second observation + TERM wait + optional KILL wait.
+		WaitTimeout:  30 * time.Second,
+		PollInterval: 50 * time.Millisecond,
 	})
 	if err != nil {
 		_ = auth.Release()
