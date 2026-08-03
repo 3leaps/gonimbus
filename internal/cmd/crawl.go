@@ -515,6 +515,13 @@ func createProvider(ctx context.Context, m *manifest.Manifest) (provider.Provide
 		src.Key = baseDir
 		opts.FileBaseDir = baseDir
 	}
+	admittedN := 0
+	if m != nil {
+		admittedN = m.Crawl.Concurrency
+	}
+	if err := applySourceConnectionPool(&opts, resolvedCrawlAdmittedN(admittedN)); err != nil {
+		return nil, err
+	}
 	return providerdispatch.NewSource(ctx, src, opts)
 }
 

@@ -61,10 +61,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	if baseBucket != "" && baseBucket != m.Connection.Bucket {
 		return out, fmt.Errorf("base_uri bucket %q does not match connection.bucket %q", baseBucket, m.Connection.Bucket)
 	}
-	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
-		Provider: m.Connection.Provider,
-		Bucket:   m.Connection.Bucket,
-	}, providerdispatch.SourceOptions{
+	sourceOpts := providerdispatch.SourceOptions{
 		Command: operationIndexBuild,
 		S3: providerdispatch.S3Options{
 			Region:         m.Connection.Region,
@@ -75,7 +72,14 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		GCS: providerdispatch.GCSOptions{
 			Project: m.Connection.Project,
 		},
-	})
+	}
+	if err := applySourceConnectionPool(&sourceOpts, resolvedCrawlAdmittedN(indexBuildEngineCrawlConfig(m).Concurrency)); err != nil {
+		return out, fmt.Errorf("create provider: %w", err)
+	}
+	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
+		Provider: m.Connection.Provider,
+		Bucket:   m.Connection.Bucket,
+	}, sourceOpts)
 	if err != nil {
 		return out, fmt.Errorf("create provider: %w", err)
 	}
@@ -197,10 +201,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 	if baseBucket != "" && baseBucket != m.Connection.Bucket {
 		return indexbuild.Summary{}, "", fmt.Errorf("base_uri bucket %q does not match connection.bucket %q", baseBucket, m.Connection.Bucket)
 	}
-	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
-		Provider: m.Connection.Provider,
-		Bucket:   m.Connection.Bucket,
-	}, providerdispatch.SourceOptions{
+	sourceOpts := providerdispatch.SourceOptions{
 		Command: operationIndexBuild,
 		S3: providerdispatch.S3Options{
 			Region:         m.Connection.Region,
@@ -211,7 +212,14 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		GCS: providerdispatch.GCSOptions{
 			Project: m.Connection.Project,
 		},
-	})
+	}
+	if err := applySourceConnectionPool(&sourceOpts, resolvedCrawlAdmittedN(indexBuildEngineCrawlConfig(m).Concurrency)); err != nil {
+		return indexbuild.Summary{}, "", fmt.Errorf("create provider: %w", err)
+	}
+	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
+		Provider: m.Connection.Provider,
+		Bucket:   m.Connection.Bucket,
+	}, sourceOpts)
 	if err != nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("create provider: %w", err)
 	}

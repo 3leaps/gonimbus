@@ -28,6 +28,11 @@ changes.
 
 ### Added
 
+- **Index-family provider connection pools follow admitted concurrency.** Index
+  build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
+  construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved
+  crawl concurrency or enrich `--parallel` (default 32). Scope-preview and hydrate
+  remain intentional SDK-default constructions. No field-throughput claim.
 - **Concurrent execution in the library reflow engine.** The `pkg/reflow`
   record-stream runner now executes objects on a bounded worker pool honoring
   the resolved concurrency ceiling, with per-destination-key arbitration moved
