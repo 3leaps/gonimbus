@@ -680,12 +680,12 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 			Project: strings.TrimSpace(enrichHeadGCPProject),
 		},
 	}
-	// Match CLI default --parallel 32 when unset/invalid at construction.
-	admittedN := parallel
-	if admittedN <= 0 {
-		admittedN = 32
+	// Construction consumes already-validated admitted N (CLI default 32 is
+	// applied at flag parse time). Invalid values refuse before factory call.
+	if parallel <= 0 {
+		return nil, fmt.Errorf("enrich parallel must be greater than zero, got %d", parallel)
 	}
-	if err := applySourceConnectionPool(&sourceOpts, admittedN); err != nil {
+	if err := applySourceConnectionPool(&sourceOpts, parallel); err != nil {
 		return nil, err
 	}
 	return newEnrichHeadProvider(ctx, parsed, sourceOpts)

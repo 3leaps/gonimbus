@@ -2150,19 +2150,8 @@ func runCrawlForIndex(
 ) (*indexBuildResult, error) {
 	// Create provider through the shared build-source seam so every index
 	// build format constructs its source identically.
-	sourceOpts := providerdispatch.SourceOptions{
-		Command: operationIndexBuild,
-		S3: providerdispatch.S3Options{
-			Region:         m.Connection.Region,
-			Endpoint:       m.Connection.Endpoint,
-			Profile:        m.Connection.Profile,
-			ForcePathStyle: m.Connection.Endpoint != "",
-		},
-		GCS: providerdispatch.GCSOptions{
-			Project: m.Connection.Project,
-		},
-	}
-	if err := applySourceConnectionPool(&sourceOpts, resolvedCrawlAdmittedN(indexBuildEngineCrawlConfig(m).Concurrency)); err != nil {
+	sourceOpts, err := indexBuildSourceOptions(m)
+	if err != nil {
 		return nil, fmt.Errorf("create provider: %w", err)
 	}
 	prov, err := newIndexBuildEngineSource(ctx, &uri.ObjectURI{
