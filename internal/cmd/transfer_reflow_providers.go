@@ -22,6 +22,10 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
+	pool, err := provider.ResolveConnectionPool(concurrency.EffectiveCeiling)
+	if err != nil {
+		return nil, fmt.Errorf("resolve destination connection pool: %w", err)
+	}
 	return providerdispatch.NewDestination(ctx, providerdispatch.DestinationOptions{
 		Command:             operationTransferReflow,
 		Provider:            dest.Provider,
@@ -36,13 +40,13 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 			Endpoint:            dest.Endpoint,
 			Profile:             dest.Profile,
 			ForcePathStyle:      dest.ForcePathStyle,
-			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
-			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+			MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     pool.MaxConnsPerHost,
 		},
 		GCS: providerdispatch.GCSOptions{
 			Project:             strings.TrimSpace(dest.GCPProject),
-			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
-			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+			MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     pool.MaxConnsPerHost,
 			// Keep destination writer memory explicit and bounded under the
 			// source-side retry-buffer budget that drives the concurrency cap.
 			WriterChunkSizeBytes: providergcs.MinWriterChunkSizeBytes,
@@ -62,6 +66,10 @@ func newSourceBinding(ctx context.Context, src *uri.ObjectURI, concurrency reflo
 	if src == nil {
 		return nil, fmt.Errorf("source URI is nil")
 	}
+	pool, err := provider.ResolveConnectionPool(concurrency.EffectiveCeiling)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source connection pool: %w", err)
+	}
 	return providerdispatch.NewSourceBinding(ctx, src, providerdispatch.SourceOptions{
 		Command:             operationTransferReflow,
 		FileMetadataSidecar: reflowMetaSuffix,
@@ -71,13 +79,13 @@ func newSourceBinding(ctx context.Context, src *uri.ObjectURI, concurrency reflo
 			Endpoint:            reflowSrcEndpoint,
 			Profile:             reflowSrcProfile,
 			ForcePathStyle:      reflowSrcEndpoint != "",
-			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
-			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+			MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     pool.MaxConnsPerHost,
 		},
 		GCS: providerdispatch.GCSOptions{
 			Project:             strings.TrimSpace(reflowSrcGCPProject),
-			MaxIdleConnsPerHost: concurrency.EffectiveCeiling,
-			MaxConnsPerHost:     concurrency.EffectiveCeiling,
+			MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+			MaxConnsPerHost:     pool.MaxConnsPerHost,
 		},
 	})
 }

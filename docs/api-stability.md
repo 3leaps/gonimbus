@@ -38,7 +38,7 @@ gonimbus and is protected by the Go compiler.
 | `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                                                                        |
 | `github.com/3leaps/gonimbus/pkg/partition`     | Experimental | Canonical hashed enumeration plans, the validated run authority over one, and the lane identity it issues.             |
 | `github.com/3leaps/gonimbus/pkg/producer`      | Experimental | Bounded provider-page lane enumeration plus revision-bound admission, outcome, and work-unit coordination.             |
-| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, capability interfaces, and optional revision-bound reads.                          |
+| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, capability interfaces, optional revision-bound reads, and `ResolveConnectionPool` construction policy. |
 | `github.com/3leaps/gonimbus/pkg/provider/file` | Stable       | Local filesystem provider construction with `Config` and `New`.                                                        |
 | `github.com/3leaps/gonimbus/pkg/provider/gcs`  | Experimental | GCS provider contract surface while provider support matures.                                                          |
 | `github.com/3leaps/gonimbus/pkg/provider/s3`   | Stable       | AWS S3 and S3-compatible provider construction with `Config` and `New`.                                                |
