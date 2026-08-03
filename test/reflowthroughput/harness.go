@@ -266,6 +266,7 @@ func buildPointReport(m pointMeasurement) PointReport {
 		pt.ConcurrencyMaxActive = intPtr(m.Parsed.MaxActive)
 		pt.ConcurrencyFinal = intPtr(m.Parsed.Final)
 		pt.AdaptiveEnabled = boolPtrVal(m.Parsed.AdaptiveEnabled)
+		pt.CheckpointWriterStats = m.Parsed.CheckpointWriterStats
 	}
 	return pt
 }

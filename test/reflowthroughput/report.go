@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/3leaps/gonimbus/pkg/reflow"
 )
 
 // ReportSchemaVersion is the test-tool report schema (not a gonimbus.* product type).
@@ -84,6 +86,11 @@ type PointReport struct {
 	ConcurrencyMaxActive *int    `json:"concurrency_max_active,omitempty"`
 	ConcurrencyFinal     *int    `json:"concurrency_final,omitempty"`
 	AdaptiveEnabled      *bool   `json:"adaptive_enabled,omitempty"`
+
+	// CheckpointWriterStats is sterile checkpoint-writer diagnostics from the
+	// child when emitted (GON-066 C1). Measure-first only — not product
+	// throughput marketing. Omitted when the child did not emit the record.
+	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord `json:"checkpoint_writer_stats,omitempty"`
 
 	ElapsedSeconds      float64 `json:"elapsed_seconds"`
 	CompletedObjects    int64   `json:"completed_objects"`

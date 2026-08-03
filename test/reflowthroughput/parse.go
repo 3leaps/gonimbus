@@ -69,6 +69,12 @@ type ParsedReflowOutput struct {
 	// record's startup sample is always zero by contract and is not retained.
 	SummaryTimeAvgActive float64
 
+	// CheckpointWriterStats is the sterile end-of-run checkpoint writer
+	// diagnostic snapshot when the child emitted
+	// gonimbus.reflow.checkpoint_writer_stats.v1 (GON-066 C1). Nil when absent.
+	// Measure-first only — not product throughput evidence.
+	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord
+
 	// Consensus fields after agreement check (filled by Finalize).
 	Requested       int
 	Effective       int
@@ -221,6 +227,14 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			}
 		case reflow.SourceRecordType:
 			// Allowed; ignore payload (may contain paths — we do not retain).
+		case reflow.CheckpointWriterStatsRecordType:
+			var st reflow.CheckpointWriterStatsRecord
+			if err := json.Unmarshal(env.Data, &st); err != nil {
+				return out, fmt.Errorf("line %d: checkpoint writer stats data: %w", lineNo, err)
+			}
+			// Last record wins if multiple (should be one end-of-run emission).
+			cp := st
+			out.CheckpointWriterStats = &cp
 		default:
 			// Known product noise types that are not concurrency-critical.
 			if env.Type == "gonimbus.preflight.v1" || env.Type == "gonimbus.error.v1" {

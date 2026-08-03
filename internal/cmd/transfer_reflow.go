@@ -458,7 +458,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	// helper fails closed on any engine error — an ErrNotImplemented is contract
 	// drift, never a pool fall-through.
 	if enginePlan.enabled {
-		return runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		engineErr := runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		// Sterile checkpoint-writer diagnostics after engine summary (GON-066 C1).
+		emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
+		return engineErr
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
@@ -1283,6 +1286,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	close(tasks)
 	wg.Wait()
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
+	// Sterile checkpoint-writer diagnostics for measure-first (GON-066 C1).
+	// Snapshot before Close (deferred); process-local aggregates only.
+	emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
 
 	fatalRunErr := currentFatalReflowError()
 	if fatalRunErr != nil || ctx.Err() != nil {

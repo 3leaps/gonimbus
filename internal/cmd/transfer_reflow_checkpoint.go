@@ -45,6 +45,60 @@ type reflowStateStore interface {
 	MarkDestKeyObserved(ctx context.Context, destKey string) error
 }
 
+// reflowWriterStatsSource is optionally implemented by checkpoint stores that
+// expose process-local WriterStats (the real reflowstate.Store does). Test
+// fakes need not implement it; emission is then skipped.
+type reflowWriterStatsSource interface {
+	WriterStats() reflowstate.WriterStats
+}
+
+// emitCheckpointWriterStatsIfPresent writes a sterile checkpoint-writer stats
+// JSONL record when the store exposes WriterStats. Best-effort: write failures
+// are ignored so diagnostics never flip a successful reflow exit. Snapshot is
+// taken before Close so counters remain live.
+func emitCheckpointWriterStatsIfPresent(ctx context.Context, w *output.JSONLWriter, state reflowStateStore) {
+	if w == nil || state == nil {
+		return
+	}
+	src, ok := state.(reflowWriterStatsSource)
+	if !ok {
+		return
+	}
+	st := src.WriterStats()
+	rec := reflowpkg.CheckpointWriterStatsRecord{
+		MaxBatch:              st.MaxBatch,
+		QueueDepthSamples:     st.QueueDepthSamples,
+		QueueDepthSum:         st.QueueDepthSum,
+		QueueDepthPeak:        st.QueueDepthPeak,
+		Admissions:            st.Admissions,
+		AdmissionWaitNanos:    st.AdmissionWaitNanos,
+		AdmissionWaitMaxNanos: st.AdmissionWaitMaxNanos,
+		AdmissionBlocked:      st.AdmissionBlocked,
+		Barriers:              st.Barriers,
+		BarrierWaitNanos:      st.BarrierWaitNanos,
+		BarrierWaitMaxNanos:   st.BarrierWaitMaxNanos,
+		BarrierOK:             st.BarrierOK,
+		BarrierRefusal:        st.BarrierRefusal,
+		BarrierWriterFailed:   st.BarrierWriterFailed,
+		BarrierWriterClosed:   st.BarrierWriterClosed,
+		BarrierCanceled:       st.BarrierCanceled,
+		Batches:               st.Batches,
+		BatchSizeSum:          st.BatchSizeSum,
+		BatchSizeMax:          st.BatchSizeMax,
+		BatchSize1:            st.BatchSize1,
+		BatchSize2To8:         st.BatchSize2To8,
+		BatchSize9To32:        st.BatchSize9To32,
+		BatchSize33To128:      st.BatchSize33To128,
+		BatchSize129Plus:      st.BatchSize129Plus,
+		Commits:               st.Commits,
+		BatchDurationNanos:    st.BatchDurationNanos,
+		BatchDurationMaxNanos: st.BatchDurationMaxNanos,
+		CommitFatals:          st.CommitFatals,
+		RequestRefusals:       st.RequestRefusals,
+	}
+	_ = w.WriteAny(ctx, reflowpkg.CheckpointWriterStatsRecordType, rec)
+}
+
 func emitReflowConcurrencyClampWarning(ctx context.Context, w *output.JSONLWriter, stderr io.Writer, cfg reflowpkg.ConcurrencyConfig) error {
 	if cfg.RequestedCeiling == cfg.EffectiveCeiling {
 		return nil

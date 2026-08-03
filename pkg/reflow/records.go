@@ -17,6 +17,11 @@ const (
 	SourceRecordType = "gonimbus.reflow.source.v1"
 	// SummaryRecordType is the JSONL type for transfer reflow summaries.
 	SummaryRecordType = "gonimbus.reflow.summary.v1"
+	// CheckpointWriterStatsRecordType is the JSONL type for sterile checkpoint
+	// writer diagnostics (queue/barrier/batch/duration aggregates). Emitted by
+	// the CLI after a run when the checkpoint store exposes WriterStats.
+	// Measure-first only: not product throughput marketing.
+	CheckpointWriterStatsRecordType = "gonimbus.reflow.checkpoint_writer_stats.v1"
 	// WarningRecordType is the JSONL type for transfer reflow warnings.
 	WarningRecordType = "gonimbus.warning.v1"
 
@@ -98,6 +103,54 @@ type SummaryRecord struct {
 	Collisions              map[string]int64 `json:"collisions,omitempty"`
 	InvalidInputs           int64            `json:"invalid_inputs,omitempty"`
 	Errors                  int64            `json:"errors,omitempty"`
+}
+
+// CheckpointWriterStatsRecord is the payload for
+// gonimbus.reflow.checkpoint_writer_stats.v1. It mirrors pkg/reflowstate
+// WriterStats aggregates without importing that package (dependency boundary).
+// Fields are counts and durations only — no paths, SQL, keys, URIs, or auth.
+//
+// BatchDuration* is wall time of the full batch write path (BeginTx through
+// per-request SQL/savepoints and tx.Commit), not storage COMMIT alone.
+// Barrier* outcomes are waiter-side observations, not a durable commit ledger.
+// Queue depth samples are approximate.
+//
+// Experimental: may change with an in-release note.
+type CheckpointWriterStatsRecord struct {
+	MaxBatch int `json:"max_batch"`
+
+	QueueDepthSamples int64 `json:"queue_depth_samples"`
+	QueueDepthSum     int64 `json:"queue_depth_sum"`
+	QueueDepthPeak    int64 `json:"queue_depth_peak"`
+
+	Admissions            int64 `json:"admissions"`
+	AdmissionWaitNanos    int64 `json:"admission_wait_nanos"`
+	AdmissionWaitMaxNanos int64 `json:"admission_wait_max_nanos"`
+	AdmissionBlocked      int64 `json:"admission_blocked"`
+
+	Barriers            int64 `json:"barriers"`
+	BarrierWaitNanos    int64 `json:"barrier_wait_nanos"`
+	BarrierWaitMaxNanos int64 `json:"barrier_wait_max_nanos"`
+	BarrierOK           int64 `json:"barrier_ok"`
+	BarrierRefusal      int64 `json:"barrier_refusal"`
+	BarrierWriterFailed int64 `json:"barrier_writer_failed"`
+	BarrierWriterClosed int64 `json:"barrier_writer_closed"`
+	BarrierCanceled     int64 `json:"barrier_canceled"`
+
+	Batches          int64 `json:"batches"`
+	BatchSizeSum     int64 `json:"batch_size_sum"`
+	BatchSizeMax     int64 `json:"batch_size_max"`
+	BatchSize1       int64 `json:"batch_size_1"`
+	BatchSize2To8    int64 `json:"batch_size_2_to_8"`
+	BatchSize9To32   int64 `json:"batch_size_9_to_32"`
+	BatchSize33To128 int64 `json:"batch_size_33_to_128"`
+	BatchSize129Plus int64 `json:"batch_size_129_plus"`
+
+	Commits               int64 `json:"commits"`
+	BatchDurationNanos    int64 `json:"batch_duration_nanos"`
+	BatchDurationMaxNanos int64 `json:"batch_duration_max_nanos"`
+	CommitFatals          int64 `json:"commit_fatals"`
+	RequestRefusals       int64 `json:"request_refusals"`
 }
 
 // SourceRunRecord is the payload for gonimbus.reflow.source.v1 JSONL records.
