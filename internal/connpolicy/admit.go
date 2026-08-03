@@ -2,6 +2,10 @@
 // formulas used when sizing HTTP connection pools. It is internal: not a Stable
 // library surface. Helpers refuse overflow rather than wrapping to a smaller
 // positive MaxConns under a parallel(N) claim.
+//
+// Arithmetic is intentionally limited to the positive admitted-N domain used by
+// locked composite formulas (transfer C/L, content workers ≥ 1). It is not a
+// general signed-integer arithmetic library.
 package connpolicy
 
 import (
@@ -9,49 +13,26 @@ import (
 	"math"
 )
 
-// AddChecked returns a+b or an error if the sum overflows int.
+// AddChecked returns a+b for positive admitted-N components, or an error if
+// either operand is not ≥ 1 or the sum overflows int.
 func AddChecked(a, b int) (int, error) {
-	if b > 0 {
-		if a > math.MaxInt-b {
-			return 0, fmt.Errorf("admitted-N add overflow: %d + %d", a, b)
-		}
-	} else if b < 0 {
-		if a < math.MinInt-b {
-			return 0, fmt.Errorf("admitted-N add underflow: %d + %d", a, b)
-		}
+	if a < 1 || b < 1 {
+		return 0, fmt.Errorf("admitted-N add requires positive operands (>= 1), got %d + %d", a, b)
+	}
+	if a > math.MaxInt-b {
+		return 0, fmt.Errorf("admitted-N add overflow: %d + %d", a, b)
 	}
 	return a + b, nil
 }
 
-// MulChecked returns a*b or an error if the product overflows int.
+// MulChecked returns a*b for positive admitted-N components, or an error if
+// either operand is not ≥ 1 or the product overflows int.
 func MulChecked(a, b int) (int, error) {
-	if a == 0 || b == 0 {
-		return 0, nil
+	if a < 1 || b < 1 {
+		return 0, fmt.Errorf("admitted-N mul requires positive operands (>= 1), got %d * %d", a, b)
 	}
-	// Avoid abs of MinInt.
-	if a == math.MinInt || b == math.MinInt {
+	if a > math.MaxInt/b {
 		return 0, fmt.Errorf("admitted-N mul overflow: %d * %d", a, b)
-	}
-	if a > 0 {
-		if b > 0 {
-			if a > math.MaxInt/b {
-				return 0, fmt.Errorf("admitted-N mul overflow: %d * %d", a, b)
-			}
-		} else { // b < 0
-			if b < math.MinInt/a {
-				return 0, fmt.Errorf("admitted-N mul overflow: %d * %d", a, b)
-			}
-		}
-	} else { // a < 0
-		if b > 0 {
-			if a < math.MinInt/b {
-				return 0, fmt.Errorf("admitted-N mul overflow: %d * %d", a, b)
-			}
-		} else { // b < 0
-			if a < math.MaxInt/b {
-				return 0, fmt.Errorf("admitted-N mul overflow: %d * %d", a, b)
-			}
-		}
 	}
 	return a * b, nil
 }

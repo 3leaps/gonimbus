@@ -16,11 +16,15 @@ func TestAddChecked(t *testing.T) {
 	_, err = AddChecked(math.MaxInt, 1)
 	require.Error(t, err)
 
-	_, err = AddChecked(math.MinInt, -1)
+	_, err = AddChecked(0, 1)
+	require.Error(t, err)
+	_, err = AddChecked(1, 0)
+	require.Error(t, err)
+	_, err = AddChecked(-1, 2)
 	require.Error(t, err)
 }
 
-func TestMulChecked(t *testing.T) {
+func TestMulCheckedPositiveDomain(t *testing.T) {
 	t.Parallel()
 	prod, err := MulChecked(16, 2)
 	require.NoError(t, err)
@@ -29,7 +33,14 @@ func TestMulChecked(t *testing.T) {
 	_, err = MulChecked(math.MaxInt, 2)
 	require.Error(t, err)
 
-	_, err = MulChecked(math.MinInt, 2)
+	// Out of positive domain — not a silent wrap.
+	_, err = MulChecked(math.MinInt, 1)
+	require.Error(t, err)
+	_, err = MulChecked(1, math.MinInt)
+	require.Error(t, err)
+	_, err = MulChecked(0, 5)
+	require.Error(t, err)
+	_, err = MulChecked(-3, 2)
 	require.Error(t, err)
 }
 
