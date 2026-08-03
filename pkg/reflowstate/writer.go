@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
@@ -132,6 +133,10 @@ type coordinator struct {
 	// in-package test can assert a genuine multi-request batch was assembled rather
 	// than inferring size from behavior. Set only by in-package tests.
 	onBatchAssembled func(n int)
+
+	// metrics are always-on cheap aggregates for Store.WriterStats().
+	// Snapshot-only public surface: no callback observer on the writer path.
+	metrics writerMetrics
 }
 
 func newCoordinator(db *sql.DB) *coordinator {
@@ -221,10 +226,25 @@ func (c *coordinator) serveBatch(first *writeRequest) bool {
 		}
 	}
 flush:
+	size := len(batch)
 	if c.onBatchAssembled != nil {
-		c.onBatchAssembled(len(batch))
+		c.onBatchAssembled(size)
 	}
+	// BatchDuration* covers the full c.commit(batch) wall time (BeginTx through
+	// tx.Commit), not storage COMMIT alone. Metrics update before result publish
+	// so snapshots stay live without delaying or branching on external sinks.
+	start := time.Now()
 	results, err := c.commit(batch)
+	dur := time.Since(start)
+	refusals := 0
+	if err == nil {
+		for _, r := range results {
+			if r != nil {
+				refusals++
+			}
+		}
+	}
+	c.metrics.noteBatch(size, dur, refusals, err != nil)
 	if err != nil {
 		// ErrWriterFailed is the shared batch disposition. Keep the underlying
 		// statement text diagnostic-only: wrapping a request-local logical error
@@ -342,8 +362,14 @@ func (c *coordinator) execTx(ctx context.Context, fn func(context.Context, *sql.
 }
 
 func (c *coordinator) submitExec(ctx context.Context, req *writeRequest) error {
+	// Approximate occupancy before this send. Documented as approximate on
+	// WriterStats: concurrent drain/admit can race the sample.
+	depth := len(c.execCh)
+	start := time.Now()
 	select {
 	case c.execCh <- req:
+		wait := time.Since(start)
+		c.metrics.noteAdmission(depth, c.maxBatch, wait)
 	case <-c.failed:
 		return c.err()
 	case <-c.closed:
@@ -357,7 +383,34 @@ func (c *coordinator) submitExec(ctx context.Context, req *writeRequest) error {
 	// caller observed an error" state, which is safe for D1 (the barrier only
 	// guards the nil/success direction) and is reconciled on resume; the §3
 	// recovery matrix governs it for non-idempotent collision modes.
-	return c.awaitResult(ctx, req)
+	return c.awaitExecResult(ctx, req)
+}
+
+// awaitExecResult is the exec-path barrier: same resolution rules as
+// awaitResult, plus always-on wait/outcome telemetry. Query waits deliberately
+// skip this path so barrier stats stay mutation-scoped.
+func (c *coordinator) awaitExecResult(ctx context.Context, req *writeRequest) error {
+	start := time.Now()
+	var (
+		err     error
+		outcome BarrierOutcome
+	)
+	select {
+	case err = <-req.done:
+		outcome = barrierOutcomeFromResult(err)
+	case <-c.failed:
+		err = c.resolve(req, c.err())
+		outcome = barrierOutcomeFromResult(err)
+	case <-c.closed:
+		err = c.resolve(req, ErrWriterClosed)
+		outcome = barrierOutcomeFromResult(err)
+	case <-ctx.Done():
+		err = ctx.Err()
+		outcome = BarrierCanceled
+	}
+	wait := time.Since(start)
+	c.metrics.noteBarrier(wait, outcome)
+	return err
 }
 
 // awaitResult blocks for an admitted request's authoritative outcome. A published
@@ -377,6 +430,14 @@ func (c *coordinator) awaitResult(ctx context.Context, req *writeRequest) error 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// statsSnapshot returns an immutable aggregate of always-on writer diagnostics.
+func (c *coordinator) statsSnapshot() WriterStats {
+	if c == nil {
+		return WriterStats{}
+	}
+	return c.metrics.snapshot(c.maxBatch)
 }
 
 // resolve returns an admitted request's own published result in preference to a

@@ -21,6 +21,14 @@ type Store struct {
 	writer *coordinator
 }
 
+// Config opens a reflow checkpoint store.
+//
+// Writer diagnostics for measure-first work are snapshot-only via
+// Store.WriterStats(); there is no callback observer on Config (C1 deliberately
+// keeps sinks off the sole-writer / post-COMMIT acknowledgement path).
+//
+// Experimental: the package is Experimental; this surface may change with only
+// an in-release note.
 type Config struct {
 	Path string
 }
@@ -65,6 +73,21 @@ func openStore(ctx context.Context, cfg Config, configure func(*coordinator)) (*
 		return nil, err
 	}
 	return s, nil
+}
+
+// WriterStats returns an immutable aggregate snapshot of checkpoint writer
+// diagnostics (queue/admission, barrier, batch size, batch/tx wall duration,
+// refusals and fatals). It is safe to call concurrently with in-flight work.
+// Queue occupancy is approximate; see WriterStats field docs. A nil Store
+// returns a zero value.
+//
+// Experimental: the package is Experimental; this surface may change with only
+// an in-release note.
+func (s *Store) WriterStats() WriterStats {
+	if s == nil || s.writer == nil {
+		return WriterStats{}
+	}
+	return s.writer.statsSnapshot()
 }
 
 func (s *Store) Close() error {
