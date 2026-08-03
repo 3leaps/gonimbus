@@ -268,6 +268,64 @@ func TestNewDestProviderSetsMinimumGCSWriterChunkUnderRetryBufferBudget(t *testi
 	require.Equal(t, gcs.MinWriterChunkSizeBytes, got.WriterChunkSizeBytes)
 }
 
+func TestNewSourceBindingExactAssignsPoolFromResolver(t *testing.T) {
+	var gotS3 s3.Config
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			gotS3 = cfg
+			return newReflowMemoryProvider(), nil
+		},
+	})
+
+	src := &uri.ObjectURI{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "src-bucket",
+		Key:      "prefix/",
+	}
+	_, err := newSourceBinding(context.Background(), src, reflowpkg.ConcurrencyConfig{
+		EffectiveCeiling: 7,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 7, gotS3.MaxIdleConnsPerHost)
+	require.Equal(t, 7, gotS3.MaxConnsPerHost)
+}
+
+func TestReflowProvidersSDKDefaultPoolAtEffectiveCeilingOne(t *testing.T) {
+	var gotDest gcs.Config
+	var gotSrc s3.Config
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		GCS: func(_ context.Context, cfg gcs.Config) (provider.Provider, error) {
+			gotDest = cfg
+			return newReflowMemoryProvider(), nil
+		},
+		S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+			gotSrc = cfg
+			return newReflowMemoryProvider(), nil
+		},
+	})
+
+	ceil1 := reflowpkg.ConcurrencyConfig{EffectiveCeiling: 1}
+
+	dest := &reflowDestSpec{
+		Provider:   string(provider.ProviderGCS),
+		Bucket:     "dest-bucket",
+		GCPProject: "gcp-project",
+	}
+	_, err := newDestProvider(context.Background(), dest, reflowMetadataConfig{}, ceil1)
+	require.NoError(t, err)
+	require.Equal(t, 0, gotDest.MaxIdleConnsPerHost)
+	require.Equal(t, 0, gotDest.MaxConnsPerHost)
+
+	src := &uri.ObjectURI{
+		Provider: string(provider.ProviderS3),
+		Bucket:   "src-bucket",
+	}
+	_, err = newSourceBinding(context.Background(), src, ceil1)
+	require.NoError(t, err)
+	require.Equal(t, 0, gotSrc.MaxIdleConnsPerHost)
+	require.Equal(t, 0, gotSrc.MaxConnsPerHost)
+}
+
 func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {
 	withTransferReflowTestState(t)
 

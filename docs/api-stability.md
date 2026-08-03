@@ -19,37 +19,37 @@ gonimbus and is protected by the Go compiler.
 
 ## Stability Manifest
 
-| Import path                                    | Tier         | Notes                                                                                                                  |
-| ---------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `github.com/3leaps/gonimbus/pkg/atlas`         | Experimental | Atlas construction and read substrate.                                                                                 |
-| `github.com/3leaps/gonimbus/pkg/content`       | Experimental | Content metadata helpers.                                                                                              |
-| `github.com/3leaps/gonimbus/pkg/crawler`       | Experimental | Crawl engine internals for CLI workflows.                                                                              |
-| `github.com/3leaps/gonimbus/pkg/indexcoord`    | Experimental | Stable-path whole-index-set mutation authority shared by library engines, CLI adapters, and destructive maintenance.   |
-| `github.com/3leaps/gonimbus/pkg/indexstore`    | Experimental | Index storage substrate.                                                                                               |
-| `github.com/3leaps/gonimbus/pkg/indexreader`   | Experimental | Format-aware reads plus authority-held canonical SQLite snapshots and bound, no-adoption write targets.                |
-| `github.com/3leaps/gonimbus/pkg/indexbuild`    | Experimental | Durable index build workflow engine (v0.4.0 default CLI path) over injected providers and journal/segment publication. |
-| `github.com/3leaps/gonimbus/pkg/indexenrich`   | Experimental | Durable HEAD-enrichment write transaction (lease, single parent, enrich-only publish) over an injected provider.       |
-| `github.com/3leaps/gonimbus/pkg/jobregistry`   | Experimental | Local job-control substrate.                                                                                           |
-| `github.com/3leaps/gonimbus/pkg/manifest`      | Experimental | Manifest parsing and validation substrate.                                                                             |
-| `github.com/3leaps/gonimbus/pkg/match`         | Stable       | Object-key pattern matching used by embedded consumers.                                                                |
-| `github.com/3leaps/gonimbus/pkg/output`        | Experimental | CLI JSONL output helpers.                                                                                              |
-| `github.com/3leaps/gonimbus/pkg/opcheckpoint`  | Experimental | Sensitive local operation-checkpoint substrate.                                                                        |
-| `github.com/3leaps/gonimbus/pkg/preflight`     | Experimental | Operator preflight checks.                                                                                             |
-| `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                                                                        |
-| `github.com/3leaps/gonimbus/pkg/partition`     | Experimental | Canonical hashed enumeration plans, the validated run authority over one, and the lane identity it issues.             |
-| `github.com/3leaps/gonimbus/pkg/producer`      | Experimental | Bounded provider-page lane enumeration plus revision-bound admission, outcome, and work-unit coordination.             |
-| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, capability interfaces, and optional revision-bound reads.                          |
-| `github.com/3leaps/gonimbus/pkg/provider/file` | Stable       | Local filesystem provider construction with `Config` and `New`.                                                        |
-| `github.com/3leaps/gonimbus/pkg/provider/gcs`  | Experimental | GCS provider contract surface while provider support matures.                                                          |
-| `github.com/3leaps/gonimbus/pkg/provider/s3`   | Stable       | AWS S3 and S3-compatible provider construction with `Config` and `New`.                                                |
-| `github.com/3leaps/gonimbus/pkg/reflow`        | Experimental | Reflow workflow engine for the migrated stdin subset, records, adaptive concurrency, and redaction helpers.            |
-| `github.com/3leaps/gonimbus/pkg/reflowstate`   | Experimental | Keyed producer state, set-derived lane terminality, and atomic reflow checkpoint acknowledgement.                      |
-| `github.com/3leaps/gonimbus/pkg/runbudget`     | Experimental | Shared provider admission: quota-domain-keyed rate, per-class concurrency, open bodies, memory, and throttle response. |
-| `github.com/3leaps/gonimbus/pkg/scope`         | Experimental | Scope compilation substrate.                                                                                           |
-| `github.com/3leaps/gonimbus/pkg/shard`         | Experimental | Prefix shard discovery substrate.                                                                                      |
-| `github.com/3leaps/gonimbus/pkg/stream`        | Experimental | Language-neutral stream framing substrate.                                                                             |
-| `github.com/3leaps/gonimbus/pkg/transfer`      | Experimental | Transfer and reflow substrate, including optional revision-bound source reads.                                         |
-| `github.com/3leaps/gonimbus/pkg/uri`           | Stable       | Object URI parsing for `s3://` and supported `file://` forms.                                                          |
+| Import path                                    | Tier         | Notes                                                                                                                                      |
+| ---------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `github.com/3leaps/gonimbus/pkg/atlas`         | Experimental | Atlas construction and read substrate.                                                                                                     |
+| `github.com/3leaps/gonimbus/pkg/content`       | Experimental | Content metadata helpers.                                                                                                                  |
+| `github.com/3leaps/gonimbus/pkg/crawler`       | Experimental | Crawl engine internals for CLI workflows.                                                                                                  |
+| `github.com/3leaps/gonimbus/pkg/indexcoord`    | Experimental | Stable-path whole-index-set mutation authority shared by library engines, CLI adapters, and destructive maintenance.                       |
+| `github.com/3leaps/gonimbus/pkg/indexstore`    | Experimental | Index storage substrate.                                                                                                                   |
+| `github.com/3leaps/gonimbus/pkg/indexreader`   | Experimental | Format-aware reads plus authority-held canonical SQLite snapshots and bound, no-adoption write targets.                                    |
+| `github.com/3leaps/gonimbus/pkg/indexbuild`    | Experimental | Durable index build workflow engine (v0.4.0 default CLI path) over injected providers and journal/segment publication.                     |
+| `github.com/3leaps/gonimbus/pkg/indexenrich`   | Experimental | Durable HEAD-enrichment write transaction (lease, single parent, enrich-only publish) over an injected provider.                           |
+| `github.com/3leaps/gonimbus/pkg/jobregistry`   | Experimental | Local job-control substrate.                                                                                                               |
+| `github.com/3leaps/gonimbus/pkg/manifest`      | Experimental | Manifest parsing and validation substrate.                                                                                                 |
+| `github.com/3leaps/gonimbus/pkg/match`         | Stable       | Object-key pattern matching used by embedded consumers.                                                                                    |
+| `github.com/3leaps/gonimbus/pkg/output`        | Experimental | CLI JSONL output helpers.                                                                                                                  |
+| `github.com/3leaps/gonimbus/pkg/opcheckpoint`  | Experimental | Sensitive local operation-checkpoint substrate.                                                                                            |
+| `github.com/3leaps/gonimbus/pkg/preflight`     | Experimental | Operator preflight checks.                                                                                                                 |
+| `github.com/3leaps/gonimbus/pkg/probe`         | Experimental | Content probe recipe substrate.                                                                                                            |
+| `github.com/3leaps/gonimbus/pkg/partition`     | Experimental | Canonical hashed enumeration plans, the validated run authority over one, and the lane identity it issues.                                 |
+| `github.com/3leaps/gonimbus/pkg/producer`      | Experimental | Bounded provider-page lane enumeration plus revision-bound admission, outcome, and work-unit coordination.                                 |
+| `github.com/3leaps/gonimbus/pkg/provider`      | Stable       | Provider interface, metadata types, capability interfaces, optional revision-bound reads, and `ResolveConnectionPool` construction policy. |
+| `github.com/3leaps/gonimbus/pkg/provider/file` | Stable       | Local filesystem provider construction with `Config` and `New`.                                                                            |
+| `github.com/3leaps/gonimbus/pkg/provider/gcs`  | Experimental | GCS provider contract surface while provider support matures.                                                                              |
+| `github.com/3leaps/gonimbus/pkg/provider/s3`   | Stable       | AWS S3 and S3-compatible provider construction with `Config` and `New`.                                                                    |
+| `github.com/3leaps/gonimbus/pkg/reflow`        | Experimental | Reflow workflow engine for the migrated stdin subset, records, adaptive concurrency, and redaction helpers.                                |
+| `github.com/3leaps/gonimbus/pkg/reflowstate`   | Experimental | Keyed producer state, set-derived lane terminality, and atomic reflow checkpoint acknowledgement.                                          |
+| `github.com/3leaps/gonimbus/pkg/runbudget`     | Experimental | Shared provider admission: quota-domain-keyed rate, per-class concurrency, open bodies, memory, and throttle response.                     |
+| `github.com/3leaps/gonimbus/pkg/scope`         | Experimental | Scope compilation substrate.                                                                                                               |
+| `github.com/3leaps/gonimbus/pkg/shard`         | Experimental | Prefix shard discovery substrate.                                                                                                          |
+| `github.com/3leaps/gonimbus/pkg/stream`        | Experimental | Language-neutral stream framing substrate.                                                                                                 |
+| `github.com/3leaps/gonimbus/pkg/transfer`      | Experimental | Transfer and reflow substrate, including optional revision-bound source reads.                                                             |
+| `github.com/3leaps/gonimbus/pkg/uri`           | Stable       | Object URI parsing for `s3://` and supported `file://` forms.                                                                              |
 
 ## Breakage Notification Protocol
 

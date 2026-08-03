@@ -15,6 +15,17 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- **Additive (Stable `pkg/provider`):** `ConnectionPoolPolicy` and
+  `ResolveConnectionPool(admittedN int)` map already-authorized concurrent
+  provider work to HTTP idle-retention and per-host connection caps
+  (`MaxIdleConnsPerHost` / `MaxConnsPerHost`). Numbers-only: no shared client,
+  no process-global transport mutation. `admittedN < 0` is rejected; `0` and
+  `1` leave SDK defaults; `admittedN >= 2` sets both fields to `admittedN`
+  (including large pass-through values). Library and CLI adapters must resolve
+  engine defaults before calling. Does not claim field throughput.
+
 ### Added
 
 - **Concurrent execution in the library reflow engine.** The `pkg/reflow`
