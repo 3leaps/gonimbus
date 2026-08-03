@@ -160,8 +160,17 @@ func (s *Store) Get(jobID string) (*JobRecord, error) {
 	}
 
 	// Zombie detection: if a job claims running but its pid is gone, mark unknown.
+	// Re-read before demotion so a concurrent child terminal write (success/failed)
+	// is not clobbered by this path — a lost-update race that leaves operators
+	// with permanent "unknown" after a successful managed build.
 	if record.State == JobStateRunning && record.PID > 0 {
 		if !isProcessAlive(record.PID) {
+			if afterGetDeadPIDCheck != nil {
+				afterGetDeadPIDCheck()
+			}
+			if fresh, err := s.getReadOnlyStrict(jobID); err == nil && fresh.State != JobStateRunning {
+				return fresh, nil
+			}
 			record.State = JobStateUnknown
 			now := time.Now().UTC()
 			record.LastHeartbeat = &now
@@ -171,6 +180,10 @@ func (s *Store) Get(jobID string) (*JobRecord, error) {
 
 	return &record, nil
 }
+
+// afterGetDeadPIDCheck is a test-only seam between observing a dead PID and the
+// demotion re-read/write. Production keeps it nil.
+var afterGetDeadPIDCheck func()
 
 // GetReadOnlyStrict returns one job record without demoting state, updating
 // heartbeats, creating directories, or otherwise mutating the registry. Recovery

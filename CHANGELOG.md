@@ -28,6 +28,12 @@ changes.
 
 ### Added
 
+- **Remaining parallel cmd construction pools follow admitted concurrency.**
+  Non-reflow transfer source/dest (composite `C+L` / `C+2L` on source; dest `C`),
+  content head/probe (`N` or `N+1` when a prefix/glob enumerator can LIST on the
+  same client), and tree traversal (`treeParallel` when `--depth > 0`; depth 0
+  stays SDK-default) exact-assign pool knobs through `provider.ResolveConnectionPool`.
+  Overflow on composite formulas refuses construction. No field-throughput claim.
 - **Index-family provider connection pools follow admitted concurrency.** Index
   build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
   construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved

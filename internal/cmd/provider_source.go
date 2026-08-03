@@ -36,7 +36,22 @@ func commandSourceTargetForRead(in *uri.ObjectURI) commandSourceTarget {
 }
 
 func newCommandSourceProviderWithGCSProject(ctx context.Context, src *uri.ObjectURI, command, region, profile, endpoint, gcpProject string) (provider.Provider, error) {
-	return providerdispatch.NewSource(ctx, src, providerdispatch.SourceOptions{
+	// sdk-default construction: no admitted-N pool exact-assign (doctor/inspect/stream).
+	return providerdispatch.NewSource(ctx, src, commandSourceOptions(command, region, profile, endpoint, gcpProject))
+}
+
+// newCommandSourceProviderWithPool exact-assigns connection pool knobs from
+// ResolveConnectionPool(admittedN). Callers must resolve admitted N first.
+func newCommandSourceProviderWithPool(ctx context.Context, src *uri.ObjectURI, command, region, profile, endpoint, gcpProject string, admittedN int) (provider.Provider, error) {
+	opts := commandSourceOptions(command, region, profile, endpoint, gcpProject)
+	if err := applySourceConnectionPool(&opts, admittedN); err != nil {
+		return nil, err
+	}
+	return providerdispatch.NewSource(ctx, src, opts)
+}
+
+func commandSourceOptions(command, region, profile, endpoint, gcpProject string) providerdispatch.SourceOptions {
+	return providerdispatch.SourceOptions{
 		Command: command,
 		S3: providerdispatch.S3Options{
 			Region:         region,
@@ -47,7 +62,7 @@ func newCommandSourceProviderWithGCSProject(ctx context.Context, src *uri.Object
 		GCS: providerdispatch.GCSOptions{
 			Project: strings.TrimSpace(gcpProject),
 		},
-	})
+	}
 }
 
 func commandSourceProviderID(in *uri.ObjectURI) string {

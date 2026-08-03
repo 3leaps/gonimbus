@@ -24,6 +24,12 @@ import (
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
 
+// newContentHeadProvider is the production construction seam for content head
+// (exact-assign pool from admitted N). Overridable in tests.
+var newContentHeadProvider = func(ctx context.Context, src *uri.ObjectURI, admittedN int) (provider.Provider, error) {
+	return newCommandSourceProviderWithPool(ctx, src, "content head", contentHeadRegion, contentHeadProfile, contentHeadEndpoint, contentHeadGCPProject, admittedN)
+}
+
 var contentHeadCmd = &cobra.Command{
 	Use:   "head <uri>",
 	Short: "Read the first N bytes (JSONL)",
@@ -130,6 +136,13 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 		serviceErrCount atomic.Int64
 	)
 
+	// Pre-resolve per-client admitted N before any construction (formula error
+	// ⇒ no providers opened for this command).
+	admittedByClient, err := resolveContentAdmittedByClient(contentHeadConcurrency, inputs)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid content head concurrency for connection pool", err)
+	}
+
 	provMu := sync.Mutex{}
 	providers := map[string]provider.Provider{}
 	getProvider := func(src *uri.ObjectURI) (provider.Provider, error) {
@@ -141,7 +154,7 @@ func runContentHead(cmd *cobra.Command, args []string) error {
 		}
 		provMu.Unlock()
 
-		pNew, err := newCommandSourceProviderWithGCSProject(ctx, src, "content head", contentHeadRegion, contentHeadProfile, contentHeadEndpoint, contentHeadGCPProject)
+		pNew, err := openContentHeadProvider(ctx, src, admittedByClient)
 		if err != nil {
 			return nil, err
 		}

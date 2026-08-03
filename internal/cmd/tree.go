@@ -109,8 +109,13 @@ func runTree(cmd *cobra.Command, args []string) error {
 		return exitError(foundry.ExitInvalidArgument, "tree requires a prefix URI", fmt.Errorf("append '/' to treat the URI as a prefix"))
 	}
 
-	prov, err := createTreeProvider(ctx, parsed)
+	// Pool policy is decided before construction: depth 0 → SDK-default;
+	// depth > 0 → exact-assign from validated treeParallel.
+	prov, err := openTreeProvider(ctx, parsed, treeDepth, treeParallel)
 	if err != nil {
+		if isConnPoolAdmission(err) {
+			return exitError(foundry.ExitInvalidArgument, "Invalid --parallel value", err)
+		}
 		observability.CLILogger.Error("Failed to create provider", zap.Error(err))
 		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to storage provider", err)
 	}
@@ -583,8 +588,8 @@ func summarizeDirectPrefix(
 	}, children, nil
 }
 
-func createTreeProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Provider, error) {
-	return providerdispatch.NewSource(ctx, objURI, providerdispatch.SourceOptions{
+func createTreeProvider(ctx context.Context, objURI *uri.ObjectURI, admittedN int) (provider.Provider, error) {
+	opts := providerdispatch.SourceOptions{
 		Command: "tree",
 		S3: providerdispatch.S3Options{
 			Region:         treeRegion,
@@ -595,7 +600,11 @@ func createTreeProvider(ctx context.Context, objURI *uri.ObjectURI) (provider.Pr
 		GCS: providerdispatch.GCSOptions{
 			Project: treeGCPProject,
 		},
-	})
+	}
+	if err := applySourceConnectionPool(&opts, admittedN); err != nil {
+		return nil, err
+	}
+	return providerdispatch.NewSource(ctx, objURI, opts)
 }
 
 func outputTreeTable(rec *output.PrefixRecord) error {
