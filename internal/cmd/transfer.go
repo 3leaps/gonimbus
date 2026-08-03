@@ -151,16 +151,16 @@ func executeTransfer(ctx context.Context, m *manifest.TransferManifest, dryRun b
 		return exitError(foundry.ExitInvalidArgument, "preflight.mode=plan-only cannot execute transfers", fmt.Errorf("set transfer.preflight.mode to read-safe or write-probe"))
 	}
 
-	srcProv, err := createTransferProvider(ctx, m.Source)
+	srcProv, dstProv, err := openTransferProviders(ctx, m)
 	if err != nil {
-		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to source", err)
+		// Typed admission failures only (formula overflow / invalid N). Provider
+		// construction errors stay external-service regardless of error text.
+		if isConnPoolAdmission(err) {
+			return exitError(foundry.ExitInvalidArgument, "Invalid transfer concurrency for connection pool", err)
+		}
+		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to transfer providers", err)
 	}
 	defer func() { _ = srcProv.Close() }()
-
-	dstProv, err := createTransferProvider(ctx, m.Target)
-	if err != nil {
-		return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to target", err)
-	}
 	defer func() { _ = dstProv.Close() }()
 	// Preflight: fail fast before heavy listing.
 	spec := preflight.Spec{
@@ -249,11 +249,8 @@ func createTransferWriter(m *manifest.TransferManifest, jobID string) (output.Wr
 	return w, cleanup, nil
 }
 
-func createTransferProvider(ctx context.Context, conn manifest.ConnectionConfig) (provider.Provider, error) {
-	return providerdispatch.NewSource(ctx, &uri.ObjectURI{
-		Provider: conn.Provider,
-		Bucket:   conn.Bucket,
-	}, providerdispatch.SourceOptions{
+func createTransferProvider(ctx context.Context, conn manifest.ConnectionConfig, admittedN int) (provider.Provider, error) {
+	opts := providerdispatch.SourceOptions{
 		Command: "transfer",
 		S3: providerdispatch.S3Options{
 			Region:         conn.Region,
@@ -261,5 +258,12 @@ func createTransferProvider(ctx context.Context, conn manifest.ConnectionConfig)
 			Profile:        conn.Profile,
 			ForcePathStyle: conn.Endpoint != "",
 		},
-	})
+	}
+	if err := applySourceConnectionPool(&opts, admittedN); err != nil {
+		return nil, err
+	}
+	return providerdispatch.NewSource(ctx, &uri.ObjectURI{
+		Provider: conn.Provider,
+		Bucket:   conn.Bucket,
+	}, opts)
 }

@@ -37,8 +37,8 @@ type contentProbeProvider interface {
 	provider.Provider
 }
 
-var newContentProbeProvider = func(ctx context.Context, src *uri.ObjectURI) (contentProbeProvider, error) {
-	return newCommandSourceProviderWithGCSProject(ctx, src, "content probe", contentProbeRegion, contentProbeProfile, contentProbeEndpoint, contentProbeGCPProject)
+var newContentProbeProvider = func(ctx context.Context, src *uri.ObjectURI, admittedN int) (contentProbeProvider, error) {
+	return newCommandSourceProviderWithPool(ctx, src, "content probe", contentProbeRegion, contentProbeProfile, contentProbeEndpoint, contentProbeGCPProject, admittedN)
 }
 
 var contentProbeCmd = &cobra.Command{
@@ -208,6 +208,12 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 		errorCount   atomic.Int64
 	)
 
+	// Pre-resolve per-client admitted N before any construction.
+	admittedByClient, err := resolveContentAdmittedByClient(contentProbeConcurrency, inputs)
+	if err != nil {
+		return exitError(foundry.ExitInvalidArgument, "Invalid content probe concurrency for connection pool", err)
+	}
+
 	provMu := sync.Mutex{}
 	providers := map[string]contentProbeProvider{}
 	getProvider := func(src *uri.ObjectURI) (contentProbeProvider, error) {
@@ -219,7 +225,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 		}
 		provMu.Unlock()
 
-		pNew, err := newContentProbeProvider(ctx, src)
+		pNew, err := openContentProbeProvider(ctx, src, admittedByClient)
 		if err != nil {
 			return nil, err
 		}
