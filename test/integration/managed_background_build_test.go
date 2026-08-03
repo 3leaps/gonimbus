@@ -450,10 +450,10 @@ func waitForManagedJob(t *testing.T, binary, dataRoot, jobID string) jobregistry
 				switch record.State {
 				case jobregistry.JobStateSuccess, jobregistry.JobStatePartial, jobregistry.JobStateFailed, jobregistry.JobStateStopped:
 					return record
-				// JobStateUnknown is a zombie demotion when a process exits while
-				// still marked running. It is not a stable terminal outcome: the
-				// child may still write success, or a concurrent re-read may show
-				// a terminal state. Keep polling until timeout.
+					// JobStateUnknown is a zombie demotion when a process exits while
+					// still marked running. It is not a stable terminal outcome: the
+					// child may still write success, or a concurrent re-read may show
+					// a terminal state. Keep polling until timeout.
 				}
 			}
 		}
