@@ -26,6 +26,15 @@ changes.
   (including large pass-through values). Library and CLI adapters must resolve
   engine defaults before calling. Does not claim field throughput.
 
+### Changed
+
+- **Concurrency guide: pool follows admitted concurrency on parallel verbs.**
+  `docs/user-guide/concurrency-and-throughput.md` no longer describes transport
+  pool sizing as reflow-only. It documents construction from admitted N across
+  index/crawl/enrich, transfer, content, tree, and reflow; intentional
+  SDK-default single-shot paths; the Stable `ResolveConnectionPool` library
+  entry; and that pool policy is not a field-throughput claim.
+
 ### Added
 
 - **Remaining parallel cmd construction pools follow admitted concurrency.**

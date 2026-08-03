@@ -188,29 +188,57 @@ The consequences worth knowing:
 
 ## Provider Transport Interaction
 
-High concurrency only helps if the underlying client reuses connections. For
-S3-compatible destinations, `transfer reflow` opts into HTTP transport sizing
-derived from the **effective ceiling**:
+High concurrency only helps if the underlying client reuses connections. Parallel
+provider paths size HTTP transport knobs from the **admitted concurrency**
+already authorized for that client (not a second, higher policy):
 
 - **Idle connection pool.** The default SDK transport keeps only a small idle
-  pool per host, so above that count every worker re-establishes a TCP+TLS
-  connection per request — a handshake tax that grows with concurrency. Sizing
-  the idle pool from the effective ceiling lets workers reuse connections.
-- **Hard connection backstop.** A per-host maximum-connections limit remains a
-  deliberate, resource-aware cap — the FD safety net beneath the controller.
-- **Sized from the effective ceiling, not the raw request.** Pool limits track
-  the resource-capped ceiling, so the transport never holds more idle
-  connections (FDs) than the host budget allows — the same amplification guard as
-  the controller, by another door.
-- **Scoped to reflow.** The tuning applies on the high-throughput reflow path;
-  unrelated commands (`inspect`, `crawl`, …) keep the SDK default transport, so
-  there is no surprise behavior change elsewhere.
+  pool per host, so above that count every worker can re-establish a TCP+TLS
+  connection between bursts — a handshake tax that can grow with concurrency.
+  Sizing idle retention from admitted N lets workers reuse connections **at**
+  that N. This is idle retention, not a two-wide active-concurrency cap when
+  `MaxConnsPerHost` is unlimited.
+- **Hard connection backstop.** When set, a per-host maximum-connections limit
+  is a deliberate resource-aware cap across active, dialing, and idle sockets —
+  the FD safety net beneath the controller or worker pool.
+- **Sized from admitted / effective concurrency, not a raw flag alone.** Pool
+  limits track the concurrency the engine or command already resolved (for
+  example reflow `EffectiveCeiling` after resource clamps; crawl concurrency
+  after defaults; transfer composite demand on a shared source client; content
+  workers with an optional enumerator +1). The transport never invents more
+  parallelism than that authorization.
+- **Same policy across parallel verbs.** Index build / crawl / enrich-head,
+  non-reflow transfer source and destination, content head/probe, tree
+  traversal (depth greater than 0), and transfer reflow all apply this
+  construction policy. Intentional **SDK-default** constructions remain for
+  single-shot or sequential paths (for example `inspect`, `stream get`/`head`,
+  doctor, preflight, atlas, hydrate hub GET, tree depth 0).
+- **No extra CLI pool flag required.** Pool follows admitted concurrency; there
+  is no separate public “pool size” control on the default path.
+- **Not a throughput claim.** Sizing the pool supports already-authorized N; it
+  does not raise rate limits, AIMD ceilings, or crawl budgets, and it does not
+  by itself prove a field throughput gain. On a sterile product index-build
+  measurement at crawl concurrency 16, idle-pool pinning was **not** a material
+  bind for that LIST workload — operators should still attribute rates with
+  measurement, not assume pool policy alone.
 
-**For future providers:** the model is provider-neutral. A new provider plugs in
-by (1) exposing a throttle signal the controller can observe and (2) sizing its
-own client transport (connection pool / concurrency limits) from the same
-effective ceiling. S3 is the reference implementation of that contract; GCS
-(planned) and others map onto it rather than re-deriving a throughput story.
+### Library consumers
+
+Embedded library callers that construct S3/GCS providers for parallel work should
+resolve admitted N first, then call the Stable numbers-only helper
+`provider.ResolveConnectionPool(admittedN)` and exact-assign
+`MaxIdleConnsPerHost` / `MaxConnsPerHost` on the provider config. See
+[`docs/api-stability.md`](../api-stability.md) (`pkg/provider`) and the Library
+API note in `CHANGELOG.md`. Do not leave both pool fields zero under an
+`admittedN ≥ 2` construction unless the site is intentionally classified
+SDK-default (single-shot / sequential).
+
+**For other providers:** the model is provider-neutral. A new provider plugs in
+by (1) exposing a throttle signal the controller can observe where adaptive
+control applies and (2) sizing its client transport (connection pool /
+concurrency limits) from the same admitted concurrency. S3 and GCS reflow and
+CLI construction paths share this contract rather than re-deriving a separate
+throughput story.
 
 ## Output Fields
 
