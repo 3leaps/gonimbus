@@ -53,7 +53,7 @@ func runIndexEnrichWithHeadDurable(ctx context.Context, cmd *cobra.Command, meta
 		return err
 	}
 
-	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, checkpointCfg.Provider)
+	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, checkpointCfg.Provider, checkpointCfg.Query.Parallel)
 	if err != nil {
 		return err
 	}

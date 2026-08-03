@@ -247,7 +247,7 @@ func runIndexEnrichWithHead(cmd *cobra.Command, args []string) (runErr error) {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d candidate timestamp parse errors\n", stats.TimestampParseErrors)
 	}
 
-	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, checkpointCfg.Provider)
+	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, checkpointCfg.Provider, checkpointCfg.Query.Parallel)
 	if err != nil {
 		return err
 	}
@@ -400,7 +400,7 @@ func runIndexEnrichWithHeadResumeHeld(ctx context.Context, cmd *cobra.Command, a
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d candidate timestamp parse errors\n", stats.TimestampParseErrors)
 	}
 
-	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, payload.Config.Provider)
+	prov, err := reconstructEnrichHeadProvider(ctx, indexSet, payload.Config.Provider, payload.Config.Query.Parallel)
 	if err != nil {
 		return err
 	}
@@ -651,7 +651,7 @@ func enrichHeadQueryParamsFromOptions(indexSetID string, opts enrichHeadQueryOpt
 	return params, len(opts.StorageClasses) > 0, nil
 }
 
-func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.IndexSet, opts enrichHeadProviderOptions) (provider.Provider, error) {
+func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.IndexSet, opts enrichHeadProviderOptions, parallel int) (provider.Provider, error) {
 	if indexSet == nil {
 		return nil, fmt.Errorf("index_set is nil")
 	}
@@ -668,7 +668,7 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 	if endpoint == "" {
 		endpoint = indexSet.Endpoint
 	}
-	return newEnrichHeadProvider(ctx, parsed, providerdispatch.SourceOptions{
+	sourceOpts := providerdispatch.SourceOptions{
 		Command: "index enrich-with-head",
 		S3: providerdispatch.S3Options{
 			Region:         region,
@@ -679,7 +679,16 @@ func reconstructEnrichHeadProvider(ctx context.Context, indexSet *indexstore.Ind
 		GCS: providerdispatch.GCSOptions{
 			Project: strings.TrimSpace(enrichHeadGCPProject),
 		},
-	})
+	}
+	// Construction consumes already-validated admitted N (CLI default 32 is
+	// applied at flag parse time). Invalid values refuse before factory call.
+	if parallel <= 0 {
+		return nil, fmt.Errorf("enrich parallel must be greater than zero, got %d", parallel)
+	}
+	if err := applySourceConnectionPool(&sourceOpts, parallel); err != nil {
+		return nil, err
+	}
+	return newEnrichHeadProvider(ctx, parsed, sourceOpts)
 }
 
 func rejectConcurrentBuild(ctx context.Context, db *sql.DB, indexSetID string) error {
