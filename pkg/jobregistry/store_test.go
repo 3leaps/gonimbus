@@ -105,6 +105,54 @@ func TestListReadOnlyStrictDoesNotPromoteDeadPID(t *testing.T) {
 	}
 }
 
+// TestGetDoesNotDemoteOverConcurrentTerminalWrite pins that a dead-PID demotion
+// re-reads before rewriting so a child's success/failed write is not lost.
+func TestGetDoesNotDemoteOverConcurrentTerminalWrite(t *testing.T) {
+	store := NewStore(t.TempDir())
+	started := time.Now().UTC()
+	if err := store.Write(&JobRecord{
+		JobID:     testJobID1,
+		State:     JobStateRunning,
+		PID:       1 << 30, // not a live process
+		CreatedAt: started,
+		StartedAt: &started,
+	}); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+
+	// Inject child terminal write after dead-PID observation, before re-read.
+	old := afterGetDeadPIDCheck
+	afterGetDeadPIDCheck = func() {
+		ended := time.Now().UTC()
+		if err := store.Write(&JobRecord{
+			JobID:     testJobID1,
+			State:     JobStateSuccess,
+			PID:       1 << 30,
+			CreatedAt: started,
+			StartedAt: &started,
+			EndedAt:   &ended,
+		}); err != nil {
+			t.Errorf("inject success: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterGetDeadPIDCheck = old })
+
+	got, err := store.Get(testJobID1)
+	if err != nil {
+		t.Fatalf("Get() error: %v", err)
+	}
+	if got.State != JobStateSuccess {
+		t.Fatalf("Get() state=%s want success (must not demote over concurrent terminal write)", got.State)
+	}
+	persisted, err := store.GetReadOnlyStrict(testJobID1)
+	if err != nil {
+		t.Fatalf("GetReadOnlyStrict() error: %v", err)
+	}
+	if persisted.State != JobStateSuccess {
+		t.Fatalf("persisted state=%s want success", persisted.State)
+	}
+}
+
 func TestListReadOnlyStrictRejectsMalformedAndSymlinkEntries(t *testing.T) {
 	t.Run("malformed record", func(t *testing.T) {
 		root := t.TempDir()
