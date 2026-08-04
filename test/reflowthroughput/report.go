@@ -182,6 +182,9 @@ func ValidateReportEnvelope(r Report) error {
 		if r.InstrumentSHA256 == "" {
 			return fmt.Errorf("instrument_sha256 required for profile %s", r.Profile)
 		}
+		if r.InstrumentCommit == "" || r.InstrumentCommit == "unknown" {
+			return fmt.Errorf("instrument_commit required (known) for profile %s", r.Profile)
+		}
 		if r.ScheduleID == "" {
 			return fmt.Errorf("schedule_id required for profile %s", r.Profile)
 		}
