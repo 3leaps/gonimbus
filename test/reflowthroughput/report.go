@@ -27,6 +27,17 @@ type Report struct {
 	BinaryCommit  string `json:"binary_commit,omitempty"`
 	BinarySHA256  string `json:"binary_sha256"`
 
+	// Instrument identity is the harness (test binary / worktree), distinct from
+	// the measured child Binary* fields (GON-066 C1 / R3). Never backfill
+	// BinaryCommit from instrument HEAD.
+	InstrumentCommit  string `json:"instrument_commit,omitempty"`
+	InstrumentSHA256  string `json:"instrument_sha256,omitempty"`
+	InstrumentDirty   bool   `json:"instrument_dirty,omitempty"`
+
+	// Checkpoint-scale schedule provenance (empty for other profiles).
+	ScheduleID    string   `json:"schedule_id,omitempty"`
+	ScheduleOrder []string `json:"schedule_order,omitempty"` // e.g. "warm:disk:64", "p1:disk:64"
+
 	Corpus CompactManifest `json:"corpus"`
 
 	Profile                 string `json:"profile"`
@@ -166,6 +177,17 @@ func ValidateReportEnvelope(r Report) error {
 	}
 	if r.BinarySHA256 == "" {
 		return fmt.Errorf("binary_sha256 required")
+	}
+	if profileRequiresCheckpointWriterStats(r.Profile) {
+		if r.InstrumentSHA256 == "" {
+			return fmt.Errorf("instrument_sha256 required for profile %s", r.Profile)
+		}
+		if r.ScheduleID == "" {
+			return fmt.Errorf("schedule_id required for profile %s", r.Profile)
+		}
+		if len(r.ScheduleOrder) == 0 {
+			return fmt.Errorf("schedule_order required for profile %s", r.Profile)
+		}
 	}
 	if r.Corpus.Digest == "" {
 		return fmt.Errorf("corpus digest required")

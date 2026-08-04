@@ -51,9 +51,12 @@ type Options struct {
 	// GOMEMLIMIT. Accepted via CONSTRAINED_GOMEMLIMIT, or the older
 	// CEILING_LIFT_GOMEMLIMIT spelling.
 	ConstrainedGOMEMLIMIT string
-	// WorktreeCommit is optional fallback commit identity when the binary
-	// reports "unknown" (plain go test builds without ldflags).
+	// WorktreeCommit is optional instrument commit override (harness identity).
+	// It is NEVER applied to measured BinaryCommit (GON-066 R3).
 	WorktreeCommit string
+	// ScheduleID selects checkpoint-scale counterbalancing plan
+	// (disk_first_odd default; tmpfs_first_odd reverse). Ignored for other profiles.
+	ScheduleID string
 
 	// Recipe overrides scale the profile's synthetic corpus at invocation. Zero
 	// means keep the profile default. Accepted via OBJECT_COUNT / SIZE_BYTES /
@@ -307,16 +310,25 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	if err != nil {
 		return Report{}, err
 	}
-	// Capture version/commit from binary; fall back to worktree HEAD for commit.
+	// Capture version/commit from the measured binary only. Unknown stays unknown —
+	// never backfill BinaryCommit from harness HEAD / WorktreeCommit (GON-066 R3).
 	binVer, binCommit := probeBinaryIdentity(ctx, absBin)
-	if (binCommit == "" || binCommit == "unknown") && opts.WorktreeCommit != "" {
-		binCommit = opts.WorktreeCommit
+	if binCommit == "" {
+		binCommit = "unknown"
 	}
-	if binCommit == "" || binCommit == "unknown" {
-		if head, err := gitHeadShort(); err == nil && head != "" {
-			binCommit = head
+
+	// Instrument = harness process (this test binary content) + worktree commit/dirty.
+	instSHA, err := HashFile(os.Args[0])
+	if err != nil {
+		return Report{}, fmt.Errorf("instrument sha: %w", err)
+	}
+	instCommit := opts.WorktreeCommit
+	if instCommit == "" {
+		if head, err := gitHeadShort(); err == nil {
+			instCommit = head
 		}
 	}
+	instDirty, _ := gitWorktreeDirty()
 
 	if opts.RunRoot == "" {
 		return Report{}, fmt.Errorf("run root is required")
@@ -471,6 +483,9 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	report = NewReport(spec.Name, providerClass, invID, binSHA, corpus.Manifest.Compact(), opts.Keep)
 	report.BinaryVersion = binVer
 	report.BinaryCommit = binCommit
+	report.InstrumentCommit = instCommit
+	report.InstrumentSHA256 = instSHA
+	report.InstrumentDirty = instDirty
 	report.OS = runtime.GOOS
 	report.Arch = runtime.GOARCH
 
@@ -816,24 +831,78 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 			}
 		}
 	default:
-		// reflow-only sweeps: every declared memory envelope over every
-		// checkpoint class and parallel point.
-		classes := spec.CheckpointClasses
-		if len(classes) == 0 {
-			classes = []string{"disk"}
-		}
-		for _, ck := range classes {
+		// reflow-only sweeps. checkpoint-scale uses a frozen counterbalanced
+		// schedule (warmups discarded); other profiles keep class-outer order.
+		if spec.Name == ProfileCheckpointScale {
+			schedID := opts.ScheduleID
+			if schedID == "" {
+				schedID = ScheduleDiskFirstOdd
+			}
+			steps, err := CheckpointScaleSchedule(spec, schedID)
+			if err != nil {
+				return report, err
+			}
+			if err := ValidateCheckpointScaleSchedule(steps); err != nil {
+				return report, fmt.Errorf("schedule: %w", err)
+			}
+			report.ScheduleID = schedID
+			order := make([]string, 0, len(steps))
+			armByLabel := map[string]resolvedArm{}
 			for _, arm := range arms {
-				for _, p := range spec.ParallelPoints {
-					if err := runPoint(pointRun{
-						Parallel:        p,
-						CheckpointClass: ck,
-						Shape:           "reflow_only",
-						GOMEMLIMIT:      arm.GOMEMLIMIT,
-						MemoryBudget:    arm.MemoryBudget,
-						MemoryEnvelope:  arm.Label,
-					}); err != nil {
-						return report, err
+				armByLabel[arm.Label] = arm
+			}
+			for _, step := range steps {
+				arm, ok := armByLabel[step.MemoryEnvelope]
+				if !ok {
+					if len(arms) == 0 {
+						return report, fmt.Errorf("schedule step missing memory arm")
+					}
+					arm = arms[0]
+				}
+				var tag string
+				if step.Warmup {
+					tag = fmt.Sprintf("warm:%s:%d", step.CheckpointClass, step.Parallel)
+				} else {
+					tag = fmt.Sprintf("p%d:%s:%d", step.PairIndex, step.CheckpointClass, step.Parallel)
+				}
+				order = append(order, tag)
+				before := len(report.Points)
+				if err := runPoint(pointRun{
+					Parallel:        step.Parallel,
+					CheckpointClass: step.CheckpointClass,
+					Shape:           "reflow_only",
+					GOMEMLIMIT:      arm.GOMEMLIMIT,
+					MemoryBudget:    arm.MemoryBudget,
+					MemoryEnvelope:  step.MemoryEnvelope,
+				}); err != nil {
+					return report, err
+				}
+				if step.Warmup {
+					if len(report.Points) != before+1 {
+						return report, fmt.Errorf("warmup did not append exactly one point")
+					}
+					report.Points = report.Points[:before]
+				}
+			}
+			report.ScheduleOrder = order
+		} else {
+			classes := spec.CheckpointClasses
+			if len(classes) == 0 {
+				classes = []string{"disk"}
+			}
+			for _, ck := range classes {
+				for _, arm := range arms {
+					for _, p := range spec.ParallelPoints {
+						if err := runPoint(pointRun{
+							Parallel:        p,
+							CheckpointClass: ck,
+							Shape:           "reflow_only",
+							GOMEMLIMIT:      arm.GOMEMLIMIT,
+							MemoryBudget:    arm.MemoryBudget,
+							MemoryEnvelope:  arm.Label,
+						}); err != nil {
+							return report, err
+						}
 					}
 				}
 			}
@@ -906,6 +975,13 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	}
 	if gotSHA != binSHA {
 		return report, fmt.Errorf("binary sha changed during run")
+	}
+	gotInst, err := HashFile(os.Args[0])
+	if err != nil {
+		return report, fmt.Errorf("re-hash instrument: %w", err)
+	}
+	if gotInst != instSHA {
+		return report, fmt.Errorf("instrument sha changed during run")
 	}
 
 	if err := ValidateReportEnvelope(report); err != nil {
@@ -1004,6 +1080,15 @@ func gitHeadShort() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func gitWorktreeDirty() (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
 }
 
 // VerifyCorpusImmutable re-hashes every source object and checks the manifest digest.

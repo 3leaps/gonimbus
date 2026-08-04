@@ -72,17 +72,39 @@ func TestEmitCheckpointWriterStatsSkipsNilStore(t *testing.T) {
 	}
 }
 
-// Dual-path control (entarch P1): CLI-pool and engine paths must both call
-// emitCheckpointWriterStatsIfPresent. A mutation deleting either site fails this
-// source inspection without a live provider.
+// Dual-path control (entarch/devrev R4): engine branch and CLI-pool branch must
+// each call emitCheckpointWriterStatsIfPresent. Region-aware: one call after
+// runEnabledTransferReflowEngine, one in the CLI-pool body after summary write.
+// Two calls in a single branch still fail.
 func TestEmitCheckpointWriterStatsCallSites(t *testing.T) {
 	src, err := os.ReadFile("transfer_reflow.go")
 	if err != nil {
 		t.Fatalf("read transfer_reflow.go: %v", err)
 	}
-	count := strings.Count(string(src), "emitCheckpointWriterStatsIfPresent(")
-	// Definition lives in transfer_reflow_checkpoint.go; call sites only here.
-	if count < 2 {
-		t.Fatalf("emitCheckpointWriterStatsIfPresent call sites in transfer_reflow.go = %d, want >= 2 (engine + CLI-pool)", count)
+	text := string(src)
+	engineMarker := "runEnabledTransferReflowEngine"
+	poolMarker := "close(tasks)"
+	engineIdx := strings.Index(text, engineMarker)
+	if engineIdx < 0 {
+		t.Fatal("engine marker not found")
+	}
+	// CLI-pool body uses close(tasks) before summary + emit; find last occurrence
+	// in the file's pool path region (after engine early-return block).
+	poolIdx := strings.LastIndex(text, poolMarker)
+	if poolIdx < 0 || poolIdx < engineIdx {
+		t.Fatalf("CLI-pool marker not found after engine region (poolIdx=%d engineIdx=%d)", poolIdx, engineIdx)
+	}
+	// Engine site: between engine call and the end of the enabled branch.
+	// Search for emit in a window after engineMarker and before a substantial
+	// gap; require emit after engine and before poolMarker.
+	engineRegion := text[engineIdx:poolIdx]
+	poolRegion := text[poolIdx:]
+	engineCalls := strings.Count(engineRegion, "emitCheckpointWriterStatsIfPresent(")
+	poolCalls := strings.Count(poolRegion, "emitCheckpointWriterStatsIfPresent(")
+	if engineCalls != 1 {
+		t.Fatalf("engine-path emit sites = %d, want exactly 1 (in region after %s before pool)", engineCalls, engineMarker)
+	}
+	if poolCalls != 1 {
+		t.Fatalf("CLI-pool-path emit sites = %d, want exactly 1 (in region after %s)", poolCalls, poolMarker)
 	}
 }

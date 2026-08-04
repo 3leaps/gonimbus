@@ -40,6 +40,47 @@ func ValidateCheckpointWriterStatsStructure(st reflow.CheckpointWriterStatsRecor
 	if st.MaxBatch < 1 {
 		return fmt.Errorf("checkpoint writer stats: MaxBatch=%d, want > 0", st.MaxBatch)
 	}
+
+	// All count / size / peak / duration aggregates must be non-negative.
+	nonneg := []struct {
+		name string
+		v    int64
+	}{
+		{"QueueDepthSamples", st.QueueDepthSamples},
+		{"QueueDepthSum", st.QueueDepthSum},
+		{"QueueDepthPeak", st.QueueDepthPeak},
+		{"Admissions", st.Admissions},
+		{"AdmissionWaitNanos", st.AdmissionWaitNanos},
+		{"AdmissionWaitMaxNanos", st.AdmissionWaitMaxNanos},
+		{"AdmissionBlocked", st.AdmissionBlocked},
+		{"Barriers", st.Barriers},
+		{"BarrierWaitNanos", st.BarrierWaitNanos},
+		{"BarrierWaitMaxNanos", st.BarrierWaitMaxNanos},
+		{"BarrierOK", st.BarrierOK},
+		{"BarrierRefusal", st.BarrierRefusal},
+		{"BarrierWriterFailed", st.BarrierWriterFailed},
+		{"BarrierWriterClosed", st.BarrierWriterClosed},
+		{"BarrierCanceled", st.BarrierCanceled},
+		{"Batches", st.Batches},
+		{"BatchSizeSum", st.BatchSizeSum},
+		{"BatchSizeMax", st.BatchSizeMax},
+		{"BatchSize1", st.BatchSize1},
+		{"BatchSize2To8", st.BatchSize2To8},
+		{"BatchSize9To32", st.BatchSize9To32},
+		{"BatchSize33To128", st.BatchSize33To128},
+		{"BatchSize129Plus", st.BatchSize129Plus},
+		{"Commits", st.Commits},
+		{"BatchDurationNanos", st.BatchDurationNanos},
+		{"BatchDurationMaxNanos", st.BatchDurationMaxNanos},
+		{"CommitFatals", st.CommitFatals},
+		{"RequestRefusals", st.RequestRefusals},
+	}
+	for _, f := range nonneg {
+		if f.v < 0 {
+			return fmt.Errorf("checkpoint writer stats: %s=%d, want >= 0", f.name, f.v)
+		}
+	}
+
 	if st.QueueDepthSamples != st.Admissions {
 		return fmt.Errorf("checkpoint writer stats: QueueDepthSamples=%d != Admissions=%d",
 			st.QueueDepthSamples, st.Admissions)
@@ -47,6 +88,10 @@ func ValidateCheckpointWriterStatsStructure(st reflow.CheckpointWriterStatsRecor
 	if st.Barriers != st.Admissions {
 		return fmt.Errorf("checkpoint writer stats: Barriers=%d != Admissions=%d",
 			st.Barriers, st.Admissions)
+	}
+	if st.AdmissionBlocked > st.Admissions {
+		return fmt.Errorf("checkpoint writer stats: AdmissionBlocked=%d > Admissions=%d",
+			st.AdmissionBlocked, st.Admissions)
 	}
 	outcomeSum := st.BarrierOK + st.BarrierRefusal + st.BarrierWriterFailed +
 		st.BarrierWriterClosed + st.BarrierCanceled

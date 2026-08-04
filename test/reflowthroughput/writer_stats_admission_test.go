@@ -45,6 +45,16 @@ func TestValidateCheckpointWriterStatsStructureRejects(t *testing.T) {
 		{"hist_sum", func(s *reflow.CheckpointWriterStatsRecord) { s.BatchSize1 = 0 }},
 		{"batch_size_sum", func(s *reflow.CheckpointWriterStatsRecord) { s.BatchSizeSum = 0 }},
 		{"peak_over_max", func(s *reflow.CheckpointWriterStatsRecord) { s.QueueDepthPeak = 999 }},
+		{"admission_blocked_over", func(s *reflow.CheckpointWriterStatsRecord) { s.AdmissionBlocked = s.Admissions + 1 }},
+		{"neg_admissions", func(s *reflow.CheckpointWriterStatsRecord) { s.Admissions = -1 }},
+		{"neg_blocked", func(s *reflow.CheckpointWriterStatsRecord) { s.AdmissionBlocked = -1 }},
+		{"neg_peak", func(s *reflow.CheckpointWriterStatsRecord) { s.QueueDepthPeak = -1 }},
+		{"neg_barrier_wait", func(s *reflow.CheckpointWriterStatsRecord) { s.BarrierWaitNanos = -1 }},
+		{"neg_batch_dur", func(s *reflow.CheckpointWriterStatsRecord) { s.BatchDurationNanos = -1 }},
+		{"neg_queue_sum", func(s *reflow.CheckpointWriterStatsRecord) { s.QueueDepthSum = -1 }},
+		{"neg_batch_size_max", func(s *reflow.CheckpointWriterStatsRecord) { s.BatchSizeMax = -1 }},
+		{"neg_commits", func(s *reflow.CheckpointWriterStatsRecord) { s.Commits = -1 }},
+		{"neg_refusals", func(s *reflow.CheckpointWriterStatsRecord) { s.RequestRefusals = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,22 +159,5 @@ func TestProfileRequiresCheckpointWriterStats(t *testing.T) {
 	}
 	if profileRequiresCheckpointWriterStats(ProfileSmoke) {
 		t.Fatal("smoke must not require stats (optional plumbing)")
-	}
-}
-
-// Source dual-path control: both reflow execution paths must call the emit helper.
-// Deleting either site fails this control without needing a live provider.
-func TestEmitSitesPresentOnBothReflowPaths(t *testing.T) {
-	t.Parallel()
-	// Paths relative to package under test are not available; read via module root.
-	// The harness package cannot import internal files by path reliably in all
-	// layouts — use go list. Simpler: embed expected markers by reading sibling
-	// is not possible. Inspect via os.ReadFile from repo root walk.
-	//
-	// This test is implemented in internal/cmd instead (see
-	// TestEmitCheckpointWriterStatsCallSites). Keep a package-level note here
-	// so the admission suite documents the dual-path requirement.
-	if !profileRequiresCheckpointWriterStats(ProfileCheckpointScale) {
-		t.Fatal("admission profile gate missing")
 	}
 }
