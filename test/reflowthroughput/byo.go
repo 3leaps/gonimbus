@@ -251,7 +251,8 @@ func uploadCorpus(ctx context.Context, stager corpusStager, cfg BYOS3Config, cor
 				if size == 0 {
 					size = e.SizeBytes
 				}
-				line, err := marshalReflowInputLine(cfg.ObjectURI(key), e.RelativeKey, size, etag)
+				// Full S3 key (prefix + relative) as source_key; relative only for dest.
+				line, err := marshalReflowInputLine(cfg.ObjectURI(key), key, e.RelativeKey, size, etag)
 				if err != nil {
 					fail(err)
 					return
