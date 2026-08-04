@@ -30,9 +30,9 @@ type Report struct {
 	// Instrument identity is the harness (test binary / worktree), distinct from
 	// the measured child Binary* fields (GON-066 C1 / R3). Never backfill
 	// BinaryCommit from instrument HEAD.
-	InstrumentCommit  string `json:"instrument_commit,omitempty"`
-	InstrumentSHA256  string `json:"instrument_sha256,omitempty"`
-	InstrumentDirty   bool   `json:"instrument_dirty,omitempty"`
+	InstrumentCommit string `json:"instrument_commit,omitempty"`
+	InstrumentSHA256 string `json:"instrument_sha256,omitempty"`
+	InstrumentDirty   bool   `json:"instrument_dirty"` // always present: false=clean, true=dirty (probe fail aborts run)
 
 	// Checkpoint-scale schedule provenance (empty for other profiles).
 	ScheduleID    string   `json:"schedule_id,omitempty"`

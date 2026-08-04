@@ -108,6 +108,63 @@ func TestE2EDelta(t *testing.T) {
 		t.Fatalf("got %v", d)
 	}
 	if !math.IsNaN(E2EDelta(0, 0)) {
-		t.Fatal("want NaN")
+		t.Fatal("want NaN for zero both")
 	}
+	if !math.IsNaN(E2EDelta(-1, 1)) {
+		t.Fatal("want NaN when either arm <= 0")
+	}
+	if !math.IsNaN(E2EDelta(1, 0)) {
+		t.Fatal("want NaN when tmpfs <= 0")
+	}
+}
+
+func TestArmHasWriterPressureROccThresholds(t *testing.T) {
+	t.Parallel()
+	// r_occ exact min with f_blk path
+	a := ArmPressureInputs{
+		Admissions: 100, AdmissionBlocked: 10, QueueDepthPeak: 50, MaxBatch: 100,
+		BarrierWaitNanos: 0, E2EWallNanos: 1e9, EffectiveConcurrency: 8, StatsOK: true,
+	}
+	if !ArmHasWriterPressure(a) {
+		t.Fatal("r_occ == 0.50 should pass with f_blk ok")
+	}
+	a.QueueDepthPeak = 49
+	if ArmHasWriterPressure(a) {
+		t.Fatal("r_occ just below min")
+	}
+	a.QueueDepthPeak = 51
+	if !ArmHasWriterPressure(a) {
+		t.Fatal("r_occ +eps")
+	}
+}
+
+func TestPairIsTieAndMaterialEps(t *testing.T) {
+	t.Parallel()
+	// epsilon_tie = 0.02
+	if !PairIsTie(0.019) {
+		t.Fatal("below eps is tie")
+	}
+	if PairIsTie(0.02) {
+		t.Fatal("|d|==eps is not < eps")
+	}
+	if PairIsMaterial(0.149) {
+		t.Fatal("below tau")
+	}
+	if !PairIsMaterial(0.15) {
+		t.Fatal("at tau material")
+	}
+	if !PairIsMaterial(0.151) {
+		t.Fatal("+eps material")
+	}
+}
+
+func TestNormalizeMeasuredBinaryCommit(t *testing.T) {
+	t.Parallel()
+	if NormalizeMeasuredBinaryCommit("") != "unknown" {
+		t.Fatal("empty -> unknown")
+	}
+	if NormalizeMeasuredBinaryCommit("abc") != "abc" {
+		t.Fatal("preserve")
+	}
+	// Helper has no worktree arg — cannot fall back.
 }

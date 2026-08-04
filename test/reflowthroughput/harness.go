@@ -313,9 +313,7 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	// Capture version/commit from the measured binary only. Unknown stays unknown —
 	// never backfill BinaryCommit from harness HEAD / WorktreeCommit (GON-066 R3).
 	binVer, binCommit := probeBinaryIdentity(ctx, absBin)
-	if binCommit == "" {
-		binCommit = "unknown"
-	}
+	binCommit = NormalizeMeasuredBinaryCommit(binCommit)
 
 	// Instrument = harness process (this test binary content) + worktree commit/dirty.
 	instSHA, err := HashFile(os.Args[0])
@@ -328,7 +326,11 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 			instCommit = head
 		}
 	}
-	instDirty, _ := gitWorktreeDirty()
+	instDirty, dirtyErr := gitWorktreeDirty()
+	if dirtyErr != nil {
+		// Never treat a failed dirty probe as clean (GON-066 R3 nit).
+		return Report{}, fmt.Errorf("instrument dirty probe: %w", dirtyErr)
+	}
 
 	if opts.RunRoot == "" {
 		return Report{}, fmt.Errorf("run root is required")

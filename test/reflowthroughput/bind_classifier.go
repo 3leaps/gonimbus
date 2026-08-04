@@ -68,12 +68,23 @@ type PairInputs struct {
 }
 
 // E2EDelta computes the frozen pair e2e relative shift.
+// Either arm with T <= 0 is non-comparable (NaN), matching the freeze.
 func E2EDelta(tDisk, tTmpfs float64) float64 {
-	m := math.Max(tDisk, tTmpfs)
-	if m <= 0 {
+	if tDisk <= 0 || tTmpfs <= 0 {
 		return math.NaN()
 	}
+	m := math.Max(tDisk, tTmpfs)
 	return (tDisk - tTmpfs) / m
+}
+
+// NormalizeMeasuredBinaryCommit maps probe output to the measured-binary commit
+// field. Empty becomes "unknown". Worktree/instrument identity must never be
+// passed here (GON-066 R3) — this helper intentionally has no fallback args.
+func NormalizeMeasuredBinaryCommit(probeCommit string) string {
+	if probeCommit == "" {
+		return "unknown"
+	}
+	return probeCommit
 }
 
 // PairIsMaterial reports |Δ| >= τ_e2e.
@@ -96,9 +107,9 @@ func PairIsTie(delta float64) bool {
 type BindDisposition string
 
 const (
-	BindBinds         BindDisposition = "binds"
-	BindDoesNotBind   BindDisposition = "does_not_bind"
-	BindInconclusive  BindDisposition = "inconclusive"
+	BindBinds        BindDisposition = "binds"
+	BindDoesNotBind  BindDisposition = "does_not_bind"
+	BindInconclusive BindDisposition = "inconclusive"
 )
 
 // ClassifyBindSet implements the frozen three-pair disposition.
