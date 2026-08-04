@@ -316,20 +316,11 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	binCommit = NormalizeMeasuredBinaryCommit(binCommit)
 
 	// Instrument = harness process (this test binary content) + worktree commit/dirty.
-	instSHA, err := HashFile(os.Args[0])
+	// Capture once before arms; re-probe after last arm and fail if either mutates
+	// (GON-066 R3 — fail-closed provenance, not omitempty false clean).
+	instSHA, instCommit, instDirty, err := captureInstrumentIdentity(opts.WorktreeCommit)
 	if err != nil {
-		return Report{}, fmt.Errorf("instrument sha: %w", err)
-	}
-	instCommit := opts.WorktreeCommit
-	if instCommit == "" {
-		if head, err := gitHeadShort(); err == nil {
-			instCommit = head
-		}
-	}
-	instDirty, dirtyErr := gitWorktreeDirty()
-	if dirtyErr != nil {
-		// Never treat a failed dirty probe as clean (GON-066 R3 nit).
-		return Report{}, fmt.Errorf("instrument dirty probe: %w", dirtyErr)
+		return Report{}, err
 	}
 
 	if opts.RunRoot == "" {
@@ -978,12 +969,9 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	if gotSHA != binSHA {
 		return report, fmt.Errorf("binary sha changed during run")
 	}
-	gotInst, err := HashFile(os.Args[0])
-	if err != nil {
-		return report, fmt.Errorf("re-hash instrument: %w", err)
-	}
-	if gotInst != instSHA {
-		return report, fmt.Errorf("instrument sha changed during run")
+	// Re-probe instrument commit + dirty + content hash; any drift fails the set.
+	if err := assertInstrumentIdentityUnchanged(opts.WorktreeCommit, instSHA, instCommit, instDirty); err != nil {
+		return report, err
 	}
 
 	if err := ValidateReportEnvelope(report); err != nil {
@@ -1091,6 +1079,53 @@ func gitWorktreeDirty() (bool, error) {
 		return false, err
 	}
 	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
+// captureInstrumentIdentity records harness process content SHA plus Git
+// commit/dirty for provenance. Probe failures never become "clean" or empty
+// commit that could be admitted as known-good (GON-066 R3).
+//
+// worktreeCommitOverride, when non-empty, replaces the Git HEAD probe (tests).
+func captureInstrumentIdentity(worktreeCommitOverride string) (sha, commit string, dirty bool, err error) {
+	sha, err = HashFile(os.Args[0])
+	if err != nil {
+		return "", "", false, fmt.Errorf("instrument sha: %w", err)
+	}
+	commit = worktreeCommitOverride
+	if commit == "" {
+		head, headErr := gitHeadShort()
+		if headErr != nil {
+			return "", "", false, fmt.Errorf("instrument commit probe: %w", headErr)
+		}
+		if head == "" {
+			return "", "", false, fmt.Errorf("instrument commit probe: empty HEAD")
+		}
+		commit = head
+	}
+	dirty, dirtyErr := gitWorktreeDirty()
+	if dirtyErr != nil {
+		return "", "", false, fmt.Errorf("instrument dirty probe: %w", dirtyErr)
+	}
+	return sha, commit, dirty, nil
+}
+
+// assertInstrumentIdentityUnchanged re-probes instrument identity after the arm
+// set and fails if content SHA, commit, or dirty state drifted.
+func assertInstrumentIdentityUnchanged(worktreeCommitOverride, wantSHA, wantCommit string, wantDirty bool) error {
+	gotSHA, gotCommit, gotDirty, err := captureInstrumentIdentity(worktreeCommitOverride)
+	if err != nil {
+		return fmt.Errorf("instrument identity re-probe: %w", err)
+	}
+	if gotSHA != wantSHA {
+		return fmt.Errorf("instrument sha changed during run")
+	}
+	if gotCommit != wantCommit {
+		return fmt.Errorf("instrument commit changed during run: %q -> %q", wantCommit, gotCommit)
+	}
+	if gotDirty != wantDirty {
+		return fmt.Errorf("instrument dirty state changed during run: %v -> %v", wantDirty, gotDirty)
+	}
+	return nil
 }
 
 // VerifyCorpusImmutable re-hashes every source object and checks the manifest digest.

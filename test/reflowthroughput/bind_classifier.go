@@ -58,13 +58,33 @@ func ArmHasWriterPressure(a ArmPressureInputs) bool {
 }
 
 // PairInputs is one matched disk/tmpfs pair at the disposition layer.
+//
+// DiskPressure and TmpfsPressure are independent so asymmetric (exactly-one-arm)
+// evidence cannot collapse into "no pair pressure" and falsely yield does_not_bind.
 type PairInputs struct {
 	// Invalid marks failed/honesty/missing-stats/non-comparable pairs.
 	Invalid bool
-	// PairPressure is true when both arms show writer pressure.
-	PairPressure bool
+	// DiskPressure is true when the disk arm shows writer pressure.
+	DiskPressure bool
+	// TmpfsPressure is true when the tmpfs arm shows writer pressure.
+	TmpfsPressure bool
 	// DeltaE2E is (T_disk - T_tmpfs) / max(T_disk, T_tmpfs).
 	DeltaE2E float64
+}
+
+// BothArmsPressure is true when each arm independently shows writer pressure.
+func (p PairInputs) BothArmsPressure() bool {
+	return p.DiskPressure && p.TmpfsPressure
+}
+
+// NeitherArmPressure is true when neither arm shows writer pressure.
+func (p PairInputs) NeitherArmPressure() bool {
+	return !p.DiskPressure && !p.TmpfsPressure
+}
+
+// AsymmetricArmPressure is true when exactly one arm shows writer pressure.
+func (p PairInputs) AsymmetricArmPressure() bool {
+	return p.DiskPressure != p.TmpfsPressure
 }
 
 // E2EDelta computes the frozen pair e2e relative shift.
@@ -114,9 +134,12 @@ const (
 
 // ClassifyBindSet implements the frozen three-pair disposition.
 //
-// does_not_bind requires: all three pairs valid, none have pair pressure,
-// all three are material e2e, and all three share the same Δ sign.
-// (A single non-material/tie pair → inconclusive — matches T5.)
+//	binds:         both arms pressured on all 3 pairs + material same-sign e2e
+//	does_not_bind: neither arm pressured on all 3 pairs + material same-sign e2e
+//	inconclusive:  any invalid pair, any asymmetric (one-arm) pressure, mixed
+//	               pressure quorum, or e2e material/direction failure
+//
+// Asymmetric one-arm pressure must never collapse into does_not_bind.
 func ClassifyBindSet(pairs []PairInputs) BindDisposition {
 	if len(pairs) != BindPairCount {
 		return BindInconclusive
@@ -125,16 +148,24 @@ func ClassifyBindSet(pairs []PairInputs) BindDisposition {
 		if p.Invalid || math.IsNaN(p.DeltaE2E) {
 			return BindInconclusive
 		}
+		// Exactly-one-arm pressure is mixed evidence, not "no pressure".
+		if p.AsymmetricArmPressure() {
+			return BindInconclusive
+		}
 	}
 
-	pressureCount := 0
+	bothCount := 0
+	neitherCount := 0
 	materialCount := 0
 	var sign float64
 	signSet := false
 	sameSign := true
 	for _, p := range pairs {
-		if p.PairPressure {
-			pressureCount++
+		switch {
+		case p.BothArmsPressure():
+			bothCount++
+		case p.NeitherArmPressure():
+			neitherCount++
 		}
 		if PairIsMaterial(p.DeltaE2E) {
 			materialCount++
@@ -151,11 +182,11 @@ func ClassifyBindSet(pairs []PairInputs) BindDisposition {
 		}
 	}
 
-	if pressureCount == BindPairCount && materialCount == BindPairCount && sameSign {
+	if bothCount == BindPairCount && materialCount == BindPairCount && sameSign {
 		return BindBinds
 	}
-	// does_not_bind: zero pair pressure, all three material, same direction.
-	if pressureCount == 0 && materialCount == BindPairCount && sameSign {
+	// does_not_bind: neither arm pressured on every pair (not merely !both).
+	if neitherCount == BindPairCount && materialCount == BindPairCount && sameSign {
 		return BindDoesNotBind
 	}
 	return BindInconclusive

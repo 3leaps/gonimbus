@@ -32,6 +32,53 @@ func TestChildBinaryIdentityDoesNotFallbackToInstrumentHead(t *testing.T) {
 	}
 }
 
+func TestCaptureInstrumentIdentityFailClosedAndStable(t *testing.T) {
+	// Not parallel: uses real git + os.Args[0] content hash.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip(err)
+	}
+	sha, commit, dirty, err := captureInstrumentIdentity("")
+	if err != nil {
+		// Outside a git worktree this must fail closed, not return clean+empty.
+		t.Logf("capture failed (ok if not in git worktree): %v", err)
+		if commit != "" || dirty {
+			t.Fatalf("on error must not invent clean provenance: commit=%q dirty=%v", commit, dirty)
+		}
+		return
+	}
+	if sha == "" || commit == "" {
+		t.Fatalf("success requires non-empty sha and commit, got sha=%q commit=%q", sha, commit)
+	}
+	// dirty is a real bool — both true and false are valid; omitempty is forbidden on the report field.
+	_ = dirty
+
+	// Override path: commit comes from override; dirty still probed.
+	sha2, commit2, dirty2, err := captureInstrumentIdentity("override-commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit2 != "override-commit" {
+		t.Fatalf("override commit=%q", commit2)
+	}
+	if sha2 != sha {
+		t.Fatal("sha should match same process")
+	}
+	// Re-probe unchanged under override.
+	if err := assertInstrumentIdentityUnchanged("override-commit", sha2, commit2, dirty2); err != nil {
+		t.Fatal(err)
+	}
+	// Drift detection: wrong expected commit fails.
+	if err := assertInstrumentIdentityUnchanged("override-commit", sha2, "not-the-commit", dirty2); err == nil {
+		t.Fatal("expected commit drift failure")
+	}
+	if err := assertInstrumentIdentityUnchanged("override-commit", sha2, commit2, !dirty2); err == nil {
+		t.Fatal("expected dirty drift failure")
+	}
+	if err := assertInstrumentIdentityUnchanged("override-commit", "deadbeef", commit2, dirty2); err == nil {
+		t.Fatal("expected sha drift failure")
+	}
+}
+
 func TestGitWorktreeDirtyHelper(t *testing.T) {
 	_, err := gitWorktreeDirty()
 	if err != nil {

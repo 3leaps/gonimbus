@@ -69,8 +69,18 @@ func TestArmHasWriterPressureThresholds(t *testing.T) {
 	}
 }
 
-func pair(p bool, d float64) PairInputs {
-	return PairInputs{PairPressure: p, DeltaE2E: d}
+// both/neither encode independent arm pressures (not a collapsed bool).
+func both(d float64) PairInputs {
+	return PairInputs{DiskPressure: true, TmpfsPressure: true, DeltaE2E: d}
+}
+func neither(d float64) PairInputs {
+	return PairInputs{DiskPressure: false, TmpfsPressure: false, DeltaE2E: d}
+}
+func oneDisk(d float64) PairInputs {
+	return PairInputs{DiskPressure: true, TmpfsPressure: false, DeltaE2E: d}
+}
+func oneTmpfs(d float64) PairInputs {
+	return PairInputs{DiskPressure: false, TmpfsPressure: true, DeltaE2E: d}
 }
 
 func TestClassifyBindSetTruthTable(t *testing.T) {
@@ -80,17 +90,23 @@ func TestClassifyBindSetTruthTable(t *testing.T) {
 		ps   []PairInputs
 		want BindDisposition
 	}{
-		{"T1", []PairInputs{pair(true, 0.20), pair(true, 0.18), pair(true, 0.25)}, BindBinds},
-		{"T2", []PairInputs{pair(true, 0.20), pair(true, 0.18), pair(true, -0.20)}, BindInconclusive},
-		{"T3", []PairInputs{pair(true, 0.20), pair(true, 0.18), pair(false, 0.22)}, BindInconclusive},
-		{"T4", []PairInputs{pair(false, 0.20), pair(false, 0.18), pair(false, 0.25)}, BindDoesNotBind},
-		{"T5", []PairInputs{pair(false, 0.20), pair(false, 0.01), pair(false, 0.18)}, BindInconclusive},
-		{"T6", []PairInputs{pair(true, 0.20), pair(true, 0.10), pair(true, 0.18)}, BindInconclusive},
-		{"T7", []PairInputs{{Invalid: true, DeltaE2E: 0.2}, pair(true, 0.2), pair(true, 0.2)}, BindInconclusive},
-		// does_not_bind boundary: all 3 material at tau exactly, no pressure
-		{"T4-tau", []PairInputs{pair(false, 0.15), pair(false, 0.15), pair(false, 0.15)}, BindDoesNotBind},
+		{"T1", []PairInputs{both(0.20), both(0.18), both(0.25)}, BindBinds},
+		{"T2", []PairInputs{both(0.20), both(0.18), both(-0.20)}, BindInconclusive},
+		{"T3", []PairInputs{both(0.20), both(0.18), neither(0.22)}, BindInconclusive},
+		{"T4", []PairInputs{neither(0.20), neither(0.18), neither(0.25)}, BindDoesNotBind},
+		{"T5", []PairInputs{neither(0.20), neither(0.01), neither(0.18)}, BindInconclusive},
+		{"T6", []PairInputs{both(0.20), both(0.10), both(0.18)}, BindInconclusive},
+		{"T7", []PairInputs{{Invalid: true, DeltaE2E: 0.2}, both(0.2), both(0.2)}, BindInconclusive},
+		// does_not_bind boundary: all 3 material at tau exactly, neither arm pressure
+		{"T4-tau", []PairInputs{neither(0.15), neither(0.15), neither(0.15)}, BindDoesNotBind},
 		// just below tau on one → inconclusive
-		{"material-eps", []PairInputs{pair(false, 0.15), pair(false, 0.149), pair(false, 0.15)}, BindInconclusive},
+		{"material-eps", []PairInputs{neither(0.15), neither(0.149), neither(0.15)}, BindInconclusive},
+		// asymmetric: one arm pressured in one pair → inconclusive (not does_not_bind)
+		{"asym-one-pair", []PairInputs{oneDisk(0.20), neither(0.18), neither(0.25)}, BindInconclusive},
+		// asymmetric: one-arm pressure on all three pairs → still inconclusive
+		{"asym-all-pairs", []PairInputs{oneDisk(0.20), oneTmpfs(0.18), oneDisk(0.25)}, BindInconclusive},
+		// mixed both + asymmetric
+		{"asym-mixed-both", []PairInputs{both(0.20), oneDisk(0.18), both(0.25)}, BindInconclusive},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
