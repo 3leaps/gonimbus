@@ -223,6 +223,16 @@ func ValidateReportEnvelope(r Report) error {
 		if err := validateResolvedMemoryProvenance(i, p); err != nil {
 			return err
 		}
+		// Retained checkpoint-scale reports must publish writer-stats evidence
+		// on every reflow point (GON-066 C1 / entarch admission gate).
+		if profileRequiresCheckpointWriterStats(r.Profile) {
+			if p.CheckpointWriterStats == nil {
+				return fmt.Errorf("point %d: profile %s requires checkpoint_writer_stats (missing — arm non-comparable)", i, r.Profile)
+			}
+			if err := ValidateCheckpointWriterStatsStructure(*p.CheckpointWriterStats); err != nil {
+				return fmt.Errorf("point %d: %w", i, err)
+			}
+		}
 		// A labeled arm must additionally match the candidate that actually
 		// BOUND the run, not merely the lever that was passed to it. Under
 		// minimum-selection an operator value can lose to a lower candidate,

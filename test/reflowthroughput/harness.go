@@ -699,6 +699,13 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 				return fmt.Errorf("point %s honesty: %s", pointID, honesty.Message)
 			}
 			honestyOK = boolPtrVal(true)
+			// GON-066 C1: retained checkpoint-scale arms fail closed without
+			// exactly one post-summary, structurally valid writer-stats record.
+			if profileRequiresCheckpointWriterStats(spec.Name) {
+				if err := CheckCheckpointWriterStatsAdmission(parsed); err != nil {
+					return fmt.Errorf("point %s checkpoint writer stats: %w", pointID, err)
+				}
+			}
 		}
 
 		elapsedSec := pr.Elapsed.Seconds()

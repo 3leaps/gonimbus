@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,5 +69,20 @@ func TestEmitCheckpointWriterStatsSkipsNilStore(t *testing.T) {
 	_ = w.Close()
 	if buf.Len() != 0 {
 		t.Fatalf("expected no emission for nil store, got %q", buf.String())
+	}
+}
+
+// Dual-path control (entarch P1): CLI-pool and engine paths must both call
+// emitCheckpointWriterStatsIfPresent. A mutation deleting either site fails this
+// source inspection without a live provider.
+func TestEmitCheckpointWriterStatsCallSites(t *testing.T) {
+	src, err := os.ReadFile("transfer_reflow.go")
+	if err != nil {
+		t.Fatalf("read transfer_reflow.go: %v", err)
+	}
+	count := strings.Count(string(src), "emitCheckpointWriterStatsIfPresent(")
+	// Definition lives in transfer_reflow_checkpoint.go; call sites only here.
+	if count < 2 {
+		t.Fatalf("emitCheckpointWriterStatsIfPresent call sites in transfer_reflow.go = %d, want >= 2 (engine + CLI-pool)", count)
 	}
 }

@@ -74,6 +74,12 @@ type ParsedReflowOutput struct {
 	// gonimbus.reflow.checkpoint_writer_stats.v1 (GON-066 C1). Nil when absent.
 	// Measure-first only — not product throughput evidence.
 	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord
+	// CheckpointWriterStatsCount is how many stats records appeared (exactly
+	// one is required for retained checkpoint-scale arms).
+	CheckpointWriterStatsCount int
+	// CheckpointWriterStatsBeforeSummary counts stats records observed before
+	// the single summary (must be zero for retained arms).
+	CheckpointWriterStatsBeforeSummary int
 
 	// Consensus fields after agreement check (filled by Finalize).
 	Requested       int
@@ -232,7 +238,11 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			if err := json.Unmarshal(env.Data, &st); err != nil {
 				return out, fmt.Errorf("line %d: checkpoint writer stats data: %w", lineNo, err)
 			}
-			// Last record wins if multiple (should be one end-of-run emission).
+			out.CheckpointWriterStatsCount++
+			if out.SummaryCount == 0 {
+				out.CheckpointWriterStatsBeforeSummary++
+			}
+			// Last record wins if multiple; admission gate fails closed on count≠1.
 			cp := st
 			out.CheckpointWriterStats = &cp
 		default:
