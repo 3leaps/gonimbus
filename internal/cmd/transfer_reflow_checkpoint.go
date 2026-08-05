@@ -357,7 +357,10 @@ func rejectTransferReflowResumeRunFlagConflicts(cmd *cobra.Command) error {
 	})
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
-		return fmt.Errorf("%s are not accepted with --resume-run; resume uses checkpointed reflow config", strings.Join(conflicts, ", "))
+		// Two distinct resume recipes (do not merge):
+		//   --resume --checkpoint <path>  … re-supply full original invocation
+		//   --resume-run <run_id>           … restore config from operation checkpoint (no foreground flags)
+		return fmt.Errorf("%s are not accepted with --resume-run; --resume-run restores config from the operation checkpoint and rejects foreground flags — for an explicit --checkpoint path use --resume with the full original invocation (not --resume-run)", strings.Join(conflicts, ", "))
 	}
 	return nil
 }

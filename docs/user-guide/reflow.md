@@ -457,7 +457,14 @@ scope the mode to endpoints known to honor conditional writes.
 
 ### Checkpoint and Resume
 
-Large reflow jobs (100K+ objects) benefit from checkpointing:
+Large reflow jobs (100K+ objects) benefit from checkpointing.
+
+There are **two distinct resume recipes** — do not mix their flags:
+
+| Recipe                   | When to use                                                           | Form                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Item checkpoint**      | You have an explicit SQLite `--checkpoint` path from the original run | Re-supply the **full original invocation** plus `--resume` and the same `--checkpoint`                                   |
+| **Operation checkpoint** | You have a `run_id` from a resumable failure record / hint            | `gonimbus transfer reflow --resume-run <run_id>` only — **no** foreground `--checkpoint`, source, dest, or rewrite flags |
 
 ```bash
 # Start with checkpoint
@@ -467,15 +474,21 @@ gonimbus transfer reflow --stdin \
   --checkpoint ./reflow-state.db \
   < probe-output.jsonl
 
-# If interrupted (network issue, auth expiry, etc.), resume:
+# If interrupted (network issue, auth expiry, etc.), resume with the SAME args:
 gonimbus transfer reflow --stdin \
   --dest 's3://dest/landing/' \
+  --rewrite-from '...' --rewrite-to '...' \
   --checkpoint ./reflow-state.db \
   --resume \
   < probe-output.jsonl
 ```
 
-The checkpoint database tracks which objects have been successfully copied. Resume skips completed objects and picks up where it left off.
+`--resume` **requires** `--checkpoint`. Passing `--checkpoint` together with
+`--resume-run` is rejected (fail-closed): `--resume-run` restores config from the
+operation checkpoint and does not accept a second foreground config surface.
+
+The checkpoint database tracks which objects have been successfully copied.
+Resume skips completed objects and picks up where it left off.
 
 If a fatal interruption is resumable, Gonimbus also emits a
 `gonimbus.operation.error.v1` record with `run_id`, `error_class`, progress

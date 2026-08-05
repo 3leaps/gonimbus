@@ -336,6 +336,22 @@ func TestTransferReflowResumeRunRejectsForegroundFlags(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--dest")
 	require.Contains(t, err.Error(), "not accepted with --resume-run")
+	// Name the preferred recipe for operators who meant item-checkpoint resume.
+	require.Contains(t, err.Error(), "--resume")
+	require.Contains(t, err.Error(), "full original invocation")
+}
+
+func TestTransferReflowResumeRunRejectsCheckpointFlag(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	cmd := newTransferReflowTestCommand()
+	cmd.SetArgs([]string{"--resume-run", "run_123", "--checkpoint", filepath.Join(t.TempDir(), "x.db")})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--checkpoint")
+	require.Contains(t, err.Error(), "not accepted with --resume-run")
+	require.Contains(t, err.Error(), "full original invocation")
 }
 
 func TestTransferReflowResumeRunRejectsSuccessfulCheckpointBeforeWork(t *testing.T) {

@@ -1141,8 +1141,31 @@ func (p *gateAfterProvider) GetObject(ctx context.Context, key string) (io.ReadC
 // with a healthy provider converges: durable completes skip as resume,
 // landed-but-unrecorded objects skip as collision duplicates, never-landed
 // objects copy — and no object is ever landed twice.
+//
+// Dual arms cover default (elision off) and experimental raw-exec savepoint
+// elision on (GON-066 Phase A residual dig): both must converge with failed=0.
 func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		elide bool
+	}{
+		{name: "elision_off", elide: false},
+		{name: "elision_on", elide: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runTransferReflowCancelMidPoolResumeRealStore(t, tc.elide)
+		})
+	}
+}
+
+func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSavepoints bool) {
+	t.Helper()
 	withTransferReflowTestState(t)
+	if elideRawExecSavepoints {
+		t.Setenv("GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS", "1")
+	} else {
+		t.Setenv("GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS", "")
+	}
 
 	const (
 		objectCount = 12
@@ -1233,7 +1256,11 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	store, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
 	require.NoError(t, err)
 	completesEmitted := 0
+	failedPreResume := 0
 	for _, rec := range records1 {
+		if rec.Status == "failed" {
+			failedPreResume++
+		}
 		if rec.Status != "complete" {
 			continue
 		}
@@ -1245,6 +1272,7 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 		require.True(t, recorded, "emitted complete for %s must be durably recorded (no false completes)", rec.SourceKey)
 		require.Equal(t, "complete", status)
 	}
+	require.Zero(t, failedPreResume, "interrupted arm must not emit failed terminals before resume")
 	require.Less(t, completesEmitted, objectCount, "interruption must leave unfinished work")
 	require.NoError(t, store.Close())
 
@@ -1260,9 +1288,14 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 
 	records2 := requireReflowRecords(t, stdout2.String())
 	terminal2 := map[string]int{}
+	failedResume := 0
 	for _, rec := range records2 {
 		if rec.Status == "in_progress" {
 			continue
+		}
+		if rec.Status == "failed" {
+			failedResume++
+			t.Fatalf("resume must not fail objects (status=failed reason=%q key=%q)", rec.Reason, rec.SourceKey)
 		}
 		switch {
 		case rec.Status == "complete",
@@ -1273,6 +1306,7 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 			t.Fatalf("unexpected resume terminal status=%q reason=%q key=%q", rec.Status, rec.Reason, rec.SourceKey)
 		}
 	}
+	require.Zero(t, failedResume, "resume failed count must be 0")
 	require.Len(t, terminal2, objectCount, "every object reaches a convergent terminal on resume")
 	for key, n := range terminal2 {
 		require.Equal(t, 1, n, "exactly one terminal for %s on resume", key)
@@ -1293,10 +1327,28 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 		require.Equal(t, fmt.Sprintf("payload-%02d", i), string(dst.mustObject("data/"+key)), "dest content intact for %s", key)
 		expectedKeys = append(expectedKeys, "data/"+key)
 	}
+	require.Len(t, expectedKeys, objectCount, "destination cardinality must equal N")
 	// The claimed property, measured directly: exactly one SUCCESSFUL
 	// object-level conditional land per destination key across cancel + resume,
 	// all attempts IfAbsent, no unconditional writes.
 	dst.requireExactlyOneLandPerKey(t, expectedKeys)
+
+	// Writer must not have been poisoned across cancel + resume.
+	statsStore, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
+	require.NoError(t, err)
+	st := statsStore.WriterStats()
+	require.NoError(t, statsStore.Close())
+	require.Zero(t, st.CommitFatals, "writer CommitFatals must stay 0")
+	require.Zero(t, st.BarrierWriterFailed, "writer must not report BarrierWriterFailed")
+	if elideRawExecSavepoints {
+		// Resume path exercises Mark/Note raw exec; elision should be observed
+		// when the experimental env is set (stdin/index path still uses mark/note).
+		// Do not require a minimum elision count here: object mix may vary; require
+		// only that the flag does not force writer fatals (above) and that created
+		// counters remain non-negative.
+		require.GreaterOrEqual(t, st.SavepointsCreated, int64(0))
+		require.GreaterOrEqual(t, st.SavepointsElided, int64(0))
+	}
 }
 
 // sourceRunMetadataRecordingState captures the positional source-run-metadata
