@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -31,9 +32,23 @@ type Store struct {
 // an in-release note.
 type Config struct {
 	Path string
+
+	// ElideRawExecSavepoints is an experimental default-off switch: when true,
+	// the write coordinator omits SAVEPOINT/RELEASE around raw writer.exec
+	// (SQL statement) mutations. execTx paths always keep savepoints so designed
+	// request-local refusals still work. Enable only for measured A/B; product
+	// default remains false. Dirty-binary override:
+	// GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS=1 (or "true") also enables this
+	// when Config does not already set it true.
+	ElideRawExecSavepoints bool
 }
 
 func Open(ctx context.Context, cfg Config) (*Store, error) {
+	if !cfg.ElideRawExecSavepoints {
+		if v := strings.TrimSpace(os.Getenv("GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS")); v == "1" || strings.EqualFold(v, "true") {
+			cfg.ElideRawExecSavepoints = true
+		}
+	}
 	return openStore(ctx, cfg, nil)
 }
 
@@ -65,6 +80,7 @@ func openStore(ctx context.Context, cfg Config, configure func(*coordinator)) (*
 	}
 
 	s.writer = newCoordinator(db)
+	s.writer.elideRawExecSavepoints = cfg.ElideRawExecSavepoints
 	if configure != nil {
 		configure(s.writer)
 	}

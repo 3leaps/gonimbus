@@ -129,6 +129,12 @@ type WriterStats struct {
 	BatchDurationMaxNanos int64
 	CommitFatals          int64
 	RequestRefusals       int64
+
+	// SavepointsCreated counts SAVEPOINT statements issued in commit.
+	// SavepointsElided counts raw-exec requests that skipped SAVEPOINT/RELEASE
+	// when ElideRawExecSavepoints is enabled (experimental).
+	SavepointsCreated int64
+	SavepointsElided  int64
 }
 
 // writerMetrics holds always-on cheap counters. Submit-side fields are updated
@@ -168,6 +174,9 @@ type writerMetrics struct {
 	batchDurationMaxNanos atomic.Int64
 	commitFatals          atomic.Int64
 	requestRefusals       atomic.Int64
+
+	savepointsCreated atomic.Int64
+	savepointsElided  atomic.Int64
 }
 
 func (m *writerMetrics) noteAdmission(depth, maxBatch int, wait time.Duration) {
@@ -269,6 +278,9 @@ func (m *writerMetrics) snapshot(maxBatch int) WriterStats {
 		BatchDurationMaxNanos: m.batchDurationMaxNanos.Load(),
 		CommitFatals:          m.commitFatals.Load(),
 		RequestRefusals:       m.requestRefusals.Load(),
+
+		SavepointsCreated: m.savepointsCreated.Load(),
+		SavepointsElided:  m.savepointsElided.Load(),
 	}
 }
 

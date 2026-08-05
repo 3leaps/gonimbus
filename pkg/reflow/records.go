@@ -151,6 +151,10 @@ type CheckpointWriterStatsRecord struct {
 	BatchDurationMaxNanos int64 `json:"batch_duration_max_nanos"`
 	CommitFatals          int64 `json:"commit_fatals"`
 	RequestRefusals       int64 `json:"request_refusals"`
+
+	// Experimental savepoint elision counters (Phase A measure).
+	SavepointsCreated int64 `json:"savepoints_created,omitempty"`
+	SavepointsElided  int64 `json:"savepoints_elided,omitempty"`
 }
 
 // SourceRunRecord is the payload for gonimbus.reflow.source.v1 JSONL records.

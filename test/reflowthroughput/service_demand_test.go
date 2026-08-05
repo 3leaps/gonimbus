@@ -2,6 +2,7 @@ package reflowthroughput
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,153 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/reflow"
 )
+
+// TestFormalServiceDemandBaselineLive runs the gated formal 3×6×300k set.
+// Opt-in only — wall-clock is long (hours possible on busy hosts).
+//
+//	GONIMBUS_FORMAL_SERVICE_DEMAND=1 \
+//	GONIMBUS_FORMAL_ROOT=~/dev/temp/.../arms \
+//	GONIMBUS_FORMAL_REPORT=~/dev/temp/.../report.json \
+//	go test ./test/reflowthroughput -run TestFormalServiceDemandBaselineLive -count=1 -timeout 6h -v
+func TestFormalServiceDemandBaselineLive(t *testing.T) {
+	if os.Getenv("GONIMBUS_FORMAL_SERVICE_DEMAND") != "1" {
+		t.Skip("set GONIMBUS_FORMAL_SERVICE_DEMAND=1 for live formal baseline")
+	}
+	root := os.Getenv("GONIMBUS_FORMAL_ROOT")
+	report := os.Getenv("GONIMBUS_FORMAL_REPORT")
+	if root == "" || report == "" {
+		t.Fatal("GONIMBUS_FORMAL_ROOT and GONIMBUS_FORMAL_REPORT required")
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("formal baseline root=%s report=%s tip_instrument_probe_via_set", root, report)
+	start := time.Now()
+	set, err := RunFormalServiceDemandBaseline(context.Background(), root, report)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("formal baseline failed after %s: %v", elapsed, err)
+	}
+	t.Logf("formal=%v disposition=%s msg=%s cells=%d wall=%s instrument=%s dirty=%v",
+		set.Formal, set.Disposition, set.DispositionMessage, len(set.Cells), elapsed,
+		set.InstrumentCommitBefore, set.InstrumentDirtyBefore)
+	if !set.Formal {
+		t.Fatalf("expected formal=true: %s", set.DispositionMessage)
+	}
+	if len(set.Cells) != 18 {
+		t.Fatalf("cells=%d want 18", len(set.Cells))
+	}
+}
+
+// TestPhaseAServiceDemandABLive runs control (flag off) vs treatment (elision)
+// at N=32,256,512 × 3 reps × formal 300k. Opt-in; long wall-clock.
+//
+//	GONIMBUS_PHASE_A_AB=1 GONIMBUS_PHASE_A_ROOT=~/dev/temp/... \
+//	go test ./test/reflowthroughput -run TestPhaseAServiceDemandABLive -count=1 -timeout 6h -v
+func TestPhaseAServiceDemandABLive(t *testing.T) {
+	if os.Getenv("GONIMBUS_PHASE_A_AB") != "1" {
+		t.Skip("set GONIMBUS_PHASE_A_AB=1 for Phase A local A/B")
+	}
+	root := os.Getenv("GONIMBUS_PHASE_A_ROOT")
+	if root == "" {
+		t.Fatal("GONIMBUS_PHASE_A_ROOT required")
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	points := []int{32, 256, 512}
+	type cell struct {
+		n, rep              int
+		elide               bool
+		muts, util, barMean float64
+		wall                float64
+		spCreated, spElided int64
+		honest              bool
+	}
+	var cells []cell
+	ctx := context.Background()
+	startAll := time.Now()
+	for _, elide := range []bool{false, true} {
+		label := "control"
+		if elide {
+			label = "treatment"
+		}
+		for rep := 1; rep <= 3; rep++ {
+			for _, n := range points {
+				path := filepath.Join(root, fmt.Sprintf("%s-rep%d-n%d.db", label, rep, n))
+				arm, err := RunServiceDemandArm(ctx, ServiceDemandArmConfig{
+					StorePath:              path,
+					Submitters:             n,
+					ElideRawExecSavepoints: elide,
+				})
+				if err != nil {
+					t.Fatalf("%s rep=%d n=%d: %v", label, rep, n, err)
+				}
+				cells = append(cells, cell{
+					n: n, rep: rep, elide: elide,
+					muts: arm.MutationsPerSec, util: arm.WriterUtilization,
+					barMean: arm.BarrierWaitMeanNanos, wall: arm.WallSeconds,
+					spCreated: arm.WriterStats.SavepointsCreated,
+					spElided:  arm.WriterStats.SavepointsElided,
+					honest:    arm.Honest,
+				})
+				t.Logf("%s rep=%d n=%d mut/s=%.0f util=%.3f barMean=%.0f spC=%d spE=%d wall=%.1fs",
+					label, rep, n, arm.MutationsPerSec, arm.WriterUtilization, arm.BarrierWaitMeanNanos,
+					arm.WriterStats.SavepointsCreated, arm.WriterStats.SavepointsElided, arm.WallSeconds)
+			}
+		}
+	}
+	// Median by (elide,n)
+	med := func(elide bool, n int, pick func(cell) float64) float64 {
+		var xs []float64
+		for _, c := range cells {
+			if c.elide == elide && c.n == n {
+				xs = append(xs, pick(c))
+			}
+		}
+		return medianFloat(xs)
+	}
+	t.Logf("total_wall=%s", time.Since(startAll))
+	// Local gates from EXECUTION-PLAN
+	for _, n := range []int{256, 512} {
+		cMut := med(false, n, func(c cell) float64 { return c.muts })
+		tMut := med(true, n, func(c cell) float64 { return c.muts })
+		cBar := med(false, n, func(c cell) float64 { return c.barMean })
+		tBar := med(true, n, func(c cell) float64 { return c.barMean })
+		mutGain := (tMut - cMut) / cMut
+		barDrop := (cBar - tBar) / cBar
+		t.Logf("gate n=%d mut gain=%.1f%% (want>=15) bar drop=%.1f%% (want>=15) cMut=%.0f tMut=%.0f cBar=%.0f tBar=%.0f",
+			n, mutGain*100, barDrop*100, cMut, tMut, cBar, tBar)
+		if mutGain < 0.15 {
+			t.Errorf("n=%d mut/s gain %.1f%% < 15%%", n, mutGain*100)
+		}
+		if barDrop < 0.15 {
+			t.Errorf("n=%d barrier-mean drop %.1f%% < 15%%", n, barDrop*100)
+		}
+	}
+	c32 := med(false, 32, func(c cell) float64 { return c.muts })
+	t32 := med(true, 32, func(c cell) float64 { return c.muts })
+	c32b := med(false, 32, func(c cell) float64 { return c.barMean })
+	t32b := med(true, 32, func(c cell) float64 { return c.barMean })
+	if (c32-t32)/c32 > 0.10 {
+		t.Errorf("n=32 mut/s regression %.1f%% > 10%%", (c32-t32)/c32*100)
+	}
+	if (t32b-c32b)/c32b > 0.10 {
+		t.Errorf("n=32 barrier regression %.1f%% > 10%%", (t32b-c32b)/c32b*100)
+	}
+	// Treatment must elide some savepoints; control must elide none.
+	for _, c := range cells {
+		if !c.elide && c.spElided != 0 {
+			t.Errorf("control n=%d rep=%d elided=%d", c.n, c.rep, c.spElided)
+		}
+		if c.elide && c.spElided < 1 {
+			t.Errorf("treatment n=%d rep=%d elided=%d want >0", c.n, c.rep, c.spElided)
+		}
+		if !c.honest {
+			t.Errorf("dishonest n=%d elide=%v", c.n, c.elide)
+		}
+	}
+}
 
 func TestServiceDemandArmSmoke(t *testing.T) {
 	ctx := context.Background()

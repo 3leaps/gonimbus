@@ -77,6 +77,8 @@ type ServiceDemandArmConfig struct {
 	Units int
 	// MinAdmissions overrides the formal work quantum when > 0 (tests only).
 	MinAdmissions int64
+	// ElideRawExecSavepoints enables experimental Phase A elision for this arm.
+	ElideRawExecSavepoints bool
 }
 
 // ServiceDemandArmReport is a sterile arm result (no paths in JSON export helpers).
@@ -151,7 +153,10 @@ func RunServiceDemandArm(ctx context.Context, cfg ServiceDemandArmConfig) (Servi
 		return ServiceDemandArmReport{}, err
 	}
 
-	store, err := reflowstate.Open(ctx, reflowstate.Config{Path: cfg.StorePath})
+	store, err := reflowstate.Open(ctx, reflowstate.Config{
+		Path:                   cfg.StorePath,
+		ElideRawExecSavepoints: cfg.ElideRawExecSavepoints,
+	})
 	if err != nil {
 		return ServiceDemandArmReport{}, fmt.Errorf("open store: %w", err)
 	}
@@ -349,6 +354,8 @@ func writerStatsToRecord(st reflowstate.WriterStats) reflow.CheckpointWriterStat
 		BatchDurationMaxNanos: st.BatchDurationMaxNanos,
 		CommitFatals:          st.CommitFatals,
 		RequestRefusals:       st.RequestRefusals,
+		SavepointsCreated:     st.SavepointsCreated,
+		SavepointsElided:      st.SavepointsElided,
 	}
 }
 
@@ -379,6 +386,9 @@ type ServiceDemandSetConfig struct {
 	MediumOverride string
 	// SkipAPFSCheck allows structural tests on non-APFS roots; forces non-formal.
 	SkipAPFSCheck bool
+	// ElideRawExecSavepoints enables Phase A elision for every arm in the set.
+	// Sets with elision are never formal baseline authority (wantFormalShape false).
+	ElideRawExecSavepoints bool
 }
 
 // ServiceDemandSetReport is the versioned sterile multi-rep report.
@@ -417,9 +427,10 @@ func RunServiceDemandSet(ctx context.Context, cfg ServiceDemandSetConfig) (Servi
 	}
 
 	// Medium: formal path requires verified APFS unless explicitly non-formal.
+	// Phase A elision sets are candidates, never formal baseline authority.
 	wantFormalShape := len(reps) == 3 && reps[0] == 1 && reps[1] == 2 && reps[2] == 3 &&
 		cfg.Units == 0 && cfg.MinAdmissions == 0 && cfg.WorktreeCommitOverride == "" &&
-		cfg.MediumOverride == "" && !cfg.SkipAPFSCheck
+		cfg.MediumOverride == "" && !cfg.SkipAPFSCheck && !cfg.ElideRawExecSavepoints
 	medium := cfg.MediumOverride
 	if medium == "" {
 		medium = ServiceDemandMedium
@@ -476,10 +487,11 @@ func RunServiceDemandSet(ctx context.Context, cfg ServiceDemandSetConfig) (Servi
 		for ord, n := range order {
 			storePath := filepath.Join(cfg.RootDir, fmt.Sprintf("rep%d-ord%d-n%d.db", r, ord, n))
 			arm, err := RunServiceDemandArm(ctx, ServiceDemandArmConfig{
-				StorePath:     storePath,
-				Submitters:    n,
-				Units:         cfg.Units,
-				MinAdmissions: cfg.MinAdmissions,
+				StorePath:              storePath,
+				Submitters:             n,
+				Units:                  cfg.Units,
+				MinAdmissions:          cfg.MinAdmissions,
+				ElideRawExecSavepoints: cfg.ElideRawExecSavepoints,
 			})
 			if err != nil {
 				return ServiceDemandSetReport{}, fmt.Errorf("rep=%d ordinal=%d submitters=%d: %w", r, ord, n, err)

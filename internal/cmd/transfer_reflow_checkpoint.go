@@ -95,6 +95,8 @@ func emitCheckpointWriterStatsIfPresent(ctx context.Context, w *output.JSONLWrit
 		BatchDurationMaxNanos: st.BatchDurationMaxNanos,
 		CommitFatals:          st.CommitFatals,
 		RequestRefusals:       st.RequestRefusals,
+		SavepointsCreated:     st.SavepointsCreated,
+		SavepointsElided:      st.SavepointsElided,
 	}
 	_ = w.WriteAny(ctx, reflowpkg.CheckpointWriterStatsRecordType, rec)
 }

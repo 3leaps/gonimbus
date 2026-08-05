@@ -409,3 +409,91 @@ func TestWriterStatsNilStore(t *testing.T) {
 		t.Fatalf("nil store stats = %+v", got)
 	}
 }
+
+// TestRawExecSavepointElisionOffDefault: flag off creates savepoints for Mark/Note
+// (raw exec) and Upsert (execTx); elided stays 0.
+func TestRawExecSavepointElisionOffDefault(t *testing.T) {
+	ctx := context.Background()
+	store := mustOpen(t)
+	defer func() { _ = store.Close() }()
+
+	if err := store.MarkDestKeyObserved(ctx, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteDestKeySource(ctx, "k1", "s3://src/1", "e", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertItem(ctx, UpsertItemParams{
+		SourceURI: "s3://src/1", DestURI: "s3://dst/1", DestKey: "k1",
+		Status: "complete", Bytes: 1, SourceSize: 1, SourceETag: "e",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st := store.WriterStats()
+	if st.SavepointsElided != 0 {
+		t.Fatalf("elided=%d want 0 with flag off", st.SavepointsElided)
+	}
+	if st.SavepointsCreated < 3 {
+		t.Fatalf("created=%d want >= 3 (mark+note+upsert)", st.SavepointsCreated)
+	}
+}
+
+// TestRawExecSavepointElisionOn: raw Mark/Note elide; Upsert (execTx) still creates.
+func TestRawExecSavepointElisionOn(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{
+		Path:                   filepath.Join(t.TempDir(), "state.db"),
+		ElideRawExecSavepoints: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.MarkDestKeyObserved(ctx, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteDestKeySource(ctx, "k1", "s3://src/1", "e", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertItem(ctx, UpsertItemParams{
+		SourceURI: "s3://src/1", DestURI: "s3://dst/1", DestKey: "k1",
+		Status: "complete", Bytes: 1, SourceSize: 1, SourceETag: "e",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st := store.WriterStats()
+	if st.SavepointsElided < 2 {
+		t.Fatalf("elided=%d want >= 2 (mark+note)", st.SavepointsElided)
+	}
+	if st.SavepointsCreated < 1 {
+		t.Fatalf("created=%d want >= 1 (upsert execTx)", st.SavepointsCreated)
+	}
+	// Designed refusal still works on execTx with savepoints.
+	// Identity collision via second upsert with different source is product path;
+	// structural gate already covers refusal savepoint rollback elsewhere.
+}
+
+// TestRawExecSQLFatalStillFailsWriterWithElision: bad SQL on raw path is batch-fatal.
+func TestRawExecSQLFatalStillFailsWriterWithElision(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{
+		Path:                   filepath.Join(t.TempDir(), "state.db"),
+		ElideRawExecSavepoints: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	err = store.writer.exec(ctx, "INSERT INTO reflow_no_such_table (x) VALUES (?)", 1)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !errors.Is(err, ErrWriterFailed) {
+		// exec wraps; may be bare SQL error from await — check coordinator failed
+		if store.writer.err() == nil {
+			t.Fatalf("writer not failed after bad SQL: %v", err)
+		}
+	}
+}

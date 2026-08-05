@@ -40,6 +40,10 @@ const (
 // writeRequest is one unit of work handed to the coordinator: either a single
 // mutation statement coalesced into a batched transaction (reqExec), or a read
 // executed on the pinned connection between batches (reqQuery).
+//
+// Raw exec (stmt path, exec==nil) is never refusal-capable: SQL errors are
+// always batch-fatal. execTx (exec!=nil) may return requestRefusal and needs a
+// per-request savepoint for request-local rollback.
 type writeRequest struct {
 	kind  reqKind
 	stmt  string
@@ -47,6 +51,12 @@ type writeRequest struct {
 	exec  func(ctx context.Context, tx *sql.Tx) error
 	query func(ctx context.Context, conn *sql.Conn) error
 	done  chan error
+}
+
+// refusalCapable is true for execTx requests (custom exec body) that may return
+// a designed requestRefusal. Raw stmt exec is never refusal-capable.
+func (r *writeRequest) refusalCapable() bool {
+	return r != nil && r.exec != nil
 }
 
 // requestRefusal marks a designed state conflict rather than a durability
@@ -137,6 +147,11 @@ type coordinator struct {
 	// metrics are always-on cheap aggregates for Store.WriterStats().
 	// Snapshot-only public surface: no callback observer on the writer path.
 	metrics writerMetrics
+
+	// elideRawExecSavepoints is experimental default-off: skip SAVEPOINT/RELEASE
+	// around raw writer.exec (stmt) requests only. execTx always keeps savepoints.
+	// Set at Open from Config / env; never toggled after start.
+	elideRawExecSavepoints bool
 }
 
 func newCoordinator(db *sql.DB) *coordinator {
@@ -270,10 +285,15 @@ func (c *coordinator) serveQuery(req *writeRequest) {
 }
 
 // commit executes the batch inside a single transaction on the pinned
-// connection. Each request has a savepoint so a designed logical refusal can
-// roll back only that request while unrelated requests still cross the same
-// durable COMMIT barrier. SQL, savepoint, and commit errors remain fatal: they
-// roll the whole batch back and are reported to every batched caller.
+// connection. By default each request has a savepoint so a designed logical
+// refusal can roll back only that request while unrelated requests still cross
+// the same durable COMMIT barrier.
+//
+// When elideRawExecSavepoints is set, raw writer.exec (stmt, non-refusal-capable)
+// requests omit SAVEPOINT/RELEASE; execTx requests always keep savepoints.
+// SQL, savepoint, and commit errors remain fatal: they roll the whole batch
+// back and are reported to every batched caller. A refusal on an elided path
+// is treated as batch-fatal (raw exec is not refusal-capable).
 func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 	if c.injectCommit != nil {
 		if err := c.injectCommit(); err != nil {
@@ -286,10 +306,18 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 	}
 	results := make([]error, len(batch))
 	for i, req := range batch {
+		// Elide only raw stmt exec when the experimental flag is on.
+		// execTx (refusal-capable) always takes the savepoint path.
+		useSavepoint := req.refusalCapable() || !c.elideRawExecSavepoints
 		savepoint := fmt.Sprintf("reflow_request_%d", i)
-		if _, err := tx.ExecContext(c.baseCtx, "SAVEPOINT "+savepoint); err != nil {
-			_ = tx.Rollback()
-			return nil, err
+		if useSavepoint {
+			c.metrics.savepointsCreated.Add(1)
+			if _, err := tx.ExecContext(c.baseCtx, "SAVEPOINT "+savepoint); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
+		} else {
+			c.metrics.savepointsElided.Add(1)
 		}
 		var err error
 		if req.exec != nil {
@@ -303,6 +331,12 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 				_ = tx.Rollback()
 				return nil, err
 			}
+			if !useSavepoint {
+				// Designed refusals require a savepoint; raw-elided path must not
+				// claim request-local rollback. Fail the whole batch.
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("%w: request refusal without savepoint: %v", ErrWriterFailed, refusal)
+			}
 			if _, rollbackErr := tx.ExecContext(c.baseCtx, "ROLLBACK TO SAVEPOINT "+savepoint); rollbackErr != nil {
 				_ = tx.Rollback()
 				return nil, rollbackErr
@@ -314,9 +348,11 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 			results[i] = refusal
 			continue
 		}
-		if _, err := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); err != nil {
-			_ = tx.Rollback()
-			return nil, err
+		if useSavepoint {
+			if _, err := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
