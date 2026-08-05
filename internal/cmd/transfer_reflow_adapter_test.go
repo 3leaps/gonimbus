@@ -1333,21 +1333,24 @@ func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSav
 	// all attempts IfAbsent, no unconditional writes.
 	dst.requireExactlyOneLandPerKey(t, expectedKeys)
 
-	// Writer must not have been poisoned across cancel + resume.
-	statsStore, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
-	require.NoError(t, err)
-	st := statsStore.WriterStats()
-	require.NoError(t, statsStore.Close())
-	require.Zero(t, st.CommitFatals, "writer CommitFatals must stay 0")
-	require.Zero(t, st.BarrierWriterFailed, "writer must not report BarrierWriterFailed")
+	// Writer health + elision identity: observe process-local counters from the
+	// emitted gonimbus.reflow.checkpoint_writer_stats.v1 record for the resume arm
+	// (snapshot before that command's store Close). Opening a fresh Store on the
+	// same DB path would start a new coordinator with zeroed stats and make
+	// CommitFatals/elision assertions vacuous (entarch NEEDS_FIX at 5d8f901).
+	//
+	// The canceled arm may also emit stats without a summary (engine path); those
+	// are not the resume-arm proof surface.
+	statsRec := requireRecord(t, stdout2.String(), reflowpkg.CheckpointWriterStatsRecordType, "")
+	var st reflowpkg.CheckpointWriterStatsRecord
+	require.NoError(t, json.Unmarshal(statsRec.Data, &st))
+	require.Zero(t, st.CommitFatals, "resume-arm emitted CommitFatals must stay 0")
+	require.Zero(t, st.BarrierWriterFailed, "resume-arm emitted BarrierWriterFailed must stay 0")
+	require.Greater(t, st.SavepointsCreated, int64(0), "terminal Upsert (execTx) must create savepoints")
 	if elideRawExecSavepoints {
-		// Resume path exercises Mark/Note raw exec; elision should be observed
-		// when the experimental env is set (stdin/index path still uses mark/note).
-		// Do not require a minimum elision count here: object mix may vary; require
-		// only that the flag does not force writer fatals (above) and that created
-		// counters remain non-negative.
-		require.GreaterOrEqual(t, st.SavepointsCreated, int64(0))
-		require.GreaterOrEqual(t, st.SavepointsElided, int64(0))
+		require.Greater(t, st.SavepointsElided, int64(0), "elision-on resume arm must elide raw-exec savepoints")
+	} else {
+		require.Zero(t, st.SavepointsElided, "elision-off resume arm must not elide savepoints")
 	}
 }
 
