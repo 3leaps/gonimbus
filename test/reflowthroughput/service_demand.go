@@ -596,11 +596,6 @@ func ValidateServiceDemandFormalSet(cells []ServiceDemandCell) error {
 	return nil
 }
 
-// serviceDemandCellsAreFormal is true iff ValidateServiceDemandFormalSet succeeds.
-func serviceDemandCellsAreFormal(cells []ServiceDemandCell) bool {
-	return ValidateServiceDemandFormalSet(cells) == nil
-}
-
 func writerStatsFromRecord(r reflow.CheckpointWriterStatsRecord) reflowstate.WriterStats {
 	return reflowstate.WriterStats{
 		MaxBatch:              r.MaxBatch,
