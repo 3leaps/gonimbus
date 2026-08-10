@@ -36,10 +36,10 @@ type Config struct {
 	// ElideRawExecSavepoints is an experimental default-off switch: when true,
 	// the write coordinator omits SAVEPOINT/RELEASE around raw writer.exec
 	// (SQL statement) mutations. execTx paths always keep savepoints so designed
-	// request-local refusals still work. Enable only for measured A/B; product
-	// default remains false. Dirty-binary override:
+	// request-local refusals still work. Product default remains false — this is
+	// not a recommended production setting. Optional measure-only override:
 	// GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS=1 (or "true") also enables this
-	// when Config does not already set it true.
+	// when Config does not already set it true. Leave unset for normal use.
 	ElideRawExecSavepoints bool
 }
 

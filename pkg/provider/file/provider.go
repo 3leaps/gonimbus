@@ -451,9 +451,11 @@ func (p *Provider) putObjectIfAbsent(ctx context.Context, key, full string, body
 		}
 		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
 	}
-	// Temp is a second hard link to the same inode; remove the staging name.
-	_ = os.Remove(tmpName)
-	cleanup = false
+	// Final is durable. Staging path is a second hard link — best-effort remove.
+	// If immediate unlink fails, leave cleanup=true so defer retries removal.
+	if err := os.Remove(tmpName); err == nil {
+		cleanup = false
+	}
 
 	token, err := p.statVersion(full)
 	if err != nil {

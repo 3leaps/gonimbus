@@ -307,8 +307,10 @@ any object twice.
 **Stated limits of the current guarantees** (tracked, not claimed):
 
 - Interruption/resume guarantees are proven for in-process cancellation with
-  in-flight work and real checkpoint state; hard process-kill (SIGKILL)
-  crash-window behavior is not claimed yet.
+  in-flight work and real checkpoint state. File destinations using IfAbsent
+  publish via same-directory staging plus no-replace link so a hard interrupt
+  mid-write does not leave a visible partial final object; full process-kill
+  crash-window coverage for every provider path is not claimed yet.
 - Concurrent multi-process runs sharing one checkpoint root are not claimed;
   run one transfer per checkpoint at a time.
 - The resume pre-check (`ItemDone`) is a best-effort skip; per-destination-key
@@ -488,6 +490,11 @@ gonimbus transfer reflow --stdin \
 operation checkpoint and does not accept a second foreground config surface.
 
 The checkpoint database tracks which objects have been successfully copied.
+
+**Experimental (default off):** raw-exec savepoint elision may be enabled only
+for measured A/B via `GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS=1` (or `true`).
+It is not a product default and is not a recommended operator setting for
+production reflow; leave it unset unless you are running an explicit experiment.
 Resume skips completed objects and picks up where it left off.
 
 If a fatal interruption is resumable, Gonimbus also emits a
