@@ -14,7 +14,7 @@ import (
 	"github.com/3leaps/gonimbus/pkg/reflowstate"
 )
 
-// Provider-free checkpoint service-demand grid (GON-066 Day-0 / freeze v2 PATH_AB).
+// Provider-free checkpoint service-demand grid (service-demand formal contract).
 // No object copy or provider in the timed region.
 
 const (
@@ -41,11 +41,11 @@ type ServiceDemandScheduleID string
 const (
 	ServiceDemandScheduleR1 ServiceDemandScheduleID = "R1"
 	ServiceDemandScheduleR2 ServiceDemandScheduleID = "R2"
-	ServiceDemandScheduleR3 ServiceDemandScheduleID = "R3"
+	ServiceDemandScheduleR3 ServiceDemandScheduleID = "provenance gate"
 )
 
 // ServiceDemandFormalSchedules are the exact three formal rep orders (Day-0 AC).
-// Rep 1→R1, rep 2→R2, rep 3→R3. Pilot rep 0 may reuse R1 and is excluded from
+// Rep 1→R1, rep 2→R2, rep 3→provenance gate. Pilot rep 0 may reuse R1 and is excluded from
 // formal classifier input.
 var ServiceDemandFormalSchedules = map[ServiceDemandScheduleID][]int{
 	ServiceDemandScheduleR1: {8, 32, 64, 128, 256, 512},
@@ -691,7 +691,7 @@ const (
 	ServiceDemandInconclusive     ServiceDemandDisposition = "inconclusive"
 )
 
-// Day-0 classifier constants (EXECUTION-PLAN PATH_AB).
+// service-demand classifier constants (formal service-demand plan).
 const (
 	ServiceDemandUtilMinHighN   = 0.85 // util median floor at each of 64..512
 	ServiceDemandPlateauRatio   = 1.05 // mut/s@512 ≤ 1.05 × mut/s@128

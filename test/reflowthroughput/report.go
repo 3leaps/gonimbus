@@ -28,11 +28,11 @@ type Report struct {
 	BinarySHA256  string `json:"binary_sha256"`
 
 	// Instrument identity is the harness (test binary / worktree), distinct from
-	// the measured child Binary* fields (GON-066 C1 / R3). Never backfill
+	// the measured child Binary* fields (checkpoint measure / provenance gate). Never backfill
 	// BinaryCommit from instrument HEAD.
 	InstrumentCommit string `json:"instrument_commit,omitempty"`
 	InstrumentSHA256 string `json:"instrument_sha256,omitempty"`
-	InstrumentDirty   bool   `json:"instrument_dirty"` // always present: false=clean, true=dirty (probe fail aborts run)
+	InstrumentDirty  bool   `json:"instrument_dirty"` // always present: false=clean, true=dirty (probe fail aborts run)
 
 	// Checkpoint-scale schedule provenance (empty for other profiles).
 	ScheduleID    string   `json:"schedule_id,omitempty"`
@@ -99,7 +99,7 @@ type PointReport struct {
 	AdaptiveEnabled      *bool   `json:"adaptive_enabled,omitempty"`
 
 	// CheckpointWriterStats is sterile checkpoint-writer diagnostics from the
-	// child when emitted (GON-066 C1). Measure-first only — not product
+	// child when emitted (checkpoint measure). Measure-first only — not product
 	// throughput marketing. Omitted when the child did not emit the record.
 	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord `json:"checkpoint_writer_stats,omitempty"`
 
@@ -249,7 +249,7 @@ func ValidateReportEnvelope(r Report) error {
 			return err
 		}
 		// Retained checkpoint-scale reports must publish writer-stats evidence
-		// on every reflow point (GON-066 C1 / entarch admission gate).
+		// on every reflow point (checkpoint measure / entarch admission gate).
 		if profileRequiresCheckpointWriterStats(r.Profile) {
 			if p.CheckpointWriterStats == nil {
 				return fmt.Errorf("point %d: profile %s requires checkpoint_writer_stats (missing — arm non-comparable)", i, r.Profile)

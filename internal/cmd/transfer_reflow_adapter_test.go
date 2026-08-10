@@ -1143,7 +1143,7 @@ func (p *gateAfterProvider) GetObject(ctx context.Context, key string) (io.ReadC
 // objects copy — and no object is ever landed twice.
 //
 // Dual arms cover default (elision off) and experimental raw-exec savepoint
-// elision on (GON-066 Phase A residual dig): both must converge with failed=0.
+// elision on (elision dual-arm residual): both must converge with failed=0.
 func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1337,7 +1337,7 @@ func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSav
 	// emitted gonimbus.reflow.checkpoint_writer_stats.v1 record for the resume arm
 	// (snapshot before that command's store Close). Opening a fresh Store on the
 	// same DB path would start a new coordinator with zeroed stats and make
-	// CommitFatals/elision assertions vacuous (entarch NEEDS_FIX at 5d8f901).
+	// CommitFatals/elision assertions vacuous (vacuous process-local counters).
 	//
 	// The canceled arm may also emit stats without a summary (engine path); those
 	// are not the resume-arm proof surface.

@@ -52,7 +52,7 @@ type Options struct {
 	// CEILING_LIFT_GOMEMLIMIT spelling.
 	ConstrainedGOMEMLIMIT string
 	// WorktreeCommit is optional instrument commit override (harness identity).
-	// It is NEVER applied to measured BinaryCommit (GON-066 R3).
+	// It is NEVER applied to measured BinaryCommit (retained-measure provenance).
 	WorktreeCommit string
 	// ScheduleID selects checkpoint-scale counterbalancing plan
 	// (disk_first_odd default; tmpfs_first_odd reverse). Ignored for other profiles.
@@ -311,13 +311,13 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 		return Report{}, err
 	}
 	// Capture version/commit from the measured binary only. Unknown stays unknown —
-	// never backfill BinaryCommit from harness HEAD / WorktreeCommit (GON-066 R3).
+	// never backfill BinaryCommit from harness HEAD / WorktreeCommit (retained-measure provenance).
 	binVer, binCommit := probeBinaryIdentity(ctx, absBin)
 	binCommit = NormalizeMeasuredBinaryCommit(binCommit)
 
 	// Instrument = harness process (this test binary content) + worktree commit/dirty.
 	// Capture once before arms; re-probe after last arm and fail if either mutates
-	// (GON-066 R3 — fail-closed provenance, not omitempty false clean).
+	// (retained-measure provenance — fail-closed provenance, not omitempty false clean).
 	instSHA, instCommit, instDirty, err := captureInstrumentIdentity(opts.WorktreeCommit)
 	if err != nil {
 		return Report{}, err
@@ -707,7 +707,7 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 				return fmt.Errorf("point %s honesty: %s", pointID, honesty.Message)
 			}
 			honestyOK = boolPtrVal(true)
-			// GON-066 C1: retained checkpoint-scale arms fail closed without
+			// checkpoint measure: retained checkpoint-scale arms fail closed without
 			// exactly one post-summary, structurally valid writer-stats record.
 			if profileRequiresCheckpointWriterStats(spec.Name) {
 				if err := CheckCheckpointWriterStatsAdmission(parsed); err != nil {
@@ -1083,7 +1083,7 @@ func gitWorktreeDirty() (bool, error) {
 
 // captureInstrumentIdentity records harness process content SHA plus Git
 // commit/dirty for provenance. Probe failures never become "clean" or empty
-// commit that could be admitted as known-good (GON-066 R3).
+// commit that could be admitted as known-good (retained-measure provenance).
 //
 // worktreeCommitOverride, when non-empty, replaces the Git HEAD probe (tests).
 func captureInstrumentIdentity(worktreeCommitOverride string) (sha, commit string, dirty bool, err error) {

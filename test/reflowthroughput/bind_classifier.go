@@ -2,7 +2,7 @@ package reflowthroughput
 
 import "math"
 
-// Frozen numeric constants (GON-066 C1 bind rule — pre-registered).
+// Frozen numeric constants (checkpoint measure bind rule — pre-registered).
 const (
 	BindFBlkMin   = 0.05 // blocked fraction floor for arm writer pressure
 	BindROccMin   = 0.50 // occupancy ratio floor
@@ -99,7 +99,7 @@ func E2EDelta(tDisk, tTmpfs float64) float64 {
 
 // NormalizeMeasuredBinaryCommit maps probe output to the measured-binary commit
 // field. Empty becomes "unknown". Worktree/instrument identity must never be
-// passed here (GON-066 R3) — this helper intentionally has no fallback args.
+// passed here (retained-measure provenance) — this helper intentionally has no fallback args.
 func NormalizeMeasuredBinaryCommit(probeCommit string) string {
 	if probeCommit == "" {
 		return "unknown"

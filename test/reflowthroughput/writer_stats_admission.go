@@ -7,7 +7,7 @@ import (
 )
 
 // CheckCheckpointWriterStatsAdmission enforces the measurement-harness
-// fail-closed contract for retained C1 evidence (GON-066 / entarch P1):
+// fail-closed contract for retained checkpoint-scale evidence (retained-measure admission):
 //
 //   - exactly one gonimbus.reflow.checkpoint_writer_stats.v1 record
 //   - that record appears only after the single summary

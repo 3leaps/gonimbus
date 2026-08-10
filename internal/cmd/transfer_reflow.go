@@ -459,7 +459,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	// drift, never a pool fall-through.
 	if enginePlan.enabled {
 		engineErr := runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
-		// Sterile checkpoint-writer diagnostics after engine summary (GON-066 C1).
+		// Sterile checkpoint-writer diagnostics after engine summary (checkpoint measure).
 		emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
 		return engineErr
 	}
@@ -1286,7 +1286,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	close(tasks)
 	wg.Wait()
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
-	// Sterile checkpoint-writer diagnostics for measure-first (GON-066 C1).
+	// Sterile checkpoint-writer diagnostics for measure-first (checkpoint measure).
 	// Snapshot before Close (deferred); process-local aggregates only.
 	emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
 

@@ -71,7 +71,7 @@ type ParsedReflowOutput struct {
 
 	// CheckpointWriterStats is the sterile end-of-run checkpoint writer
 	// diagnostic snapshot when the child emitted
-	// gonimbus.reflow.checkpoint_writer_stats.v1 (GON-066 C1). Nil when absent.
+	// gonimbus.reflow.checkpoint_writer_stats.v1 (checkpoint measure). Nil when absent.
 	// Measure-first only — not product throughput evidence.
 	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord
 	// CheckpointWriterStatsCount is how many stats records appeared (exactly

@@ -80,7 +80,7 @@ func TestParseRejectsUnknownType(t *testing.T) {
 	}
 }
 
-// Checkpoint writer stats is a known sterile measure-first type (GON-066 C1);
+// Checkpoint writer stats is a known sterile measure-first type (checkpoint measure);
 // it must not fail as unknown and must surface on the parse for reports.
 func TestParseCheckpointWriterStats(t *testing.T) {
 	t.Parallel()

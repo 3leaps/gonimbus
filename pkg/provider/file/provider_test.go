@@ -581,7 +581,7 @@ func TestPutObjectConditionalIfAbsentWrongContentUnchanged(t *testing.T) {
 }
 
 func TestListExcludesIfAbsentTempExactShapeOnly(t *testing.T) {
-	// T-list-orphan + T-list-filter-exact (devrev ASSENT_WITH_NITS).
+	// T-list-orphan + T-list-filter-exact (exact-shape List filter review).
 	ctx := context.Background()
 	baseDir := t.TempDir()
 	p, err := New(Config{BaseDir: baseDir})
