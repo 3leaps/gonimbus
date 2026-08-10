@@ -79,3 +79,27 @@ func TestParseRejectsUnknownType(t *testing.T) {
 		t.Fatal("expected unknown type error")
 	}
 }
+
+// Checkpoint writer stats is a known sterile measure-first type (checkpoint measure);
+// it must not fail as unknown and must surface on the parse for reports.
+func TestParseCheckpointWriterStats(t *testing.T) {
+	t.Parallel()
+	stdout := strings.Join([]string{
+		`{"type":"gonimbus.reflow.run.v1","data":{"dest_uri":"x","checkpoint_path":"y","dry_run":false,"resume":false,"parallel":8,"adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":4}}`,
+		`{"type":"gonimbus.reflow.summary.v1","data":{"dest_uri":"x","dry_run":false,"on_collision":"skip-if-duplicate","adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":8,"concurrency_ceiling_requested":8,"concurrency_ceiling_effective":8,"concurrency_ceiling_reason":"requested","concurrency_final":8,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":4,"dest_ifabsent_honored":null,"fallback_active":false,"ifabsent_fallback_objects":0,"statuses":{"complete":1},"errors":0,"invalid_inputs":0}}`,
+		`{"type":"gonimbus.reflow.checkpoint_writer_stats.v1","data":{"max_batch":256,"admissions":10,"admission_blocked":2,"barriers":10,"barrier_ok":10,"batches":3,"batch_size_sum":10,"batch_size_max":4,"commits":3,"batch_duration_nanos":1000,"batch_duration_max_nanos":500}}`,
+	}, "\n") + "\n"
+	p, err := ParseReflowStdout([]byte(stdout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CheckpointWriterStats == nil {
+		t.Fatal("expected CheckpointWriterStats")
+	}
+	if p.CheckpointWriterStats.MaxBatch != 256 || p.CheckpointWriterStats.Admissions != 10 {
+		t.Fatalf("stats=%+v", p.CheckpointWriterStats)
+	}
+	if p.CheckpointWriterStats.AdmissionBlocked != 2 || p.CheckpointWriterStats.BatchDurationNanos != 1000 {
+		t.Fatalf("pressure/duration fields: %+v", p.CheckpointWriterStats)
+	}
+}

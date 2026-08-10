@@ -166,10 +166,10 @@ func init() {
 	transferReflowCmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "Disable adaptive concurrency and run fixed at the resource-capped --parallel ceiling")
 	transferReflowCmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "Memory budget governing transfer retry buffering and concurrency sizing — not total process or provider-SDK memory (e.g. 8GiB; min 64MiB, max 4TiB; values above the detected memory limit are clamped to it; omitted: 25% of the detected limit)")
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
-	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume from checkpoint (requires --checkpoint)")
-	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume a failed-resumable transfer reflow run by run id")
+	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume an item-checkpoint run: re-supply the full original invocation plus the same --checkpoint path (do not combine with --resume-run)")
+	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume by operation run id from a resumable failure hint: restores checkpointed config and rejects foreground flags such as --checkpoint, --dest, or source args (use --resume + --checkpoint for an explicit DB path)")
 	transferReflowCmd.Flags().StringVar(&reflowRunID, "run-id", "", "Use a specific run id for a new run (default: a generated id). Must be a single safe identifier segment (letters, digits, '.', '-', '_'; no path separators or '..'). Provenance run.run_id and the checkpoint key derive from it; reusing an id targets that run's existing checkpoint")
-	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Checkpoint DB path (sqlite)")
+	transferReflowCmd.Flags().StringVar(&reflowCheckpoint, "checkpoint", "", "Item-checkpoint SQLite DB path; pair with --resume and the full original args (not with --resume-run)")
 	transferReflowCmd.Flags().BoolVar(&reflowOverwrite, "overwrite", false, "Allow overwriting destination objects")
 	transferReflowCmd.Flags().StringVar(&reflowOnCollision, "on-collision", reflowCollisionSkip, "Collision policy: skip-if-duplicate|fail|overwrite|quarantine|overwrite-if-source-newer (log is a deprecated alias)")
 	transferReflowCmd.Flags().StringVar(&reflowCollQuar, "collision-quarantine-prefix", "", "Relative destination prefix for --on-collision=quarantine")
@@ -458,7 +458,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	// helper fails closed on any engine error — an ErrNotImplemented is contract
 	// drift, never a pool fall-through.
 	if enginePlan.enabled {
-		return runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		engineErr := runEnabledTransferReflowEngine(ctx, enginePlan, runTransferReflowViaEngine, w, checkpointPath, reflowResume, provCfg, metaCfg)
+		// Sterile checkpoint-writer diagnostics after engine summary (checkpoint measure).
+		emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
+		return engineErr
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
@@ -1283,6 +1286,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	close(tasks)
 	wg.Wait()
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
+	// Sterile checkpoint-writer diagnostics for measure-first (checkpoint measure).
+	// Snapshot before Close (deferred); process-local aggregates only.
+	emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
 
 	fatalRunErr := currentFatalReflowError()
 	if fatalRunErr != nil || ctx.Err() != nil {

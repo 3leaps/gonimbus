@@ -75,7 +75,8 @@ func Generate(opts GenerateOptions) (GeneratedCorpus, error) {
 		})
 		// Absolute file:// URI form accepted by transfer reflow stdin file records.
 		srcURI := fileURIFromAbs(abs)
-		line, err := marshalReflowInputLine(srcURI, rel, int64(len(body)), digest)
+		// Local file: source key is the path under the source root (same as destRel).
+		line, err := marshalReflowInputLine(srcURI, rel, rel, int64(len(body)), digest)
 		if err != nil {
 			return GeneratedCorpus{}, err
 		}
@@ -123,12 +124,19 @@ func Generate(opts GenerateOptions) (GeneratedCorpus, error) {
 	}, nil
 }
 
-func marshalReflowInputLine(sourceURI, destRel string, size int64, etag string) (string, error) {
+// marshalReflowInputLine builds one gonimbus.reflow.input.v1 line.
+//
+// sourceKey must be the object key the product will Get (for S3, the full key
+// including any minted prefix). destRel is the destination-relative mapping
+// only. Reflow prefers data.source_key over the key parsed from source_uri when
+// source_key is non-empty — putting destRel in source_key drops the upload
+// prefix and every Get becomes not_found (moto/BYO harness bug class).
+func marshalReflowInputLine(sourceURI, sourceKey, destRel string, size int64, etag string) (string, error) {
 	// ETag is not meaningful for local files; use content digest as a sterile stand-in
 	// so records remain well-formed for skip-if-duplicate comparisons when applicable.
 	data := map[string]any{
 		"source_uri":           sourceURI,
-		"source_key":           destRel,
+		"source_key":           sourceKey,
 		"source_etag":          etag,
 		"source_size_bytes":    size,
 		"source_last_modified": "2026-01-17T00:00:00Z",

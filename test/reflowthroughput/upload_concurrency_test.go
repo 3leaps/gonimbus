@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
 // Controls for concurrent corpus staging. Each drives the real uploadCorpus
@@ -184,22 +186,36 @@ func TestCorpusUploadConcurrencyOverride(t *testing.T) {
 	}
 }
 
-// The provider config must size the connection pool. Left at zero the S3
-// provider hands the SDK a nil HTTP client and it falls back to Go's default
-// transport, which keeps 2 idle connections per host -- a 16-way fan-out would
-// then be mostly TLS handshakes and the concurrency above would not deliver.
+// The provider config must size the connection pool through the shared product
+// resolver (provider.ResolveConnectionPool). Left at zero the S3 provider hands
+// the SDK a nil HTTP client and it falls back to Go's default transport, which
+// keeps 2 idle connections per host -- a 16-way fan-out would then be mostly
+// TLS handshakes and the concurrency above would not deliver.
 func TestProviderConfigSizesConnectionPool(t *testing.T) {
 	t.Setenv("GONIMBUS_THROUGHPUT_UPLOAD_CONCURRENCY", "12")
 	cfg := BYOS3Config{Bucket: "b"}.ProviderConfig()
 
-	if cfg.MaxIdleConnsPerHost != 12 {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want 12 (pool must track the fan-out)", cfg.MaxIdleConnsPerHost)
+	want, err := provider.ResolveConnectionPool(12)
+	if err != nil {
+		t.Fatalf("ResolveConnectionPool(12): %v", err)
 	}
-	if cfg.MaxConnsPerHost != 12 {
-		t.Fatalf("MaxConnsPerHost = %d, want 12", cfg.MaxConnsPerHost)
+	if cfg.MaxIdleConnsPerHost != want.MaxIdleConnsPerHost || cfg.MaxConnsPerHost != want.MaxConnsPerHost {
+		t.Fatalf("pool knobs = idle=%d max=%d, want idle=%d max=%d (single authority: ResolveConnectionPool)",
+			cfg.MaxIdleConnsPerHost, cfg.MaxConnsPerHost, want.MaxIdleConnsPerHost, want.MaxConnsPerHost)
 	}
 	if cfg.MaxIdleConnsPerHost <= 2 {
 		t.Fatalf("pool of %d is at or below Go's default of 2: staging would be handshake-bound", cfg.MaxIdleConnsPerHost)
+	}
+}
+
+// N < 2 must leave SDK defaults (zero policy), matching product
+// ResolveConnectionPool semantics — not invent 1/1 knobs.
+func TestProviderConfigPoolUsesSharedResolverForN1(t *testing.T) {
+	t.Setenv("GONIMBUS_THROUGHPUT_UPLOAD_CONCURRENCY", "1")
+	cfg := BYOS3Config{Bucket: "b"}.ProviderConfig()
+	if cfg.MaxIdleConnsPerHost != 0 || cfg.MaxConnsPerHost != 0 {
+		t.Fatalf("N=1 pool knobs = idle=%d max=%d, want 0/0 (SDK defaults via ResolveConnectionPool)",
+			cfg.MaxIdleConnsPerHost, cfg.MaxConnsPerHost)
 	}
 }
 

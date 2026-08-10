@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
@@ -39,6 +40,10 @@ const (
 // writeRequest is one unit of work handed to the coordinator: either a single
 // mutation statement coalesced into a batched transaction (reqExec), or a read
 // executed on the pinned connection between batches (reqQuery).
+//
+// Raw exec (stmt path, exec==nil) is never refusal-capable: SQL errors are
+// always batch-fatal. execTx (exec!=nil) may return requestRefusal and needs a
+// per-request savepoint for request-local rollback.
 type writeRequest struct {
 	kind  reqKind
 	stmt  string
@@ -46,6 +51,12 @@ type writeRequest struct {
 	exec  func(ctx context.Context, tx *sql.Tx) error
 	query func(ctx context.Context, conn *sql.Conn) error
 	done  chan error
+}
+
+// refusalCapable is true for execTx requests (custom exec body) that may return
+// a designed requestRefusal. Raw stmt exec is never refusal-capable.
+func (r *writeRequest) refusalCapable() bool {
+	return r != nil && r.exec != nil
 }
 
 // requestRefusal marks a designed state conflict rather than a durability
@@ -132,6 +143,15 @@ type coordinator struct {
 	// in-package test can assert a genuine multi-request batch was assembled rather
 	// than inferring size from behavior. Set only by in-package tests.
 	onBatchAssembled func(n int)
+
+	// metrics are always-on cheap aggregates for Store.WriterStats().
+	// Snapshot-only public surface: no callback observer on the writer path.
+	metrics writerMetrics
+
+	// elideRawExecSavepoints is experimental default-off: skip SAVEPOINT/RELEASE
+	// around raw writer.exec (stmt) requests only. execTx always keeps savepoints.
+	// Set at Open from Config / env; never toggled after start.
+	elideRawExecSavepoints bool
 }
 
 func newCoordinator(db *sql.DB) *coordinator {
@@ -221,10 +241,25 @@ func (c *coordinator) serveBatch(first *writeRequest) bool {
 		}
 	}
 flush:
+	size := len(batch)
 	if c.onBatchAssembled != nil {
-		c.onBatchAssembled(len(batch))
+		c.onBatchAssembled(size)
 	}
+	// BatchDuration* covers the full c.commit(batch) wall time (BeginTx through
+	// tx.Commit), not storage COMMIT alone. Metrics update before result publish
+	// so snapshots stay live without delaying or branching on external sinks.
+	start := time.Now()
 	results, err := c.commit(batch)
+	dur := time.Since(start)
+	refusals := 0
+	if err == nil {
+		for _, r := range results {
+			if r != nil {
+				refusals++
+			}
+		}
+	}
+	c.metrics.noteBatch(size, dur, refusals, err != nil)
 	if err != nil {
 		// ErrWriterFailed is the shared batch disposition. Keep the underlying
 		// statement text diagnostic-only: wrapping a request-local logical error
@@ -250,10 +285,15 @@ func (c *coordinator) serveQuery(req *writeRequest) {
 }
 
 // commit executes the batch inside a single transaction on the pinned
-// connection. Each request has a savepoint so a designed logical refusal can
-// roll back only that request while unrelated requests still cross the same
-// durable COMMIT barrier. SQL, savepoint, and commit errors remain fatal: they
-// roll the whole batch back and are reported to every batched caller.
+// connection. By default each request has a savepoint so a designed logical
+// refusal can roll back only that request while unrelated requests still cross
+// the same durable COMMIT barrier.
+//
+// When elideRawExecSavepoints is set, raw writer.exec (stmt, non-refusal-capable)
+// requests omit SAVEPOINT/RELEASE; execTx requests always keep savepoints.
+// SQL, savepoint, and commit errors remain fatal: they roll the whole batch
+// back and are reported to every batched caller. A refusal on an elided path
+// is treated as batch-fatal (raw exec is not refusal-capable).
 func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 	if c.injectCommit != nil {
 		if err := c.injectCommit(); err != nil {
@@ -266,10 +306,18 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 	}
 	results := make([]error, len(batch))
 	for i, req := range batch {
+		// Elide only raw stmt exec when the experimental flag is on.
+		// execTx (refusal-capable) always takes the savepoint path.
+		useSavepoint := req.refusalCapable() || !c.elideRawExecSavepoints
 		savepoint := fmt.Sprintf("reflow_request_%d", i)
-		if _, err := tx.ExecContext(c.baseCtx, "SAVEPOINT "+savepoint); err != nil {
-			_ = tx.Rollback()
-			return nil, err
+		if useSavepoint {
+			c.metrics.savepointsCreated.Add(1)
+			if _, err := tx.ExecContext(c.baseCtx, "SAVEPOINT "+savepoint); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
+		} else {
+			c.metrics.savepointsElided.Add(1)
 		}
 		var err error
 		if req.exec != nil {
@@ -283,6 +331,12 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 				_ = tx.Rollback()
 				return nil, err
 			}
+			if !useSavepoint {
+				// Designed refusals require a savepoint; raw-elided path must not
+				// claim request-local rollback. Fail the whole batch.
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("%w: request refusal without savepoint: %v", ErrWriterFailed, refusal)
+			}
 			if _, rollbackErr := tx.ExecContext(c.baseCtx, "ROLLBACK TO SAVEPOINT "+savepoint); rollbackErr != nil {
 				_ = tx.Rollback()
 				return nil, rollbackErr
@@ -294,9 +348,11 @@ func (c *coordinator) commit(batch []*writeRequest) ([]error, error) {
 			results[i] = refusal
 			continue
 		}
-		if _, err := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); err != nil {
-			_ = tx.Rollback()
-			return nil, err
+		if useSavepoint {
+			if _, err := tx.ExecContext(c.baseCtx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -342,8 +398,14 @@ func (c *coordinator) execTx(ctx context.Context, fn func(context.Context, *sql.
 }
 
 func (c *coordinator) submitExec(ctx context.Context, req *writeRequest) error {
+	// Approximate occupancy before this send. Documented as approximate on
+	// WriterStats: concurrent drain/admit can race the sample.
+	depth := len(c.execCh)
+	start := time.Now()
 	select {
 	case c.execCh <- req:
+		wait := time.Since(start)
+		c.metrics.noteAdmission(depth, c.maxBatch, wait)
 	case <-c.failed:
 		return c.err()
 	case <-c.closed:
@@ -357,7 +419,34 @@ func (c *coordinator) submitExec(ctx context.Context, req *writeRequest) error {
 	// caller observed an error" state, which is safe for D1 (the barrier only
 	// guards the nil/success direction) and is reconciled on resume; the §3
 	// recovery matrix governs it for non-idempotent collision modes.
-	return c.awaitResult(ctx, req)
+	return c.awaitExecResult(ctx, req)
+}
+
+// awaitExecResult is the exec-path barrier: same resolution rules as
+// awaitResult, plus always-on wait/outcome telemetry. Query waits deliberately
+// skip this path so barrier stats stay mutation-scoped.
+func (c *coordinator) awaitExecResult(ctx context.Context, req *writeRequest) error {
+	start := time.Now()
+	var (
+		err     error
+		outcome BarrierOutcome
+	)
+	select {
+	case err = <-req.done:
+		outcome = barrierOutcomeFromResult(err)
+	case <-c.failed:
+		err = c.resolve(req, c.err())
+		outcome = barrierOutcomeFromResult(err)
+	case <-c.closed:
+		err = c.resolve(req, ErrWriterClosed)
+		outcome = barrierOutcomeFromResult(err)
+	case <-ctx.Done():
+		err = ctx.Err()
+		outcome = BarrierCanceled
+	}
+	wait := time.Since(start)
+	c.metrics.noteBarrier(wait, outcome)
+	return err
 }
 
 // awaitResult blocks for an admitted request's authoritative outcome. A published
@@ -377,6 +466,14 @@ func (c *coordinator) awaitResult(ctx context.Context, req *writeRequest) error 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// statsSnapshot returns an immutable aggregate of always-on writer diagnostics.
+func (c *coordinator) statsSnapshot() WriterStats {
+	if c == nil {
+		return WriterStats{}
+	}
+	return c.metrics.snapshot(c.maxBatch)
 }
 
 // resolve returns an admitted request's own published result in preference to a

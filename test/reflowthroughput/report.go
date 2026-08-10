@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/3leaps/gonimbus/pkg/reflow"
 )
 
 // ReportSchemaVersion is the test-tool report schema (not a gonimbus.* product type).
@@ -24,6 +26,17 @@ type Report struct {
 	BinaryVersion string `json:"binary_version,omitempty"`
 	BinaryCommit  string `json:"binary_commit,omitempty"`
 	BinarySHA256  string `json:"binary_sha256"`
+
+	// Instrument identity is the harness (test binary / worktree), distinct from
+	// the measured child Binary* fields (checkpoint measure / provenance gate). Never backfill
+	// BinaryCommit from instrument HEAD.
+	InstrumentCommit string `json:"instrument_commit,omitempty"`
+	InstrumentSHA256 string `json:"instrument_sha256,omitempty"`
+	InstrumentDirty  bool   `json:"instrument_dirty"` // always present: false=clean, true=dirty (probe fail aborts run)
+
+	// Checkpoint-scale schedule provenance (empty for other profiles).
+	ScheduleID    string   `json:"schedule_id,omitempty"`
+	ScheduleOrder []string `json:"schedule_order,omitempty"` // e.g. "warm:disk:64", "p1:disk:64"
 
 	Corpus CompactManifest `json:"corpus"`
 
@@ -84,6 +97,11 @@ type PointReport struct {
 	ConcurrencyMaxActive *int    `json:"concurrency_max_active,omitempty"`
 	ConcurrencyFinal     *int    `json:"concurrency_final,omitempty"`
 	AdaptiveEnabled      *bool   `json:"adaptive_enabled,omitempty"`
+
+	// CheckpointWriterStats is sterile checkpoint-writer diagnostics from the
+	// child when emitted (checkpoint measure). Measure-first only — not product
+	// throughput marketing. Omitted when the child did not emit the record.
+	CheckpointWriterStats *reflow.CheckpointWriterStatsRecord `json:"checkpoint_writer_stats,omitempty"`
 
 	ElapsedSeconds      float64 `json:"elapsed_seconds"`
 	CompletedObjects    int64   `json:"completed_objects"`
@@ -160,6 +178,20 @@ func ValidateReportEnvelope(r Report) error {
 	if r.BinarySHA256 == "" {
 		return fmt.Errorf("binary_sha256 required")
 	}
+	if profileRequiresCheckpointWriterStats(r.Profile) {
+		if r.InstrumentSHA256 == "" {
+			return fmt.Errorf("instrument_sha256 required for profile %s", r.Profile)
+		}
+		if r.InstrumentCommit == "" || r.InstrumentCommit == "unknown" {
+			return fmt.Errorf("instrument_commit required (known) for profile %s", r.Profile)
+		}
+		if r.ScheduleID == "" {
+			return fmt.Errorf("schedule_id required for profile %s", r.Profile)
+		}
+		if len(r.ScheduleOrder) == 0 {
+			return fmt.Errorf("schedule_order required for profile %s", r.Profile)
+		}
+	}
 	if r.Corpus.Digest == "" {
 		return fmt.Errorf("corpus digest required")
 	}
@@ -215,6 +247,16 @@ func ValidateReportEnvelope(r Report) error {
 		// declares no envelope, but it still executed under a resolved one.
 		if err := validateResolvedMemoryProvenance(i, p); err != nil {
 			return err
+		}
+		// Retained checkpoint-scale reports must publish writer-stats evidence
+		// on every reflow point (checkpoint measure / entarch admission gate).
+		if profileRequiresCheckpointWriterStats(r.Profile) {
+			if p.CheckpointWriterStats == nil {
+				return fmt.Errorf("point %d: profile %s requires checkpoint_writer_stats (missing — arm non-comparable)", i, r.Profile)
+			}
+			if err := ValidateCheckpointWriterStatsStructure(*p.CheckpointWriterStats); err != nil {
+				return fmt.Errorf("point %d: %w", i, err)
+			}
 		}
 		// A labeled arm must additionally match the candidate that actually
 		// BOUND the run, not merely the lever that was passed to it. Under

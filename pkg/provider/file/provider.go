@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -54,6 +55,13 @@ const (
 	metadataSidecarSchema        = "gonimbus.reflow.meta.v1"
 	SymlinkPolicySkip            = "skip"
 	SymlinkPolicyFollow          = "follow"
+
+	// ifAbsentTempCreatePattern is the CreateTemp pattern for IfAbsent staging.
+	// List excludes only basenames matching isReservedIfAbsentTempName — not
+	// ordinary keys that merely contain the token "gonimbus-ifabsent".
+	ifAbsentTempCreatePattern = "gonimbus-ifabsent-*.tmp"
+	ifAbsentTempNamePrefix    = "gonimbus-ifabsent-"
+	ifAbsentTempNameSuffix    = ".tmp"
 )
 
 type metadataSidecar struct {
@@ -368,34 +376,10 @@ func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io
 		return p.putObjectIfMatch(ctx, key, full, body, *precond.IfMatchETag)
 	}
 
-	f, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- fullPath cleans key under configured provider baseDir before opening.
-	if err != nil {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
-	}
-
-	cleanup := true
-	defer func() {
-		_ = f.Close()
-		if cleanup {
-			_ = os.Remove(full)
-		}
-	}()
-
-	if _, err := io.Copy(f, body); err != nil {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
-	}
-	if err := f.Close(); err != nil {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
-	}
-	cleanup = false
-	token, err := p.statVersion(full)
-	if err != nil {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
-	}
-	if err := p.removeMetadataSidecar(key); err != nil {
-		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
-	}
-	return provider.PutResult{ETag: token}, nil
+	// IfAbsent: write a complete same-dir temp, then no-replace publish (Link).
+	// Never stream to the final path under O_EXCL/CREATE_NEW — a hard interrupt
+	// mid-stream would leave a visible partial final (D1 truncated-dest class).
+	return p.putObjectIfAbsent(ctx, key, full, body)
 }
 
 func (p *Provider) PutObjectConditionalWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition, opts provider.PutOptions) (provider.PutResult, error) {
@@ -420,15 +404,102 @@ var (
 )
 
 // ConditionalWriteCapabilities declares the conditional-write predicates this
-// file adapter honors: IfAbsent (O_EXCL create) and IfMatch (lock + ETag
-// compare-and-swap). The file provider has no multipart path, so conditional
-// multipart completion is not offered.
+// file adapter honors: IfAbsent (same-dir temp + no-replace Link publish) and
+// IfMatch (lock + ETag compare-and-swap). The file provider has no multipart
+// path, so conditional multipart completion is not offered.
 func (p *Provider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
 	return provider.ConditionalWriteCapabilities{
 		IfAbsent:                       true,
 		IfMatchETag:                    true,
 		ConditionalMultipartCompletion: false,
 	}
+}
+
+// putObjectIfAbsent stages the full body in a reserved same-directory temp,
+// then publishes with os.Link (atomic no-replace). Plain rename is forbidden:
+// it replaces an existing final and would violate IfAbsent.
+func (p *Provider) putObjectIfAbsent(ctx context.Context, key, full string, body io.Reader) (provider.PutResult, error) {
+	_ = ctx
+	dir := filepath.Dir(full)
+	tmp, err := os.CreateTemp(dir, ifAbsentTempCreatePattern) // #nosec G304 -- dir is filepath.Dir of fullPath under configured baseDir.
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if _, err := io.Copy(tmp, body); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+
+	// No-replace publish: Link fails if final already exists; never use os.Rename.
+	if err := os.Link(tmpName, full); err != nil {
+		if isAlreadyExistsLinkError(err) {
+			return provider.PutResult{}, p.wrapError("PutObjectConditional", key, os.ErrExist)
+		}
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	// Final is durable. Staging path is a second hard link — best-effort remove.
+	// If immediate unlink fails, leave cleanup=true so defer retries removal.
+	if err := os.Remove(tmpName); err == nil {
+		cleanup = false
+	}
+
+	token, err := p.statVersion(full)
+	if err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	if err := p.removeMetadataSidecar(key); err != nil {
+		return provider.PutResult{}, p.wrapError("PutObjectConditional", key, err)
+	}
+	return provider.PutResult{ETag: token}, nil
+}
+
+func isAlreadyExistsLinkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsExist(err) || errors.Is(err, os.ErrExist) {
+		return true
+	}
+	// Some platforms surface EEXIST without os.IsExist matching; message fallback
+	// is intentionally narrow.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file exists") || strings.Contains(msg, "already exists")
+}
+
+// isReservedIfAbsentTempName reports whether a provider-relative key is a
+// CreateTemp staging name for IfAbsent. Match is basename-only and exact shape
+// gonimbus-ifabsent-<nonempty>.tmp so ordinary object keys are never hidden.
+func isReservedIfAbsentTempName(rel string) bool {
+	base := filepath.Base(filepath.ToSlash(rel))
+	if !strings.HasPrefix(base, ifAbsentTempNamePrefix) || !strings.HasSuffix(base, ifAbsentTempNameSuffix) {
+		return false
+	}
+	mid := base[len(ifAbsentTempNamePrefix) : len(base)-len(ifAbsentTempNameSuffix)]
+	if mid == "" {
+		return false
+	}
+	// CreateTemp random segment has no path separators or extra dots in practice;
+	// reject separators defensively. Allow alphanumerics and common CreateTemp chars.
+	for _, r := range mid {
+		if r == '/' || r == '\\' || r == '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Provider) putObjectIfMatch(ctx context.Context, key, full string, body io.Reader, etag string) (provider.PutResult, error) {
@@ -796,6 +867,9 @@ func (p *Provider) collectKeys(prefix string) ([]string, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if p.metadataSidecarSuffix != "" && strings.HasSuffix(rel, p.metadataSidecarSuffix) {
+			return nil
+		}
+		if isReservedIfAbsentTempName(rel) {
 			return nil
 		}
 		keys = append(keys, rel)

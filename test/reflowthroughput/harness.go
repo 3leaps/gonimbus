@@ -51,9 +51,12 @@ type Options struct {
 	// GOMEMLIMIT. Accepted via CONSTRAINED_GOMEMLIMIT, or the older
 	// CEILING_LIFT_GOMEMLIMIT spelling.
 	ConstrainedGOMEMLIMIT string
-	// WorktreeCommit is optional fallback commit identity when the binary
-	// reports "unknown" (plain go test builds without ldflags).
+	// WorktreeCommit is optional instrument commit override (harness identity).
+	// It is NEVER applied to measured BinaryCommit (retained-measure provenance).
 	WorktreeCommit string
+	// ScheduleID selects checkpoint-scale counterbalancing plan
+	// (disk_first_odd default; tmpfs_first_odd reverse). Ignored for other profiles.
+	ScheduleID string
 
 	// Recipe overrides scale the profile's synthetic corpus at invocation. Zero
 	// means keep the profile default. Accepted via OBJECT_COUNT / SIZE_BYTES /
@@ -266,6 +269,7 @@ func buildPointReport(m pointMeasurement) PointReport {
 		pt.ConcurrencyMaxActive = intPtr(m.Parsed.MaxActive)
 		pt.ConcurrencyFinal = intPtr(m.Parsed.Final)
 		pt.AdaptiveEnabled = boolPtrVal(m.Parsed.AdaptiveEnabled)
+		pt.CheckpointWriterStats = m.Parsed.CheckpointWriterStats
 	}
 	return pt
 }
@@ -306,15 +310,17 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	if err != nil {
 		return Report{}, err
 	}
-	// Capture version/commit from binary; fall back to worktree HEAD for commit.
+	// Capture version/commit from the measured binary only. Unknown stays unknown —
+	// never backfill BinaryCommit from harness HEAD / WorktreeCommit (retained-measure provenance).
 	binVer, binCommit := probeBinaryIdentity(ctx, absBin)
-	if (binCommit == "" || binCommit == "unknown") && opts.WorktreeCommit != "" {
-		binCommit = opts.WorktreeCommit
-	}
-	if binCommit == "" || binCommit == "unknown" {
-		if head, err := gitHeadShort(); err == nil && head != "" {
-			binCommit = head
-		}
+	binCommit = NormalizeMeasuredBinaryCommit(binCommit)
+
+	// Instrument = harness process (this test binary content) + worktree commit/dirty.
+	// Capture once before arms; re-probe after last arm and fail if either mutates
+	// (retained-measure provenance — fail-closed provenance, not omitempty false clean).
+	instSHA, instCommit, instDirty, err := captureInstrumentIdentity(opts.WorktreeCommit)
+	if err != nil {
+		return Report{}, err
 	}
 
 	if opts.RunRoot == "" {
@@ -470,6 +476,9 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	report = NewReport(spec.Name, providerClass, invID, binSHA, corpus.Manifest.Compact(), opts.Keep)
 	report.BinaryVersion = binVer
 	report.BinaryCommit = binCommit
+	report.InstrumentCommit = instCommit
+	report.InstrumentSHA256 = instSHA
+	report.InstrumentDirty = instDirty
 	report.OS = runtime.GOOS
 	report.Arch = runtime.GOARCH
 
@@ -698,6 +707,13 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 				return fmt.Errorf("point %s honesty: %s", pointID, honesty.Message)
 			}
 			honestyOK = boolPtrVal(true)
+			// checkpoint measure: retained checkpoint-scale arms fail closed without
+			// exactly one post-summary, structurally valid writer-stats record.
+			if profileRequiresCheckpointWriterStats(spec.Name) {
+				if err := CheckCheckpointWriterStatsAdmission(parsed); err != nil {
+					return fmt.Errorf("point %s checkpoint writer stats: %w", pointID, err)
+				}
+			}
 		}
 
 		elapsedSec := pr.Elapsed.Seconds()
@@ -808,24 +824,78 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 			}
 		}
 	default:
-		// reflow-only sweeps: every declared memory envelope over every
-		// checkpoint class and parallel point.
-		classes := spec.CheckpointClasses
-		if len(classes) == 0 {
-			classes = []string{"disk"}
-		}
-		for _, ck := range classes {
+		// reflow-only sweeps. checkpoint-scale uses a frozen counterbalanced
+		// schedule (warmups discarded); other profiles keep class-outer order.
+		if spec.Name == ProfileCheckpointScale {
+			schedID := opts.ScheduleID
+			if schedID == "" {
+				schedID = ScheduleDiskFirstOdd
+			}
+			steps, err := CheckpointScaleSchedule(spec, schedID)
+			if err != nil {
+				return report, err
+			}
+			if err := ValidateCheckpointScaleSchedule(steps); err != nil {
+				return report, fmt.Errorf("schedule: %w", err)
+			}
+			report.ScheduleID = schedID
+			order := make([]string, 0, len(steps))
+			armByLabel := map[string]resolvedArm{}
 			for _, arm := range arms {
-				for _, p := range spec.ParallelPoints {
-					if err := runPoint(pointRun{
-						Parallel:        p,
-						CheckpointClass: ck,
-						Shape:           "reflow_only",
-						GOMEMLIMIT:      arm.GOMEMLIMIT,
-						MemoryBudget:    arm.MemoryBudget,
-						MemoryEnvelope:  arm.Label,
-					}); err != nil {
-						return report, err
+				armByLabel[arm.Label] = arm
+			}
+			for _, step := range steps {
+				arm, ok := armByLabel[step.MemoryEnvelope]
+				if !ok {
+					if len(arms) == 0 {
+						return report, fmt.Errorf("schedule step missing memory arm")
+					}
+					arm = arms[0]
+				}
+				var tag string
+				if step.Warmup {
+					tag = fmt.Sprintf("warm:%s:%d", step.CheckpointClass, step.Parallel)
+				} else {
+					tag = fmt.Sprintf("p%d:%s:%d", step.PairIndex, step.CheckpointClass, step.Parallel)
+				}
+				order = append(order, tag)
+				before := len(report.Points)
+				if err := runPoint(pointRun{
+					Parallel:        step.Parallel,
+					CheckpointClass: step.CheckpointClass,
+					Shape:           "reflow_only",
+					GOMEMLIMIT:      arm.GOMEMLIMIT,
+					MemoryBudget:    arm.MemoryBudget,
+					MemoryEnvelope:  step.MemoryEnvelope,
+				}); err != nil {
+					return report, err
+				}
+				if step.Warmup {
+					if len(report.Points) != before+1 {
+						return report, fmt.Errorf("warmup did not append exactly one point")
+					}
+					report.Points = report.Points[:before]
+				}
+			}
+			report.ScheduleOrder = order
+		} else {
+			classes := spec.CheckpointClasses
+			if len(classes) == 0 {
+				classes = []string{"disk"}
+			}
+			for _, ck := range classes {
+				for _, arm := range arms {
+					for _, p := range spec.ParallelPoints {
+						if err := runPoint(pointRun{
+							Parallel:        p,
+							CheckpointClass: ck,
+							Shape:           "reflow_only",
+							GOMEMLIMIT:      arm.GOMEMLIMIT,
+							MemoryBudget:    arm.MemoryBudget,
+							MemoryEnvelope:  arm.Label,
+						}); err != nil {
+							return report, err
+						}
 					}
 				}
 			}
@@ -898,6 +968,10 @@ func Run(ctx context.Context, opts Options) (report Report, runErr error) {
 	}
 	if gotSHA != binSHA {
 		return report, fmt.Errorf("binary sha changed during run")
+	}
+	// Re-probe instrument commit + dirty + content hash; any drift fails the set.
+	if err := assertInstrumentIdentityUnchanged(opts.WorktreeCommit, instSHA, instCommit, instDirty); err != nil {
+		return report, err
 	}
 
 	if err := ValidateReportEnvelope(report); err != nil {
@@ -996,6 +1070,62 @@ func gitHeadShort() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func gitWorktreeDirty() (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
+// captureInstrumentIdentity records harness process content SHA plus Git
+// commit/dirty for provenance. Probe failures never become "clean" or empty
+// commit that could be admitted as known-good (retained-measure provenance).
+//
+// worktreeCommitOverride, when non-empty, replaces the Git HEAD probe (tests).
+func captureInstrumentIdentity(worktreeCommitOverride string) (sha, commit string, dirty bool, err error) {
+	sha, err = HashFile(os.Args[0])
+	if err != nil {
+		return "", "", false, fmt.Errorf("instrument sha: %w", err)
+	}
+	commit = worktreeCommitOverride
+	if commit == "" {
+		head, headErr := gitHeadShort()
+		if headErr != nil {
+			return "", "", false, fmt.Errorf("instrument commit probe: %w", headErr)
+		}
+		if head == "" {
+			return "", "", false, fmt.Errorf("instrument commit probe: empty HEAD")
+		}
+		commit = head
+	}
+	dirty, dirtyErr := gitWorktreeDirty()
+	if dirtyErr != nil {
+		return "", "", false, fmt.Errorf("instrument dirty probe: %w", dirtyErr)
+	}
+	return sha, commit, dirty, nil
+}
+
+// assertInstrumentIdentityUnchanged re-probes instrument identity after the arm
+// set and fails if content SHA, commit, or dirty state drifted.
+func assertInstrumentIdentityUnchanged(worktreeCommitOverride, wantSHA, wantCommit string, wantDirty bool) error {
+	gotSHA, gotCommit, gotDirty, err := captureInstrumentIdentity(worktreeCommitOverride)
+	if err != nil {
+		return fmt.Errorf("instrument identity re-probe: %w", err)
+	}
+	if gotSHA != wantSHA {
+		return fmt.Errorf("instrument sha changed during run")
+	}
+	if gotCommit != wantCommit {
+		return fmt.Errorf("instrument commit changed during run: %q -> %q", wantCommit, gotCommit)
+	}
+	if gotDirty != wantDirty {
+		return fmt.Errorf("instrument dirty state changed during run: %v -> %v", wantDirty, gotDirty)
+	}
+	return nil
 }
 
 // VerifyCorpusImmutable re-hashes every source object and checks the manifest digest.

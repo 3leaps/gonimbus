@@ -71,14 +71,19 @@ func LoadBYOS3Config() (cfg BYOS3Config, ok bool) {
 // ProviderConfig maps to the S3 provider constructor (ambient credential chain
 // for real BYO; optional static keys for moto only).
 //
-// The connection pool is sized to the upload fan-out. Left at zero the provider
-// returns a nil HTTP client and the AWS SDK falls back to Go's default
-// transport, which keeps only net/http.DefaultMaxIdleConnsPerHost (2) idle
-// connections per host: every request past the second re-dials and repeats the
-// TLS handshake. Concurrent staging without this is mostly handshake, and the
-// fan-out above would not deliver.
+// The connection pool follows the same public policy as product constructions:
+// provider.ResolveConnectionPool(admittedN) with admittedN = corpus upload
+// fan-out. For N >= 2 both fields equal N so concurrent staging is not bound
+// by net/http.DefaultMaxIdleConnsPerHost (2). For N < 2 the zero policy leaves
+// SDK / transport defaults (same as product). Staging must not invent a second
+// transport policy pattern.
 func (c BYOS3Config) ProviderConfig() providers3.Config {
-	pool := CorpusUploadConcurrency()
+	n := CorpusUploadConcurrency()
+	pool, err := provider.ResolveConnectionPool(n)
+	if err != nil {
+		// CorpusUploadConcurrency is always >= 1; refuse inventing knobs on error.
+		pool = provider.ConnectionPoolPolicy{}
+	}
 	return providers3.Config{
 		Bucket:              c.Bucket,
 		Endpoint:            c.Endpoint,
@@ -87,8 +92,8 @@ func (c BYOS3Config) ProviderConfig() providers3.Config {
 		ForcePathStyle:      c.ForcePathStyle,
 		AccessKeyID:         c.AccessKeyID,
 		SecretAccessKey:     c.SecretAccessKey,
-		MaxIdleConnsPerHost: pool,
-		MaxConnsPerHost:     pool,
+		MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+		MaxConnsPerHost:     pool.MaxConnsPerHost,
 	}
 }
 
@@ -246,7 +251,8 @@ func uploadCorpus(ctx context.Context, stager corpusStager, cfg BYOS3Config, cor
 				if size == 0 {
 					size = e.SizeBytes
 				}
-				line, err := marshalReflowInputLine(cfg.ObjectURI(key), e.RelativeKey, size, etag)
+				// Full S3 key (prefix + relative) as source_key; relative only for dest.
+				line, err := marshalReflowInputLine(cfg.ObjectURI(key), key, e.RelativeKey, size, etag)
 				if err != nil {
 					fail(err)
 					return

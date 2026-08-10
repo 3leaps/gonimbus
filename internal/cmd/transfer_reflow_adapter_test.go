@@ -1141,8 +1141,31 @@ func (p *gateAfterProvider) GetObject(ctx context.Context, key string) (io.ReadC
 // with a healthy provider converges: durable completes skip as resume,
 // landed-but-unrecorded objects skip as collision duplicates, never-landed
 // objects copy — and no object is ever landed twice.
+//
+// Dual arms cover default (elision off) and experimental raw-exec savepoint
+// elision on (elision dual-arm residual): both must converge with failed=0.
 func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		elide bool
+	}{
+		{name: "elision_off", elide: false},
+		{name: "elision_on", elide: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runTransferReflowCancelMidPoolResumeRealStore(t, tc.elide)
+		})
+	}
+}
+
+func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSavepoints bool) {
+	t.Helper()
 	withTransferReflowTestState(t)
+	if elideRawExecSavepoints {
+		t.Setenv("GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS", "1")
+	} else {
+		t.Setenv("GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS", "")
+	}
 
 	const (
 		objectCount = 12
@@ -1233,7 +1256,11 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 	store, err := reflowstate.Open(ctx, reflowstate.Config{Path: checkpointPath})
 	require.NoError(t, err)
 	completesEmitted := 0
+	failedPreResume := 0
 	for _, rec := range records1 {
+		if rec.Status == "failed" {
+			failedPreResume++
+		}
 		if rec.Status != "complete" {
 			continue
 		}
@@ -1245,6 +1272,7 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 		require.True(t, recorded, "emitted complete for %s must be durably recorded (no false completes)", rec.SourceKey)
 		require.Equal(t, "complete", status)
 	}
+	require.Zero(t, failedPreResume, "interrupted arm must not emit failed terminals before resume")
 	require.Less(t, completesEmitted, objectCount, "interruption must leave unfinished work")
 	require.NoError(t, store.Close())
 
@@ -1260,9 +1288,14 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 
 	records2 := requireReflowRecords(t, stdout2.String())
 	terminal2 := map[string]int{}
+	failedResume := 0
 	for _, rec := range records2 {
 		if rec.Status == "in_progress" {
 			continue
+		}
+		if rec.Status == "failed" {
+			failedResume++
+			t.Fatalf("resume must not fail objects (status=failed reason=%q key=%q)", rec.Reason, rec.SourceKey)
 		}
 		switch {
 		case rec.Status == "complete",
@@ -1273,6 +1306,7 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 			t.Fatalf("unexpected resume terminal status=%q reason=%q key=%q", rec.Status, rec.Reason, rec.SourceKey)
 		}
 	}
+	require.Zero(t, failedResume, "resume failed count must be 0")
 	require.Len(t, terminal2, objectCount, "every object reaches a convergent terminal on resume")
 	for key, n := range terminal2 {
 		require.Equal(t, 1, n, "exactly one terminal for %s on resume", key)
@@ -1293,10 +1327,31 @@ func TestTransferReflowCommand_EngineCancelMidPoolResumeRealStore(t *testing.T) 
 		require.Equal(t, fmt.Sprintf("payload-%02d", i), string(dst.mustObject("data/"+key)), "dest content intact for %s", key)
 		expectedKeys = append(expectedKeys, "data/"+key)
 	}
+	require.Len(t, expectedKeys, objectCount, "destination cardinality must equal N")
 	// The claimed property, measured directly: exactly one SUCCESSFUL
 	// object-level conditional land per destination key across cancel + resume,
 	// all attempts IfAbsent, no unconditional writes.
 	dst.requireExactlyOneLandPerKey(t, expectedKeys)
+
+	// Writer health + elision identity: observe process-local counters from the
+	// emitted gonimbus.reflow.checkpoint_writer_stats.v1 record for the resume arm
+	// (snapshot before that command's store Close). Opening a fresh Store on the
+	// same DB path would start a new coordinator with zeroed stats and make
+	// CommitFatals/elision assertions vacuous (vacuous process-local counters).
+	//
+	// The canceled arm may also emit stats without a summary (engine path); those
+	// are not the resume-arm proof surface.
+	statsRec := requireRecord(t, stdout2.String(), reflowpkg.CheckpointWriterStatsRecordType, "")
+	var st reflowpkg.CheckpointWriterStatsRecord
+	require.NoError(t, json.Unmarshal(statsRec.Data, &st))
+	require.Zero(t, st.CommitFatals, "resume-arm emitted CommitFatals must stay 0")
+	require.Zero(t, st.BarrierWriterFailed, "resume-arm emitted BarrierWriterFailed must stay 0")
+	require.Greater(t, st.SavepointsCreated, int64(0), "terminal Upsert (execTx) must create savepoints")
+	if elideRawExecSavepoints {
+		require.Greater(t, st.SavepointsElided, int64(0), "elision-on resume arm must elide raw-exec savepoints")
+	} else {
+		require.Zero(t, st.SavepointsElided, "elision-off resume arm must not elide savepoints")
+	}
 }
 
 // sourceRunMetadataRecordingState captures the positional source-run-metadata
