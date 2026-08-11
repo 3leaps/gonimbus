@@ -12,9 +12,15 @@ type HonestyResult struct {
 	Message string
 }
 
+// concurrencyDomainCount is the number of independent permit domains in
+// ConcurrencyLimiter (source copy, dest copy, probe). max_active is the peak
+// sum across domains, so it may reach domainCount * effective.
+const concurrencyDomainCount = 3
+
 // CheckHonesty enforces:
 //
-//	0 <= max_active <= effective <= requested
+//	0 <= max_active <= domainCount*effective
+//	effective <= requested
 //
 // Equality effective==requested requires reason exactly "requested".
 // Lower effective requires resource_capped:* reason AND exactly one clamp warning.
@@ -32,8 +38,11 @@ func CheckHonesty(p ParsedReflowOutput, requested int) HonestyResult {
 	if maxA < 0 || eff < 0 || req < 0 {
 		return HonestyResult{OK: false, Message: "negative concurrency field"}
 	}
-	if maxA > eff {
-		return HonestyResult{OK: false, Message: fmt.Sprintf("max_active %d > effective %d", maxA, eff)}
+	// Dual-domain (and probe) permits: each domain is capped at effective, so
+	// peak concurrent tokens may reach domainCount * effective.
+	maxActiveCap := eff * concurrencyDomainCount
+	if maxA > maxActiveCap {
+		return HonestyResult{OK: false, Message: fmt.Sprintf("max_active %d > domain cap %d (effective %d × %d domains)", maxA, maxActiveCap, eff, concurrencyDomainCount)}
 	}
 	if eff > req {
 		return HonestyResult{OK: false, Message: fmt.Sprintf("effective %d > requested %d", eff, req)}

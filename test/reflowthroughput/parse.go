@@ -81,6 +81,13 @@ type ParsedReflowOutput struct {
 	// the single summary (must be zero for retained arms).
 	CheckpointWriterStatsBeforeSummary int
 
+	// ObjectPathStageStats is the sterile object-path stage attribution snapshot
+	// when the child emitted gonimbus.reflow.object_path_stage_stats.v1.
+	// Optional; measure-first only — not product throughput marketing.
+	ObjectPathStageStats *reflow.ObjectPathStageStatsRecord
+	// ObjectPathStageStatsCount is how many stage-stats records appeared.
+	ObjectPathStageStatsCount int
+
 	// Consensus fields after agreement check (filled by Finalize).
 	Requested       int
 	Effective       int
@@ -245,6 +252,15 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			// Last record wins if multiple; admission gate fails closed on count≠1.
 			cp := st
 			out.CheckpointWriterStats = &cp
+		case reflow.ObjectPathStageStatsRecordType:
+			var st reflow.ObjectPathStageStatsRecord
+			if err := json.Unmarshal(env.Data, &st); err != nil {
+				return out, fmt.Errorf("line %d: object path stage stats data: %w", lineNo, err)
+			}
+			out.ObjectPathStageStatsCount++
+			// Last record wins if multiple; optional diagnostic — no admission gate.
+			cp := st
+			out.ObjectPathStageStats = &cp
 		default:
 			// Known product noise types that are not concurrency-critical.
 			if env.Type == "gonimbus.preflight.v1" || env.Type == "gonimbus.error.v1" {

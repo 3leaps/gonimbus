@@ -22,6 +22,10 @@ const (
 	// the CLI after a run when the checkpoint store exposes WriterStats.
 	// Measure-first only: not product throughput marketing.
 	CheckpointWriterStatsRecordType = "gonimbus.reflow.checkpoint_writer_stats.v1"
+	// ObjectPathStageStatsRecordType is the JSONL type for sterile object-path
+	// stage attribution (permit wait, source read, dest write, collision probe,
+	// checkpoint write). Measure-first only: not product throughput marketing.
+	ObjectPathStageStatsRecordType = "gonimbus.reflow.object_path_stage_stats.v1"
 	// WarningRecordType is the JSONL type for transfer reflow warnings.
 	WarningRecordType = "gonimbus.warning.v1"
 
@@ -155,6 +159,45 @@ type CheckpointWriterStatsRecord struct {
 	// Experimental savepoint elision counters (Phase A measure).
 	SavepointsCreated int64 `json:"savepoints_created,omitempty"`
 	SavepointsElided  int64 `json:"savepoints_elided,omitempty"`
+}
+
+// ObjectPathStageStatsRecord is the payload for
+// gonimbus.reflow.object_path_stage_stats.v1. Counts and durations only — no
+// paths, keys, URIs, SQL, or auth. Emitted after the summary when stage
+// attribution was collected for the run.
+//
+// Experimental: may change with an in-release note.
+type ObjectPathStageStatsRecord struct {
+	PermitWaits        int64 `json:"permit_waits"`
+	PermitWaitNanos    int64 `json:"permit_wait_nanos"`
+	PermitWaitMaxNanos int64 `json:"permit_wait_max_nanos"`
+
+	SourceReads        int64 `json:"source_reads"`
+	SourceReadNanos    int64 `json:"source_read_nanos"`
+	SourceReadMaxNanos int64 `json:"source_read_max_nanos"`
+
+	DestWrites        int64 `json:"dest_writes"`
+	DestWriteNanos    int64 `json:"dest_write_nanos"`
+	DestWriteMaxNanos int64 `json:"dest_write_max_nanos"`
+
+	CoupledCopies       int64 `json:"coupled_copies"`
+	CoupledCopyNanos    int64 `json:"coupled_copy_nanos"`
+	CoupledCopyMaxNanos int64 `json:"coupled_copy_max_nanos"`
+
+	CollisionProbes        int64 `json:"collision_probes"`
+	CollisionProbeNanos    int64 `json:"collision_probe_nanos"`
+	CollisionProbeMaxNanos int64 `json:"collision_probe_max_nanos"`
+
+	CheckpointWrites        int64 `json:"checkpoint_writes"`
+	CheckpointWriteNanos    int64 `json:"checkpoint_write_nanos"`
+	CheckpointWriteMaxNanos int64 `json:"checkpoint_write_max_nanos"`
+
+	// PhaseSplitCopies counts copies that used independent source-read and
+	// dest-write permits (the default single-part path after PR1).
+	PhaseSplitCopies int64 `json:"phase_split_copies"`
+	// CoupledCopyOps counts copies that held one permit across source+dest
+	// (streaming multipart / coupled path).
+	CoupledCopyOps int64 `json:"coupled_copy_ops"`
 }
 
 // SourceRunRecord is the payload for gonimbus.reflow.source.v1 JSONL records.

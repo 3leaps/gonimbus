@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/match"
@@ -72,7 +73,7 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	// one terminal record per accepted input, the summary follows worker join, and
 	// global input order is not promised.
 	producer := r.recordStreamProducer(src, layout, plan.rewrite, stats)
-	if err := r.drivePlannedRecords(ctx, layout, stats, capability, limiter, plan.arbiter, producer); err != nil {
+	if err := r.drivePlannedRecords(ctx, layout, stats, plan.stages, capability, limiter, plan.arbiter, producer); err != nil {
 		return Summary{}, err
 	}
 
@@ -86,6 +87,9 @@ func (r *Runner) finishRun(ctx context.Context, plan runPlan) (Summary, error) {
 	summary := plan.stats.summary(plan.layout.BaseURI, r.cfg.Collision.Mode, r.cfg.DryRun, plan.capability, plan.limiter.Snapshot())
 	summary.ExecutionPath = ExecutionPathEngine
 	if err := r.emitSummary(ctx, summary); err != nil {
+		return Summary{}, err
+	}
+	if err := r.emitObjectPathStageStats(ctx, plan.stages.Snapshot()); err != nil {
 		return Summary{}, err
 	}
 	if summary.InvalidInputs > 0 {
@@ -142,7 +146,7 @@ func (r *Runner) runPositional(ctx context.Context, src positionalSource) (Summa
 		Bucket:   src.bucket,
 		URI:      src.selector,
 	})
-	if err := r.drivePlannedRecords(ctx, plan.layout, plan.stats, plan.capability, plan.limiter, plan.arbiter, src.producer(plan)); err != nil {
+	if err := r.drivePlannedRecords(ctx, plan.layout, plan.stats, plan.stages, plan.capability, plan.limiter, plan.arbiter, src.producer(plan)); err != nil {
 		return Summary{}, err
 	}
 	return r.finishRun(ctx, plan)
@@ -636,6 +640,7 @@ type runPlan struct {
 	capability IfAbsentCapability
 	limiter    *ConcurrencyLimiter
 	stats      *runStats
+	stages     *StageStats
 	arbiter    *destKeyArbiter
 }
 
@@ -695,6 +700,7 @@ func (r *Runner) prepareRun(ctx context.Context) (runPlan, error) {
 		capability: capability,
 		limiter:    limiter,
 		stats:      newRunStats(),
+		stages:     newStageStats(),
 		arbiter:    newDestKeyArbiter(),
 	}, nil
 }
@@ -740,10 +746,14 @@ type producerDeps struct {
 // producer reader/sink error outranks context cancellation; cancellation outranks
 // a scanner read error (the producer orders the last two at its scan completion).
 // See recordProducer for the two shutdown modes.
-func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, producer recordProducer) error {
+func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, stats *runStats, stages *StageStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, producer recordProducer) error {
 	poolCtx, cancelPool := context.WithCancel(ctx)
 	defer cancelPool()
-	workers := r.cfg.Concurrency.EffectiveCeiling
+	// Dual-domain permits cap source and dest each at EffectiveCeiling. Worker
+	// pool is 2× so Get of B can overlap Put of A without raising the
+	// per-domain admission ceiling. HTTP connection pools for src/dest clients
+	// are sized to EffectiveCeiling each (one domain per client).
+	workers := r.cfg.Concurrency.EffectiveCeiling * 2
 	if workers < 1 {
 		workers = 1
 	}
@@ -770,7 +780,7 @@ func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, sta
 				if poolCtx.Err() != nil {
 					continue // drain remaining tasks after cancellation
 				}
-				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, capability, limiter, arbiter, task.in, task.destRel, task.destKey, task.destURI); err != nil {
+				if err := r.copyAndEmit(poolCtx, task.src, layout, stats, stages, capability, limiter, arbiter, task.in, task.destRel, task.destKey, task.destURI); err != nil {
 					recordFatal(err)
 				}
 			}
@@ -1104,7 +1114,7 @@ func validateSourceIdentity(current *string, in reflowInput) error {
 	return nil
 }
 
-func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destRel, destKey, destURI string) error {
+func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provider, layout DestLayout, stats *runStats, stages *StageStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destRel, destKey, destURI string) error {
 	sourceURI := sanitizeSourceURI(in.SourceURI)
 
 	if in.AdmissionError != nil {
@@ -1178,7 +1188,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	// size reserving the conservative memory cap). Mirrors the CLI pool.
 	mandatorySourceHead := r.cfg.Metadata.NeedsSourceHead() || needsSourceHeadForCollision
 	if mandatorySourceHead || sourceETag == "" || sourceSize == 0 {
-		meta, err := limitedHead(ctx, limiter, sourceProvider, in.SourceKey)
+		meta, err := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey)
 		switch {
 		case err == nil:
 			sourceMeta = meta
@@ -1241,7 +1251,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 		defer releaseHeld()
 	}
 
-	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, capability, limiter, arbiter, copyInput, destKey, putOptions, heldGate)
+	bytes, putResult, collision, status, reason, err := r.copyWithCollision(ctx, sourceProvider, layout, stats, stages, capability, limiter, arbiter, copyInput, destKey, putOptions, heldGate)
 	if err != nil {
 		details := map[string]any{"source_uri": sourceURI, "dest_uri": destURI}
 		msg := "copy failed"
@@ -1319,10 +1329,10 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 // copyUnconditionalOverwrite) may call arbiter.acquire(destKey) again — that would
 // self-deadlock. Any future collision path that needs the gate must reuse heldGate,
 // never re-acquire.
-func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions, heldGate *destKeyGate) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, layout DestLayout, stats *runStats, stages *StageStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, in reflowInput, destKey string, opts provider.PutOptions, heldGate *destKeyGate) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	dst := r.cfg.Destination.Provider
 	if r.cfg.Collision.Mode == CollisionOverwrite {
-		return r.copyUnconditionalOverwrite(ctx, src, layout, limiter, in, destKey, opts)
+		return r.copyUnconditionalOverwrite(ctx, src, layout, limiter, stages, in, destKey, opts)
 	}
 
 	// Per-dest-key gate: concurrent workers targeting the same destination key
@@ -1366,11 +1376,11 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	}
 	if known {
 		release()
-		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+		dstMeta, headErr := limitedHead(ctx, limiter, stages, dst, destKey)
 		if headErr != nil {
 			return 0, provider.PutResult{}, nil, "", "", headErr
 		}
-		return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead, opts)
+		return r.handleExistingDestination(ctx, src, layout, limiter, stages, in, destKey, dstMeta, decisionIfAbsentHead, opts)
 	}
 
 	// markObserved records the key as observed on the in-process gate AND in the
@@ -1398,7 +1408,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 
 	if capability.FallbackActive {
 		stats.recordFallbackObject()
-		dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+		dstMeta, headErr := limitedHead(ctx, limiter, stages, dst, destKey)
 		switch {
 		case headErr == nil:
 			markErr := markObserved()
@@ -1406,9 +1416,9 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 			if markErr != nil {
 				return 0, provider.PutResult{}, nil, "", "", markErr
 			}
-			return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionHeadFallback, opts)
+			return r.handleExistingDestination(ctx, src, layout, limiter, stages, in, destKey, dstMeta, decisionHeadFallback, opts)
 		case provider.IsNotFound(headErr):
-			bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
+			bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
 			if err == nil {
 				err = markObserved()
 			}
@@ -1420,7 +1430,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		}
 	}
 
-	bytes, result, err := limitedCopyConditional(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts, in.SourceRevision)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts, in.SourceRevision)
 	if err == nil {
 		markErr := markObserved()
 		release()
@@ -1438,11 +1448,11 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 	if markErr != nil {
 		return 0, provider.PutResult{}, nil, "", "", markErr
 	}
-	dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+	dstMeta, headErr := limitedHead(ctx, limiter, stages, dst, destKey)
 	if headErr != nil {
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	return r.handleExistingDestination(ctx, src, layout, limiter, in, destKey, dstMeta, decisionIfAbsentHead, opts)
+	return r.handleExistingDestination(ctx, src, layout, limiter, stages, in, destKey, dstMeta, decisionIfAbsentHead, opts)
 }
 
 // copyUnconditionalOverwrite lands the source over the destination without a
@@ -1451,10 +1461,10 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 // "unconditional_overwrite" decision path, then copies last-write-wins. A dest
 // head returning NotFound simply lands with no collision; any other head error
 // is fatal. No per-key arbiter is needed — overwrite is inherently last-writer.
-func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, stages *StageStats, in reflowInput, destKey string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	dst := r.cfg.Destination.Provider
 	var collision *CollisionInfo
-	dstMeta, headErr := limitedHead(ctx, limiter, dst, destKey)
+	dstMeta, headErr := limitedHead(ctx, limiter, stages, dst, destKey)
 	switch {
 	case headErr == nil:
 		kind := collisionConflict
@@ -1470,14 +1480,16 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 	default:
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	bytes, err := limitedCopy(ctx, limiter, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
+	bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision)
 	return bytes, provider.PutResult{}, collision, "complete", "", err
 }
 
-func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, stages *StageStats, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	probeStart := time.Now()
 	duplicate, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (bool, error) {
 		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
 	})
+	stages.recordCollisionProbe(time.Since(probeStart))
 	if err != nil {
 		return 0, provider.PutResult{}, nil, "", "", err
 	}
@@ -1496,7 +1508,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 	// comparing timestamps and conditionally overwriting; every other conflict
 	// terminal mode fails closed.
 	if r.cfg.Collision.Mode == CollisionOverwriteIfSourceNewer {
-		return r.resolveSourceNewerConflict(ctx, src, limiter, in, destKey, dstMeta, decisionPath, opts)
+		return r.resolveSourceNewerConflict(ctx, src, limiter, stages, in, destKey, dstMeta, decisionPath, opts)
 	}
 
 	collision := newCollisionInfo(collisionConflict, dstMeta, decisionPath)
@@ -1513,7 +1525,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 // otherwise the destination is preserved. A dest mutated between the head and
 // the conditional PUT yields a concurrent-mutation skip. All three terminals
 // carry byte-identical source-newer collision metadata for dual-path parity.
-func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Provider, limiter *ConcurrencyLimiter, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Provider, limiter *ConcurrencyLimiter, stages *StageStats, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
 	sourceNewerDecisionPath := decisionHeadCompare
 	if decisionPath == decisionHeadFallback {
 		sourceNewerDecisionPath = decisionHeadFallback
@@ -1562,7 +1574,7 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 
 	collision := newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 	etag := dstMeta.ETag
-	bytes, result, err := limitedCopyConditional(ctx, limiter, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts, in.SourceRevision)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts, in.SourceRevision)
 	if err != nil {
 		if isConditionalExists(err) {
 			concurrent := newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
@@ -1644,52 +1656,50 @@ func (r *Runner) emitCheckpointWriteWarning(ctx context.Context, code, destKey, 
 	})
 }
 
-func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, p provider.Provider, key string) (*provider.ObjectMeta, error) {
-	return reflowprobe.Run(ctx, limiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
+func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, p provider.Provider, key string) (*provider.ObjectMeta, error) {
+	start := time.Now()
+	meta, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
 		return p.Head(ctx, key)
 	})
+	stages.recordCollisionProbe(time.Since(start))
+	return meta, err
 }
 
-func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions, revision provider.SourceRevision) (int64, error) {
+// limitedCopy phase-splits the global concurrency token across source-read and
+// dest-write for the single-part path (see transfer.CopyGate). Memory
+// reservation still spans the whole copy.
+func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions, revision provider.SourceRevision) (int64, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, err
 	}
 	defer releaseMem()
-	release, err := limiter.Acquire(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer release()
+	gate := newLimiterCopyGate(limiter, stages)
 	var bytes int64
 	if _, ok := src.(provider.RevisionGetter); ok && revision.Validate() == nil {
-		bytes, err = transfer.CopyObjectRevisionWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts, revision)
+		bytes, err = transfer.CopyObjectRevisionWithGate(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts, revision, gate)
 	} else {
-		bytes, err = transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts)
+		bytes, err = transfer.CopyObjectWithGate(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), opts, gate)
 	}
 	limiter.ObserveProviderResult(err)
 	return bytes, err
 }
 
-func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision) (int64, provider.PutResult, error) {
+func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision) (int64, provider.PutResult, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, provider.PutResult{}, err
 	}
 	defer releaseMem()
-	release, err := limiter.Acquire(ctx)
-	if err != nil {
-		return 0, provider.PutResult{}, err
-	}
-	defer release()
+	gate := newLimiterCopyGate(limiter, stages)
 	var (
 		bytes  int64
 		result provider.PutResult
 	)
 	if _, ok := src.(provider.RevisionGetter); ok && revision.Validate() == nil {
-		bytes, result, err = transfer.CopyObjectRevisionConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts, revision)
+		bytes, result, err = transfer.CopyObjectRevisionConditionalWithGate(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts, revision, gate)
 	} else {
-		bytes, result, err = transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts)
+		bytes, result, err = transfer.CopyObjectConditionalWithGate(ctx, src, dst, srcKey, dstKey, sourceSize, limiter.RetryBufferCap(), precond, opts, gate)
 	}
 	limiter.ObserveProviderResult(err)
 	return bytes, result, err
@@ -1873,4 +1883,17 @@ func (r *Runner) emitSummary(ctx context.Context, rec SummaryRecord) error {
 	r.emitMu.Lock()
 	defer r.emitMu.Unlock()
 	return r.cfg.Events.OnSummary(ctx, rec)
+}
+
+func (r *Runner) emitObjectPathStageStats(ctx context.Context, rec ObjectPathStageStatsRecord) error {
+	if r.cfg.Events == nil {
+		return nil
+	}
+	emitter, ok := r.cfg.Events.(ObjectPathStageStatsEmitter)
+	if !ok {
+		return nil
+	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return emitter.OnObjectPathStageStats(ctx, rec)
 }

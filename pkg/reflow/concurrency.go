@@ -119,15 +119,25 @@ type ConcurrencyStats struct {
 
 // ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
 // resource-derived effective ceiling.
+//
+// Domain permits (source vs dest) are independent up to `current` each so a
+// sequential Get-then-Put copy path does not couple both endpoints on one
+// global token (GON-067 PR1 under-admission fix). Probe Acquire uses a third
+// domain of the same size. Occupancy (active / maxActive / time-average) sums
+// all domains.
 type ConcurrencyLimiter struct {
 	mu sync.Mutex
 
 	cfg       ConcurrencyConfig
 	current   int
-	active    int
+	active    int // source + dest + probe held tokens
 	maxActive int
-	clean     int
-	cooldown  int
+	// Independent domain occupancy, each capped by current.
+	activeSource int
+	activeDest   int
+	activeProbe  int
+	clean        int
+	cooldown     int
 
 	throttleBackoffs  int64
 	additiveIncreases int64
@@ -423,13 +433,40 @@ func (l *ConcurrencyLimiter) accrueActiveLocked(now time.Time) {
 	l.lastTransition = now
 }
 
-// Acquire waits until the current adaptive concurrency permits another active
-// copy and returns a release function for the acquired token.
+// Acquire waits until the probe domain permits another active operation
+// (HEAD / collision compare). Copy stages use AcquireSource / AcquireDest so
+// source-read and dest-write are not serialized on one shared token.
 func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
+	return l.acquireDomain(ctx, domainProbe)
+}
+
+// AcquireSource admits one source-side stage (Get / materialize) under the
+// current adaptive ceiling.
+func (l *ConcurrencyLimiter) AcquireSource(ctx context.Context) (func(), error) {
+	return l.acquireDomain(ctx, domainSource)
+}
+
+// AcquireDest admits one destination-side stage (Put / multipart) under the
+// current adaptive ceiling.
+func (l *ConcurrencyLimiter) AcquireDest(ctx context.Context) (func(), error) {
+	return l.acquireDomain(ctx, domainDest)
+}
+
+type concurrencyDomain int
+
+const (
+	domainProbe concurrencyDomain = iota
+	domainSource
+	domainDest
+)
+
+func (l *ConcurrencyLimiter) acquireDomain(ctx context.Context, domain concurrencyDomain) (func(), error) {
 	for {
 		l.mu.Lock()
-		if l.active < l.current {
+		domainActive := l.domainActiveLocked(domain)
+		if domainActive < l.current {
 			l.accrueActiveLocked(l.clock())
+			l.bumpDomainLocked(domain, 1)
 			l.active++
 			if l.active > l.maxActive {
 				l.maxActive = l.active
@@ -438,6 +475,7 @@ func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
 			return func() {
 				l.mu.Lock()
 				l.accrueActiveLocked(l.clock())
+				l.bumpDomainLocked(domain, -1)
 				l.active--
 				l.mu.Unlock()
 			}, nil
@@ -449,6 +487,28 @@ func (l *ConcurrencyLimiter) Acquire(ctx context.Context) (func(), error) {
 			return nil, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func (l *ConcurrencyLimiter) domainActiveLocked(domain concurrencyDomain) int {
+	switch domain {
+	case domainSource:
+		return l.activeSource
+	case domainDest:
+		return l.activeDest
+	default:
+		return l.activeProbe
+	}
+}
+
+func (l *ConcurrencyLimiter) bumpDomainLocked(domain concurrencyDomain, delta int) {
+	switch domain {
+	case domainSource:
+		l.activeSource += delta
+	case domainDest:
+		l.activeDest += delta
+	default:
+		l.activeProbe += delta
 	}
 }
 

@@ -3175,7 +3175,8 @@ func TestTransferReflowCommand_PerObjectMetadataDerivation(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"source/a.xml", "source/b.xml"}, src.headCallsSnapshot())
-	require.Equal(t, []string{"source/a.xml", "source/b.xml"}, dst.conditionalPutCallsSnapshot())
+	// Dual-domain worker pool may complete concurrent objects out of input order.
+	require.ElementsMatch(t, []string{"source/a.xml", "source/b.xml"}, dst.conditionalPutCallsSnapshot())
 
 	metaA := dst.metaSnapshot("source/a.xml")
 	require.Equal(t, "copy-a", metaA.Metadata["source-copy"])
