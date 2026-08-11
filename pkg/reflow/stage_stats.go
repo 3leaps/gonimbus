@@ -116,16 +116,6 @@ func (s *StageStats) recordCollisionProbe(d time.Duration) {
 	s.observeMax(&s.collisionProbeMaxNanos, n)
 }
 
-func (s *StageStats) recordCheckpointWrite(d time.Duration) {
-	if s == nil {
-		return
-	}
-	n := d.Nanoseconds()
-	s.checkpointWrites.Add(1)
-	s.checkpointWriteNanos.Add(n)
-	s.observeMax(&s.checkpointWriteMaxNanos, n)
-}
-
 // Snapshot returns an immutable sterile record for JSONL emission.
 func (s *StageStats) Snapshot() ObjectPathStageStatsRecord {
 	if s == nil {
