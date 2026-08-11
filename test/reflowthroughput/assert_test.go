@@ -38,6 +38,20 @@ func TestCheckHonesty(t *testing.T) {
 	if bad.OK {
 		t.Fatal("expected failure when effective > requested")
 	}
+	// Dual-domain: max_active may exceed effective (sum of independent domains).
+	dual := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 32,
+	}, 16)
+	if !dual.OK {
+		t.Fatalf("dual-domain max_active within 3×effective should pass: %s", dual.Message)
+	}
+	// Beyond domain count × effective is still dishonest.
+	over := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 49,
+	}, 16)
+	if over.OK {
+		t.Fatal("expected failure when max_active > 3×effective")
+	}
 }
 
 func TestCheckOccupancy(t *testing.T) {

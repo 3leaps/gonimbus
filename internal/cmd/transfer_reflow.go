@@ -554,18 +554,18 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		stats.record(rec)
 		_ = w.WriteAny(ctx, reflowpkg.RecordType, rec)
 	}
+	stageStats := reflowpkg.NewStageStats()
 	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions) (int64, error) {
 		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
 		if err != nil {
 			return 0, err
 		}
 		defer releaseMem()
-		release, err := concurrencyLimiter.Acquire(ctx)
-		if err != nil {
-			return 0, err
-		}
-		defer release()
-		bytes, err := transfer.CopyObjectWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), opts)
+		// Phase-split global permits across source-read and dest-write so Get of
+		// object B can overlap Put of object A (same ceiling; ADR-0006 parity
+		// with pkg/reflow limitedCopy).
+		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
+		bytes, err := transfer.CopyObjectWithGate(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), opts, gate)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, err
 	}
@@ -575,12 +575,8 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return 0, provider.PutResult{}, err
 		}
 		defer releaseMem()
-		release, err := concurrencyLimiter.Acquire(ctx)
-		if err != nil {
-			return 0, provider.PutResult{}, err
-		}
-		defer release()
-		bytes, result, err := transfer.CopyObjectConditionalWithOptions(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), precond, opts)
+		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
+		bytes, result, err := transfer.CopyObjectConditionalWithGate(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), precond, opts, gate)
 		concurrencyLimiter.ObserveProviderResult(err)
 		return bytes, result, err
 	}
@@ -636,10 +632,16 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 	}
 
-	tasks := make(chan reflowTask, concurrencyCfg.EffectiveCeiling*2)
+	// Dual-domain permits each cap at EffectiveCeiling; 2× workers fill both
+	// pipelines without raising the per-domain admission ceiling.
+	tasks := make(chan reflowTask, concurrencyCfg.EffectiveCeiling*4)
 	destArbiter := newReflowDestKeyArbiter()
 	var wg sync.WaitGroup
-	for i := 0; i < concurrencyCfg.EffectiveCeiling; i++ {
+	workerCount := concurrencyCfg.EffectiveCeiling * 2
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1286,6 +1288,8 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	close(tasks)
 	wg.Wait()
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
+	// Sterile object-path stage attribution (permit wait / source read / dest write).
+	_ = w.WriteAny(context.Background(), reflowpkg.ObjectPathStageStatsRecordType, stageStats.Snapshot())
 	// Sterile checkpoint-writer diagnostics for measure-first (checkpoint measure).
 	// Snapshot before Close (deferred); process-local aggregates only.
 	emitCheckpointWriterStatsIfPresent(context.Background(), w, state)

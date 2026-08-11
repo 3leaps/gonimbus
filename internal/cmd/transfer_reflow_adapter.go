@@ -417,6 +417,10 @@ func (s transferReflowEventSink) OnError(ctx context.Context, event reflowpkg.Er
 	return s.w.WriteAny(ctx, reflowpkg.ErrorEventType, event)
 }
 
+func (s transferReflowEventSink) OnObjectPathStageStats(ctx context.Context, rec reflowpkg.ObjectPathStageStatsRecord) error {
+	return s.w.WriteAny(ctx, reflowpkg.ObjectPathStageStatsRecordType, rec)
+}
+
 func (s transferReflowEventSink) OnSummary(ctx context.Context, rec reflowpkg.SummaryRecord) error {
 	return s.w.WriteAny(ctx, reflowpkg.SummaryRecordType, rec)
 }
