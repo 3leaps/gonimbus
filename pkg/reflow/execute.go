@@ -89,6 +89,9 @@ func (r *Runner) finishRun(ctx context.Context, plan runPlan) (Summary, error) {
 	if err := r.emitSummary(ctx, summary); err != nil {
 		return Summary{}, err
 	}
+	if plan.stages != nil {
+		plan.stages.AttachLimiterPeaks(plan.limiter)
+	}
 	if err := r.emitObjectPathStageStats(ctx, plan.stages.Snapshot()); err != nil {
 		return Summary{}, err
 	}
@@ -749,11 +752,13 @@ type producerDeps struct {
 func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, stats *runStats, stages *StageStats, capability IfAbsentCapability, limiter *ConcurrencyLimiter, arbiter *destKeyArbiter, producer recordProducer) error {
 	poolCtx, cancelPool := context.WithCancel(ctx)
 	defer cancelPool()
-	// Dual-domain permits cap source and dest each at EffectiveCeiling. Worker
-	// pool is 2× so Get of B can overlap Put of A without raising the
-	// per-domain admission ceiling. HTTP connection pools for src/dest clients
-	// are sized to EffectiveCeiling each (one domain per client).
-	workers := r.cfg.Concurrency.EffectiveCeiling * 2
+	// Workers sized to fill the larger domain (dest may be 2× under PR2). Domain
+	// Acquire still bounds in-flight stages; memory ledger bounds buffers.
+	// When dest-bound, workers sit on dest; when source frees, they refill source.
+	workers := DestAdmittedN(r.cfg.Concurrency)
+	if workers < r.cfg.Concurrency.EffectiveCeiling {
+		workers = r.cfg.Concurrency.EffectiveCeiling
+	}
 	if workers < 1 {
 		workers = 1
 	}

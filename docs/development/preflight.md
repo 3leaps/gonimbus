@@ -15,10 +15,12 @@ Without preflight:
 Preflight modes are schema-backed and appear in manifests as `crawl.preflight` (crawl jobs) and `transfer.preflight` (transfer jobs).
 
 - `plan-only`
+
   - No provider calls.
   - Used for static planning and validation.
 
 - `read-safe`
+
   - Provider calls allowed.
   - Must not write/delete.
   - Intended to validate: credentials, connectivity, bucket existence, list/head permissions.
@@ -42,6 +44,7 @@ This is intended for dogfooding on real buckets and for lower-trust automation/a
 Provider implementations must choose the lowest-impact probe available.
 
 - `multipart-abort`
+
   - Preferred when available.
   - Example (S3): create multipart upload then abort.
   - Goal: no durable objects created.
@@ -60,9 +63,11 @@ At minimum, records must include capability name, allowed bool, and method strin
 ## Required Capabilities (v0.1.x)
 
 - Crawl/shard discovery:
+
   - `source.list`
 
 - Enrichment (HEAD stage):
+
   - `source.head`
 
 - Transfer (copy/move):

@@ -38,19 +38,19 @@ func TestCheckHonesty(t *testing.T) {
 	if bad.OK {
 		t.Fatal("expected failure when effective > requested")
 	}
-	// Dual-domain: max_active may exceed effective (sum of independent domains).
+	// Dual-domain + dest bias: max_active may reach source+dest×2+probe.
 	dual := CheckHonesty(ParsedReflowOutput{
-		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 32,
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 48,
 	}, 16)
 	if !dual.OK {
-		t.Fatalf("dual-domain max_active within 3×effective should pass: %s", dual.Message)
+		t.Fatalf("dest-biased max_active within sum cap should pass: %s", dual.Message)
 	}
-	// Beyond domain count × effective is still dishonest.
+	// Beyond domain sum cap is still dishonest.
 	over := CheckHonesty(ParsedReflowOutput{
-		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 49,
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 65,
 	}, 16)
 	if over.OK {
-		t.Fatal("expected failure when max_active > 3×effective")
+		t.Fatal("expected failure when max_active > domain sum cap")
 	}
 }
 

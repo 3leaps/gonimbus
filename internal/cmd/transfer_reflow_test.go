@@ -263,8 +263,9 @@ func TestNewDestProviderSetsMinimumGCSWriterChunkUnderRetryBufferBudget(t *testi
 	require.NoError(t, err)
 	require.Equal(t, "dest-bucket", got.Bucket)
 	require.Equal(t, "gcp-project", got.Project)
-	require.Equal(t, 7, got.MaxIdleConnsPerHost)
-	require.Equal(t, 7, got.MaxConnsPerHost)
+	// Dest pool admits DestDomainCeilingEffective (default 2× effective).
+	require.Equal(t, 14, got.MaxIdleConnsPerHost)
+	require.Equal(t, 14, got.MaxConnsPerHost)
 	require.Equal(t, gcs.MinWriterChunkSizeBytes, got.WriterChunkSizeBytes)
 }
 
@@ -313,8 +314,9 @@ func TestReflowProvidersSDKDefaultPoolAtEffectiveCeilingOne(t *testing.T) {
 	}
 	_, err := newDestProvider(context.Background(), dest, reflowMetadataConfig{}, ceil1)
 	require.NoError(t, err)
-	require.Equal(t, 0, gotDest.MaxIdleConnsPerHost)
-	require.Equal(t, 0, gotDest.MaxConnsPerHost)
+	// Dest admits 2× ceiling (default multiplier); ResolveConnectionPool(2) sets 2/2.
+	require.Equal(t, 2, gotDest.MaxIdleConnsPerHost)
+	require.Equal(t, 2, gotDest.MaxConnsPerHost)
 
 	src := &uri.ObjectURI{
 		Provider: string(provider.ProviderS3),
@@ -322,6 +324,7 @@ func TestReflowProvidersSDKDefaultPoolAtEffectiveCeilingOne(t *testing.T) {
 	}
 	_, err = newSourceBinding(context.Background(), src, ceil1)
 	require.NoError(t, err)
+	// Source still uses EffectiveCeiling=1 → SDK defaults (0/0).
 	require.Equal(t, 0, gotSrc.MaxIdleConnsPerHost)
 	require.Equal(t, 0, gotSrc.MaxConnsPerHost)
 }

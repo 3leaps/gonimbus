@@ -20,14 +20,18 @@ import (
 // poolConcurrency returns a fixed (non-adaptive) concurrency config so pool
 // tests are independent of host resource probing.
 func poolConcurrency(ceiling int) ConcurrencyConfig {
-	return ConcurrencyConfig{
-		RequestedCeiling: ceiling,
-		EffectiveCeiling: ceiling,
-		CeilingReason:    "requested",
-		AdaptiveEnabled:  false,
-		Floor:            1,
-		Initial:          ceiling,
-	}
+	// Symmetric domains for pool-behavior tests (single-worker fatal paths,
+	// queue drain). Product default dest bias is exercised in dest_domain_test.
+	return clampConcurrencyInvariants(ConcurrencyConfig{
+		RequestedCeiling:           ceiling,
+		EffectiveCeiling:           ceiling,
+		CeilingReason:              "requested",
+		AdaptiveEnabled:            false,
+		Floor:                      1,
+		Initial:                    ceiling,
+		DestDomainMultiplier:       1,
+		DestDomainCeilingEffective: ceiling,
+	})
 }
 
 func poolInputLines(n int) string {

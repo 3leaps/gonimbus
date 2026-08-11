@@ -632,12 +632,14 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		observability.CLILogger.Debug("Checkpoint write failed", zap.Error(werr))
 	}
 
-	// Dual-domain permits each cap at EffectiveCeiling; 2× workers fill both
-	// pipelines without raising the per-domain admission ceiling.
+	// Workers sized to the larger domain (dest may be 2× under PR2).
 	tasks := make(chan reflowTask, concurrencyCfg.EffectiveCeiling*4)
 	destArbiter := newReflowDestKeyArbiter()
 	var wg sync.WaitGroup
-	workerCount := concurrencyCfg.EffectiveCeiling * 2
+	workerCount := reflowpkg.DestAdmittedN(concurrencyCfg)
+	if workerCount < concurrencyCfg.EffectiveCeiling {
+		workerCount = concurrencyCfg.EffectiveCeiling
+	}
 	if workerCount < 1 {
 		workerCount = 1
 	}
@@ -1289,6 +1291,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	wg.Wait()
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
 	// Sterile object-path stage attribution (permit wait / source read / dest write).
+	stageStats.AttachLimiterPeaks(concurrencyLimiter)
 	_ = w.WriteAny(context.Background(), reflowpkg.ObjectPathStageStatsRecordType, stageStats.Snapshot())
 	// Sterile checkpoint-writer diagnostics for measure-first (checkpoint measure).
 	// Snapshot before Close (deferred); process-local aggregates only.

@@ -22,7 +22,9 @@ func newDestProvider(ctx context.Context, dest *reflowDestSpec, metaCfg reflowMe
 	if dest == nil {
 		return nil, fmt.Errorf("destination is nil")
 	}
-	pool, err := provider.ResolveConnectionPool(concurrency.EffectiveCeiling)
+	// Size dest transport to the resolved dest-domain ceiling so PR2 dest-biased
+	// admission can realize concurrent Puts (not silently queue on MaxConns).
+	pool, err := provider.ResolveConnectionPool(reflowpkg.DestAdmittedN(concurrency))
 	if err != nil {
 		return nil, fmt.Errorf("resolve destination connection pool: %w", err)
 	}

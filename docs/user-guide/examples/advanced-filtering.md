@@ -11,6 +11,7 @@ Filters are applied with **AND semantics**:
 ## Semantics
 
 - **Include/exclude patterns**
+
   - `match.includes` defines the candidate object keys to inspect or crawl.
   - `match.excludes` removes matching keys after include matching.
   - Excludes use the same doublestar glob semantics as includes.
@@ -18,12 +19,14 @@ Filters are applied with **AND semantics**:
     folders, marker files, or generated staging output.
 
 - **Size**
+
   - Raw bytes: `1024`
   - Base-10 (SI): `1KB`, `100MB`, `1GB` (1KB = 1000 bytes)
   - Base-2 (IEC): `1KiB`, `100MiB`, `1GiB` (1KiB = 1024 bytes)
   - Bounds are **inclusive** (`min <= size <= max`)
 
 - **Date** (`--after` / `--before`)
+
   - ISO 8601 date: `2024-01-15` (interpreted as start of day UTC)
   - ISO 8601 datetime: `2024-01-15T10:30:00Z` (or with offsets)
   - Bounds are **[after, before)**:

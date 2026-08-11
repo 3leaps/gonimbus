@@ -12,19 +12,15 @@ type HonestyResult struct {
 	Message string
 }
 
-// concurrencyDomainCount is the number of independent permit domains in
-// ConcurrencyLimiter (source copy, dest copy, probe). max_active is the peak
-// sum across domains, so it may reach domainCount * effective.
-const concurrencyDomainCount = 3
-
 // CheckHonesty enforces:
 //
-//	0 <= max_active <= domainCount*effective
+//	0 <= max_active <= sourceCap+destCap+probeCap
 //	effective <= requested
 //
-// Equality effective==requested requires reason exactly "requested".
-// Lower effective requires resource_capped:* reason AND exactly one clamp warning.
-// Honest caps are valid results, not harness failures.
+// Source and probe domains cap at effective; dest may be DestDomainMultiplier ×
+// effective (default 2 after PR2). Equality effective==requested requires reason
+// exactly "requested". Lower effective requires resource_capped:* reason AND
+// exactly one clamp warning. Honest caps are valid results, not harness failures.
 func CheckHonesty(p ParsedReflowOutput, requested int) HonestyResult {
 	if requested < 1 {
 		return HonestyResult{OK: false, Message: "requested concurrency must be >= 1"}
@@ -38,11 +34,11 @@ func CheckHonesty(p ParsedReflowOutput, requested int) HonestyResult {
 	if maxA < 0 || eff < 0 || req < 0 {
 		return HonestyResult{OK: false, Message: "negative concurrency field"}
 	}
-	// Dual-domain (and probe) permits: each domain is capped at effective, so
-	// peak concurrent tokens may reach domainCount * effective.
-	maxActiveCap := eff * concurrencyDomainCount
+	// source + dest(×2 default) + probe
+	const destMultDefault = 2
+	maxActiveCap := eff + eff*destMultDefault + eff
 	if maxA > maxActiveCap {
-		return HonestyResult{OK: false, Message: fmt.Sprintf("max_active %d > domain cap %d (effective %d × %d domains)", maxA, maxActiveCap, eff, concurrencyDomainCount)}
+		return HonestyResult{OK: false, Message: fmt.Sprintf("max_active %d > domain sum cap %d (effective %d, dest×%d)", maxA, maxActiveCap, eff, destMultDefault)}
 	}
 	if eff > req {
 		return HonestyResult{OK: false, Message: fmt.Sprintf("effective %d > requested %d", eff, req)}

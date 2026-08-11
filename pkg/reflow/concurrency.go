@@ -76,6 +76,15 @@ type ConcurrencyConfig struct {
 	// paths must allocate against this value, spooling above it. Zero means
 	// not memory-resolved — consumers fall back to the transfer default.
 	RetryBufferCapBytes int64
+
+	// DestDomainMultiplier scales adaptive `current` for the destination
+	// domain only (GON-067 PR2 dest-biased admission). Zero or one = symmetric
+	// with source (pre-PR2). Product default is 2 after clamp.
+	DestDomainMultiplier int
+	// DestDomainCeilingEffective is the hard dest-domain cap after clamp:
+	// DestDomainMultiplier * EffectiveCeiling, never silent over-admit.
+	// Recorded so clients/pools can size to realize the cap.
+	DestDomainCeilingEffective int
 }
 
 // ConcurrencyStats is embedded in reflow run and summary records.
@@ -115,16 +124,24 @@ type ConcurrencyStats struct {
 	MemoryReservedPeakBytes int64 `json:"memory_reserved_peak_bytes,omitempty"`
 	MemoryReservationWaits  int64 `json:"memory_reservation_waits,omitempty"`
 	MemoryReservationWaitMS int64 `json:"memory_reservation_wait_ms,omitempty"`
+
+	// Dest-domain admission (GON-067 PR2). Multiplier and resolved ceiling are
+	// static for the run; per-domain peaks prove capacity was used.
+	DestDomainMultiplier       int `json:"dest_domain_multiplier,omitempty"`
+	DestDomainCeilingEffective int `json:"dest_domain_ceiling_effective,omitempty"`
+	ConcurrencyMaxActiveSource int `json:"concurrency_max_active_source,omitempty"`
+	ConcurrencyMaxActiveDest   int `json:"concurrency_max_active_dest,omitempty"`
+	ConcurrencyMaxActiveProbe  int `json:"concurrency_max_active_probe,omitempty"`
 }
 
 // ConcurrencyLimiter gates active copy work and applies AIMD feedback under the
 // resource-derived effective ceiling.
 //
-// Domain permits (source vs dest) are independent up to `current` each so a
-// sequential Get-then-Put copy path does not couple both endpoints on one
-// global token (GON-067 PR1 under-admission fix). Probe Acquire uses a third
-// domain of the same size. Occupancy (active / maxActive / time-average) sums
-// all domains.
+// Domain permits (source vs dest) are independent so a sequential Get-then-Put
+// copy path does not couple both endpoints on one global token (GON-067 PR1).
+// Source and probe domains are each capped at adaptive `current`; the dest
+// domain is capped at min(current*DestDomainMultiplier, DestDomainCeilingEffective)
+// (GON-067 PR2 dest-biased residual). Occupancy sums all domains.
 type ConcurrencyLimiter struct {
 	mu sync.Mutex
 
@@ -132,12 +149,15 @@ type ConcurrencyLimiter struct {
 	current   int
 	active    int // source + dest + probe held tokens
 	maxActive int
-	// Independent domain occupancy, each capped by current.
-	activeSource int
-	activeDest   int
-	activeProbe  int
-	clean        int
-	cooldown     int
+	// Independent domain occupancy.
+	activeSource    int
+	activeDest      int
+	activeProbe     int
+	maxActiveSource int
+	maxActiveDest   int
+	maxActiveProbe  int
+	clean           int
+	cooldown        int
 
 	throttleBackoffs  int64
 	additiveIncreases int64
@@ -386,6 +406,19 @@ func clampConcurrencyInvariants(cfg ConcurrencyConfig) ConcurrencyConfig {
 	if cfg.CeilingReason == "" {
 		cfg.CeilingReason = "requested"
 	}
+	// Dest-domain bias (PR2): default multiplier 2; hard ceiling is
+	// multiplier * EffectiveCeiling so adaptive current growth cannot admit
+	// dest work beyond a recorded, pool-sizeable bound.
+	if cfg.DestDomainMultiplier < 1 {
+		cfg.DestDomainMultiplier = 2
+	}
+	wantDest := cfg.EffectiveCeiling * cfg.DestDomainMultiplier
+	if wantDest < 1 {
+		wantDest = cfg.EffectiveCeiling
+	}
+	if cfg.DestDomainCeilingEffective < 1 || cfg.DestDomainCeilingEffective > wantDest {
+		cfg.DestDomainCeilingEffective = wantDest
+	}
 	// Post-conditions: 1 <= Floor <= Initial <= EffectiveCeiling <= RequestedCeiling.
 	return cfg
 }
@@ -447,9 +480,27 @@ func (l *ConcurrencyLimiter) AcquireSource(ctx context.Context) (func(), error) 
 }
 
 // AcquireDest admits one destination-side stage (Put / multipart) under the
-// current adaptive ceiling.
+// dest-domain cap (adaptive current × DestDomainMultiplier, hard-clamped).
 func (l *ConcurrencyLimiter) AcquireDest(ctx context.Context) (func(), error) {
 	return l.acquireDomain(ctx, domainDest)
+}
+
+// DestDomainCeiling returns the resolved hard dest-domain admission ceiling
+// (for connection-pool sizing and records).
+func (l *ConcurrencyLimiter) DestDomainCeiling() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.cfg.DestDomainCeilingEffective
+}
+
+// DestAdmittedN returns the pool/client admitted-N for the destination
+// provider: DestDomainCeilingEffective, floored at 1.
+func DestAdmittedN(cfg ConcurrencyConfig) int {
+	cfg = clampConcurrencyInvariants(cfg)
+	if cfg.DestDomainCeilingEffective < 1 {
+		return cfg.EffectiveCeiling
+	}
+	return cfg.DestDomainCeilingEffective
 }
 
 type concurrencyDomain int
@@ -460,11 +511,35 @@ const (
 	domainDest
 )
 
+func (l *ConcurrencyLimiter) domainCapLocked(domain concurrencyDomain) int {
+	switch domain {
+	case domainDest:
+		cap := l.current * l.cfg.DestDomainMultiplier
+		if l.cfg.DestDomainMultiplier < 1 {
+			cap = l.current
+		}
+		if l.cfg.DestDomainCeilingEffective > 0 && cap > l.cfg.DestDomainCeilingEffective {
+			cap = l.cfg.DestDomainCeilingEffective
+		}
+		if cap < 1 {
+			cap = 1
+		}
+		return cap
+	default:
+		// source + probe track adaptive current (never above EffectiveCeiling).
+		if l.current < 1 {
+			return 1
+		}
+		return l.current
+	}
+}
+
 func (l *ConcurrencyLimiter) acquireDomain(ctx context.Context, domain concurrencyDomain) (func(), error) {
 	for {
 		l.mu.Lock()
 		domainActive := l.domainActiveLocked(domain)
-		if domainActive < l.current {
+		cap := l.domainCapLocked(domain)
+		if domainActive < cap {
 			l.accrueActiveLocked(l.clock())
 			l.bumpDomainLocked(domain, 1)
 			l.active++
@@ -505,10 +580,19 @@ func (l *ConcurrencyLimiter) bumpDomainLocked(domain concurrencyDomain, delta in
 	switch domain {
 	case domainSource:
 		l.activeSource += delta
+		if l.activeSource > l.maxActiveSource {
+			l.maxActiveSource = l.activeSource
+		}
 	case domainDest:
 		l.activeDest += delta
+		if l.activeDest > l.maxActiveDest {
+			l.maxActiveDest = l.activeDest
+		}
 	default:
 		l.activeProbe += delta
+		if l.activeProbe > l.maxActiveProbe {
+			l.maxActiveProbe = l.activeProbe
+		}
 	}
 }
 
@@ -626,6 +710,11 @@ func (l *ConcurrencyLimiter) Snapshot() ConcurrencyStats {
 		MemoryBudgetEffectiveBytes:        l.cfg.MemoryBudgetEffectiveBytes,
 		MemoryBudgetSource:                l.cfg.MemoryBudgetSource,
 		RetryBufferCapBytes:               l.cfg.RetryBufferCapBytes,
+		DestDomainMultiplier:              l.cfg.DestDomainMultiplier,
+		DestDomainCeilingEffective:        l.cfg.DestDomainCeilingEffective,
+		ConcurrencyMaxActiveSource:        l.maxActiveSource,
+		ConcurrencyMaxActiveDest:          l.maxActiveDest,
+		ConcurrencyMaxActiveProbe:         l.maxActiveProbe,
 	}
 	if l.ledger != nil {
 		ledgerStats := l.ledger.Stats()

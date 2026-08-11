@@ -198,6 +198,27 @@ type ObjectPathStageStatsRecord struct {
 	// CoupledCopyOps counts copies that held one permit across source+dest
 	// (streaming multipart / coupled path).
 	CoupledCopyOps int64 `json:"coupled_copy_ops"`
+
+	// Per-domain permit waits (PR2): prove dest capacity was admitted separately
+	// from source. Aggregate PermitWaits remains the sum of domains.
+	SourcePermitWaits        int64 `json:"source_permit_waits"`
+	SourcePermitWaitNanos    int64 `json:"source_permit_wait_nanos"`
+	SourcePermitWaitMaxNanos int64 `json:"source_permit_wait_max_nanos"`
+	DestPermitWaits          int64 `json:"dest_permit_waits"`
+	DestPermitWaitNanos      int64 `json:"dest_permit_wait_nanos"`
+	DestPermitWaitMaxNanos   int64 `json:"dest_permit_wait_max_nanos"`
+	ProbePermitWaits         int64 `json:"probe_permit_waits"`
+	ProbePermitWaitNanos     int64 `json:"probe_permit_wait_nanos"`
+	ProbePermitWaitMaxNanos  int64 `json:"probe_permit_wait_max_nanos"`
+
+	// Peak concurrent tokens observed per domain (from limiter snapshot).
+	SourceMaxActive int `json:"source_max_active"`
+	DestMaxActive   int `json:"dest_max_active"`
+	ProbeMaxActive  int `json:"probe_max_active"`
+
+	// Resolved dest-domain policy for the run (mirrors ConcurrencyStats).
+	DestDomainMultiplier       int `json:"dest_domain_multiplier,omitempty"`
+	DestDomainCeilingEffective int `json:"dest_domain_ceiling_effective,omitempty"`
 }
 
 // SourceRunRecord is the payload for gonimbus.reflow.source.v1 JSONL records.
