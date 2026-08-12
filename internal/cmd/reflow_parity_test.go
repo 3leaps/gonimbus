@@ -47,7 +47,10 @@ var presentationDropKeys = map[string]bool{
 	// admission (source + dest + probe domains may overlap to different
 	// peaks between the CLI pool and library engine). Relations are
 	// asserted by the throughput honesty harness, not output parity.
-	"concurrency_max_active": true,
+	"concurrency_max_active":        true,
+	"concurrency_max_active_source": true,
+	"concurrency_max_active_dest":   true,
+	"concurrency_max_active_probe":  true,
 	// Ledger pressure is scheduling-dependent: the peak is a maximum
 	// concurrent reservation and the wait counters follow admission
 	// interleaving, so both legitimately differ between the two pools and

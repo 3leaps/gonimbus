@@ -103,3 +103,35 @@ func TestParseCheckpointWriterStats(t *testing.T) {
 		t.Fatalf("pressure/duration fields: %+v", p.CheckpointWriterStats)
 	}
 }
+
+// Dest-domain policy is fixed at clamp; run and summary must agree, and the
+// consensus fields must surface for CheckHonesty (gate asserts resolved output).
+func TestParseDestDomainPolicyAgreement(t *testing.T) {
+	t.Parallel()
+	stdout := strings.Join([]string{
+		`{"type":"gonimbus.reflow.run.v1","data":{"dest_uri":"x","checkpoint_path":"y","dry_run":false,"resume":false,"parallel":16,"adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":16,"concurrency_ceiling_requested":16,"concurrency_ceiling_effective":16,"concurrency_ceiling_reason":"requested","concurrency_final":16,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"dest_domain_multiplier":3,"dest_domain_ceiling_effective":48}}`,
+		`{"type":"gonimbus.reflow.summary.v1","data":{"dest_uri":"x","dry_run":false,"on_collision":"skip-if-duplicate","adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":16,"concurrency_ceiling_requested":16,"concurrency_ceiling_effective":16,"concurrency_ceiling_reason":"requested","concurrency_final":16,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":40,"dest_domain_multiplier":3,"dest_domain_ceiling_effective":48,"dest_ifabsent_honored":null,"fallback_active":false,"ifabsent_fallback_objects":0,"statuses":{"complete":1},"errors":0,"invalid_inputs":0}}`,
+	}, "\n") + "\n"
+	p, err := ParseReflowStdout([]byte(stdout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.DestDomainMultiplier != 3 || p.DestDomainCeilingEffective != 48 {
+		t.Fatalf("consensus dest policy mult=%d ceil=%d", p.DestDomainMultiplier, p.DestDomainCeilingEffective)
+	}
+	h := CheckHonesty(p, 16)
+	if !h.OK {
+		t.Fatalf("honesty with recorded mult=3: %s", h.Message)
+	}
+}
+
+func TestParseRejectsDestDomainPolicyMismatch(t *testing.T) {
+	t.Parallel()
+	stdout := strings.Join([]string{
+		`{"type":"gonimbus.reflow.run.v1","data":{"dest_uri":"x","checkpoint_path":"y","dry_run":false,"resume":false,"parallel":16,"adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":16,"concurrency_ceiling_requested":16,"concurrency_ceiling_effective":16,"concurrency_ceiling_reason":"requested","concurrency_final":16,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":0,"dest_domain_multiplier":2,"dest_domain_ceiling_effective":32}}`,
+		`{"type":"gonimbus.reflow.summary.v1","data":{"dest_uri":"x","dry_run":false,"on_collision":"skip-if-duplicate","adaptive_enabled":false,"concurrency_floor":1,"concurrency_initial":16,"concurrency_ceiling_requested":16,"concurrency_ceiling_effective":16,"concurrency_ceiling_reason":"requested","concurrency_final":16,"concurrency_throttle_backoffs":0,"concurrency_additive_increases":0,"concurrency_connection_error_freezes":0,"concurrency_max_active":16,"dest_domain_multiplier":3,"dest_domain_ceiling_effective":48,"dest_ifabsent_honored":null,"fallback_active":false,"ifabsent_fallback_objects":0,"statuses":{"complete":1},"errors":0,"invalid_inputs":0}}`,
+	}, "\n") + "\n"
+	if _, err := ParseReflowStdout([]byte(stdout)); err == nil {
+		t.Fatal("expected run/summary dest_domain_multiplier mismatch")
+	}
+}

@@ -1734,6 +1734,9 @@ func dropVolatileConcurrencyObservations(events []normalizedEvent) []normalizedE
 	volatile := []string{
 		"concurrency_final",
 		"concurrency_max_active",
+		"concurrency_max_active_source",
+		"concurrency_max_active_dest",
+		"concurrency_max_active_probe",
 		"concurrency_time_avg_active",
 		"concurrency_additive_increases",
 		"concurrency_throttle_backoffs",
