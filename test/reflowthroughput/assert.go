@@ -17,10 +17,13 @@ type HonestyResult struct {
 //	0 <= max_active <= sourceCap+destCap+probeCap
 //	effective <= requested
 //
-// Source and probe domains cap at effective; dest may be DestDomainMultiplier ×
-// effective (default 2 after PR2). Equality effective==requested requires reason
-// exactly "requested". Lower effective requires resource_capped:* reason AND
-// exactly one clamp warning. Honest caps are valid results, not harness failures.
+// Source and probe domains cap at effective. Dest is bounded by the *recorded*
+// dest_domain_ceiling_effective from the product run/summary (not a hard-coded
+// multiplier). Multiplier is cross-checked when present so a non-default
+// ConcurrencyConfig.DestDomainMultiplier cannot silently over-admit relative
+// to the gate. Equality effective==requested requires reason exactly
+// "requested". Lower effective requires resource_capped:* reason AND exactly
+// one clamp warning. Honest caps are valid results, not harness failures.
 func CheckHonesty(p ParsedReflowOutput, requested int) HonestyResult {
 	if requested < 1 {
 		return HonestyResult{OK: false, Message: "requested concurrency must be >= 1"}
@@ -34,11 +37,38 @@ func CheckHonesty(p ParsedReflowOutput, requested int) HonestyResult {
 	if maxA < 0 || eff < 0 || req < 0 {
 		return HonestyResult{OK: false, Message: "negative concurrency field"}
 	}
-	// source + dest(×2 default) + probe
-	const destMultDefault = 2
-	maxActiveCap := eff + eff*destMultDefault + eff
+	// Gate asserts resolved dest policy from product output — never assume ×2.
+	mult := p.DestDomainMultiplier
+	destCeil := p.DestDomainCeilingEffective
+	if mult < 1 || destCeil < 1 {
+		return HonestyResult{OK: false, Message: fmt.Sprintf(
+			"missing dest-domain policy (multiplier=%d ceiling=%d); gate requires resolved run/summary fields",
+			mult, destCeil)}
+	}
+	// Hard dest ceiling must not exceed mult×effective (product clamp invariant).
+	if want := mult * eff; destCeil > want {
+		return HonestyResult{OK: false, Message: fmt.Sprintf(
+			"dest_domain_ceiling_effective %d > multiplier×effective %d (mult=%d effective=%d)",
+			destCeil, want, mult, eff)}
+	}
+	// Optional stage-stats record must agree with run/summary policy when present.
+	if st := p.ObjectPathStageStats; st != nil {
+		if st.DestDomainMultiplier != 0 && st.DestDomainMultiplier != mult {
+			return HonestyResult{OK: false, Message: fmt.Sprintf(
+				"stage_stats dest_domain_multiplier %d != run/summary %d", st.DestDomainMultiplier, mult)}
+		}
+		if st.DestDomainCeilingEffective != 0 && st.DestDomainCeilingEffective != destCeil {
+			return HonestyResult{OK: false, Message: fmt.Sprintf(
+				"stage_stats dest_domain_ceiling_effective %d != run/summary %d",
+				st.DestDomainCeilingEffective, destCeil)}
+		}
+	}
+	// source + dest(recorded ceiling) + probe
+	maxActiveCap := eff + destCeil + eff
 	if maxA > maxActiveCap {
-		return HonestyResult{OK: false, Message: fmt.Sprintf("max_active %d > domain sum cap %d (effective %d, dest×%d)", maxA, maxActiveCap, eff, destMultDefault)}
+		return HonestyResult{OK: false, Message: fmt.Sprintf(
+			"max_active %d > domain sum cap %d (effective %d, dest_ceiling %d, mult %d)",
+			maxA, maxActiveCap, eff, destCeil, mult)}
 	}
 	if eff > req {
 		return HonestyResult{OK: false, Message: fmt.Sprintf("effective %d > requested %d", eff, req)}

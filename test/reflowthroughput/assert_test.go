@@ -1,11 +1,20 @@
 package reflowthroughput
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/3leaps/gonimbus/pkg/reflow"
+)
 
 func TestCheckHonesty(t *testing.T) {
 	t.Parallel()
+	// Product-default dest policy (mult=2, ceil=2×eff) for baseline cases.
+	defaultPolicy := func(eff int) (int, int) { return 2, 2 * eff }
+
+	okMult, okCeil := defaultPolicy(32)
 	ok := CheckHonesty(ParsedReflowOutput{
 		Requested: 32, Effective: 32, Reason: "requested", MaxActive: 16,
+		DestDomainMultiplier: okMult, DestDomainCeilingEffective: okCeil,
 	}, 32)
 	if !ok.OK {
 		t.Fatal(ok.Message)
@@ -13,13 +22,16 @@ func TestCheckHonesty(t *testing.T) {
 	// Wrong reason when effective==requested must fail.
 	badReason := CheckHonesty(ParsedReflowOutput{
 		Requested: 32, Effective: 32, Reason: "not-requested", MaxActive: 16,
+		DestDomainMultiplier: okMult, DestDomainCeilingEffective: okCeil,
 	}, 32)
 	if badReason.OK {
 		t.Fatal("expected failure for non-requested reason")
 	}
+	clampMult, clampCeil := defaultPolicy(16)
 	clamp := CheckHonesty(ParsedReflowOutput{
 		Requested: 256, Effective: 16, Reason: "resource_capped:memory:conservative_default",
 		MaxActive: 16, WarningClampCount: 1, ClampWarningOK: true,
+		DestDomainMultiplier: clampMult, DestDomainCeilingEffective: clampCeil,
 	}, 256)
 	if !clamp.OK {
 		t.Fatal(clamp.Message)
@@ -28,19 +40,22 @@ func TestCheckHonesty(t *testing.T) {
 	noWarn := CheckHonesty(ParsedReflowOutput{
 		Requested: 256, Effective: 16, Reason: "resource_capped:memory:conservative_default",
 		MaxActive: 16, WarningClampCount: 0,
+		DestDomainMultiplier: clampMult, DestDomainCeilingEffective: clampCeil,
 	}, 256)
 	if noWarn.OK {
 		t.Fatal("expected failure without clamp warning")
 	}
 	bad := CheckHonesty(ParsedReflowOutput{
 		Requested: 8, Effective: 16, Reason: "requested", MaxActive: 4,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 32,
 	}, 8)
 	if bad.OK {
 		t.Fatal("expected failure when effective > requested")
 	}
-	// Dual-domain + dest bias: max_active may reach source+dest×2+probe.
+	// Dual-domain + dest bias: max_active may reach source+dest_ceiling+probe.
 	dual := CheckHonesty(ParsedReflowOutput{
 		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 48,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 32,
 	}, 16)
 	if !dual.OK {
 		t.Fatalf("dest-biased max_active within sum cap should pass: %s", dual.Message)
@@ -48,9 +63,65 @@ func TestCheckHonesty(t *testing.T) {
 	// Beyond domain sum cap is still dishonest.
 	over := CheckHonesty(ParsedReflowOutput{
 		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 65,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 32,
 	}, 16)
 	if over.OK {
 		t.Fatal("expected failure when max_active > domain sum cap")
+	}
+}
+
+// TestCheckHonestyDestPolicyRecorded covers the gate-integrity requirement that
+// CheckHonesty asserts resolved dest policy from product output, not a hard-coded
+// multiplier=2 assumption.
+func TestCheckHonestyDestPolicyRecorded(t *testing.T) {
+	t.Parallel()
+
+	// Missing policy fails closed (never assume default mult).
+	missing := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 16,
+	}, 16)
+	if missing.OK {
+		t.Fatal("expected failure when dest-domain policy is missing")
+	}
+
+	// Non-default multiplier: max_active that would exceed hard-coded ×2 (64)
+	// but sits under recorded ceil=3×16=48 → source+dest+probe = 16+48+16=80.
+	nonDefault := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 72,
+		DestDomainMultiplier: 3, DestDomainCeilingEffective: 48,
+	}, 16)
+	if !nonDefault.OK {
+		t.Fatalf("non-default mult with recorded ceiling should pass: %s", nonDefault.Message)
+	}
+	// Same max_active under mult=2 / ceil=32 must fail (cap=64).
+	assumedTwo := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 72,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 32,
+	}, 16)
+	if assumedTwo.OK {
+		t.Fatal("max_active 72 must fail under recorded mult=2 ceil=32")
+	}
+
+	// Ceiling above mult×effective is dishonest policy.
+	overCeil := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 16,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 40,
+	}, 16)
+	if overCeil.OK {
+		t.Fatal("expected failure when dest ceiling exceeds mult×effective")
+	}
+
+	// Stage-stats policy mismatch fails closed.
+	stageMismatch := CheckHonesty(ParsedReflowOutput{
+		Requested: 16, Effective: 16, Reason: "requested", MaxActive: 16,
+		DestDomainMultiplier: 2, DestDomainCeilingEffective: 32,
+		ObjectPathStageStats: &reflow.ObjectPathStageStatsRecord{
+			DestDomainMultiplier:       3,
+			DestDomainCeilingEffective: 48,
+		},
+	}, 16)
+	if stageMismatch.OK {
+		t.Fatal("expected failure when stage_stats dest policy disagrees with run/summary")
 	}
 }
 

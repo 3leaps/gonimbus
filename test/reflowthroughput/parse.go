@@ -50,6 +50,14 @@ type ParsedReflowOutput struct {
 	SummaryFinal     int
 	SummaryAdaptive  bool
 
+	// Dest-domain policy (GON-067 PR2): static for the run; run and summary must
+	// agree. Used by CheckHonesty so the gate asserts resolved output, not an
+	// assumed default multiplier.
+	RunDestDomainMultiplier           int
+	RunDestDomainCeilingEffective     int
+	SummaryDestDomainMultiplier       int
+	SummaryDestDomainCeilingEffective int
+
 	// Memory resolution as the product reported it. The whole tuple is fixed at
 	// startup, so run and summary must agree on every field — comparing only
 	// the source labels would let a differing limit, budget, or retry cap
@@ -97,6 +105,10 @@ type ParsedReflowOutput struct {
 	AdaptiveEnabled bool
 	Initial         int
 	Floor           int
+
+	// Consensus dest-domain policy after run/summary agreement.
+	DestDomainMultiplier       int
+	DestDomainCeilingEffective int
 
 	ThrottleBackoffs  int64
 	AdditiveIncreases int64
@@ -165,6 +177,8 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.RunMaxActive = rr.ConcurrencyMaxActive
 			out.RunFinal = rr.ConcurrencyFinal
 			out.RunAdaptive = rr.AdaptiveEnabled
+			out.RunDestDomainMultiplier = rr.DestDomainMultiplier
+			out.RunDestDomainCeilingEffective = rr.DestDomainCeilingEffective
 			out.Initial = rr.ConcurrencyInitial
 			out.Floor = rr.ConcurrencyFloor
 			out.ThrottleBackoffs = rr.ConcurrencyThrottleBackoffs
@@ -190,6 +204,8 @@ func ParseReflowReader(r io.Reader) (ParsedReflowOutput, error) {
 			out.SummaryMaxActive = sr.ConcurrencyMaxActive
 			out.SummaryFinal = sr.ConcurrencyFinal
 			out.SummaryAdaptive = sr.AdaptiveEnabled
+			out.SummaryDestDomainMultiplier = sr.DestDomainMultiplier
+			out.SummaryDestDomainCeilingEffective = sr.DestDomainCeilingEffective
 			out.SummaryMemory = MemoryResolution{
 				LimitBytes:           sr.MemoryLimitBytes,
 				LimitSource:          sr.MemoryLimitSource,
@@ -392,6 +408,16 @@ func (p *ParsedReflowOutput) agreeRunSummary() error {
 	if p.SummaryMaxActive < p.RunMaxActive {
 		return fmt.Errorf("run/summary max_active regress: run=%d summary=%d", p.RunMaxActive, p.SummaryMaxActive)
 	}
+	// Dest-domain policy is fixed at clamp; run and summary must publish the
+	// same resolved multiplier and hard ceiling (gate asserts output, not input).
+	if p.RunDestDomainMultiplier != p.SummaryDestDomainMultiplier {
+		return fmt.Errorf("run/summary dest_domain_multiplier mismatch: %d vs %d",
+			p.RunDestDomainMultiplier, p.SummaryDestDomainMultiplier)
+	}
+	if p.RunDestDomainCeilingEffective != p.SummaryDestDomainCeilingEffective {
+		return fmt.Errorf("run/summary dest_domain_ceiling_effective mismatch: %d vs %d",
+			p.RunDestDomainCeilingEffective, p.SummaryDestDomainCeilingEffective)
+	}
 	p.Requested = p.RunRequested
 	p.Effective = p.RunEffective
 	p.Reason = p.RunReason
@@ -401,6 +427,8 @@ func (p *ParsedReflowOutput) agreeRunSummary() error {
 		p.Final = p.RunFinal
 	}
 	p.AdaptiveEnabled = p.RunAdaptive
+	p.DestDomainMultiplier = p.RunDestDomainMultiplier
+	p.DestDomainCeilingEffective = p.RunDestDomainCeilingEffective
 	return nil
 }
 
