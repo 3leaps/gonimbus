@@ -84,8 +84,9 @@ walkthrough.
   interruption/resume evidence measuring exactly-one-land per object against a
   real checkpoint store, and a flag-coverage matrix proving every flag's
   disposition on each execution path. File destinations, file-tree sources,
-  GCS positional sources, `index.object.v1` stdin, and quarantine/preserve
-  forms still report `execution_path: cli-pool`.
+  GCS positional sources, `index.object.v1` stdin, quarantine collision
+  mode, `--preserve-mode`, and non-default `--on-source-failure` still
+  report `execution_path: cli-pool`.
 - **Dispatch transparency.** Run and summary records carry `execution_path`
   (`engine` | `cli-pool`) on both paths; requested (`parallel`), resolved
   (`concurrency_ceiling_effective`), and observed (`concurrency_max_active`)

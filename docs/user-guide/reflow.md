@@ -284,8 +284,8 @@ Dispatch selects the path per run shape. The engine executes live stdin
 destination, plus positional S3 sources, including the skip-if-duplicate,
 fail, overwrite, and overwrite-if-source-newer collision modes for those
 destinations. File destinations, file-tree sources, GCS positional sources,
-`index.object.v1` stdin, quarantine/preserve collision modes, and a
-non-default source-failure policy still report `execution_path: cli-pool`.
+`index.object.v1` stdin, quarantine collision mode, `--preserve-mode`, and a
+non-default `--on-source-failure` still report `execution_path: cli-pool`.
 Independent source/dest admission applies on **both** paths.
 
 Path selection is **observable evidence, never an implementation detail**:

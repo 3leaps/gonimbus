@@ -217,8 +217,9 @@ to change the recorded multiplier. Dual-domain admission does not widen
 engine dispatch: only stdin `gonimbus.reflow.input.v1` with an `s3://` source
 and an object-store destination (and positional S3) take
 `execution_path: engine`. File destinations, file-tree sources, GCS
-positional sources, `index.object.v1` stdin, and quarantine/preserve forms
-still report `cli-pool`; they still use independent source/dest permits.
+positional sources, `index.object.v1` stdin, quarantine collision mode,
+`--preserve-mode`, and a non-default `--on-source-failure` still report
+`cli-pool`; they still use independent source/dest permits.
 
 Some write paths (streaming multipart) still hold one permit across
 source+dest. Phase-split is the default single-part path.
