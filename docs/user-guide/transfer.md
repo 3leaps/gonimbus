@@ -638,6 +638,13 @@ Reflow supports multiple destination types:
 | S3-compat   | `s3://bucket/` + `--dest-endpoint` | Wasabi, R2, MinIO        |
 | Local       | `file:///tmp/output/`              | Download and reorganize  |
 
+For local `file://` destinations under no-overwrite collision modes, Gonimbus
+does **not** stream bytes straight into the final path. It stages the write in
+the same directory, then publishes with a no-replace link so a hard interrupt
+mid-write does not leave a visible truncated final object. That is publish
+atomicity for IfAbsent landings — not a claim that every provider path has
+full process-kill crash-window coverage.
+
 ### Collision Handling
 
 Control behavior when destination objects already exist:

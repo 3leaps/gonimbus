@@ -233,9 +233,10 @@ default) then varies the _active_ copy concurrency within that ceiling, backing
 off when the destination throttles and ramping back up gradually when it stops.
 
 ```bash
-# --parallel is a requested ceiling (not a dest-worker guarantee). Dest-write
-# may run above source under the recorded dest-domain cap; see dest-biased
-# admission below. (reflow-input.jsonl carries dest_rel_key per record.)
+# --parallel is a requested ceiling (not a fixed dest-worker count). Dest-write
+# may run above source, and dest occupancy may exceed --parallel up to the
+# recorded dest-domain ceiling; see dest-biased admission below.
+# (reflow-input.jsonl carries dest_rel_key per record.)
 gonimbus transfer reflow --stdin \
   --dest 's3://dest-bucket/reflowed/' \
   --parallel 256 < reflow-input.jsonl
@@ -265,11 +266,14 @@ gonimbus transfer reflow --stdin \
   cap, and admission-wait pressure.
 
 Object-store and heterogeneous copies admit source-read and dest-write
-independently. Dest work may run above source up to a recorded dest-domain
-ceiling (twice adaptive `current`, hard-clamped to twice the effective
-ceiling). Dual-domain admission applies on both `engine` and `cli-pool`
-paths; `--parallel` remains a requested ceiling. There is no flag to turn
-this on.
+independently (**diagnostics-first**, automatic). Dest work may run above
+source up to a recorded dest-domain ceiling (twice adaptive `current`,
+hard-clamped to twice the effective ceiling). That dest peak may exceed the
+`--parallel` request; `--parallel` stays the request and does not need to be
+raised. Dual-domain admission applies on both `engine` and `cli-pool` paths.
+There is no flag to turn it on. Optional
+`gonimbus.reflow.object_path_stage_stats.v1` is a per-domain occupancy
+diagnostic, not a throughput claim.
 
 See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
 provider-generalized model (resource cap, independent source/dest

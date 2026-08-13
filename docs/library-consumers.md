@@ -266,14 +266,15 @@ notes; they do not carry the Stable advance-notice guarantee.
 
 v0.4.2 grew this Experimental surface (courtesy, not a Stable break): concurrent
 worker-pool execution, a memory admission ledger, independent source/dest copy
-permits with dest-biased dest cap, collision/durability and keyed partitioned
-work, engine-authored provenance sidecars, and S3-compatible positional
-sources. `pkg/provider` (**Stable**) is additive only in this cut —
-`ResolveConnectionPool`, `ConditionalWriteCapabilities` /
-`ConditionalCapabilityReporter`, and optional `Revision` / `RevisionGetter`
-source-revision reads. Existing embedders that do not implement the reporter
-are treated as unable to prove If-Match and are refused fail-closed by
-`overwrite-if-source-newer`.
+permits with a dest-biased dest cap (dest occupancy may exceed the operator
+`--parallel` request up to the recorded ceiling; source stays at adaptive
+`current`), collision/durability and keyed partitioned work, engine-authored
+provenance sidecars, and S3-compatible positional sources. `pkg/provider`
+(**Stable**) is additive only in this cut — `ResolveConnectionPool`,
+`ConditionalWriteCapabilities` / `ConditionalCapabilityReporter`, and optional
+`Revision` / `RevisionGetter` source-revision reads. Existing embedders that do
+not implement the reporter are treated as unable to prove If-Match and are
+refused fail-closed by `overwrite-if-source-newer`.
 
 Use the CLI when you want a supported operator interface. Use `pkg/reflow` when
 you are building a Go application that needs to compose the reflow data and

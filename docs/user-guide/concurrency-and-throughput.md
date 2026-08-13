@@ -13,8 +13,9 @@ same model rather than introducing separate provider-specific throughput guides.
 worker count.** A run resolves an _effective ceiling_ from the requested value
 and local resource limits, then — in adaptive mode (the default) — varies
 source-domain concurrency within that ceiling in response to throttle
-feedback. Dest-write permits may run above source under a recorded dest-domain
-ceiling; they do not raise `--parallel`.
+feedback. Dest-write permits may run above source, and dest occupancy may
+**exceed** the `--parallel` request up to a recorded dest-domain ceiling
+(default 2× effective). Dual-domain admission does not raise `--parallel`.
 
 ```
 effective_ceiling = min(--parallel, memory_cap, fd_cap)
@@ -23,9 +24,11 @@ dest-domain current ≤ min(2 × source current, dest-domain ceiling)
 dest-domain ceiling = 2 × effective_ceiling   # recorded; default multiplier 2
 ```
 
-`--parallel` is still the operator request. Dest-biased admission can place
-more dest-write work than source-read work under that request; it does not
-raise the request. See
+`--parallel` remains the operator request (source stays at adaptive `current`).
+Dest-biased admission can place more dest-write work than source-read work,
+and that dest peak may be higher than the `--parallel` number — up to the
+recorded dest-domain ceiling. Memory, FD, IfAbsent, and throttle clamps still
+bind. See
 [Independent source and dest admission](#independent-source-and-dest-admission).
 
 ### Requested vs effective ceiling (the resource cap)
@@ -205,11 +208,13 @@ flight.
   ceiling under `--no-adaptive`).
 - **Dest-write** may run above source. Dest admission tracks twice adaptive
   `current` and is hard-clamped to a recorded, pool-realizable dest-domain
-  ceiling of twice the effective ceiling (default multiplier 2). That does
-  not raise `--parallel` or the source-read permit.
-- **The same clamps still bind.** Memory admission, the file-descriptor cap,
-  IfAbsent collision policy, and throttle feedback apply as before. Dest
-  bias cannot outrun those bounds.
+  ceiling of twice the effective ceiling (default multiplier 2). Dest
+  occupancy may therefore exceed the operator `--parallel` request; the
+  request is not raised, and the source-read permit stays at `current`.
+- **Integrity clamps still bind.** Memory admission, the file-descriptor cap,
+  IfAbsent collision policy, and throttle feedback apply as before. Dest bias
+  cannot outrun those bounds — only the single shared Get→Put permit model is
+  gone.
 
 This is automatic on **both** execution paths (`engine` and `cli-pool`). There
 is no operator flag to turn dual-domain admission on, and no dest-bias flag

@@ -614,7 +614,11 @@ gonimbus index compare durable-delta \
 
 ## Job Management
 
-For long-running builds (hours on large buckets), gonimbus provides managed job execution with durable state and background operation.
+For long-running builds (hours on large buckets), gonimbus provides managed job
+execution with durable state and background operation. When a managed job is
+still recorded as running but the holder looks stalled, use
+[plan-stalled / recover-stalled](#stalled-managed-job-recovery) rather than
+guessing whether to stop or reap.
 
 ### Starting Background Builds
 
