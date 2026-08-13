@@ -26,10 +26,12 @@ Discouraged surfaces:
 Experimental workflow surface:
 
 - `github.com/3leaps/gonimbus/pkg/reflow` exposes shared reflow workflow
-  substrate and the migrated stdin reflow execution subset. As of v0.3.5 it
-  includes metadata planning, dry-run planning, record-stream copy execution,
-  collision decisions, adaptive concurrency, typed run/summary records, and the
-  provider-error redaction helpers used by CLI `transfer reflow`.
+  substrate and the migrated stdin / positional-S3 execution subset. As of
+  v0.4.2 it includes metadata and dry-run planning, concurrent record-stream
+  copy execution, independent source/dest admission, collision and durability,
+  provenance sidecars, budgeted partitioned work, typed run/summary records,
+  and the provider-error redaction helpers used by CLI `transfer reflow`.
+  The package remains **Experimental**; pin a release.
 - `github.com/3leaps/gonimbus/pkg/indexbuild` is the durable index build
   workflow engine (v0.4.0 default artifact path). See
   [Durable index builds (pkg/indexbuild)](#durable-index-builds-pkgindexbuild) below.
@@ -261,6 +263,17 @@ release and expect the API to evolve until at least one downstream embedder has
 exercised the engine in production-shaped workflows and the package is promoted
 through the stability process. Experimental changes are called out in release
 notes; they do not carry the Stable advance-notice guarantee.
+
+v0.4.2 grew this Experimental surface (courtesy, not a Stable break): concurrent
+worker-pool execution, a memory admission ledger, independent source/dest copy
+permits with dest-biased dest cap, collision/durability and keyed partitioned
+work, engine-authored provenance sidecars, and S3-compatible positional
+sources. `pkg/provider` (**Stable**) is additive only in this cut —
+`ResolveConnectionPool`, `ConditionalWriteCapabilities` /
+`ConditionalCapabilityReporter`, and optional `Revision` / `RevisionGetter`
+source-revision reads. Existing embedders that do not implement the reporter
+are treated as unable to prove If-Match and are refused fail-closed by
+`overwrite-if-source-newer`.
 
 Use the CLI when you want a supported operator interface. Use `pkg/reflow` when
 you are building a Go application that needs to compose the reflow data and

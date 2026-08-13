@@ -11,14 +11,22 @@ same model rather than introducing separate provider-specific throughput guides.
 
 `transfer reflow --parallel` is a **requested ceiling, not a guaranteed active
 worker count.** A run resolves an _effective ceiling_ from the requested value
-and local resource limits, then — in adaptive mode (the default) — varies the
-_active_ copy concurrency within that ceiling in response to how the destination
-behaves.
+and local resource limits, then — in adaptive mode (the default) — varies
+source-domain concurrency within that ceiling in response to throttle
+feedback. Dest-write permits may run above source under a recorded dest-domain
+ceiling; they do not raise `--parallel`.
 
 ```
 effective_ceiling = min(--parallel, memory_cap, fd_cap)
-floor ≤ active concurrency ≤ effective_ceiling
+floor ≤ source-domain current ≤ effective_ceiling
+dest-domain current ≤ min(2 × source current, dest-domain ceiling)
+dest-domain ceiling = 2 × effective_ceiling   # recorded; default multiplier 2
 ```
+
+`--parallel` is still the operator request. Dest-biased admission can place
+more dest-write work than source-read work under that request; it does not
+raise the request. See
+[Independent source and dest admission](#independent-source-and-dest-admission).
 
 ### Requested vs effective ceiling (the resource cap)
 
@@ -186,6 +194,45 @@ The consequences worth knowing:
   its initial value runs at `min(16, effective)` when adaptive, or at the
   effective ceiling when fixed — never silently serial.
 
+## Independent source and dest admission
+
+A copy is two phases — source-read, then dest-write. Those phases no longer
+share one global permit for the whole Get→Put. Source and dest take
+independent permits so dest work can proceed while source reads are still in
+flight.
+
+- **Source-read** is capped at adaptive `current` (or at the fixed effective
+  ceiling under `--no-adaptive`).
+- **Dest-write** may run above source. Dest admission tracks twice adaptive
+  `current` and is hard-clamped to a recorded, pool-realizable dest-domain
+  ceiling of twice the effective ceiling (default multiplier 2). That does
+  not raise `--parallel` or the source-read permit.
+- **The same clamps still bind.** Memory admission, the file-descriptor cap,
+  IfAbsent collision policy, and throttle feedback apply as before. Dest
+  bias cannot outrun those bounds.
+
+This is automatic on **both** execution paths (`engine` and `cli-pool`). There
+is no operator flag to turn dual-domain admission on, and no dest-bias flag
+to change the recorded multiplier. Dual-domain admission does not widen
+engine dispatch: only stdin `gonimbus.reflow.input.v1` with an `s3://` source
+and an object-store destination (and positional S3) take
+`execution_path: engine`. File destinations, file-tree sources, GCS
+positional sources, `index.object.v1` stdin, and quarantine/preserve forms
+still report `cli-pool`; they still use independent source/dest permits.
+
+Some write paths (streaming multipart) still hold one permit across
+source+dest. Phase-split is the default single-part path.
+
+Run and summary records carry the recorded dest policy
+(`dest_domain_multiplier`, `dest_domain_ceiling_effective`) so connection
+pools size to the same dest-domain ceiling. Per-domain peaks
+(`concurrency_max_active_source`, `concurrency_max_active_dest`) are
+diagnostics, not a throughput claim.
+
+Optional `gonimbus.reflow.object_path_stage_stats.v1` attributes permit
+waits and occupancy per domain (counts and durations only; no keys, URIs,
+or paths). It is a run diagnostic, not a marketing metric.
+
 ## Provider Transport Interaction
 
 High concurrency only helps if the underlying client reuses connections. Parallel
@@ -260,6 +307,10 @@ operator audit (all backwards-compatible; existing consumers are unaffected):
 | `concurrency_additive_increases`       | Count of step-up increases.                                                                                                                      |
 | `concurrency_connection_error_freezes` | Count of increase-freezes from connection-error streaks.                                                                                         |
 | `concurrency_time_avg_active`          | Time-averaged active concurrency over the run's execution window (see below).                                                                    |
+| `dest_domain_multiplier`               | Record field only (not a CLI flag): dest-domain scale of adaptive `current` (product default 2).                                                 |
+| `dest_domain_ceiling_effective`        | Record field only (not a CLI flag): hard dest-domain cap (`multiplier ×` effective ceiling). Connection pools size to this recorded bound.       |
+| `concurrency_max_active_source`        | Peak source-domain permits observed. Diagnostic; not a throughput claim.                                                                         |
+| `concurrency_max_active_dest`          | Peak dest-domain permits observed. Diagnostic; not a throughput claim.                                                                           |
 
 Reading these together — e.g. _requested 256 → effective 256 → final 48, 6
 throttle backoffs_ — tells you the endpoint's sustainable rate and whether the

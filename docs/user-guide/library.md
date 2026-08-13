@@ -33,8 +33,11 @@ pattern in `ObjectURI.Pattern` and expose the strongest listing prefix in
 characters.
 
 For workflow embedding, `pkg/reflow` exposes the Experimental reflow engine used
-by the migrated stdin `transfer reflow` subset. Treat it as a pinned-release
-surface until it is promoted from Experimental to Stable.
+by the migrated stdin / positional-S3 `transfer reflow` subset. The v0.4.2
+engine surface grew (concurrent execution, memory admission, dual-domain copy
+permits, collision/durability, provenance sidecars) but the package is still
+Experimental — pin a release. Stable `pkg/provider` is additive in this cut
+(`ResolveConnectionPool`, conditional-write reporter, revision-bound reads).
 
 Gonimbus is pre-v1.0. Public packages are intended for library use, but breaking
 changes may still happen across minor versions. Pin applications to specific

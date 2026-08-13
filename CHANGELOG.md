@@ -280,7 +280,11 @@ walkthrough.
   `internal/buildinfo/VERSION`).
 - Updated the current-release README pointer.
 - Concurrency guide documents pool construction from admitted N across parallel
-  verbs (`docs/user-guide/concurrency-and-throughput.md`).
+  verbs and dest-biased source/dest admission
+  (`docs/user-guide/concurrency-and-throughput.md`).
+- User guide documents `index jobs plan-stalled` / `recover-stalled`.
+- Library-consumer notes name the Stable `pkg/provider` additive surfaces and
+  Experimental `pkg/reflow` growth.
 
 ### Development
 
