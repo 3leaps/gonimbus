@@ -15,6 +15,32 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-13
+
+**Library reflow is the data plane, and object-store copies admit source and dest independently.**
+
+v0.4.2 makes the library record-stream engine (`pkg/reflow`) the execution home
+for live copies: concurrent workers, memory admission, collision and durability
+handling, provenance sidecars, S3-compatible positional sources, and budgeted
+partitioned work live in the engine. The CLI is an adapter (ADR-0006). A
+standing dual-path parity gate holds engine and CLI-pool behavior together.
+
+Object-store and heterogeneous copies now admit the source-read and dest-write
+phases independently. Dest work can run above source under a recorded,
+pool-realizable ceiling, still bounded by `--parallel`, memory, file-descriptor,
+IfAbsent, and throttle clamps. Connection pools follow the already-admitted N
+across parallel verbs.
+
+As in v0.4.0 and v0.4.1, the durable-v2 format is a full-fidelity **internal
+render** for trusted operator and pipeline use — **not** a reduced-trust,
+de-identified, or third-party publication format. Content digests carried by
+durable manifests and segments are **content-integrity / tamper-evidence**
+checksums, not statements of author authenticity or provenance. SQLite remains
+a first-class compatibility path (`--format sqlite` / `--format both`).
+
+See [`docs/releases/v0.4.2.md`](docs/releases/v0.4.2.md) for the narrative
+walkthrough.
+
 ### Library API
 
 - **Additive (Stable `pkg/provider`):** `ConnectionPoolPolicy` and
@@ -25,40 +51,41 @@ changes.
   `1` leave SDK defaults; `admittedN >= 2` sets both fields to `admittedN`
   (including large pass-through values). Library and CLI adapters must resolve
   engine defaults before calling. Does not claim field throughput.
-
-### Changed
-
-- **Concurrency guide: pool follows admitted concurrency on parallel verbs.**
-  `docs/user-guide/concurrency-and-throughput.md` no longer describes transport
-  pool sizing as reflow-only. It documents construction from admitted N across
-  index/crawl/enrich, transfer, content, tree, and reflow; intentional
-  SDK-default single-shot paths; the Stable `ResolveConnectionPool` library
-  entry; and that pool policy is not a field-throughput claim.
+- **Added (compatible): provider conditional-write capability declaration.** New
+  `provider.ConditionalWriteCapabilities` descriptor and
+  `provider.ConditionalCapabilityReporter` interface let a destination provider
+  declare which conditional-write predicates it honors atomically — `IfAbsent`,
+  `IfMatchETag`, and `ConditionalMultipartCompletion`. The built-in S3 and file
+  providers declare If-Match support (S3 also conditional multipart completion);
+  GCS declares IfAbsent only. The reflow engine now validates source-newer
+  overwrite support against this declaration instead of inferring it from
+  `ConditionalPutter` presence, so an IfAbsent-only conditional provider is
+  refused before any read or destination mutation. Additive: existing embedders
+  that do not implement the reporter are treated as unable to prove If-Match and
+  are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
+  refusal.
+- **Added (compatible): source-revision reads.** `provider.ObjectSummary` now
+  carries an optional opaque provider-native `Revision`, and the new
+  `provider.SourceRevision` and `provider.RevisionGetter` contracts let callers
+  request exactly an admitted version or generation. Providers that cannot
+  enforce a replay validator need not implement the optional interface.
 
 ### Added
 
-- **Remaining parallel cmd construction pools follow admitted concurrency.**
-  Non-reflow transfer source/dest (composite `C+L` / `C+2L` on source; dest `C`),
-  content head/probe (`N` or `N+1` when a prefix/glob enumerator can LIST on the
-  same client), and tree traversal (`treeParallel` when `--depth > 0`; depth 0
-  stays SDK-default) exact-assign pool knobs through `provider.ResolveConnectionPool`.
-  Overflow on composite formulas refuses construction. No field-throughput claim.
-- **Index-family provider connection pools follow admitted concurrency.** Index
-  build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
-  construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved
-  crawl concurrency or enrich `--parallel` (default 32). Scope-preview and hydrate
-  remain intentional SDK-default constructions. No field-throughput claim.
 - **Concurrent execution in the library reflow engine.** The `pkg/reflow`
   record-stream runner now executes objects on a bounded worker pool honoring
   the resolved concurrency ceiling, with per-destination-key arbitration moved
   into the engine (concurrent same-key workers serialize; each established
   destination key gets exactly one durable observed-mark and one conditional
-  create). Live stdin record-stream copies dispatch to the engine again — the
-  v0.4.1 dispatch narrowing (#159) is removed, behind a standing behavioral
-  parity gate: a same-input dual-path harness (copy-heavy and skip-heavy),
+  create). Live stdin `gonimbus.reflow.input.v1` copies with `s3://` sources and
+  an object-store destination dispatch to the engine again — the v0.4.1
+  dispatch narrowing (#159) is removed — behind a standing behavioral parity
+  gate: a same-input dual-path harness (copy-heavy and skip-heavy),
   interruption/resume evidence measuring exactly-one-land per object against a
   real checkpoint store, and a flag-coverage matrix proving every flag's
-  disposition on each execution path.
+  disposition on each execution path. File destinations, file-tree sources,
+  GCS positional sources, `index.object.v1` stdin, and quarantine/preserve
+  forms still report `execution_path: cli-pool`.
 - **Dispatch transparency.** Run and summary records carry `execution_path`
   (`engine` | `cli-pool`) on both paths; requested (`parallel`), resolved
   (`concurrency_ceiling_effective`), and observed (`concurrency_max_active`)
@@ -112,6 +139,48 @@ changes.
   complete; an enabled live run requires a callable sidecar object-putter before
   any effect. Byte-identical sidecar content across the engine and command paths
   is held by a standing dual-path parity gate.
+- **S3-compatible positional sources on the engine.** Positional S3 source
+  shapes that previously stayed on the command path now execute on the
+  record-stream runner with the same concurrency, admission, and durability
+  contracts as engine stdin live copies. GCS positional sources remain on the
+  CLI-pool path in this cut.
+- **Independent source and dest copy admission** (#191). Source-read and
+  dest-write no longer share one global permit for the whole Get→Put. A
+  phase-split `CopyGate` issues per-domain permits on both execution paths;
+  dest work can proceed while source reads are still in flight, under the same
+  `--parallel` / memory / FD / throttle clamps. Optional
+  `gonimbus.reflow.object_path_stage_stats.v1` records per-domain occupancy as
+  a diagnostic, not a throughput claim.
+- **Dest-biased dest cap** (#192). Dest-domain admission tracks twice the
+  adaptive `current` (source stays at `current`), hard-clamped to a recorded,
+  pool-realizable dest ceiling of twice the effective ceiling (default
+  `dest_domain_multiplier` 2). The dest phase can admit more work without
+  raising the source-read permit or the operator `--parallel` request. Run
+  records carry the dest multiplier and dest-domain ceiling so connection
+  pools size to the same bound. Honesty checks assert that recorded dest
+  policy, not a hard-coded factor.
+- **Index-family provider connection pools follow admitted concurrency.** Index
+  build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
+  construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved
+  crawl concurrency or enrich `--parallel` (default 32). Scope-preview and hydrate
+  remain intentional SDK-default constructions. No field-throughput claim.
+- **Remaining parallel cmd construction pools follow admitted concurrency.**
+  Non-reflow transfer source/dest (composite `C+L` / `C+2L` on source; dest `C`),
+  content head/probe (`N` or `N+1` when a prefix/glob enumerator can LIST on the
+  same client), and tree traversal (`treeParallel` when `--depth > 0`; depth 0
+  stays SDK-default) exact-assign pool knobs through `provider.ResolveConnectionPool`.
+  Overflow on composite formulas refuses construction. No field-throughput claim.
+- **Stale index set-authority lease detect and reclaim.** Index jobs detect a
+  stale set-authority lease and reclaim it so a later holder can proceed
+  instead of blocking behind a dead lease.
+- **Durable index crawl across parallel journal lanes** (#182). Durable
+  `index build` crawl can write independent journal lanes in parallel on
+  multi-entry crawl plans and still publish a single consistent durable
+  snapshot. Matcher-derived single-entry plans stay single-lane.
+- **`index jobs plan-stalled` / `recover-stalled`** (#185). Managed index
+  jobs can plan and recover a stalled holder: `plan-stalled <job_id>` reports
+  the recovery action without mutating authority; `recover-stalled <job_id>`
+  is dry-run by default and mutates only with `--confirm`.
 
 ### Changed
 
@@ -127,10 +196,10 @@ changes.
   object reports `failed` (reason `checkpoint.write_failed`) and the run exits
   non-zero; resume against a healthy store converges without double-landing.
   Auxiliary arbitration-state write failures warn (typed
-  `REFLOW_ARBITRATION_STATE_WRITE_FAILED`) and continue on both paths. The
-  CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
-  their historical warn-and-continue terminal behavior until they migrate to
-  the engine.
+  `REFLOW_ARBITRATION_STATE_WRITE_FAILED`) and continue on both paths.
+  `--on-collision overwrite-if-source-newer` now executes on the engine for
+  object-store destinations; quarantine remains CLI-pool-routed. Both paths
+  use this same strict terminal acknowledgement.
 - **Keyed durability for partitioned reflow.** Live partitioned-prefix runs now
   persist source-revision-bound admissions before selection, persist an outcome
   for every admitted object and a deterministic work-unit key before handoff,
@@ -140,13 +209,6 @@ changes.
   `source_changed`; a fresh non-resume run supersedes that source slot instead.
   Replay without an enforceable provider revision is refused as
   `replay_unverifiable`.
-- **Failed-copy checkpoints record the specific failure reason.** On the
-  record-stream engine path, a failed collision now persists the same specific
-  reason on the durable checkpoint, the error event, and the emitted record
-  (e.g. `collision.exists.duplicate` or `collision.exists.conflict`) rather
-  than the coarse error class on the checkpoint. `error_code` still carries the
-  class and the sanitized cause is retained, so a resume reading the checkpoint
-  sees the reason a consumer saw on the record.
 - **The memory limit binds to the lowest detected candidate.** Container/cgroup
   limit, explicit runtime limit (`GOMEMLIMIT`), and detected physical RAM are
   all probed and the lowest positive value binds, with its source recorded — an
@@ -170,27 +232,33 @@ changes.
   `provenance.uri` naming a bucket the object was never written to. A same-bucket
   GCS mirrored root now honors the sidecar-root prefix — previously a GCS
   mirrored root fell back to adjacent placement and silently ignored the root.
+- **Set-authority lease is dropped when its holder completes**, so a finished
+  index job does not leave a live lease that blocks the next writer.
+- **Concurrency guide: pool follows admitted concurrency on parallel verbs.**
+  `docs/user-guide/concurrency-and-throughput.md` no longer describes transport
+  pool sizing as reflow-only. It documents construction from admitted N across
+  index/crawl/enrich, transfer, content, tree, and reflow; intentional
+  SDK-default single-shot paths; the Stable `ResolveConnectionPool` library
+  entry; and that pool policy is not a field-throughput claim.
 
-### Library API
+### Fixed
 
-- **Added (compatible): provider conditional-write capability declaration.** New
-  `provider.ConditionalWriteCapabilities` descriptor and
-  `provider.ConditionalCapabilityReporter` interface let a destination provider
-  declare which conditional-write predicates it honors atomically — `IfAbsent`,
-  `IfMatchETag`, and `ConditionalMultipartCompletion`. The built-in S3 and file
-  providers declare If-Match support (S3 also conditional multipart completion);
-  GCS declares IfAbsent only. The reflow engine now validates source-newer
-  overwrite support against this declaration instead of inferring it from
-  `ConditionalPutter` presence, so an IfAbsent-only conditional provider is
-  refused before any read or destination mutation. Additive: existing embedders
-  that do not implement the reporter are treated as unable to prove If-Match and
-  are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
-  refusal.
-- **Added (compatible): source-revision reads.** `provider.ObjectSummary` now
-  carries an optional opaque provider-native `Revision`, and the new
-  `provider.SourceRevision` and `provider.RevisionGetter` contracts let callers
-  request exactly an admitted version or generation. Providers that cannot
-  enforce a replay validator need not implement the optional interface.
+- **Failed-copy checkpoints record the specific failure reason.** On the
+  record-stream engine path, a failed collision now persists the same specific
+  reason on the durable checkpoint, the error event, and the emitted record
+  (e.g. `collision.exists.duplicate` or `collision.exists.conflict`) rather
+  than the coarse error class on the checkpoint. `error_code` still carries the
+  class and the sanitized cause is retained, so a resume reading the checkpoint
+  sees the reason a consumer saw on the record.
+- **File destinations publish IfAbsent landings atomically** (#190). The file
+  provider stages the object and publishes with a no-replace link, so a hard
+  interrupt mid-write does not leave a visible truncated final at the
+  destination key. Experimental savepoint elision
+  (`GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS`) stays default off and is not a
+  recommended production control.
+- **Generated run and event identifiers stay unique under a coarse clock.**
+- **An exited managed process reads as finished**, and lease acquisitions are
+  identified by entropy rather than colliding on a reused pid.
 
 ### Known limits (stated, not claimed)
 
@@ -201,8 +269,28 @@ changes.
 - On Windows the file-descriptor probe leaves no usable headroom, so the FD cap
   binds at 1 and serializes copies regardless of `--parallel` or the memory
   budget. The clamp is reported truthfully (`resource_capped:fd`); a
-  Windows-representative descriptor probe is tracked for the next
+  Windows-representative descriptor probe is tracked for a later
   transfer-concurrency slice.
+- Experimental `GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS` remains default off.
+
+### Documentation
+
+- Added this v0.4.2 release page and refreshed rolling release notes.
+- Bumped version to `0.4.2` (`VERSION`, `.fulmen/app.yaml`, embedded identity,
+  `internal/buildinfo/VERSION`).
+- Updated the current-release README pointer.
+- Concurrency guide documents pool construction from admitted N across parallel
+  verbs (`docs/user-guide/concurrency-and-throughput.md`).
+
+### Development
+
+- Checkpoint-scale throughput profiles, producer-path report control, and
+  object-store harness hardening remain measurement-only (non-CI). They are
+  not product throughput claims.
+- Role checklists gained gate-integrity and public-surface items; role prompts
+  validate against the vendored schema.
+- Dropped scheduling-dependent ledger pressure from the reflow parity gate so
+  the dual-path harness does not fail on scheduler jitter.
 
 ## [0.4.1] - 2026-07-18
 
@@ -1131,6 +1219,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Hub (`index hub` + `index export` + `index hydrate`)
 
 - **Index Hub CRUD** (`internal/cmd/index_hub.go`)
+
   - `gonimbus index hub init` — create a new hub root with marker file
   - `gonimbus index hub ls` — list index sets and their runs at a hub
   - `gonimbus index hub show` — show details for a specific index set or run
@@ -1139,12 +1228,14 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - `gonimbus index hub gc` — garbage-collect runs by `--keep N` or `--before DATE`; supports `--dry-run` and `--json`
 
 - **Index Export** (`internal/cmd/index_export.go`)
+
   - `gonimbus index export` publishes an index run to a file or S3 hub
   - Atomic publish sequence: `index.db` → `identity.json` → `complete.json` (commit marker) → `latest.json`
   - SHA-256 + size integrity manifest in `complete.json`
   - `latest.json` is best-effort last-writer-wins for v0.1.x; CAS / fail-closed semantics tracked for v0.2.x
 
 - **Index Hydrate** (`internal/cmd/index_hydrate.go`)
+
   - `gonimbus index hydrate` downloads a published index run from a hub
   - Resolves run via `latest.json` pointer or explicit `--run-id`
   - SHA-256 + size verification for `index.db` and `identity.json`
@@ -1201,6 +1292,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Transfer Reflow (`transfer reflow`)
 
 - **Transfer Reflow Command** (`internal/cmd/transfer_reflow.go`)
+
   - `gonimbus transfer reflow <source-uri>` copies objects while rewriting keys
   - Template-based path variable extraction and substitution
   - Supports probe-derived variables (e.g., `{business_date}` from content)
@@ -1218,6 +1310,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Probe (`content probe`)
 
 - **Content Probe Command** (`internal/cmd/content_probe.go`)
+
   - `gonimbus content probe <uri>` extracts derived fields from content
   - Config-driven extraction rules (`--config probe.yaml`)
   - Bulk processing via `--stdin`
@@ -1257,6 +1350,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Inspection Commands (`content head`)
 
 - **Content Head Command** (`internal/cmd/content_head.go`)
+
   - `gonimbus content head <uri>` reads the first N bytes of an object
   - Uses HTTP Range requests when provider supports them (falls back to GetObject)
   - Output is JSONL-only (`gonimbus.content.head.v1`) with base64-encoded content
@@ -1271,6 +1365,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Provider Range Requests
 
 - **ObjectRanger Interface** (`pkg/provider/capabilities.go`)
+
   - `GetRange(ctx, key, start, endInclusive)` for byte-range reads
   - HTTP Range semantics (inclusive start/end offsets)
   - S3 provider implementation with range header support
@@ -1296,6 +1391,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Streaming Commands (`stream get`, `stream head`)
 
 - **Stream Get Command** (`internal/cmd/stream_get.go`)
+
   - `gonimbus stream get <uri>` streams object content with JSONL framing
   - Mixed-framing output: JSONL headers + raw bytes for efficient large payload handling
   - `gonimbus.stream.open.v1` with uri, size, etag, last_modified, content_type
@@ -1305,6 +1401,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Errors emitted to stdout as `gonimbus.error.v1` (streaming mode contract)
 
 - **Stream Head Command** (`internal/cmd/stream_head.go`)
+
   - `gonimbus stream head <uri>` retrieves object metadata without content
   - Returns `gonimbus.object.v1` with full metadata including custom S3 user metadata
   - Errors emitted to stdout as `gonimbus.error.v1` (consistent with streaming mode)
@@ -1339,17 +1436,20 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Path-Scoped Index Builds (`build.scope`)
 
 - **Scope Types** (`pkg/manifest/`, `internal/assets/schemas/`)
+
   - `prefix_list`: Explicit prefixes for deterministic crawl scope
   - `date_partitions`: Dynamic prefix generation from date ranges with segment discovery
   - `union`: Combine multiple scope definitions
 
 - **Scope Compiler** (`pkg/scope/`)
+
   - Compiles `build.scope` configuration into explicit prefix plans
   - Delimiter listing for segment discovery (e.g., device IDs under store prefixes)
   - Date range expansion to concrete `YYYY-MM-DD/` prefixes
   - `--dry-run` flag previews scope plan before execution
 
 - **Scope Guardrails** (`pkg/scope/`)
+
   - Warning threshold for large prefix expansions
   - Soft-delete skipped by default for scoped builds (partial coverage)
   - Scope config included in IndexSet identity hash
@@ -1362,10 +1462,12 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Job Management
 
 - **Job Registry** (`pkg/jobregistry/`)
+
   - Durable on-disk job records under the app data dir (`jobs/index-build/<job_id>/job.json`)
   - Captures identity/run metadata, PID, heartbeat timestamps, and log file paths
 
 - **Managed Background Builds** (`internal/cmd/index_build.go`, `pkg/jobregistry/executor.go`)
+
   - `gonimbus index build --background` spawns a managed child process and returns a job id
   - Captures stdout/stderr to per-job log files
   - Safe cancellation via SIGTERM -> context cancellation; SIGKILL fallback
@@ -1405,6 +1507,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Workflow
 
 - **Local Index Store** (`pkg/indexstore/`)
+
   - SQLite-based local index for offline bucket inventory
   - Per-index database isolation (hash-based identity)
   - Streaming batch ingestion from crawl results
@@ -1412,6 +1515,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Schema version tracking for upgrades
 
 - **Index CLI Commands** (`internal/cmd/index*.go`)
+
   - `gonimbus index init` - Initialize local index database
   - `gonimbus index build --job <manifest>` - Build index from crawl
   - `gonimbus index list` - List local indexes with stats
@@ -1422,12 +1526,14 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - `gonimbus index show` - Display manifest provenance
 
 - **Index Build Features**
+
   - Build-time include patterns for scope control
   - Derived prefix display during builds
   - Explicit identity validation (provider, region, endpoint)
   - Tolerates provider outages via SDK retry
 
 - **Index Query Features**
+
   - Pattern matching with doublestar globs
   - Metadata filters: `--min-size`, `--max-size`, `--after`, `--before`
   - Count mode: `--count` for quick totals
@@ -1456,6 +1562,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Transfer Workflow
 
 - **Transfer Engine** (`pkg/transfer/`, `internal/cmd/transfer.go`)
+
   - Manifest-driven copy/move operations between S3 buckets
   - `gonimbus transfer --job manifest.yaml` CLI command
   - Support for same-bucket, cross-account, and cross-provider transfers
@@ -1464,6 +1571,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Deduplication strategies: `etag` (default), `key`, or `none`
 
 - **Prefix Sharding for Parallel Enumeration** (`pkg/shard/`)
+
   - `sharding.enabled`, `sharding.depth`, `sharding.list_concurrency` manifest options
   - Parallel prefix discovery using delimiter listing
   - Bounded concurrency with configurable worker pools
@@ -1523,6 +1631,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Fixed
 
 - **Retryable PUT Bodies** (`pkg/transfer/`)
+
   - Fixed "failed to rewind transport stream for retry" errors on transient failures
   - Small objects now buffered with seekable wrapper for SDK retry support
 
@@ -1543,6 +1652,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Added
 
 - **AWS Profile Authentication** (`internal/cmd/doctor.go`)
+
   - `--profile` flag on `doctor` command for enterprise SSO diagnostics
   - Credential expiry check with warning when < 1 hour remaining
   - IMDS timeout optimization when profile/env credentials available
@@ -1573,23 +1683,27 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 ### Added
 
 - **Provider Interface & S3 Implementation** (`pkg/provider/`)
+
   - Abstract provider interface with `List`, `Head`, and `Close` methods
   - S3 provider using AWS SDK v2 with default credential chain
   - Support for S3-compatible stores (Wasabi, Cloudflare R2, DigitalOcean Spaces)
   - Custom endpoint and explicit credential configuration
 
 - **Pattern Matching Layer** (`pkg/match/`)
+
   - Doublestar glob pattern matching for cloud object keys
   - Prefix derivation algorithm for efficient listing at scale
   - Include/exclude pattern support
   - Hidden file detection and filtering
 
 - **JSONL Output Layer** (`pkg/output/`)
+
   - Typed record envelopes: `gonimbus.object.v1`, `gonimbus.error.v1`, `gonimbus.progress.v1`
   - Stream-friendly JSONL writer with atomic line writes
   - Configurable progress emission
 
 - **Crawl Engine** (`pkg/crawler/`)
+
   - Bounded streaming pipeline: lister → matcher → writer
   - Configurable concurrency and rate limiting
   - Backpressure via bounded channels
@@ -1597,11 +1711,13 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
   - Progress tracking and summary statistics
 
 - **Job Manifest Schema** (`pkg/manifest/`)
+
   - JSON Schema validated job manifests (YAML/JSON)
   - Connection, match, crawl, and output configuration
   - Strict validation with clear error messages
 
 - **CLI Commands** (`internal/cmd/`)
+
   - `gonimbus crawl` - Run crawl jobs from manifest files
   - `gonimbus inspect` - Quick inspection of objects or prefixes
   - `gonimbus doctor` - Environment and credential diagnostics
@@ -1609,6 +1725,7 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
   - `gonimbus version` - Version and build information
 
 - **Server Skeleton** (`internal/server/`)
+
   - Chi-based HTTP router with middleware stack
   - Health check endpoints (`/health`, `/health/live`, `/health/ready`, `/health/startup`)
   - Prometheus metrics endpoint (`/metrics`)
@@ -1631,7 +1748,9 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/3leaps/gonimbus/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/3leaps/gonimbus/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/3leaps/gonimbus/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/3leaps/gonimbus/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/3leaps/gonimbus/compare/v0.3.5...v0.3.6
