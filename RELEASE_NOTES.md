@@ -14,15 +14,17 @@ handling, provenance sidecars, S3-compatible positional sources, and budgeted
 partitioned work. The CLI is an adapter. A standing dual-path parity gate holds
 engine and CLI-pool behavior together. Stdin `gonimbus.reflow.input.v1` copies
 with `s3://` sources and an object-store destination dispatch to the engine
-again; file destinations, file-tree sources, GCS positional sources, and
-`index.object.v1` stdin still report `execution_path: cli-pool`.
+again; file destinations, file-tree sources, GCS positional sources,
+`index.object.v1` stdin, quarantine collision mode, `--preserve-mode`, and
+non-default `--on-source-failure` still report `execution_path: cli-pool`.
 
 Object-store and heterogeneous copies now admit source-read and dest-write
 independently (#191, #192). Dest admission tracks twice adaptive `current`
 (source stays at `current`), hard-clamped to a recorded, pool-realizable dest
 ceiling of twice the effective ceiling (default multiplier 2). Honesty checks
-assert that recorded dest policy. Copies remain bounded by `--parallel`,
-memory, file-descriptor, IfAbsent, and throttle clamps.
+assert that recorded dest policy. Dest occupancy may exceed `--parallel` up
+to that recorded ceiling; `--parallel` remains the operator request. Memory,
+file-descriptor, IfAbsent, and throttle clamps still bind.
 
 ### Operator quick path
 

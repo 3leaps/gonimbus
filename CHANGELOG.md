@@ -27,9 +27,10 @@ standing dual-path parity gate holds engine and CLI-pool behavior together.
 
 Object-store and heterogeneous copies now admit the source-read and dest-write
 phases independently. Dest work can run above source under a recorded,
-pool-realizable ceiling, still bounded by `--parallel`, memory, file-descriptor,
-IfAbsent, and throttle clamps. Connection pools follow the already-admitted N
-across parallel verbs.
+pool-realizable ceiling (default 2× effective) without raising the operator
+`--parallel` request. Memory, file-descriptor, IfAbsent, and throttle clamps
+still bind. Connection pools follow the already-admitted N across parallel
+verbs.
 
 As in v0.4.0 and v0.4.1, the durable-v2 format is a full-fidelity **internal
 render** for trusted operator and pipeline use — **not** a reduced-trust,
@@ -148,8 +149,9 @@ walkthrough.
 - **Independent source and dest copy admission** (#191). Source-read and
   dest-write no longer share one global permit for the whole Get→Put. A
   phase-split `CopyGate` issues per-domain permits on both execution paths;
-  dest work can proceed while source reads are still in flight, under the same
-  `--parallel` / memory / FD / throttle clamps. Optional
+  dest work can proceed while source reads are still in flight. Dest occupancy
+  may exceed the `--parallel` request up to the recorded dest ceiling (#192).
+  Memory, FD, IfAbsent, and throttle clamps still bind. Optional
   `gonimbus.reflow.object_path_stage_stats.v1` records per-domain occupancy as
   a diagnostic, not a throughput claim.
 - **Dest-biased dest cap** (#192). Dest-domain admission tracks twice the
