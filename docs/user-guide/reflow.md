@@ -233,8 +233,10 @@ default) then varies the _active_ copy concurrency within that ceiling, backing
 off when the destination throttles and ramping back up gradually when it stops.
 
 ```bash
-# Ask for up to 256 workers; the engine settles wherever the endpoint + host allow.
-# (reflow-input.jsonl carries dest_rel_key per record, e.g. from `content probe --emit reflow-input`)
+# --parallel is a requested ceiling (not a fixed dest-worker count). Dest-write
+# may run above source, and dest occupancy may exceed --parallel up to the
+# recorded dest-domain ceiling; see dest-biased admission below.
+# (reflow-input.jsonl carries dest_rel_key per record.)
 gonimbus transfer reflow --stdin \
   --dest 's3://dest-bucket/reflowed/' \
   --parallel 256 < reflow-input.jsonl
@@ -263,20 +265,32 @@ gonimbus transfer reflow --stdin \
   are clamped to it. The summary records the limit, budget, sources, resolved retry
   cap, and admission-wait pressure.
 
+Object-store and heterogeneous copies admit source-read and dest-write
+independently (**diagnostics-first**, automatic). Dest work may run above
+source up to a recorded dest-domain ceiling (twice adaptive `current`,
+hard-clamped to twice the effective ceiling). That dest peak may exceed the
+`--parallel` request; `--parallel` stays the request and does not need to be
+raised. Dual-domain admission applies on both `engine` and `cli-pool` paths.
+There is no flag to turn it on. Optional
+`gonimbus.reflow.object_path_stage_stats.v1` is a per-domain occupancy
+diagnostic, not a throughput claim.
+
 See [Concurrency and Throughput](concurrency-and-throughput.md) for the full
-provider-generalized model (resource cap, AIMD control, transport tuning).
+provider-generalized model (resource cap, independent source/dest
+admission, AIMD control, transport tuning).
 
 ### Execution Paths and Dispatch Transparency
 
 `transfer reflow` has two execution paths for the same verb: the **library
-engine** (the embeddable `pkg/reflow` runner, which executes live stdin
-record-stream copies with a concurrent worker pool) and the **CLI worker pool**
-(the command-layer pool that carries run shapes the engine has not migrated:
-positional sources, provenance sidecars, the quarantine collision mode, file
-destinations, non-default source-failure policy, and run-id resume). The engine
-executes the skip-if-duplicate, fail, overwrite, and overwrite-if-source-newer
-collision modes for supported record-stream destinations. Dispatch selects the
-path per run shape.
+engine** (the embeddable `pkg/reflow` runner) and the **CLI worker pool**.
+Dispatch selects the path per run shape. The engine executes live stdin
+`gonimbus.reflow.input.v1` copies with an `s3://` source and an object-store
+destination, plus positional S3 sources, including the skip-if-duplicate,
+fail, overwrite, and overwrite-if-source-newer collision modes for those
+destinations. File destinations, file-tree sources, GCS positional sources,
+`index.object.v1` stdin, quarantine collision mode, `--preserve-mode`, and a
+non-default `--on-source-failure` still report `execution_path: cli-pool`.
+Independent source/dest admission applies on **both** paths.
 
 Path selection is **observable evidence, never an implementation detail**:
 

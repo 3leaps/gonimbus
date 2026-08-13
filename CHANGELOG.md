@@ -15,6 +15,33 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-13
+
+**Library reflow is the data plane, and object-store copies admit source and dest independently.**
+
+v0.4.2 makes the library record-stream engine (`pkg/reflow`) the execution home
+for live copies: concurrent workers, memory admission, collision and durability
+handling, provenance sidecars, S3-compatible positional sources, and budgeted
+partitioned work live in the engine. The CLI is an adapter (ADR-0006). A
+standing dual-path parity gate holds engine and CLI-pool behavior together.
+
+Object-store and heterogeneous copies now admit the source-read and dest-write
+phases independently. Dest work can run above source under a recorded,
+pool-realizable ceiling (default 2× effective) without raising the operator
+`--parallel` request. Memory, file-descriptor, IfAbsent, and throttle clamps
+still bind. Connection pools follow the already-admitted N across parallel
+verbs.
+
+As in v0.4.0 and v0.4.1, the durable-v2 format is a full-fidelity **internal
+render** for trusted operator and pipeline use — **not** a reduced-trust,
+de-identified, or third-party publication format. Content digests carried by
+durable manifests and segments are **content-integrity / tamper-evidence**
+checksums, not statements of author authenticity or provenance. SQLite remains
+a first-class compatibility path (`--format sqlite` / `--format both`).
+
+See [`docs/releases/v0.4.2.md`](docs/releases/v0.4.2.md) for the narrative
+walkthrough.
+
 ### Library API
 
 - **Additive (Stable `pkg/provider`):** `ConnectionPoolPolicy` and
@@ -25,40 +52,42 @@ changes.
   `1` leave SDK defaults; `admittedN >= 2` sets both fields to `admittedN`
   (including large pass-through values). Library and CLI adapters must resolve
   engine defaults before calling. Does not claim field throughput.
-
-### Changed
-
-- **Concurrency guide: pool follows admitted concurrency on parallel verbs.**
-  `docs/user-guide/concurrency-and-throughput.md` no longer describes transport
-  pool sizing as reflow-only. It documents construction from admitted N across
-  index/crawl/enrich, transfer, content, tree, and reflow; intentional
-  SDK-default single-shot paths; the Stable `ResolveConnectionPool` library
-  entry; and that pool policy is not a field-throughput claim.
+- **Added (compatible): provider conditional-write capability declaration.** New
+  `provider.ConditionalWriteCapabilities` descriptor and
+  `provider.ConditionalCapabilityReporter` interface let a destination provider
+  declare which conditional-write predicates it honors atomically — `IfAbsent`,
+  `IfMatchETag`, and `ConditionalMultipartCompletion`. The built-in S3 and file
+  providers declare If-Match support (S3 also conditional multipart completion);
+  GCS declares IfAbsent only. The reflow engine now validates source-newer
+  overwrite support against this declaration instead of inferring it from
+  `ConditionalPutter` presence, so an IfAbsent-only conditional provider is
+  refused before any read or destination mutation. Additive: existing embedders
+  that do not implement the reporter are treated as unable to prove If-Match and
+  are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
+  refusal.
+- **Added (compatible): source-revision reads.** `provider.ObjectSummary` now
+  carries an optional opaque provider-native `Revision`, and the new
+  `provider.SourceRevision` and `provider.RevisionGetter` contracts let callers
+  request exactly an admitted version or generation. Providers that cannot
+  enforce a replay validator need not implement the optional interface.
 
 ### Added
 
-- **Remaining parallel cmd construction pools follow admitted concurrency.**
-  Non-reflow transfer source/dest (composite `C+L` / `C+2L` on source; dest `C`),
-  content head/probe (`N` or `N+1` when a prefix/glob enumerator can LIST on the
-  same client), and tree traversal (`treeParallel` when `--depth > 0`; depth 0
-  stays SDK-default) exact-assign pool knobs through `provider.ResolveConnectionPool`.
-  Overflow on composite formulas refuses construction. No field-throughput claim.
-- **Index-family provider connection pools follow admitted concurrency.** Index
-  build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
-  construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved
-  crawl concurrency or enrich `--parallel` (default 32). Scope-preview and hydrate
-  remain intentional SDK-default constructions. No field-throughput claim.
 - **Concurrent execution in the library reflow engine.** The `pkg/reflow`
   record-stream runner now executes objects on a bounded worker pool honoring
   the resolved concurrency ceiling, with per-destination-key arbitration moved
   into the engine (concurrent same-key workers serialize; each established
   destination key gets exactly one durable observed-mark and one conditional
-  create). Live stdin record-stream copies dispatch to the engine again — the
-  v0.4.1 dispatch narrowing (#159) is removed, behind a standing behavioral
-  parity gate: a same-input dual-path harness (copy-heavy and skip-heavy),
+  create). Live stdin `gonimbus.reflow.input.v1` copies with `s3://` sources and
+  an object-store destination dispatch to the engine again — the v0.4.1
+  dispatch narrowing (#159) is removed — behind a standing behavioral parity
+  gate: a same-input dual-path harness (copy-heavy and skip-heavy),
   interruption/resume evidence measuring exactly-one-land per object against a
   real checkpoint store, and a flag-coverage matrix proving every flag's
-  disposition on each execution path.
+  disposition on each execution path. File destinations, file-tree sources,
+  GCS positional sources, `index.object.v1` stdin, quarantine collision
+  mode, `--preserve-mode`, and non-default `--on-source-failure` still
+  report `execution_path: cli-pool`.
 - **Dispatch transparency.** Run and summary records carry `execution_path`
   (`engine` | `cli-pool`) on both paths; requested (`parallel`), resolved
   (`concurrency_ceiling_effective`), and observed (`concurrency_max_active`)
@@ -112,6 +141,49 @@ changes.
   complete; an enabled live run requires a callable sidecar object-putter before
   any effect. Byte-identical sidecar content across the engine and command paths
   is held by a standing dual-path parity gate.
+- **S3-compatible positional sources on the engine.** Positional S3 source
+  shapes that previously stayed on the command path now execute on the
+  record-stream runner with the same concurrency, admission, and durability
+  contracts as engine stdin live copies. GCS positional sources remain on the
+  CLI-pool path in this cut.
+- **Independent source and dest copy admission** (#191). Source-read and
+  dest-write no longer share one global permit for the whole Get→Put. A
+  phase-split `CopyGate` issues per-domain permits on both execution paths;
+  dest work can proceed while source reads are still in flight. Dest occupancy
+  may exceed the `--parallel` request up to the recorded dest ceiling (#192).
+  Memory, FD, IfAbsent, and throttle clamps still bind. Optional
+  `gonimbus.reflow.object_path_stage_stats.v1` records per-domain occupancy as
+  a diagnostic, not a throughput claim.
+- **Dest-biased dest cap** (#192). Dest-domain admission tracks twice the
+  adaptive `current` (source stays at `current`), hard-clamped to a recorded,
+  pool-realizable dest ceiling of twice the effective ceiling (default
+  `dest_domain_multiplier` 2). The dest phase can admit more work without
+  raising the source-read permit or the operator `--parallel` request. Run
+  records carry the dest multiplier and dest-domain ceiling so connection
+  pools size to the same bound. Honesty checks assert that recorded dest
+  policy, not a hard-coded factor.
+- **Index-family provider connection pools follow admitted concurrency.** Index
+  build (engine + SQLite crawl path), standalone crawl, and index enrich-with-head
+  construct S3/GCS sources through `provider.ResolveConnectionPool` using resolved
+  crawl concurrency or enrich `--parallel` (default 32). Scope-preview and hydrate
+  remain intentional SDK-default constructions. No field-throughput claim.
+- **Remaining parallel cmd construction pools follow admitted concurrency.**
+  Non-reflow transfer source/dest (composite `C+L` / `C+2L` on source; dest `C`),
+  content head/probe (`N` or `N+1` when a prefix/glob enumerator can LIST on the
+  same client), and tree traversal (`treeParallel` when `--depth > 0`; depth 0
+  stays SDK-default) exact-assign pool knobs through `provider.ResolveConnectionPool`.
+  Overflow on composite formulas refuses construction. No field-throughput claim.
+- **Stale index set-authority lease detect and reclaim.** Index jobs detect a
+  stale set-authority lease and reclaim it so a later holder can proceed
+  instead of blocking behind a dead lease.
+- **Durable index crawl across parallel journal lanes** (#182). Durable
+  `index build` crawl can write independent journal lanes in parallel on
+  multi-entry crawl plans and still publish a single consistent durable
+  snapshot. Matcher-derived single-entry plans stay single-lane.
+- **`index jobs plan-stalled` / `recover-stalled`** (#185). Managed index
+  jobs can plan and recover a stalled holder: `plan-stalled <job_id>` reports
+  the recovery action without mutating authority; `recover-stalled <job_id>`
+  is dry-run by default and mutates only with `--confirm`.
 
 ### Changed
 
@@ -127,10 +199,10 @@ changes.
   object reports `failed` (reason `checkpoint.write_failed`) and the run exits
   non-zero; resume against a healthy store converges without double-landing.
   Auxiliary arbitration-state write failures warn (typed
-  `REFLOW_ARBITRATION_STATE_WRITE_FAILED`) and continue on both paths. The
-  CLI-only collision modes (`overwrite-if-source-newer`, `quarantine`) retain
-  their historical warn-and-continue terminal behavior until they migrate to
-  the engine.
+  `REFLOW_ARBITRATION_STATE_WRITE_FAILED`) and continue on both paths.
+  `--on-collision overwrite-if-source-newer` now executes on the engine for
+  object-store destinations; quarantine remains CLI-pool-routed. Both paths
+  use this same strict terminal acknowledgement.
 - **Keyed durability for partitioned reflow.** Live partitioned-prefix runs now
   persist source-revision-bound admissions before selection, persist an outcome
   for every admitted object and a deterministic work-unit key before handoff,
@@ -140,13 +212,6 @@ changes.
   `source_changed`; a fresh non-resume run supersedes that source slot instead.
   Replay without an enforceable provider revision is refused as
   `replay_unverifiable`.
-- **Failed-copy checkpoints record the specific failure reason.** On the
-  record-stream engine path, a failed collision now persists the same specific
-  reason on the durable checkpoint, the error event, and the emitted record
-  (e.g. `collision.exists.duplicate` or `collision.exists.conflict`) rather
-  than the coarse error class on the checkpoint. `error_code` still carries the
-  class and the sanitized cause is retained, so a resume reading the checkpoint
-  sees the reason a consumer saw on the record.
 - **The memory limit binds to the lowest detected candidate.** Container/cgroup
   limit, explicit runtime limit (`GOMEMLIMIT`), and detected physical RAM are
   all probed and the lowest positive value binds, with its source recorded — an
@@ -170,27 +235,33 @@ changes.
   `provenance.uri` naming a bucket the object was never written to. A same-bucket
   GCS mirrored root now honors the sidecar-root prefix — previously a GCS
   mirrored root fell back to adjacent placement and silently ignored the root.
+- **Set-authority lease is dropped when its holder completes**, so a finished
+  index job does not leave a live lease that blocks the next writer.
+- **Concurrency guide: pool follows admitted concurrency on parallel verbs.**
+  `docs/user-guide/concurrency-and-throughput.md` no longer describes transport
+  pool sizing as reflow-only. It documents construction from admitted N across
+  index/crawl/enrich, transfer, content, tree, and reflow; intentional
+  SDK-default single-shot paths; the Stable `ResolveConnectionPool` library
+  entry; and that pool policy is not a field-throughput claim.
 
-### Library API
+### Fixed
 
-- **Added (compatible): provider conditional-write capability declaration.** New
-  `provider.ConditionalWriteCapabilities` descriptor and
-  `provider.ConditionalCapabilityReporter` interface let a destination provider
-  declare which conditional-write predicates it honors atomically — `IfAbsent`,
-  `IfMatchETag`, and `ConditionalMultipartCompletion`. The built-in S3 and file
-  providers declare If-Match support (S3 also conditional multipart completion);
-  GCS declares IfAbsent only. The reflow engine now validates source-newer
-  overwrite support against this declaration instead of inferring it from
-  `ConditionalPutter` presence, so an IfAbsent-only conditional provider is
-  refused before any read or destination mutation. Additive: existing embedders
-  that do not implement the reporter are treated as unable to prove If-Match and
-  are refused fail-closed by `overwrite-if-source-newer`, matching the prior GCS
-  refusal.
-- **Added (compatible): source-revision reads.** `provider.ObjectSummary` now
-  carries an optional opaque provider-native `Revision`, and the new
-  `provider.SourceRevision` and `provider.RevisionGetter` contracts let callers
-  request exactly an admitted version or generation. Providers that cannot
-  enforce a replay validator need not implement the optional interface.
+- **Failed-copy checkpoints record the specific failure reason.** On the
+  record-stream engine path, a failed collision now persists the same specific
+  reason on the durable checkpoint, the error event, and the emitted record
+  (e.g. `collision.exists.duplicate` or `collision.exists.conflict`) rather
+  than the coarse error class on the checkpoint. `error_code` still carries the
+  class and the sanitized cause is retained, so a resume reading the checkpoint
+  sees the reason a consumer saw on the record.
+- **File destinations publish IfAbsent landings atomically** (#190). The file
+  provider stages the object and publishes with a no-replace link, so a hard
+  interrupt mid-write does not leave a visible truncated final at the
+  destination key. Experimental savepoint elision
+  (`GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS`) stays default off and is not a
+  recommended production control.
+- **Generated run and event identifiers stay unique under a coarse clock.**
+- **An exited managed process reads as finished**, and lease acquisitions are
+  identified by entropy rather than colliding on a reused pid.
 
 ### Known limits (stated, not claimed)
 
@@ -201,8 +272,32 @@ changes.
 - On Windows the file-descriptor probe leaves no usable headroom, so the FD cap
   binds at 1 and serializes copies regardless of `--parallel` or the memory
   budget. The clamp is reported truthfully (`resource_capped:fd`); a
-  Windows-representative descriptor probe is tracked for the next
+  Windows-representative descriptor probe is tracked for a later
   transfer-concurrency slice.
+- Experimental `GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS` remains default off.
+
+### Documentation
+
+- Added this v0.4.2 release page and refreshed rolling release notes.
+- Bumped version to `0.4.2` (`VERSION`, `.fulmen/app.yaml`, embedded identity,
+  `internal/buildinfo/VERSION`).
+- Updated the current-release README pointer.
+- Concurrency guide documents pool construction from admitted N across parallel
+  verbs and dest-biased source/dest admission
+  (`docs/user-guide/concurrency-and-throughput.md`).
+- User guide documents `index jobs plan-stalled` / `recover-stalled`.
+- Library-consumer notes name the Stable `pkg/provider` additive surfaces and
+  Experimental `pkg/reflow` growth.
+
+### Development
+
+- Checkpoint-scale throughput profiles, producer-path report control, and
+  object-store harness hardening remain measurement-only (non-CI). They are
+  not product throughput claims.
+- Role checklists gained gate-integrity and public-surface items; role prompts
+  validate against the vendored schema.
+- Dropped scheduling-dependent ledger pressure from the reflow parity gate so
+  the dual-path harness does not fail on scheduler jitter.
 
 ## [0.4.1] - 2026-07-18
 
@@ -1631,7 +1726,9 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/3leaps/gonimbus/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/3leaps/gonimbus/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/3leaps/gonimbus/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/3leaps/gonimbus/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/3leaps/gonimbus/compare/v0.3.5...v0.3.6

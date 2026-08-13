@@ -155,6 +155,7 @@ compatibility path; it is still required for `query --since-run`,
 publication uses operator-tunable capacity budgets (16 GiB workspace / 16 MiB
 record defaults; flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
+[v0.4.2 release notes](docs/releases/v0.4.2.md),
 [v0.4.1 release notes](docs/releases/v0.4.1.md), and
 [v0.4.0 release notes](docs/releases/v0.4.0.md).
 

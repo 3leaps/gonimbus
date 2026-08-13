@@ -614,7 +614,11 @@ gonimbus index compare durable-delta \
 
 ## Job Management
 
-For long-running builds (hours on large buckets), gonimbus provides managed job execution with durable state and background operation.
+For long-running builds (hours on large buckets), gonimbus provides managed job
+execution with durable state and background operation. When a managed job is
+still recorded as running but the holder looks stalled, use
+[plan-stalled / recover-stalled](#stalled-managed-job-recovery) rather than
+guessing whether to stop or reap.
 
 ### Starting Background Builds
 
@@ -701,6 +705,38 @@ gonimbus index jobs stop <job_id> --signal kill
 ```
 
 Graceful cancellation produces a `partial` run status and preserves index integrity.
+
+### Stalled managed-job recovery
+
+When a managed (`--background`) index-build job is still recorded as running
+but the holder looks stalled — heartbeat past grace, or a dead PID under a
+running record — plan first, then recover. These commands take a positional
+`<job_id>` (an unambiguous short prefix is accepted). They act only on a
+durable managed job identity. Foreground builds without a job record are
+outside this surface.
+
+```bash
+# Read-only plan: classify the job; no registry or lease mutation
+gonimbus index jobs plan-stalled job_...
+
+# Recover is dry-run unless --confirm (omit --confirm to preview only)
+gonimbus index jobs recover-stalled job_...
+gonimbus index jobs recover-stalled job_... --confirm
+```
+
+`plan-stalled` never signals and never reaps a lease. `recover-stalled`
+without `--confirm` is dry-run: it classifies the job and prints a recover
+preview, leaving registry and lease bytes unchanged. `--confirm` applies
+the planned recovery. `--force` is the same opt-in as `--confirm`; it does
+not bypass identity, lease, stalled-state, or termination gates.
+
+This is a different authority from `index jobs stop` (cancel a live child)
+and from `index lease reap` (reclaim an already-unheld set-authority
+lease). Use `stop` when the process is still yours to cancel; use
+`plan-stalled` / `recover-stalled` when the managed holder is proven
+stalled.
+
+Both commands accept `--json` for scripting.
 
 ### Cleaning Up Job Records
 

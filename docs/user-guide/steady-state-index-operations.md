@@ -9,6 +9,18 @@ or growing buckets, where each build should add to an index set's run history
 rather than create a new index set. It describes the repeat-build pattern and
 the `index build --since` mode for incremental top-ups.
 
+For managed (`--background`) builds that appear stuck — heartbeat past grace
+or a dead PID under a running record — plan first, then recover with confirm:
+
+```bash
+gonimbus index jobs plan-stalled job_...
+gonimbus index jobs recover-stalled job_...          # dry-run
+gonimbus index jobs recover-stalled job_... --confirm
+```
+
+Full steps and authority boundaries (vs `stop` / `lease reap`) live under
+[Job Management — stalled recovery](index.md#stalled-managed-job-recovery).
+
 ## Mental Model
 
 An index set is the stable identity for an indexed source. The same manifest
