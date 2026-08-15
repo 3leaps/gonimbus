@@ -74,11 +74,13 @@ PASS: TestGofulmenCrucibleIntegration
 As implementation progresses, we'll add:
 
 - **Server Tests** (`internal/server/server_test.go`)
+
   - HTTP server lifecycle
   - Route registration
   - Middleware chain
 
 - **Handler Tests** (`internal/server/handlers/*_test.go`)
+
   - Health endpoint
   - Version endpoint
   - Metrics endpoint
@@ -145,11 +147,13 @@ These tests verify core functionality that must never break:
 ### Future Critical Tests
 
 1. **Health Endpoint**
+
    - Must return 200 OK
    - Must return valid JSON
    - Must include version info
 
 2. **Graceful Shutdown**
+
    - Must handle SIGTERM
    - Must finish in-flight requests
    - Must respect shutdown timeout
