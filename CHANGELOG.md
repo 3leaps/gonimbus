@@ -15,6 +15,13 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI and contributor goneat pin.** Workflows now use
+  `goneat-tools-runner-glibc:v0.5.1`. Local bootstrap is goneat `v0.5.16`
+  (format-equivalent to the runner's bundled `v0.5.15`). Markdown list-blank
+  spacing is reconciled to that contract so local `make fmt` matches CI.
+
 ## [0.4.2] - 2026-08-13
 
 **Library reflow is the data plane, and object-store copies admit source and dest independently.**
@@ -1226,6 +1233,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Hub (`index hub` + `index export` + `index hydrate`)
 
 - **Index Hub CRUD** (`internal/cmd/index_hub.go`)
+
   - `gonimbus index hub init` — create a new hub root with marker file
   - `gonimbus index hub ls` — list index sets and their runs at a hub
   - `gonimbus index hub show` — show details for a specific index set or run
@@ -1234,12 +1242,14 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - `gonimbus index hub gc` — garbage-collect runs by `--keep N` or `--before DATE`; supports `--dry-run` and `--json`
 
 - **Index Export** (`internal/cmd/index_export.go`)
+
   - `gonimbus index export` publishes an index run to a file or S3 hub
   - Atomic publish sequence: `index.db` → `identity.json` → `complete.json` (commit marker) → `latest.json`
   - SHA-256 + size integrity manifest in `complete.json`
   - `latest.json` is best-effort last-writer-wins for v0.1.x; CAS / fail-closed semantics tracked for v0.2.x
 
 - **Index Hydrate** (`internal/cmd/index_hydrate.go`)
+
   - `gonimbus index hydrate` downloads a published index run from a hub
   - Resolves run via `latest.json` pointer or explicit `--run-id`
   - SHA-256 + size verification for `index.db` and `identity.json`
@@ -1296,6 +1306,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Transfer Reflow (`transfer reflow`)
 
 - **Transfer Reflow Command** (`internal/cmd/transfer_reflow.go`)
+
   - `gonimbus transfer reflow <source-uri>` copies objects while rewriting keys
   - Template-based path variable extraction and substitution
   - Supports probe-derived variables (e.g., `{business_date}` from content)
@@ -1313,6 +1324,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Probe (`content probe`)
 
 - **Content Probe Command** (`internal/cmd/content_probe.go`)
+
   - `gonimbus content probe <uri>` extracts derived fields from content
   - Config-driven extraction rules (`--config probe.yaml`)
   - Bulk processing via `--stdin`
@@ -1352,6 +1364,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Inspection Commands (`content head`)
 
 - **Content Head Command** (`internal/cmd/content_head.go`)
+
   - `gonimbus content head <uri>` reads the first N bytes of an object
   - Uses HTTP Range requests when provider supports them (falls back to GetObject)
   - Output is JSONL-only (`gonimbus.content.head.v1`) with base64-encoded content
@@ -1366,6 +1379,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Provider Range Requests
 
 - **ObjectRanger Interface** (`pkg/provider/capabilities.go`)
+
   - `GetRange(ctx, key, start, endInclusive)` for byte-range reads
   - HTTP Range semantics (inclusive start/end offsets)
   - S3 provider implementation with range header support
@@ -1391,6 +1405,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Content Streaming Commands (`stream get`, `stream head`)
 
 - **Stream Get Command** (`internal/cmd/stream_get.go`)
+
   - `gonimbus stream get <uri>` streams object content with JSONL framing
   - Mixed-framing output: JSONL headers + raw bytes for efficient large payload handling
   - `gonimbus.stream.open.v1` with uri, size, etag, last_modified, content_type
@@ -1400,6 +1415,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Errors emitted to stdout as `gonimbus.error.v1` (streaming mode contract)
 
 - **Stream Head Command** (`internal/cmd/stream_head.go`)
+
   - `gonimbus stream head <uri>` retrieves object metadata without content
   - Returns `gonimbus.object.v1` with full metadata including custom S3 user metadata
   - Errors emitted to stdout as `gonimbus.error.v1` (consistent with streaming mode)
@@ -1434,17 +1450,20 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Path-Scoped Index Builds (`build.scope`)
 
 - **Scope Types** (`pkg/manifest/`, `internal/assets/schemas/`)
+
   - `prefix_list`: Explicit prefixes for deterministic crawl scope
   - `date_partitions`: Dynamic prefix generation from date ranges with segment discovery
   - `union`: Combine multiple scope definitions
 
 - **Scope Compiler** (`pkg/scope/`)
+
   - Compiles `build.scope` configuration into explicit prefix plans
   - Delimiter listing for segment discovery (e.g., device IDs under store prefixes)
   - Date range expansion to concrete `YYYY-MM-DD/` prefixes
   - `--dry-run` flag previews scope plan before execution
 
 - **Scope Guardrails** (`pkg/scope/`)
+
   - Warning threshold for large prefix expansions
   - Soft-delete skipped by default for scoped builds (partial coverage)
   - Scope config included in IndexSet identity hash
@@ -1457,10 +1476,12 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Job Management
 
 - **Job Registry** (`pkg/jobregistry/`)
+
   - Durable on-disk job records under the app data dir (`jobs/index-build/<job_id>/job.json`)
   - Captures identity/run metadata, PID, heartbeat timestamps, and log file paths
 
 - **Managed Background Builds** (`internal/cmd/index_build.go`, `pkg/jobregistry/executor.go`)
+
   - `gonimbus index build --background` spawns a managed child process and returns a job id
   - Captures stdout/stderr to per-job log files
   - Safe cancellation via SIGTERM -> context cancellation; SIGKILL fallback
@@ -1500,6 +1521,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Index Workflow
 
 - **Local Index Store** (`pkg/indexstore/`)
+
   - SQLite-based local index for offline bucket inventory
   - Per-index database isolation (hash-based identity)
   - Streaming batch ingestion from crawl results
@@ -1507,6 +1529,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Schema version tracking for upgrades
 
 - **Index CLI Commands** (`internal/cmd/index*.go`)
+
   - `gonimbus index init` - Initialize local index database
   - `gonimbus index build --job <manifest>` - Build index from crawl
   - `gonimbus index list` - List local indexes with stats
@@ -1517,12 +1540,14 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - `gonimbus index show` - Display manifest provenance
 
 - **Index Build Features**
+
   - Build-time include patterns for scope control
   - Derived prefix display during builds
   - Explicit identity validation (provider, region, endpoint)
   - Tolerates provider outages via SDK retry
 
 - **Index Query Features**
+
   - Pattern matching with doublestar globs
   - Metadata filters: `--min-size`, `--max-size`, `--after`, `--before`
   - Count mode: `--count` for quick totals
@@ -1551,6 +1576,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 #### Transfer Workflow
 
 - **Transfer Engine** (`pkg/transfer/`, `internal/cmd/transfer.go`)
+
   - Manifest-driven copy/move operations between S3 buckets
   - `gonimbus transfer --job manifest.yaml` CLI command
   - Support for same-bucket, cross-account, and cross-provider transfers
@@ -1559,6 +1585,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
   - Deduplication strategies: `etag` (default), `key`, or `none`
 
 - **Prefix Sharding for Parallel Enumeration** (`pkg/shard/`)
+
   - `sharding.enabled`, `sharding.depth`, `sharding.list_concurrency` manifest options
   - Parallel prefix discovery using delimiter listing
   - Bounded concurrency with configurable worker pools
@@ -1618,6 +1645,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Fixed
 
 - **Retryable PUT Bodies** (`pkg/transfer/`)
+
   - Fixed "failed to rewind transport stream for retry" errors on transient failures
   - Small objects now buffered with seekable wrapper for SDK retry support
 
@@ -1638,6 +1666,7 @@ v0.2.0 grows gonimbus along three axes simultaneously: stable library surface fo
 ### Added
 
 - **AWS Profile Authentication** (`internal/cmd/doctor.go`)
+
   - `--profile` flag on `doctor` command for enterprise SSO diagnostics
   - Credential expiry check with warning when < 1 hour remaining
   - IMDS timeout optimization when profile/env credentials available
@@ -1668,23 +1697,27 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 ### Added
 
 - **Provider Interface & S3 Implementation** (`pkg/provider/`)
+
   - Abstract provider interface with `List`, `Head`, and `Close` methods
   - S3 provider using AWS SDK v2 with default credential chain
   - Support for S3-compatible stores (Wasabi, Cloudflare R2, DigitalOcean Spaces)
   - Custom endpoint and explicit credential configuration
 
 - **Pattern Matching Layer** (`pkg/match/`)
+
   - Doublestar glob pattern matching for cloud object keys
   - Prefix derivation algorithm for efficient listing at scale
   - Include/exclude pattern support
   - Hidden file detection and filtering
 
 - **JSONL Output Layer** (`pkg/output/`)
+
   - Typed record envelopes: `gonimbus.object.v1`, `gonimbus.error.v1`, `gonimbus.progress.v1`
   - Stream-friendly JSONL writer with atomic line writes
   - Configurable progress emission
 
 - **Crawl Engine** (`pkg/crawler/`)
+
   - Bounded streaming pipeline: lister → matcher → writer
   - Configurable concurrency and rate limiting
   - Backpressure via bounded channels
@@ -1692,11 +1725,13 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
   - Progress tracking and summary statistics
 
 - **Job Manifest Schema** (`pkg/manifest/`)
+
   - JSON Schema validated job manifests (YAML/JSON)
   - Connection, match, crawl, and output configuration
   - Strict validation with clear error messages
 
 - **CLI Commands** (`internal/cmd/`)
+
   - `gonimbus crawl` - Run crawl jobs from manifest files
   - `gonimbus inspect` - Quick inspection of objects or prefixes
   - `gonimbus doctor` - Environment and credential diagnostics
@@ -1704,6 +1739,7 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
   - `gonimbus version` - Version and build information
 
 - **Server Skeleton** (`internal/server/`)
+
   - Chi-based HTTP router with middleware stack
   - Health check endpoints (`/health`, `/health/live`, `/health/ready`, `/health/startup`)
   - Prometheus metrics endpoint (`/metrics`)
