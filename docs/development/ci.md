@@ -7,7 +7,7 @@ This document explains the CI/CD setup for this repository.
 This repository uses the **goneat-tools-runner container** for CI jobs. Specifically the **glibc variant** at the current fulmen-toolbox release:
 
 ```
-ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2
 ```
 
 See [Image variant](#image-variant-musl-default-vs--glibc) below for why gonimbus uses `-glibc` rather than the default musl image.
@@ -45,7 +45,7 @@ This template uses `options: --user 1001` for `goneat-tools-runner` container jo
 
 ```yaml
 container:
-  image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+  image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2
   options: --user 1001
 ```
 
@@ -65,7 +65,7 @@ The workaround is small but mandatory for every job that runs Go:
 jobs:
   build-test:
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2
       options: --user 1001
     env:
       GOPATH: ${{ github.workspace }}/../_go
@@ -75,7 +75,7 @@ jobs:
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.4"
+          go-version: "1.26.5"
 ```
 
 The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is used
@@ -85,11 +85,11 @@ Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which o
 
 ### Pin Go to an exact patch release
 
-CI and release workflows pin `actions/setup-go` to `1.26.4` rather than the
+CI and release workflows pin `actions/setup-go` to `1.26.5` rather than the
 floating `1.26.x` selector. Vulnerability scans report standard-library CVEs
 against the Go toolchain used to build or scan the repo, so release builds and
 SBOM/vulnerability reports need a fixed patched toolchain for attributable
-results. Local scans should use Go `1.26.4` or newer on the 1.26 lane.
+results. Local scans should use Go `1.26.5` or newer on the 1.26 lane.
 
 ### Bash shell required for `run:` steps
 
@@ -139,7 +139,7 @@ Pin `CGO_ENABLED=0` at the release job's `env:` block so all release cross-compi
 jobs:
   release:
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2
       options: --user 1001
     env:
       GOPATH: ${{ github.workspace }}/../_go
@@ -318,7 +318,7 @@ For local development, you have two options:
 
    ```bash
    docker run --rm -v "$(pwd)":/work -w /work --entrypoint "" \
-     ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2 yamlfmt -lint .
+     ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2 yamlfmt -lint .
    ```
 
 2. **Install tools locally via sfetch + goneat**:
