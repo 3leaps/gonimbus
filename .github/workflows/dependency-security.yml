@@ -14,7 +14,7 @@ jobs:
   dependency-security:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.4.2
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.2
       options: --user 1001
     defaults:
       run:
@@ -33,7 +33,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26.4"
+          go-version: "1.26.7"
       - name: Verify dependency security gate
         run: |
           set -euo pipefail
