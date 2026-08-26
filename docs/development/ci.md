@@ -75,7 +75,7 @@ jobs:
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.7"
 ```
 
 The same workspace-relative-`GOPATH` + `Prepare Go directories` pattern is used
@@ -85,11 +85,11 @@ Jobs that do not invoke `actions/setup-go` (e.g. our `format-check` job, which o
 
 ### Pin Go to an exact patch release
 
-CI and release workflows pin `actions/setup-go` to `1.26.5` rather than the
+CI and release workflows pin `actions/setup-go` to `1.26.7` rather than the
 floating `1.26.x` selector. Vulnerability scans report standard-library CVEs
 against the Go toolchain used to build or scan the repo, so release builds and
 SBOM/vulnerability reports need a fixed patched toolchain for attributable
-results. Local scans should use Go `1.26.5` or newer on the 1.26 lane.
+results. Local scans should use Go `1.26.7` or newer on the 1.26 lane.
 
 ### Bash shell required for `run:` steps
 
