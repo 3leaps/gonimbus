@@ -1,5 +1,6 @@
 # yamllint disable rule:document-start
 # yamllint disable rule:truthy
+# CI workflow — container jobs use goneat-tools-runner-glibc v0.5.2 (see docs/development/ci.md).
 name: CI
 on:
   push:
