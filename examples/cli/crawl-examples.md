@@ -98,11 +98,11 @@ Error: /match: additionalProperties 'include' not allowed
 ```yaml
 # High-throughput crawl
 crawl:
-  concurrency: 20      # More parallel list operations
+  concurrency: 20 # More parallel list operations
   progress_every: 1000 # Less frequent progress updates
 
 # Rate-limited crawl
 crawl:
   concurrency: 4
-  rate_limit: 100      # Max 100 requests/second
+  rate_limit: 100 # Max 100 requests/second
 ```

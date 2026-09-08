@@ -51,7 +51,7 @@ BINDIR_RESOLVE = \
 	fi
 
 # Tooling - minimum versions (won't downgrade existing installs)
-GONEAT_VERSION ?= v0.5.16
+GONEAT_VERSION ?= v0.6.0
 
 SFETCH_RESOLVE = \
 	$(BINDIR_RESOLVE); \
