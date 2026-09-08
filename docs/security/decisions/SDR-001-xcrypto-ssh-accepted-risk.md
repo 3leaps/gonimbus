@@ -3,7 +3,7 @@
 **Date:** 2026-09-08
 **Status:** Approved
 **Author:** @3leapsdave
-**Reviewer:** golf-devrev
+**Reviewer:** devrev
 
 ## Context
 
@@ -24,7 +24,7 @@ accepts.
 
 ## Analysis
 
-Both advisories are in the `x/crypto/ssh` (and related ACME) surface.
+Both advisories are `x/crypto/ssh` channel denial-of-service findings.
 `govulncheck -show verbose ./...` reports zero reachable vulnerabilities in
 this repository. The module is present through the fake-GCS / MinIO test
 path (`argon2`), not through SSH constructors.
@@ -45,7 +45,7 @@ goneat assess --categories dependencies --check --fail-on high
 
 ## Action Items
 
-- [x] Expire accepts on 2026-09-10
+- [ ] Remove or verify expired accepts by 2026-09-10 (Goneat `until` expires at the start of that date)
 - [ ] Take `golang.org/x/crypto v0.56.0` after cooling and delete both allow entries
 
 ## References
