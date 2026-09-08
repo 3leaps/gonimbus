@@ -17,6 +17,10 @@ changes.
 
 ### Changed
 
+- **CI and contributor goneat pin.** Workflows use
+  `goneat-tools-runner-glibc:v0.5.6`. Local bootstrap is goneat `v0.6.0`,
+  matching the runner. Keep them paired so local `make fmt` matches CI
+  `format-check`.
 - **gRPC v1.83.1.** Indirect `google.golang.org/grpc` moves to the cooled
   fix for GHSA-vp52-pcj8-j9qc.
 - **Temporary x/crypto advisory accepts.** GO-2026-6354 and GO-2026-6355
