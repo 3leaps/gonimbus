@@ -15,6 +15,16 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **gRPC v1.83.1.** Indirect `google.golang.org/grpc` moves to the cooled
+  fix for GHSA-vp52-pcj8-j9qc.
+- **Temporary x/crypto advisory accepts.** GO-2026-6354 and GO-2026-6355
+  are accepted through 2026-09-10 only (`accepted_risk`), documented in
+  `docs/security/decisions/SDR-001-xcrypto-ssh-accepted-risk.md`. `fail_on`
+  stays `high`. Remove both accepts when taking `golang.org/x/crypto`
+  v0.56.0 after cooling.
+
 ## [0.4.2] - 2026-08-13
 
 **Library reflow is the data plane, and object-store copies admit source and dest independently.**
