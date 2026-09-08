@@ -90,6 +90,28 @@ cooling:
 vulnerabilities:
   enabled: true
   fail_on: high
+  allow:
+    - id: GO-2026-6354
+      status: accepted_risk
+      until: 2026-09-10
+      reason: "x/crypto/ssh advisory; not reachable in this repo; cooling on v0.56.0"
+      sdr: docs/security/decisions/SDR-001-xcrypto-ssh-accepted-risk.md
+      analysis: |
+        govulncheck reports zero reachable findings. x/crypto is pulled through
+        the fake-GCS/MinIO test path (argon2), not SSH. Remove this accept when
+        taking golang.org/x/crypto v0.56.0 after cooling (2026-09-09T18:02Z).
+      approved_by: "@3leapsdave"
+      approved_date: "2026-09-08"
+    - id: GO-2026-6355
+      status: accepted_risk
+      until: 2026-09-10
+      reason: "x/crypto/ssh advisory; not reachable in this repo; cooling on v0.56.0"
+      sdr: docs/security/decisions/SDR-001-xcrypto-ssh-accepted-risk.md
+      analysis: |
+        Same reachability as GO-2026-6354. Do not suppress GHSA-vp52-pcj8-j9qc
+        (grpc); that is fixed by google.golang.org/grpc v1.83.1.
+      approved_by: "@3leapsdave"
+      approved_date: "2026-09-08"
 # ============================================================================
 # POLICY ENGINE CONFIGURATION
 # ============================================================================
