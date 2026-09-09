@@ -150,10 +150,12 @@ documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 segments + manifest unless you pass `--format sqlite` or `--format both`).
 Format-aware local consumers include `query`, `list`, `stats`, `doctor`,
 `enrich-with-head`, and whole-set `gc`. SQLite remains a first-class
-compatibility path; it is still required for `query --since-run`,
-`stats --prefixes`, and full `--resume-run` checkpoint recovery. Streaming
-publication uses operator-tunable capacity budgets (16 GiB workspace / 16 MiB
-record defaults; flag > env > config > default). See
+compatibility path; it is still required for latest-selected
+`query --since-run`, `stats --prefixes`, and full `--resume-run` checkpoint
+recovery. Durable forward deltas require exact `--index-set`, current
+`--run-id`, and `--since-run` pins. Streaming publication uses
+operator-tunable capacity budgets (16 GiB workspace / 16 MiB record defaults;
+flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [v0.4.2 release notes](docs/releases/v0.4.2.md),
 [v0.4.1 release notes](docs/releases/v0.4.1.md), and
@@ -198,7 +200,8 @@ gonimbus index build --job <path> --format both    # Dual-format + LIST parity r
 gonimbus index build --since auto --job <path>  # Incremental top-up (narrows date-partitioned re-listing)
 gonimbus index build --background --job <path>  # Background build with job tracking
 gonimbus index query <uri>     # Query indexed objects (format-aware: durable or SQLite)
-gonimbus index query <uri> --since-run <run_id>  # Since-run delta (SQLite-only today)
+gonimbus index query <uri> --since-run <run_id>  # Latest-selected delta (SQLite)
+gonimbus index query --index-set <full-id> --run-id <current> --since-run <baseline>  # Exact durable delta
 gonimbus index enrich-with-head <index-set-id>  # HEAD enrich (format-aware: durable or SQLite)
 gonimbus index compare durable-delta  # Temporal delta between two durable snapshots
 gonimbus index list            # List local indexes (format-aware)

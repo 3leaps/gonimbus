@@ -134,14 +134,15 @@ type Reader interface {
 	// ETags) plus alternates storage for non-canonical group members.
 	QueryCanonicalObjects(ctx context.Context, params indexstore.QueryParams) ([]indexstore.CanonicalOutputRecord, indexstore.CanonicalQueryStats, error)
 	// ResolveSinceRunFilter validates a --since-run boundary for this index.
-	// Durable-v2 currently fails closed: use sqlite-v1 or build with --format both.
+	// Durable-v2 requires an exact pinned current run and digest-verified
+	// continuous ancestry through the requested baseline.
 	ResolveSinceRunFilter(ctx context.Context, runID string) (*indexstore.SinceRunFilter, error)
 	Close() error
 }
 
 // ErrDurableSinceRunUnsupported is returned when --since-run is requested
-// against a durable-v2 index. Use --format sqlite or both for forward deltas.
-var ErrDurableSinceRunUnsupported = fmt.Errorf("--since-run is not supported on durable-v2 indexes; use --format sqlite or both")
+// against an unpinned durable-v2 reader.
+var ErrDurableSinceRunUnsupported = fmt.Errorf("--since-run on durable-v2 requires exact pinned current and baseline runs")
 
 // ResolveOptions configures local index discovery roots.
 type ResolveOptions struct {

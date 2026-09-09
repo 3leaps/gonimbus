@@ -91,16 +91,17 @@ canonical-by-ETag mode where filtering happens before ETag grouping.
 ### Current-state forward deltas
 
 `index query --since-run` is a current-state forward-delta query. It returns
-rows whose `first_seen_run_id` or `last_changed_run_id` resolves to an
-`index_runs.started_at` after the supplied successful boundary run in the same
-IndexSet. Run ordering is resolved through `index_runs`; run ID lexical order is
-not a contract.
+rows first seen or meaningfully changed strictly after the supplied boundary
+run in the same IndexSet. SQLite resolves ordering through
+`index_runs.started_at`. Durable requires an exact current-run pin, verifies
+digest-bound continuous ancestry through the named baseline, and accepts
+classifying run IDs only from that verified descendant chain. Run ID lexical
+order is not a contract.
 
-The current SQLite schema stores latest object state in `objects_current`, not
-per-run object snapshots. Therefore `--since-run` can answer "what current rows
-were added or meaningfully changed after run X", but it cannot reconstruct
-"what rows existed at run X". Full point-in-time history belongs to a future
-segment or snapshot-backed index format.
+Both substrates query the selected current object state rather than rebuilding
+a historical snapshot. Therefore `--since-run` can answer "what selected
+current rows were added or meaningfully changed after run X", but it cannot
+reconstruct "what rows existed at run X".
 
 ### Durable Snapshot Manifests
 

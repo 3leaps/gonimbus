@@ -74,8 +74,9 @@ Examples:
   # Emit one canonical object per non-empty ETag group
   gonimbus index query s3://bucket/prefix/ --canonical-by-etag
 
-  # Emit current objects first seen or changed after a completed run
-  gonimbus index query --index-set idx_da038d8171b4a9ba --since-run run_1783087200000000000
+  # Emit an exact durable current-state delta through a completed ancestor
+  gonimbus index query --index-set idx_<full-sha256> \
+    --run-id run_1783173600000000000 --since-run run_1783087200000000000
 
   ETag caveat: ETag is a provider version/fingerprint hint, not a universal
   content hash. See docs/user-guide/index-build-mental-model.md.`,
@@ -107,7 +108,7 @@ func init() {
 	indexQueryCmd.Flags().Bool("canonical-by-etag", false, "Emit one canonical record per non-empty ETag group; empty ETags pass through as standard records")
 	indexQueryCmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule for --canonical-by-etag: min-key, min-modified, max-modified")
 	indexQueryCmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
-	indexQueryCmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run")
+	indexQueryCmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run (durable requires exact --index-set and --run-id)")
 	indexQueryCmd.Flags().String("output-format", "", "Output framing (default human JSONL/count, or receipt-jsonl-v1 for a pinned verified query)")
 
 	// Index selection
@@ -206,6 +207,8 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
 	runIDFlag = strings.TrimSpace(runIDFlag)
+	sinceRun, _ := cmd.Flags().GetString("since-run")
+	sinceRun = strings.TrimSpace(sinceRun)
 	outputFormat, _ := cmd.Flags().GetString("output-format")
 	outputFormat = strings.TrimSpace(outputFormat)
 	switch outputFormat {
@@ -225,6 +228,11 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	if runIDFlag != "" {
 		if strings.TrimSpace(indexSetFlag) == "" {
 			return fmt.Errorf("--run-id requires --index-set")
+		}
+		if sinceRun != "" &&
+			(!validFullIndexSetID(strings.TrimSpace(indexSetFlag)) ||
+				strings.TrimSpace(indexSetFlag) != strings.ToLower(strings.TrimSpace(indexSetFlag))) {
+			return fmt.Errorf("--run-id with --since-run requires a full lowercase --index-set ID")
 		}
 		if err := validateRunID(runIDFlag); err != nil {
 			return fmt.Errorf("invalid --run-id: %w", err)
@@ -254,15 +262,10 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	canonicalByETag, _ := cmd.Flags().GetBool("canonical-by-etag")
 	canonicalTieBreakRaw, _ := cmd.Flags().GetString("canonical-tie-break")
 	includeAlternates, _ := cmd.Flags().GetBool("include-alternates")
-	sinceRun, _ := cmd.Flags().GetString("since-run")
 	outputURI, _ := cmd.Flags().GetString("output")
 	outputProfile, _ := cmd.Flags().GetString("output-profile")
 	outputRegion, _ := cmd.Flags().GetString("output-region")
 	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
-	if runIDFlag != "" && strings.TrimSpace(sinceRun) != "" {
-		return fmt.Errorf("--run-id and --since-run are distinct selectors; do not combine them")
-	}
-
 	// Format-aware read seam: sqlite-v1 or durable-v2 (pinned run forces durable-v2).
 	reader, err := openIndexReader(ctx, baseURI, indexSetFlag, runIDFlag)
 	if err != nil {

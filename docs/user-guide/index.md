@@ -46,7 +46,7 @@ Gonimbus supports two workflows based on bucket scale:
 gonimbus index build --job index-manifest.yaml
 
 # SQLite when you need a canonical index.db or SQLite-only surfaces
-# (query --since-run, stats --prefixes, full --resume-run)
+# (stats --prefixes, full --resume-run)
 gonimbus index build --job index-manifest.yaml --format sqlite
 
 # Format-aware query works on durable or SQLite sets
@@ -58,17 +58,19 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 | Format                | Build flag         | What it produces                                            | Local consumers today                                                                    |
 | --------------------- | ------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare, `gc`     |
-| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers; required for `--since-run`, `stats --prefixes`, full `--resume-run` |
+| **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers; required for latest-selected `--since-run`, `stats --prefixes`, full `--resume-run` |
 | **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB    |
 
 Durable is the default index artifact format. SQLite remains a first-class
 supported compatibility path (`--format sqlite` / `--format both`). Durable
 hydrate restores `manifest.json` + segments, **not** `index.db`. Format-aware
 local consumers work on durable-only sets; keep `--format sqlite` when you need
-a canonical `index.db` or a **SQLite-only** surface: **`query --since-run`**,
-**`stats --prefixes`**, or full **`--resume-run`** checkpoint recovery. `both`
-does not produce a canonical `index.db`; when both substrates exist for a set,
-readers prefer the verified durable snapshot.
+a canonical `index.db`, a latest-selected **`query --since-run`**, or a
+**SQLite-only** surface: **`stats --prefixes`** or full **`--resume-run`**
+checkpoint recovery. Exact pinned durable deltas require full `--index-set`,
+current `--run-id`, and `--since-run`. `both` does not produce a canonical
+`index.db`; when both substrates exist for a set, readers prefer the verified
+durable snapshot.
 
 See [Durable Index Format](durable-index.md) for the operator map, streaming
 capacity budgets (16 GiB workspace / 16 MiB record defaults), LIST parity
@@ -388,6 +390,12 @@ gonimbus index query 's3://bucket/prefix/' --pattern '**/*.json' --count
 gonimbus index query 's3://bucket/prefix/' \
   --since-run run_1783087200000000000
 
+# The same delta from one exact durable publication through a named ancestor
+gonimbus index query \
+  --index-set idx_<full-64-character-sha256> \
+  --run-id run_1783173600000000000 \
+  --since-run run_1783087200000000000
+
 # Emit one canonical object per non-empty ETag group
 gonimbus index query 's3://bucket/prefix/' --canonical-by-etag
 
@@ -531,17 +539,24 @@ schemas separately through a guarded path such as
 `index init --db <canonical-index.db>` or a subsequent build.
 
 `--since-run <run_id>` emits the current active rows first seen or meaningfully
-changed after a successful run in the same IndexSet. **SQLite-only today**
-(durable query fails closed). It is a forward delta over latest index state,
-intended for "only process new or changed objects" flows. It is not
-point-in-time history: the current SQLite index does not retain object
-snapshots for older runs, so it cannot reconstruct "state as of run X".
+changed after a successful run in the same IndexSet. SQLite supports its
+existing latest-selected form. Durable requires the exact triple
+`--index-set <full> --run-id <current> --since-run <baseline>`; it never
+discovers a current run through `latest.json`. It is a forward delta over the
+selected current state, intended for "only process new or changed objects"
+flows. It is not point-in-time history and does not reconstruct an older
+snapshot.
 
 Delta tracking uses Gonimbus-written run metadata and compares run boundaries by
-stored run timestamps, not by run ID string sorting. Unknown, non-successful, or
-cross-IndexSet run IDs fail closed. For indexes migrated from older schemas,
-precise `added` / `changed` classification begins at the migration baseline run;
-older boundary runs are rejected rather than returning a confident but
+stored run timestamps, not by run ID string sorting. Durable readers verify the
+same-set, digest-bound ancestry from the exact current run only through the
+named baseline. The baseline may be the current run (an empty delta) or an
+ancestor in the same continuity era. Legacy, unlinked, foreign-set,
+non-ancestor, corrupt, non-monotonic, or resource-exhausted ancestry fails
+closed; a named run outside the current ancestry reports
+`baseline_not_ancestor`. For indexes migrated from older schemas, precise
+`added` / `changed` classification begins at the migration baseline run; older
+boundary runs are rejected rather than returning a confident but
 under-specified delta.
 
 `--since-run` output keeps the existing `gonimbus.index.object.v1` record type
@@ -551,6 +566,13 @@ after the boundary, and `changed` when an existing or reappeared object changed
 after the boundary. Deletion history is not tracked in this index format, so
 `--include-deleted --since-run` is rejected instead of implying a deletion
 delta.
+
+Durable classification uses strict `>` comparisons against the baseline's
+authoritative `run_started_at`. A qualifying row's `first_seen_run_id` or
+`last_changed_run_id` must be one of the verified descendants between the
+current and baseline runs. A fact attributed to the verified baseline run is
+the boundary, not a trigger, even when its observation timestamp is later than
+that run's start. Re-seen but unchanged rows are excluded.
 
 `--canonical-by-etag` groups query results by non-empty ETag and emits one
 `gonimbus.index.object.canonical.v1` record per group. Rows with empty or

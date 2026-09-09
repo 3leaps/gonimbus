@@ -102,8 +102,10 @@ type QueryResult struct {
 
 // SinceRunFilter is a resolved query boundary for --since-run.
 type SinceRunFilter struct {
-	RunID     string
-	StartedAt time.Time
+	RunID                    string
+	StartedAt                time.Time
+	VerifiedDescendantRunIDs []string
+	SameRun                  bool
 }
 
 // ObjectDeltaBaseline records the legacy migration boundary for an index set.

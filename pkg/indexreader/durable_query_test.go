@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,203 @@ func TestDurableQuery_SinceRunUnsupportedFailClosed(t *testing.T) {
 		SinceRun:   &indexstore.SinceRunFilter{RunID: "run_unlinked_sibling", StartedAt: time.Now().UTC()},
 	})
 	require.ErrorIs(t, err, ErrDurableSinceRunUnsupported)
+}
+
+func TestDurableQuery_PinnedAncestorDelta(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, nil)
+	baselineStarted := time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC)
+	middleStarted := baselineStarted.Add(24 * time.Hour)
+	currentStarted := middleStarted.Add(24 * time.Hour)
+	baselineRun := "run_baseline_0001"
+	middleRun := "run_middle_0002"
+	currentRun := "run_current_0003"
+
+	baselineSHA := publishDurableLineageRun(t, env, baselineRun, baselineStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
+		nil, nil,
+	)
+	middleSHA := publishDurableLineageRun(t, env, middleRun, middleStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 2},
+		&indexsubstrate.StateParent{
+			IndexSetID: env.indexSetID, RunID: baselineRun, ManifestSHA256: baselineSHA,
+		},
+		nil,
+	)
+	rows := []indexsubstrate.CurrentObjectRow{
+		{
+			RelKey: "delta/added.json", SizeBytes: 10, ETag: "added",
+			FirstSeenRunID: middleRun, FirstSeenAt: middleStarted,
+			LastChangedRunID: middleRun, LastChangedAt: middleStarted,
+			LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+		},
+		{
+			RelKey: "delta/changed.json", SizeBytes: 20, ETag: "changed",
+			FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
+			LastChangedRunID: currentRun, LastChangedAt: currentStarted,
+			LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+		},
+		{
+			RelKey: "delta/reseen.json", SizeBytes: 30, ETag: "reseen",
+			FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
+			LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(20 * time.Minute),
+			LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+		},
+	}
+	publishDurableLineageRun(t, env, currentRun, currentStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 3},
+		&indexsubstrate.StateParent{
+			IndexSetID: env.indexSetID, RunID: middleRun, ManifestSHA256: middleSHA,
+		},
+		rows,
+	)
+
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID, RunID: currentRun})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+	filter, err := reader.ResolveSinceRunFilter(ctx, baselineRun)
+	require.NoError(t, err)
+	require.Equal(t, baselineRun, filter.RunID)
+	require.Equal(t, baselineStarted, filter.StartedAt)
+	require.Equal(t, []string{currentRun, middleRun}, filter.VerifiedDescendantRunIDs)
+	require.False(t, filter.SameRun)
+
+	results, _, err := reader.QueryObjects(ctx, indexstore.QueryParams{IndexSetID: env.indexSetID, SinceRun: filter})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.Equal(t, "delta/added.json", results[0].RelKey)
+	require.Equal(t, indexstore.QueryChangeKindAdded, results[0].ChangeKind)
+	require.Equal(t, "delta/changed.json", results[1].RelKey)
+	require.Equal(t, indexstore.QueryChangeKindChanged, results[1].ChangeKind)
+
+	count, err := reader.QueryObjectCount(ctx, indexstore.QueryParams{IndexSetID: env.indexSetID, SinceRun: filter})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, count)
+
+	sameRun, err := reader.ResolveSinceRunFilter(ctx, currentRun)
+	require.NoError(t, err)
+	require.True(t, sameRun.SameRun)
+	results, _, err = reader.QueryObjects(ctx, indexstore.QueryParams{IndexSetID: env.indexSetID, SinceRun: sameRun})
+	require.NoError(t, err)
+	require.Empty(t, results)
+
+	_, err = reader.ResolveSinceRunFilter(ctx, "run_unlinked_9999")
+	require.True(t, indexsubstrate.IsLineageCode(err, indexsubstrate.LineageCodeBaselineNotAncestor), "got %v", err)
+}
+
+func TestDurableQuery_PinnedDeltaRejectsUnverifiedRowProvenance(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, nil)
+	baselineStarted := time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC)
+	currentStarted := baselineStarted.Add(24 * time.Hour)
+	baselineRun := "run_baseline_0001"
+	currentRun := "run_current_0002"
+	baselineSHA := publishDurableLineageRun(t, env, baselineRun, baselineStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
+		nil, nil,
+	)
+	publishDurableLineageRun(t, env, currentRun, currentStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 2},
+		&indexsubstrate.StateParent{
+			IndexSetID: env.indexSetID, RunID: baselineRun, ManifestSHA256: baselineSHA,
+		},
+		[]indexsubstrate.CurrentObjectRow{{
+			RelKey: "delta/unbound.json", SizeBytes: 1,
+			FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted,
+			LastChangedRunID: "run_unverified_9999", LastChangedAt: currentStarted,
+			LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+		}},
+	)
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID, RunID: currentRun})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+	filter, err := reader.ResolveSinceRunFilter(ctx, baselineRun)
+	require.NoError(t, err)
+	_, _, err = reader.QueryObjects(ctx, indexstore.QueryParams{IndexSetID: env.indexSetID, SinceRun: filter})
+	require.ErrorContains(t, err, "last_changed_run_id")
+	require.ErrorContains(t, err, "verified descendant")
+}
+
+func TestDurableQuery_PinnedDeltaRefusals(t *testing.T) {
+	t.Run("legacy lineage", func(t *testing.T) {
+		env := setupDurableTestEnv(t, nil)
+		reader, err := ResolveIndexReader(context.Background(), env.opts, ResolveTarget{
+			IndexSetID: env.indexSetID,
+			RunID:      env.runID,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reader.Close() })
+		_, err = reader.ResolveSinceRunFilter(context.Background(), env.runID)
+		require.True(t, indexsubstrate.IsLineageCode(err, indexsubstrate.LineageCodeRequireContinuous), "got %v", err)
+	})
+
+	t.Run("corrupt parent digest binding", func(t *testing.T) {
+		env := setupDurableTestEnv(t, nil)
+		baselineStarted := time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC)
+		currentStarted := baselineStarted.Add(time.Hour)
+		baselineRun := "run_baseline_0001"
+		currentRun := "run_current_0002"
+		publishDurableLineageRun(t, env, baselineRun, baselineStarted,
+			&indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
+			nil, nil,
+		)
+		publishDurableLineageRun(t, env, currentRun, currentStarted,
+			&indexsubstrate.LineageRecord{Version: 1, Generation: 2},
+			&indexsubstrate.StateParent{
+				IndexSetID: env.indexSetID, RunID: baselineRun, ManifestSHA256: strings.Repeat("a", 64),
+			},
+			nil,
+		)
+		reader, err := ResolveIndexReader(context.Background(), env.opts, ResolveTarget{
+			IndexSetID: env.indexSetID,
+			RunID:      currentRun,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reader.Close() })
+		_, err = reader.ResolveSinceRunFilter(context.Background(), baselineRun)
+		require.True(t, indexsubstrate.IsLineageCode(err, indexsubstrate.LineageCodeDigestMismatch), "got %v", err)
+	})
+
+	t.Run("nonmonotonic run starts", func(t *testing.T) {
+		env := setupDurableTestEnv(t, nil)
+		baselineStarted := time.Date(2025, 2, 2, 12, 0, 0, 0, time.UTC)
+		currentStarted := baselineStarted.Add(-time.Hour)
+		baselineRun := "run_baseline_0001"
+		currentRun := "run_current_0002"
+		baselineSHA := publishDurableLineageRun(t, env, baselineRun, baselineStarted,
+			&indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
+			nil, nil,
+		)
+		publishDurableLineageRun(t, env, currentRun, currentStarted,
+			&indexsubstrate.LineageRecord{Version: 1, Generation: 2},
+			&indexsubstrate.StateParent{
+				IndexSetID: env.indexSetID, RunID: baselineRun, ManifestSHA256: baselineSHA,
+			},
+			nil,
+		)
+		reader, err := ResolveIndexReader(context.Background(), env.opts, ResolveTarget{
+			IndexSetID: env.indexSetID,
+			RunID:      currentRun,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reader.Close() })
+		_, err = reader.ResolveSinceRunFilter(context.Background(), baselineRun)
+		require.True(t, indexsubstrate.IsLineageCode(err, indexsubstrate.LineageCodeInvalidTime), "got %v", err)
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		env := setupDurableTestEnv(t, nil)
+		reader, err := ResolveIndexReader(context.Background(), env.opts, ResolveTarget{
+			IndexSetID: env.indexSetID,
+			RunID:      env.runID,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reader.Close() })
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = reader.ResolveSinceRunFilter(ctx, env.runID)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 func TestDurableQuery_CanonicalByETag(t *testing.T) {
@@ -540,6 +738,54 @@ func writeRunComplete(t *testing.T, env durableTestEnv, runID string, createdAt 
 		"segment_dir":     runDir,
 		"segments":        len(manifest.Segments),
 	})
+}
+
+func publishDurableLineageRun(
+	t *testing.T,
+	env durableTestEnv,
+	runID string,
+	startedAt time.Time,
+	lineage *indexsubstrate.LineageRecord,
+	parent *indexsubstrate.StateParent,
+	rows []indexsubstrate.CurrentObjectRow,
+) string {
+	t.Helper()
+	runDir := filepath.Join(env.segmentRoot, "runs", runID)
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	for i := range rows {
+		rows[i].IndexSetID = env.indexSetID
+	}
+	manifest, err := indexsubstrate.WriteSegmentSet(indexsubstrate.SegmentWriterConfig{
+		Dir:                  runDir,
+		IndexSetID:           env.indexSetID,
+		RunID:                runID,
+		CreatedAt:            startedAt,
+		RunStartedAt:         &startedAt,
+		StateParent:          parent,
+		Lineage:              lineage,
+		TargetRowsPerSegment: 100,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	}, rows)
+	require.NoError(t, err)
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
+	manifestSHA, err := hashFileSHA256(manifestPath)
+	require.NoError(t, err)
+	writeJSON(t, filepath.Join(runDir, "complete.json"), map[string]any{
+		"type":            "gonimbus.index.complete.v1",
+		"index_set_id":    env.indexSetID,
+		"run_id":          runID,
+		"completed_at":    startedAt.Format(time.RFC3339Nano),
+		"manifest_path":   manifestPath,
+		"manifest_sha256": manifestSHA,
+		"segment_dir":     runDir,
+		"segments":        len(manifest.Segments),
+	})
+	return manifestSHA
 }
 
 func durableRow(relKey string, size int64, etag string, mod time.Time) indexsubstrate.CurrentObjectRow {

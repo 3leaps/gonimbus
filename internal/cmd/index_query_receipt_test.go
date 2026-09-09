@@ -632,6 +632,96 @@ func TestIndexQueryReceiptJSONL_CanonicalEmptyETagFailsClosed(t *testing.T) {
 	}
 }
 
+func TestIndexQueryReceiptJSONL_PinnedAncestorDelta(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	env := seedDurableOnlyAppData(t, dataRoot, nil)
+	baselineStarted := time.Date(2025, 5, 1, 12, 0, 0, 0, time.UTC)
+	currentStarted := baselineStarted.Add(24 * time.Hour)
+	baselineRun := "run_1746100800000000000"
+	currentRun := "run_1746187200000000000"
+	baselineSHA := publishDurableCLILineageRun(t, env, baselineRun, baselineStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
+		nil, nil,
+	)
+	publishDurableCLILineageRun(t, env, currentRun, currentStarted,
+		&indexsubstrate.LineageRecord{Version: 1, Generation: 2},
+		&indexsubstrate.StateParent{
+			IndexSetID: env.indexSetID, RunID: baselineRun, ManifestSHA256: baselineSHA,
+		},
+		[]indexsubstrate.CurrentObjectRow{
+			{
+				RelKey: "delta/added.json", SizeBytes: 10, ETag: "added",
+				FirstSeenRunID: currentRun, FirstSeenAt: currentStarted,
+				LastChangedRunID: currentRun, LastChangedAt: currentStarted,
+				LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+			},
+			{
+				RelKey: "delta/changed.json", SizeBytes: 20, ETag: "changed",
+				FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
+				LastChangedRunID: currentRun, LastChangedAt: currentStarted,
+				LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+			},
+			{
+				RelKey: "delta/reseen.json", SizeBytes: 30, ETag: "reseen",
+				FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
+				LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(20 * time.Minute),
+				LastSeenRunID: currentRun, LastSeenAt: currentStarted,
+			},
+		},
+	)
+
+	stdout, stderr, err := executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", currentRun,
+		"--since-run", baselineRun,
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines := nonEmptyLines(stdout)
+	require.Len(t, lines, 3)
+	var added, changed indexQueryRecord
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &added))
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &changed))
+	require.Equal(t, "delta/added.json", added.Data.RelKey)
+	require.Equal(t, indexstore.QueryChangeKindAdded, added.Data.ChangeKind)
+	require.Equal(t, "delta/changed.json", changed.Data.RelKey)
+	require.Equal(t, indexstore.QueryChangeKindChanged, changed.Data.ChangeKind)
+	var receipt indexQueryReceiptRecord
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &receipt))
+	require.Equal(t, currentRun, receipt.RunID)
+	require.Equal(t, baselineRun, receipt.Query.BaselineRunID)
+	require.EqualValues(t, 3, receipt.Results.Examined)
+	require.EqualValues(t, 2, receipt.Results.Matched)
+	require.EqualValues(t, 2, receipt.Results.Emitted)
+	validateQueryReceiptAgainstSchema(t, receipt)
+
+	stdout, stderr, err = executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", currentRun,
+		"--since-run", currentRun,
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines = nonEmptyLines(stdout)
+	require.Len(t, lines, 1)
+	receipt = indexQueryReceiptRecord{}
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &receipt))
+	require.Equal(t, currentRun, receipt.Query.BaselineRunID)
+	require.Zero(t, receipt.Results.Matched)
+	require.Zero(t, receipt.Results.Emitted)
+
+	stdout, stderr, err = executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", currentRun,
+		"--since-run", "run_1746000000000000000",
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.ErrorContains(t, err, indexsubstrate.LineageCodeBaselineNotAncestor)
+	require.Empty(t, stdout, "stdout=%q stderr=%q", stdout, stderr)
+}
+
 func TestIndexQueryReceiptQuerySpecNormalization(t *testing.T) {
 	meta := indexreader.VerifiedSnapshotMetadata{
 		IndexSetID: "idx_" + strings.Repeat("a", 64),

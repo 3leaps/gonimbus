@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -24,6 +25,9 @@ type durableReader struct {
 	snap             indexsubstrate.PublishedSnapshot
 	sourceIdentity   verifiedLocalIdentityFile
 	segmentCacheRoot string
+	pinned           bool
+	sinceMu          sync.RWMutex
+	sinceFilters     map[string]indexstore.SinceRunFilter
 }
 
 func openDurableReader(opts ResolveOptions, c candidate) (*durableReader, error) {
@@ -137,6 +141,7 @@ func openPinnedDurableRun(opts ResolveOptions, target ResolveTarget) (*durableRe
 		snap:             snap,
 		sourceIdentity:   sourceIdentity,
 		segmentCacheRoot: filepath.Join(opts.SegmentCacheRoot, fullID),
+		pinned:           true,
 	}, nil
 }
 
@@ -231,15 +236,76 @@ func (r *durableReader) SQLiteDB() *sql.DB { return nil }
 func (r *durableReader) Close() error { return nil }
 
 func (r *durableReader) ResolveSinceRunFilter(ctx context.Context, runID string) (*indexstore.SinceRunFilter, error) {
-	_ = ctx
-	if strings.TrimSpace(runID) == "" {
-		return nil, fmt.Errorf("run_id is required")
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	// Fail closed: durable markers do not persist RunStartedAt or digest-bound
-	// parent-chain lineage required for SQLite-parity --since-run. Approximating
-	// via CreatedAt/CompletedAt or unlinked runs/<id>/complete.json would
-	// silently widen/narrow deltas.
-	return nil, fmt.Errorf("%w: run %s", ErrDurableSinceRunUnsupported, strings.TrimSpace(runID))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	runID = strings.TrimSpace(runID)
+	if err := validatePinnedRunID(runID); err != nil {
+		return nil, err
+	}
+	if !r.pinned {
+		return nil, fmt.Errorf("%w: exact --run-id current selection is required", ErrDurableSinceRunUnsupported)
+	}
+	budget := indexsubstrate.DefaultAncestryBudget()
+	budget.MaxMarkerBytes = r.opts.MaxMarkerBytes
+	budget.MaxManifestBytes = r.opts.MaxManifestBytes
+	ancestry, err := indexsubstrate.ResolveAncestry(r.snap, indexsubstrate.AncestryResolveConfig{
+		ThroughRunID: runID,
+		Lookup: func(indexSetID, parentRunID string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			if indexSetID != r.meta.IndexSetID {
+				return "", fmt.Errorf("lineage parent crosses index set boundary")
+			}
+			if err := validatePinnedRunID(parentRunID); err != nil {
+				return "", err
+			}
+			return filepath.Join(r.segmentCacheRoot, "runs", parentRunID, "complete.json"), nil
+		},
+		Budget:            budget,
+		RequireContinuous: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if ancestry.RequestedBoundary == nil || len(ancestry.Chain) == 0 {
+		return nil, &indexsubstrate.LineageError{
+			Code:    indexsubstrate.LineageCodeBaselineNotAncestor,
+			Message: "requested baseline was not verified",
+		}
+	}
+	for i := 0; i+1 < len(ancestry.Chain); i++ {
+		child := ancestry.Chain[i]
+		parent := ancestry.Chain[i+1]
+		if !child.RunStartedAt.After(parent.RunStartedAt) {
+			return nil, &indexsubstrate.LineageError{
+				Code:    indexsubstrate.LineageCodeInvalidTime,
+				Message: "continuous descendant run_started_at must be strictly after its parent",
+			}
+		}
+	}
+	descendants := make([]string, 0, len(ancestry.Chain)-1)
+	for _, node := range ancestry.Chain[:len(ancestry.Chain)-1] {
+		descendants = append(descendants, node.RunID)
+	}
+	resolved := indexstore.SinceRunFilter{
+		RunID:                    ancestry.RequestedBoundary.RunID,
+		StartedAt:                ancestry.RequestedBoundary.RunStartedAt,
+		VerifiedDescendantRunIDs: descendants,
+		SameRun:                  len(ancestry.Chain) == 1,
+	}
+	r.sinceMu.Lock()
+	if r.sinceFilters == nil {
+		r.sinceFilters = make(map[string]indexstore.SinceRunFilter)
+	}
+	r.sinceFilters[resolved.RunID] = cloneSinceRunFilter(resolved)
+	r.sinceMu.Unlock()
+	out := cloneSinceRunFilter(resolved)
+	return &out, nil
 }
 
 func (r *durableReader) WalkObjects(ctx context.Context, params indexstore.QueryParams, visit VisitObject) (indexstore.QueryStats, error) {
@@ -250,8 +316,8 @@ func (r *durableReader) WalkObjects(ctx context.Context, params indexstore.Query
 	if err := validateQueryParams(&params); err != nil {
 		return indexstore.QueryStats{}, err
 	}
-	if params.SinceRun != nil {
-		return indexstore.QueryStats{}, ErrDurableSinceRunUnsupported
+	if err := r.validateResolvedSinceRunFilter(params.SinceRun); err != nil {
+		return indexstore.QueryStats{}, err
 	}
 	filter, err := compileRowFilter(params)
 	if err != nil {
@@ -290,8 +356,8 @@ func (r *durableReader) QueryObjectCount(ctx context.Context, params indexstore.
 	if err := validateQueryParams(&params); err != nil {
 		return 0, err
 	}
-	if params.SinceRun != nil {
-		return 0, ErrDurableSinceRunUnsupported
+	if err := r.validateResolvedSinceRunFilter(params.SinceRun); err != nil {
+		return 0, err
 	}
 	filter, err := compileRowFilter(params)
 	if err != nil {
@@ -314,8 +380,8 @@ func (r *durableReader) QueryCanonicalObjects(ctx context.Context, params indexs
 	if err := validateQueryParams(&params); err != nil {
 		return nil, indexstore.CanonicalQueryStats{}, err
 	}
-	if params.SinceRun != nil {
-		return nil, indexstore.CanonicalQueryStats{}, ErrDurableSinceRunUnsupported
+	if err := r.validateResolvedSinceRunFilter(params.SinceRun); err != nil {
+		return nil, indexstore.CanonicalQueryStats{}, err
 	}
 	rule := params.CanonicalTieBreak
 	if rule == "" {
@@ -337,6 +403,32 @@ func (r *durableReader) QueryCanonicalObjects(ctx context.Context, params indexs
 	}
 	outputs, stats := groupCanonical(results, rule, params.Limit, queryStats)
 	return outputs, stats, nil
+}
+
+func cloneSinceRunFilter(in indexstore.SinceRunFilter) indexstore.SinceRunFilter {
+	out := in
+	out.VerifiedDescendantRunIDs = append([]string(nil), in.VerifiedDescendantRunIDs...)
+	return out
+}
+
+func (r *durableReader) validateResolvedSinceRunFilter(filter *indexstore.SinceRunFilter) error {
+	if filter == nil {
+		return nil
+	}
+	r.sinceMu.RLock()
+	expected, ok := r.sinceFilters[filter.RunID]
+	r.sinceMu.RUnlock()
+	if !ok || !expected.StartedAt.Equal(filter.StartedAt) ||
+		expected.SameRun != filter.SameRun ||
+		len(expected.VerifiedDescendantRunIDs) != len(filter.VerifiedDescendantRunIDs) {
+		return fmt.Errorf("%w: filter is not bound to this verified reader", ErrDurableSinceRunUnsupported)
+	}
+	for i := range expected.VerifiedDescendantRunIDs {
+		if expected.VerifiedDescendantRunIDs[i] != filter.VerifiedDescendantRunIDs[i] {
+			return fmt.Errorf("%w: filter is not bound to this verified reader", ErrDurableSinceRunUnsupported)
+		}
+	}
+	return nil
 }
 
 var errStopWalk = fmt.Errorf("stop walk")
@@ -506,10 +598,20 @@ func filterCurrentRow(row indexsubstrate.CurrentObjectRow, filter *rowFilter, pa
 		}
 	}
 	if filter.sinceRun != nil {
-		// Match SQLite semantics using row observation timestamps against the
-		// validated boundary started_at (durable has no index_runs table).
-		firstOK := !row.FirstSeenAt.IsZero() && row.FirstSeenAt.After(filter.sinceRun.StartedAt)
-		changedOK := !row.LastChangedAt.IsZero() && row.LastChangedAt.After(filter.sinceRun.StartedAt)
+		if filter.sinceRun.SameRun {
+			return indexstore.QueryResult{}, false, nil
+		}
+		// A baseline-run observation normally occurs after run_started_at, but
+		// the baseline is the boundary rather than its own descendant. Combine
+		// time and verified run identity to distinguish it from a delta trigger.
+		firstOK, err := durableDeltaFactAfterBoundary(filter.sinceRun, row.FirstSeenRunID, row.FirstSeenAt, "first_seen_run_id")
+		if err != nil {
+			return indexstore.QueryResult{}, false, err
+		}
+		changedOK, err := durableDeltaFactAfterBoundary(filter.sinceRun, row.LastChangedRunID, row.LastChangedAt, "last_changed_run_id")
+		if err != nil {
+			return indexstore.QueryResult{}, false, err
+		}
 		if !firstOK && !changedOK {
 			return indexstore.QueryResult{}, false, nil
 		}
@@ -536,11 +638,38 @@ func filterCurrentRow(row indexsubstrate.CurrentObjectRow, filter *rowFilter, pa
 	return result, true, nil
 }
 
+func verifiedDescendantRun(filter *indexstore.SinceRunFilter, runID string) bool {
+	if filter == nil {
+		return false
+	}
+	for _, verified := range filter.VerifiedDescendantRunIDs {
+		if runID == verified {
+			return true
+		}
+	}
+	return false
+}
+
+func durableDeltaFactAfterBoundary(filter *indexstore.SinceRunFilter, runID string, at time.Time, field string) (bool, error) {
+	if filter == nil || at.IsZero() || !at.After(filter.StartedAt) {
+		return false, nil
+	}
+	if runID == filter.RunID {
+		return false, nil
+	}
+	if verifiedDescendantRun(filter, runID) {
+		return true, nil
+	}
+	return false, fmt.Errorf("delta row %s is not the verified baseline or a verified descendant", field)
+}
+
 func changeKind(result indexstore.QueryResult, filter *indexstore.SinceRunFilter) string {
 	if filter == nil {
 		return ""
 	}
-	if result.FirstSeenAt != nil && result.FirstSeenAt.After(filter.StartedAt) {
+	if result.FirstSeenAt != nil &&
+		result.FirstSeenAt.After(filter.StartedAt) &&
+		verifiedDescendantRun(filter, result.FirstSeenRunID) {
 		return indexstore.QueryChangeKindAdded
 	}
 	if result.LastChangedAt != nil && result.LastChangedAt.After(filter.StartedAt) {

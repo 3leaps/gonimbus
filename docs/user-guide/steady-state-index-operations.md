@@ -294,10 +294,11 @@ Gonimbus does not yet provide:
 
 For query-time deltas, `index query --since-run <run_id>` emits the current
 active rows first seen or meaningfully changed after a successful run in the
-same IndexSet. It is a forward delta over latest state, not point-in-time
-history. For indexes migrated from older schemas, precise `added` / `changed`
-classification begins at the migration baseline, and boundary runs before that
-baseline are rejected.
+same IndexSet. SQLite uses latest state; durable requires exact full
+`--index-set`, current `--run-id`, and `--since-run` pins. It is a forward delta
+over selected current state, not point-in-time history. For indexes migrated
+from older schemas, precise `added` / `changed` classification begins at the
+migration baseline, and boundary runs before that baseline are rejected.
 
 Use a full-coverage audit build when you need deletion detection.
 `--since-run` does not track deletion history, so it rejects

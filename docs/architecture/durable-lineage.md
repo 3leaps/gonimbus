@@ -1,11 +1,12 @@
 # Durable lineage
 
-**Status**: active — ordinary durable builds emit lineage / `state_parent` and
-load verified parent state
+**Status**: active — ordinary durable builds emit lineage / `state_parent`,
+load verified parent state, and support ancestry-proven deltas between exact
+local run pins
 
-**Does not**: enable durable `--since` / `--since-run` (timestamp-scoped
-reduction), raise enrich scale ceilings, or make the SQLite index a lineage
-authority
+**Does not**: enable latest-selected or timestamp-only durable deltas, rebuild
+historical snapshots, raise enrich scale ceilings, or make the SQLite index a
+lineage authority
 
 ## Purpose
 
@@ -15,6 +16,7 @@ This document freezes the **additive** durable-manifest contract for:
 2. exact single `state_parent` (set / run / manifest digest)
 3. all-or-nothing `lineage` generation/baseline record
 4. bounded, digest-verifying **ancestry readers**
+5. exact current-run deltas through a named verified ancestor
 
 Ordinary durable builds emit continuity edges: parent rows and continuity
 metadata derive from a single verified same-set capture of latest, under the
@@ -80,6 +82,10 @@ byte hash, no depth budget).
   even though it is omitted from the continuous `Chain`).
 - Trusted **delta** ancestry stops at `baseline:true` (even when a pre-continuity
   state parent was verified).
+- A named delta boundary stops the walk as soon as that verified node is
+  reached. Reaching the continuity-era baseline first refuses with
+  `baseline_not_ancestor`; the optional pre-continuity state parent is never a
+  delta boundary.
 - Continuous (non-baseline) parents must carry lineage; a baseline’s optional
   state-source parent must be pre-continuity (`Lineage == nil`).
 - Parent identity already present in the walk is refused as `lineage_cycle`
@@ -93,7 +99,7 @@ byte hash, no depth budget).
 | Production `PublishSnapshot`               | **Active** — persists `run_started_at`, digest-bound `state_parent`, and `lineage` supplied by the durable build path                                                                                                                                                                                                                                                                                        |
 | Durable/`both` build adapter               | **Active** — ordinary builds stream the verified same-set parent's rows from a single lease-held capture (caller `PriorRows` refused) and derive the three-way baseline/generation rule; `both` derives durable lineage independently of the SQLite sidecar                                                                                                                                                  |
 | Ancestry validation                        | **Active** — a continuous parent's bounded ancestry is verified before extension and before a same-run recovery re-publish; defects fail closed without advancing latest                                                                                                                                                                                                                                     |
-| Durable `--since` / `--since-run`          | Unsupported (timestamp-scoped reduction is not activated)                                                                                                                                                                                                                                                                                                                                                    |
+| Durable `--since-run`                      | **Active when exactly pinned** — requires full `--index-set`, exact current `--run-id`, and a same-set current-or-ancestor `--since-run`; the bounded digest-verified walk stops at the named boundary, same-run is empty, facts attributed to the baseline are non-triggers even when observed after run start, and latest/unlinked/legacy/corrupt inputs fail closed                                                                                                  |
 | Scope-reduced coverage merge               | **Active** — a build whose crawl-prefix plan covers only part of the parent's rows retains every out-of-coverage prior row verbatim (state, first-seen lineage, HEAD enrichment, existing tombstones) and tombstones only keys inside the current confirmed-complete attestation; published coverage equals the crawl plan exactly (fail-closed set equality — never rolled up toward the parent's coverage) |
 | Enrich publish                             | Pre-continuity (no lineage emission on the enrich path); enrich scale ceiling unchanged                                                                                                                                                                                                                                                                                                                      |
 | Canonical authority / whole-set GC execute | Untouched by this schema                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -105,7 +111,9 @@ refuse as `lineage_invalid_time` and do not create segment artifacts).
 
 ## Explicit non-goals
 
-- Enabling durable `--since` / `--since auto` / `--since-run`
+- Latest-selected or timestamp-only durable deltas (`--since`, `--since auto`,
+  or `--since-run` without an exact current pin)
+- Deletion history or reconstruction of historical object snapshots
 - Reachability delete driven by new edges
 - Backfilling history onto legacy artifacts
 - Treating the SQLite index as a lineage authority

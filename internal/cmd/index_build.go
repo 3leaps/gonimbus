@@ -67,9 +67,10 @@ SQLite compatibility builds still use:
 
 Local consumer note: query, list, stats, doctor, and enrich-with-head are
 format-aware (durable or SQLite). Use --format sqlite or --format both when you
-still need SQLite-only surfaces: query --since-run, stats --prefixes, or full
---resume-run checkpoint recovery. Durable hydrate restores
-manifest+segments, not index.db.
+still need a canonical index.db, latest-selected query --since-run,
+stats --prefixes, or full --resume-run checkpoint recovery. Exact pinned
+durable deltas require --index-set, --run-id, and --since-run. Durable hydrate
+restores manifest+segments, not index.db.
 
 The index build process:
 1. Loads and validates the index manifest

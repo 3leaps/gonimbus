@@ -13,10 +13,10 @@ import (
 )
 
 // Durable-lineage schema and bounded digest-verifying ancestry readers, active
-// on the durable build path: ordinary builds emit lineage and a digest-bound
-// state_parent, and validate bounded ancestry before extending a continuous
-// parent. Timestamp-scoped reduction (durable --since / --since-run) is not
-// activated. See docs/architecture/durable-lineage.md.
+// on the durable build path and for exact pinned durable --since-run queries.
+// Ordinary builds emit lineage and a digest-bound state_parent, and validate
+// bounded ancestry before extending a continuous parent. See
+// docs/architecture/durable-lineage.md.
 
 const (
 	// LineageVersionV1 is the only supported lineage.version.
@@ -35,24 +35,25 @@ const (
 
 // Stable lineage reason codes (operator/product APIs; sanitized messages).
 const (
-	LineageCodeLegacy            = "lineage_legacy"
-	LineageCodeUnknownVersion    = "lineage_unknown_version"
-	LineageCodePartial           = "lineage_partial"
-	LineageCodeInvalidTime       = "lineage_invalid_time"
-	LineageCodeInvalidDigest     = "lineage_invalid_digest"
-	LineageCodeCrossSet          = "lineage_cross_set"
-	LineageCodeMissingParent     = "lineage_missing_parent"
-	LineageCodeDigestMismatch    = "lineage_digest_mismatch"
-	LineageCodeSetRunMismatch    = "lineage_set_run_mismatch"
-	LineageCodeCycle             = "lineage_cycle"
-	LineageCodeGeneration        = "lineage_generation"
-	LineageCodeBaselineConflict  = "lineage_baseline_conflict"
-	LineageCodeBudgetDepth       = "lineage_budget_depth"
-	LineageCodeBudgetNodes       = "lineage_budget_nodes"
-	LineageCodeBudgetBytes       = "lineage_budget_bytes"
-	LineageCodeMalformed         = "lineage_malformed"
-	LineageCodeLookupRequired    = "lineage_lookup_required"
-	LineageCodeRequireContinuous = "lineage_require_continuous"
+	LineageCodeLegacy              = "lineage_legacy"
+	LineageCodeUnknownVersion      = "lineage_unknown_version"
+	LineageCodePartial             = "lineage_partial"
+	LineageCodeInvalidTime         = "lineage_invalid_time"
+	LineageCodeInvalidDigest       = "lineage_invalid_digest"
+	LineageCodeCrossSet            = "lineage_cross_set"
+	LineageCodeMissingParent       = "lineage_missing_parent"
+	LineageCodeDigestMismatch      = "lineage_digest_mismatch"
+	LineageCodeSetRunMismatch      = "lineage_set_run_mismatch"
+	LineageCodeCycle               = "lineage_cycle"
+	LineageCodeGeneration          = "lineage_generation"
+	LineageCodeBaselineConflict    = "lineage_baseline_conflict"
+	LineageCodeBudgetDepth         = "lineage_budget_depth"
+	LineageCodeBudgetNodes         = "lineage_budget_nodes"
+	LineageCodeBudgetBytes         = "lineage_budget_bytes"
+	LineageCodeMalformed           = "lineage_malformed"
+	LineageCodeLookupRequired      = "lineage_lookup_required"
+	LineageCodeRequireContinuous   = "lineage_require_continuous"
+	LineageCodeBaselineNotAncestor = "baseline_not_ancestor"
 )
 
 // sha256HexRE matches a lowercase hex-encoded SHA-256 digest.
@@ -314,8 +315,12 @@ type AncestryResult struct {
 	Mode AncestryMode
 	// Chain is root-first toward the baseline (root, parent, ..., baseline).
 	Chain []AncestryNode
-	// DeltaBoundary is set when Mode is continuous (the baseline node).
+	// DeltaBoundary is set when the walk reaches the continuity baseline. An
+	// earlier ThroughRunID stop leaves it nil.
 	DeltaBoundary *AncestryNode
+	// RequestedBoundary is set when ThroughRunID names a verified node. Unlike
+	// DeltaBoundary, it may be any continuous ancestor, including the root.
+	RequestedBoundary *AncestryNode
 	// AccountedBytes is the total marker+manifest bytes charged across the graph.
 	AccountedBytes int64
 }
@@ -372,6 +377,9 @@ type AncestryResolveConfig struct {
 	// RequireContinuous fails closed on legacy (no lineage) instead of
 	// returning AncestryModeLegacy.
 	RequireContinuous bool
+	// ThroughRunID stops the walk after verifying the named root/ancestor.
+	// Reaching the lineage baseline first returns baseline_not_ancestor.
+	ThroughRunID string
 }
 
 // ResolveAncestry walks digest-bound same-set state parents from a verified
@@ -390,6 +398,12 @@ type AncestryResolveConfig struct {
 // parent need not carry lineage); trusted delta ancestry still stops at baseline.
 func ResolveAncestry(root PublishedSnapshot, cfg AncestryResolveConfig) (AncestryResult, error) {
 	cfg.Budget = cfg.Budget.normalize()
+	cfg.ThroughRunID = strings.TrimSpace(cfg.ThroughRunID)
+	if cfg.ThroughRunID != "" {
+		if err := validateSafeRunComponent(cfg.ThroughRunID, "through_run_id"); err != nil {
+			return AncestryResult{}, err
+		}
+	}
 	if err := ValidateManifestLineageStructure(root.Manifest); err != nil {
 		return AncestryResult{}, err
 	}
@@ -450,8 +464,31 @@ func ResolveAncestry(root PublishedSnapshot, cfg AncestryResolveConfig) (Ancestr
 		if current.Manifest.Lineage == nil {
 			return AncestryResult{}, lineageError(LineageCodeGeneration, "continuous lineage hop lacks lineage record")
 		}
+		if cfg.ThroughRunID != "" && current.Manifest.RunID == cfg.ThroughRunID {
+			boundary := chain[len(chain)-1]
+			var deltaBoundary *AncestryNode
+			if current.Manifest.Lineage.Baseline {
+				boundary.DeltaBoundary = true
+				chain[len(chain)-1] = boundary
+				deltaBoundary = &boundary
+			}
+			return AncestryResult{
+				Mode:              AncestryModeContinuous,
+				Chain:             chain,
+				DeltaBoundary:     deltaBoundary,
+				RequestedBoundary: &boundary,
+				AccountedBytes:    aggBytes,
+			}, nil
+		}
 
 		if current.Manifest.Lineage.Baseline {
+			if cfg.ThroughRunID != "" {
+				return AncestryResult{}, lineageErrorf(
+					LineageCodeBaselineNotAncestor,
+					"requested baseline run %s is not a continuous ancestor",
+					cfg.ThroughRunID,
+				)
+			}
 			// Optional pre-continuity state source: still a graph node/edge for
 			// budgets, but not a trusted delta boundary and not on Chain.
 			if current.Manifest.StateParent != nil {

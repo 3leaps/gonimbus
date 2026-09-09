@@ -109,6 +109,17 @@ func newIndexQueryCommandForTest() *cobra.Command {
 	return cmd
 }
 
+func TestIndexQuery_PinnedSinceRunRequiresFullIndexSetID(t *testing.T) {
+	stdout, stderr, err := executeIndexQueryCommand(t,
+		"--index-set", "idx_0123456789abcdef",
+		"--run-id", "run_current_0002",
+		"--since-run", "run_baseline_0001",
+	)
+	require.ErrorContains(t, err, "requires a full lowercase --index-set ID")
+	require.Empty(t, stdout)
+	require.Empty(t, stderr)
+}
+
 // TestIndexQuery_StreamingJSONLParity compares timestamp-normalized JSONL from
 // sqlite and durable readers through the same record encoder used by the CLI.
 func TestIndexQuery_StreamingJSONLParity(t *testing.T) {
@@ -214,6 +225,7 @@ type durableCLIEnv struct {
 	indexSetID     string
 	identityDir    string
 	identitySHA256 string
+	segmentRoot    string
 	runID          string
 	params         indexstore.IndexSetParams
 }
@@ -308,9 +320,58 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 		indexSetID:     identity.IndexSetID,
 		identityDir:    identityDir,
 		identitySHA256: identitySHA256,
+		segmentRoot:    segmentRoot,
 		runID:          runID,
 		params:         params,
 	}
+}
+
+func publishDurableCLILineageRun(
+	t *testing.T,
+	env durableCLIEnv,
+	runID string,
+	startedAt time.Time,
+	lineage *indexsubstrate.LineageRecord,
+	parent *indexsubstrate.StateParent,
+	rows []indexsubstrate.CurrentObjectRow,
+) string {
+	t.Helper()
+	runDir := filepath.Join(env.segmentRoot, "runs", runID)
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	for i := range rows {
+		rows[i].IndexSetID = env.indexSetID
+	}
+	manifest, err := indexsubstrate.WriteSegmentSet(indexsubstrate.SegmentWriterConfig{
+		Dir:                  runDir,
+		IndexSetID:           env.indexSetID,
+		RunID:                runID,
+		CreatedAt:            startedAt,
+		RunStartedAt:         &startedAt,
+		StateParent:          parent,
+		Lineage:              lineage,
+		TargetRowsPerSegment: 100,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	}, rows)
+	require.NoError(t, err)
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
+	manifestSHA, err := fileSHA256Hex(manifestPath)
+	require.NoError(t, err)
+	writeJSONFile(t, filepath.Join(runDir, "complete.json"), map[string]any{
+		"type":            "gonimbus.index.complete.v1",
+		"index_set_id":    env.indexSetID,
+		"run_id":          runID,
+		"completed_at":    startedAt.Format(time.RFC3339Nano),
+		"manifest_path":   manifestPath,
+		"manifest_sha256": manifestSHA,
+		"segment_dir":     runDir,
+		"segments":        len(manifest.Segments),
+	})
+	return manifestSHA
 }
 
 func durableCLIRow(relKey string, size int64, etag string, mod time.Time) indexsubstrate.CurrentObjectRow {

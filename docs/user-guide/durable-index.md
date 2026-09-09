@@ -45,7 +45,7 @@ SQLite and faithful coverage for scoped dual-format builds.
 gonimbus index build --job index.yaml
 
 # SQLite when you need a canonical index.db or SQLite-only surfaces
-# (query --since-run, stats --prefixes, full --resume-run recovery)
+# (stats --prefixes, full --resume-run recovery)
 gonimbus index build --job index.yaml --format sqlite
 # Durable publication + per-run SQLite parity verification
 gonimbus index build --job index.yaml --format both
@@ -58,7 +58,9 @@ gonimbus index build --job index.yaml --format both
 | Local `enrich-with-head`                                      | `durable` or `sqlite` (format-aware)         |
 | Local inventory GC (`index gc`)                               | Format-aware plan; durable sets included     |
 | Canonical SQLite consumer artifact (`index.db`)               | `sqlite` only                                |
-| `query --since-run`, `stats --prefixes`, full `--resume-run`  | `sqlite` (or build that produces `index.db`) |
+| Latest-selected `query --since-run`                          | `sqlite`                                     |
+| Exact pinned `query --since-run`                             | `durable`                                    |
+| `stats --prefixes`, full `--resume-run`                      | `sqlite` (or build that produces `index.db`) |
 | Dual-format LIST parity gate (durable + per-run SQLite check) | `both`                                       |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
@@ -344,10 +346,9 @@ gonimbus index compare durable-delta \
 ```
 
 The report summarizes added / changed / tombstoned rows with fail-closed
-coverage attribution. This is a **snapshot-to-snapshot** tool, not a
-replacement for `index query --since-run`. Forward object deltas via
-`--since-run` still require a canonical SQLite index (`--format sqlite`);
-durable snapshots do not support `--since-run` yet.
+coverage attribution. This is a **snapshot-to-snapshot** tool. In contrast,
+an exact pinned durable `index query --since-run` emits only added or changed
+rows from the selected current snapshot; it does not report deletions.
 
 ### Lineage and continuity
 
@@ -368,8 +369,11 @@ from the verified latest snapshot of the same index set. See
   forward-delta boundary.
 - `run_started_at` is a non-zero **UTC** authoritative run start (not
   `created_at` or journal time).
-- Durable `--since` / `--since-run` remains unsupported: forward object deltas
-  still require a SQLite-backed index.
+- Durable `--since-run` requires a full `--index-set`, exact current
+  `--run-id`, and a current-or-ancestor baseline in the same continuous lineage.
+  The reader verifies the digest-bound chain only through that named baseline.
+  Same-run queries are empty; legacy, unlinked, foreign, non-ancestor, corrupt,
+  and over-budget ancestry fail closed.
 
 ## Hub export and hydrate
 
@@ -424,7 +428,8 @@ local paths, source coordinates, or filter literals. See
 
 Durable-v2 limitations (fail closed or narrowed):
 
-- **`index query --since-run`** requires SQLite today.
+- **`index query --since-run`** on durable requires exact full `--index-set`
+  and current `--run-id` pins. Unpinned/latest durable deltas fail closed.
 - **`index stats --prefixes`** is sqlite-only (`prefix_stats` table).
 - **`index stats --runs`** on durable lists published complete markers only
   (not the full SQLite run lifecycle / failed-resumable).
@@ -495,10 +500,12 @@ authenticity or provenance.
    sets.
 3. On a representative unit, run `--format both` and confirm green LIST parity
    when you want a dual-format confidence check.
-4. Keep `--format sqlite` when you need a canonical `index.db` or a
-   **SQLite-only** surface: `query --since-run`, `stats --prefixes`, and full
-   `--resume-run` checkpoint recovery. (`both` does not produce a canonical
-   `index.db`; its SQLite side is per-run parity verification.)
+4. Keep `--format sqlite` when you need a canonical `index.db`, a
+   latest-selected `query --since-run`, or a **SQLite-only** surface:
+   `stats --prefixes` and full `--resume-run` checkpoint recovery. Exact pinned
+   durable deltas use full `--index-set`, current `--run-id`, and
+   `--since-run`. (`both` does not produce a canonical `index.db`; its SQLite
+   side is per-run parity verification.)
 5. For large builds, leave streaming capacity budgets at the defaults unless a
    build refuses on a ceiling; size `--spill-workspace-max` to the corpus and
    point `--spill-root` at disk with room.

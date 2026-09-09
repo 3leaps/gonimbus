@@ -344,6 +344,71 @@ func TestResolveAncestry_MultiHop(t *testing.T) {
 	require.Equal(t, child.snap.AccountedBytes()+mid.snap.AccountedBytes()+base.snap.AccountedBytes(), got.AccountedBytes)
 }
 
+func TestResolveAncestry_ThroughNamedAncestorStopsBounded(t *testing.T) {
+	t.Parallel()
+	rootDir := t.TempDir()
+	lookup := map[string]string{}
+
+	base := publishLineageFixtureAt(t, rootDir, lineageFixtureSpec{
+		RunID:   "run_0",
+		Lineage: &LineageRecord{Version: LineageVersionV1, Generation: 1, Baseline: true},
+	})
+	lookup[manifestKey("idx_test", "run_0")] = base.completePath
+	mid := publishLineageFixtureAt(t, rootDir, lineageFixtureSpec{
+		RunID:   "run_1",
+		Lineage: &LineageRecord{Version: LineageVersionV1, Generation: 2, Baseline: false},
+		StateParent: &StateParent{
+			IndexSetID: "idx_test", RunID: "run_0", ManifestSHA256: base.manifestSHA,
+		},
+	})
+	lookup[manifestKey("idx_test", "run_1")] = mid.completePath
+	child := publishLineageFixtureAt(t, rootDir, lineageFixtureSpec{
+		RunID:   "run_2",
+		Lineage: &LineageRecord{Version: LineageVersionV1, Generation: 3, Baseline: false},
+		StateParent: &StateParent{
+			IndexSetID: "idx_test", RunID: "run_1", ManifestSHA256: mid.manifestSHA,
+		},
+	})
+
+	var lookups []string
+	got, err := ResolveAncestry(child.snap, AncestryResolveConfig{
+		ThroughRunID: "run_1",
+		Lookup: func(indexSetID, runID string) (string, error) {
+			lookups = append(lookups, runID)
+			return lookup[manifestKey(indexSetID, runID)], nil
+		},
+		RequireContinuous: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"run_1"}, lookups)
+	require.Equal(t, []string{"run_2", "run_1"}, []string{got.Chain[0].RunID, got.Chain[1].RunID})
+	require.NotNil(t, got.RequestedBoundary)
+	require.Equal(t, "run_1", got.RequestedBoundary.RunID)
+	require.Nil(t, got.DeltaBoundary)
+	require.Equal(t, child.snap.AccountedBytes()+mid.snap.AccountedBytes(), got.AccountedBytes)
+
+	got, err = ResolveAncestry(child.snap, AncestryResolveConfig{
+		ThroughRunID:      "run_2",
+		RequireContinuous: true,
+		Lookup: func(_, _ string) (string, error) {
+			t.Fatal("same-run boundary must not resolve a parent")
+			return "", nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Chain, 1)
+	require.Equal(t, "run_2", got.RequestedBoundary.RunID)
+
+	_, err = ResolveAncestry(child.snap, AncestryResolveConfig{
+		ThroughRunID: "run_not_ancestor",
+		Lookup: func(indexSetID, runID string) (string, error) {
+			return lookup[manifestKey(indexSetID, runID)], nil
+		},
+		RequireContinuous: true,
+	})
+	require.True(t, IsLineageCode(err, LineageCodeBaselineNotAncestor), "got %v", err)
+}
+
 func TestResolveAncestry_BudgetBytesMultiHopPlusOne(t *testing.T) {
 	t.Parallel()
 	rootDir := t.TempDir()
