@@ -93,6 +93,34 @@ Real S3-compatible tests create objects only under a generated test prefix
 inside your bucket and clean up that prefix at test end. They do not create or
 delete the bucket.
 
+#### Two-account hub-read isolation
+
+The exact hub-acquisition lane can additionally prove that one named read
+handle cannot select or consume a second account. It requires an absolute path
+to a configuration file outside the repository. That file defines two
+`hub_read_handles` with distinct S3 profiles and hub URIs; credentials remain
+in the profiles and are never copied into the configuration or repository.
+
+```bash
+export GONIMBUS_HUB_ACQUIRE_REAL_S3_CONFIG=/absolute/oob/path/config.yaml
+export GONIMBUS_HUB_ACQUIRE_REAL_S3_SELECTED_HANDLE=<selected-handle>
+export GONIMBUS_HUB_ACQUIRE_REAL_S3_UNSELECTED_HANDLE=<unselected-handle>
+
+go test ./internal/cmd -v -tags=cloudintegration \
+  -run '^TestIndexAcquireTwoAccountIsolation_RealS3$' -count=1
+```
+
+The test creates a tiny durable-v2 fixture outside the repository and exports it
+under a unique, cleanup-scoped prefix in both accounts. It then performs one
+exact-object liveness probe through the unselected account, resets the measured
+boundary, acquires the pinned run using only the selected handle, and queries
+the acquired local bundle in `receipt-jsonl-v1` count mode. The measured
+acquisition must perform zero reads through the unselected account and must
+never request `latest.json`; fixture writes and cleanup remain outside that
+boundary. An access denial, timeout, or endpoint failure in this opt-in lane
+should be treated first as credential, endpoint, or network-allowlist
+setup—not as evidence that exact acquisition is unsupported.
+
 #### S3-compatible release stress validation
 
 The release stress lane is separate from `make test-cloud-real` because it

@@ -91,10 +91,17 @@ func runIndexAcquire(cmd *cobra.Command, _ []string) error {
 var hubReadHandleNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func resolveConfiguredHubReadHandle(ctx context.Context, name string) (hubReadHandleResolution, error) {
+	return resolveConfiguredHubReadHandleFrom(ctx, viper.GetViper(), name)
+}
+
+func resolveConfiguredHubReadHandleFrom(ctx context.Context, config *viper.Viper, name string) (hubReadHandleResolution, error) {
 	if !hubReadHandleNameRE.MatchString(name) {
 		return hubReadHandleResolution{}, fmt.Errorf("hub_read_handle name is invalid")
 	}
-	cfg := viper.Sub("hub_read_handles." + name)
+	if config == nil {
+		return hubReadHandleResolution{}, fmt.Errorf("hub_read_handle configuration is invalid")
+	}
+	cfg := config.Sub("hub_read_handles." + name)
 	if cfg == nil {
 		return hubReadHandleResolution{}, fmt.Errorf("hub_read_handle is not configured")
 	}
