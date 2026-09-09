@@ -414,6 +414,14 @@ later-segment failure returns non-zero). Result order matches SQLite
 (`O(matched rows)` before grouping; `O(distinct non-empty ETags)` for
 selection/output).
 
+For automation against an immutable local publication, combine an exact full
+`--index-set` and `--run-id` with
+`--output-format receipt-jsonl-v1`. The pin bypasses `latest.json`; the final
+typed receipt is derived from the same verified complete-marker/manifest open
+used by the query and reports segment verification scope without exposing
+local paths, source coordinates, or filter literals. See
+[Verified query receipt framing](index.md#verified-query-receipt-framing).
+
 Durable-v2 limitations (fail closed or narrowed):
 
 - **`index query --since-run`** requires SQLite today.

@@ -67,6 +67,10 @@ Examples:
   # Pin a durable snapshot run (bypasses latest.json; requires --index-set)
   gonimbus index query --index-set idx_da038d8171b4a9ba --run-id run_1783087200000000000 --pattern "**/*.xml"
 
+  # Emit typed results followed by one terminal verified query receipt
+  gonimbus index query --index-set idx_<full-sha256> --run-id run_1783087200000000000 \
+    --output-format receipt-jsonl-v1 --pattern "**/*.xml"
+
   # Emit one canonical object per non-empty ETag group
   gonimbus index query s3://bucket/prefix/ --canonical-by-etag
 
@@ -104,6 +108,7 @@ func init() {
 	indexQueryCmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule for --canonical-by-etag: min-key, min-modified, max-modified")
 	indexQueryCmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
 	indexQueryCmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run")
+	indexQueryCmd.Flags().String("output-format", "", "Output framing (default human JSONL/count, or receipt-jsonl-v1 for a pinned verified query)")
 
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
@@ -201,6 +206,22 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
 	runIDFlag = strings.TrimSpace(runIDFlag)
+	outputFormat, _ := cmd.Flags().GetString("output-format")
+	outputFormat = strings.TrimSpace(outputFormat)
+	switch outputFormat {
+	case "", indexQueryReceiptOutputFormat:
+	default:
+		return fmt.Errorf("unsupported --output-format %q; available values: %s", outputFormat, indexQueryReceiptOutputFormat)
+	}
+	if outputFormat == indexQueryReceiptOutputFormat {
+		indexSetFlag = strings.TrimSpace(indexSetFlag)
+		if !validFullIndexSetID(indexSetFlag) || indexSetFlag != strings.ToLower(indexSetFlag) {
+			return fmt.Errorf("--output-format %s requires a full lowercase --index-set ID", indexQueryReceiptOutputFormat)
+		}
+		if runIDFlag == "" {
+			return fmt.Errorf("--output-format %s requires --run-id", indexQueryReceiptOutputFormat)
+		}
+	}
 	if runIDFlag != "" {
 		if strings.TrimSpace(indexSetFlag) == "" {
 			return fmt.Errorf("--run-id requires --index-set")
@@ -331,6 +352,20 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 			return fmt.Errorf("invalid --enriched-after: %w", err)
 		}
 		params.EnrichedAfter = t
+	}
+
+	if outputFormat == indexQueryReceiptOutputFormat {
+		return runIndexQueryReceipt(ctx, reader, indexQueryReceiptRunOptions{
+			BaseURI:           baseURI,
+			Params:            params,
+			CountOnly:         countOnly,
+			CanonicalByETag:   canonicalByETag,
+			IncludeAlternates: includeAlternates,
+			OutputURI:         outputURI,
+			OutputProfile:     outputProfile,
+			OutputRegion:      outputRegion,
+			OutputEndpoint:    outputEndpoint,
+		})
 	}
 
 	// Handle count-only mode with optimized path

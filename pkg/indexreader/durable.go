@@ -22,6 +22,7 @@ type durableReader struct {
 	meta             Meta
 	opts             ResolveOptions
 	snap             indexsubstrate.PublishedSnapshot
+	sourceIdentity   verifiedLocalIdentityFile
 	segmentCacheRoot string
 }
 
@@ -80,6 +81,7 @@ func openPinnedDurableRun(opts ResolveOptions, target ResolveTarget) (*durableRe
 	identityDir := ""
 	baseURI := ""
 	provider := ""
+	var sourceIdentity verifiedLocalIdentityFile
 	if opts.IndexesRoot != "" {
 		// Identity metadata is optional; only attach when recomputed full
 		// IndexSetID exactly matches the pinned set (no prefix-only guesses).
@@ -109,6 +111,18 @@ func openPinnedDurableRun(opts ResolveOptions, target ResolveTarget) (*durableRe
 			}
 		}
 	}
+	if identityDir != "" {
+		verifiedIdentity, verifyErr := readVerifiedLocalIdentityFile(
+			filepath.Join(identityDir, "identity.json"),
+			opts.MaxMarkerBytes,
+			fullID,
+		)
+		if verifyErr == nil {
+			sourceIdentity = verifiedIdentity
+			baseURI = verifiedIdentity.Payload.BaseURI
+			provider = verifiedIdentity.Payload.Provider
+		}
+	}
 	return &durableReader{
 		meta: Meta{
 			Format:      FormatDurableV2,
@@ -121,6 +135,7 @@ func openPinnedDurableRun(opts ResolveOptions, target ResolveTarget) (*durableRe
 		},
 		opts:             opts,
 		snap:             snap,
+		sourceIdentity:   sourceIdentity,
 		segmentCacheRoot: filepath.Join(opts.SegmentCacheRoot, fullID),
 	}, nil
 }
@@ -149,6 +164,67 @@ func validatePinnedRunID(runID string) error {
 }
 
 func (r *durableReader) Meta() Meta { return r.meta }
+
+func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, error) {
+	if r == nil {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: nil durable reader", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	manifest := r.snap.Manifest
+	complete := r.snap.Complete
+	if manifest.RunStartedAt == nil || manifest.RunStartedAt.IsZero() {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable manifest run_started_at is required", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	completedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(complete.CompletedAt))
+	if err != nil || completedAt.IsZero() {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at is invalid", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	if completedAt.Before(*manifest.RunStartedAt) {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at precedes run_started_at", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	if r.sourceIdentity.IndexSetID != manifest.IndexSetID ||
+		len(r.sourceIdentity.CompleteFileSHA256) != 64 {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: exact canonical source identity is required", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	coverageSHA256, err := indexsubstrate.CoverageSHA256(manifest.Coverage)
+	if err != nil {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: hash durable coverage: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
+	}
+	coverage := CoverageSummary{Entries: len(manifest.Coverage)}
+	for _, entry := range manifest.Coverage {
+		if entry.Complete {
+			coverage.CompleteEntries++
+		}
+		switch entry.Basis {
+		case indexsubstrate.CoverageBasisConfirmed:
+			coverage.ConfirmedEntries++
+		case indexsubstrate.CoverageBasisInferred:
+			coverage.InferredEntries++
+		default:
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable coverage basis %q is not supported", ErrVerifiedSnapshotMetadataUnavailable, entry.Basis)
+		}
+		coverage.GapCount += len(entry.Gaps)
+	}
+	return VerifiedSnapshotMetadata{
+		SourceKind:            SnapshotSourceLocalPublished,
+		IndexSetID:            manifest.IndexSetID,
+		RunID:                 manifest.RunID,
+		RunStartedAt:          manifest.RunStartedAt.UTC(),
+		SnapshotCompletedAt:   completedAt.UTC(),
+		SourceIdentitySHA256:  r.sourceIdentity.CompleteFileSHA256,
+		SourceIdentitySchema:  SourceIdentitySchemaV1,
+		SourceIdentityProfile: SourceIdentityProfileV1,
+		ManifestSHA256:        complete.ManifestSHA256,
+		CoverageSHA256:        coverageSHA256,
+		Coverage:              coverage,
+		Declared: DeclaredSnapshotCounts{
+			Rows:          manifest.Counts.Rows,
+			ActiveRows:    manifest.Counts.ActiveRows,
+			Tombstones:    manifest.Counts.Tombstones,
+			DistinctETags: manifest.Counts.DistinctETags,
+			Segments:      len(manifest.Segments),
+		},
+	}, nil
+}
 
 func (r *durableReader) SQLiteDB() *sql.DB { return nil }
 
@@ -183,7 +259,7 @@ func (r *durableReader) WalkObjects(ctx context.Context, params indexstore.Query
 	}
 	var stats indexstore.QueryStats
 	var emitted int
-	err = r.walkFiltered(ctx, filter, params, func(result indexstore.QueryResult) error {
+	stats, err = r.walkFiltered(ctx, filter, params, func(result indexstore.QueryResult) error {
 		if err := visit(result); err != nil {
 			return err
 		}
@@ -222,7 +298,7 @@ func (r *durableReader) QueryObjectCount(ctx context.Context, params indexstore.
 		return 0, err
 	}
 	var count int64
-	err = r.walkFiltered(ctx, filter, params, func(result indexstore.QueryResult) error {
+	_, err = r.walkFiltered(ctx, filter, params, func(result indexstore.QueryResult) error {
 		_ = result
 		count++
 		return nil
@@ -265,24 +341,34 @@ func (r *durableReader) QueryCanonicalObjects(ctx context.Context, params indexs
 
 var errStopWalk = fmt.Errorf("stop walk")
 
-func (r *durableReader) walkFiltered(ctx context.Context, filter *rowFilter, params indexstore.QueryParams, visit func(indexstore.QueryResult) error) error {
+func (r *durableReader) walkFiltered(ctx context.Context, filter *rowFilter, params indexstore.QueryParams, visit func(indexstore.QueryResult) error) (indexstore.QueryStats, error) {
+	var stats indexstore.QueryStats
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	for _, segment := range r.snap.Manifest.Segments {
 		if err := ctx.Err(); err != nil {
-			return err
+			return stats, err
 		}
 		if filter != nil && !segmentMayMatch(segment, filter) {
-			// Integrity: still verify segment digest before trusting skip decision
-			// based only on descriptor metadata. Descriptors come from a verified
-			// manifest, so min/max key skips are safe without re-hashing.
+			// Descriptor bounds come from the digest-verified manifest. The
+			// segment bytes are intentionally not walked or claimed verified.
+			stats.SegmentsManifestPruned++
 			continue
 		}
+		entered := false
 		if err := indexsubstrate.WalkSegmentFileVerified(r.snap.SegmentDir, segment, func(row indexsubstrate.CurrentObjectRow) error {
+			if !entered {
+				// WalkSegmentFileVerified hashes the same file descriptor before
+				// invoking the first row callback.
+				stats.SegmentsWalked++
+				stats.SegmentsVerified++
+				entered = true
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			stats.Examined++
 			result, ok, err := filterCurrentRow(row, filter, params)
 			if err != nil {
 				return err
@@ -290,12 +376,19 @@ func (r *durableReader) walkFiltered(ctx context.Context, filter *rowFilter, par
 			if !ok {
 				return nil
 			}
+			stats.Matched++
 			return visit(result)
 		}); err != nil {
-			return err
+			return stats, err
+		}
+		if !entered {
+			// Empty segments still completed same-open digest verification and
+			// a successful row walk.
+			stats.SegmentsWalked++
+			stats.SegmentsVerified++
 		}
 	}
-	return nil
+	return stats, nil
 }
 
 type rowFilter struct {
@@ -474,12 +567,17 @@ func groupCanonical(results []indexstore.QueryResult, rule indexstore.CanonicalT
 	sort.SliceStable(outputs, func(i, j int) bool {
 		return canonicalRelKey(outputs[i]) < canonicalRelKey(outputs[j])
 	})
+	availableRecords := len(outputs)
+	availablePassthroughRows := countCanonicalPassthroughs(outputs)
 	if limit > 0 && len(outputs) > limit {
 		outputs = outputs[:limit]
 	}
 	stats := indexstore.CanonicalQueryStats{
-		QueryStats:   queryStats,
-		TotalRecords: len(outputs),
+		QueryStats:               queryStats,
+		TotalRecords:             len(outputs),
+		AvailableRecords:         availableRecords,
+		AvailablePassthroughRows: availablePassthroughRows,
+		Truncated:                len(outputs) < availableRecords,
 	}
 	for _, output := range outputs {
 		if output.Group != nil {
@@ -490,6 +588,16 @@ func groupCanonical(results []indexstore.QueryResult, rule indexstore.CanonicalT
 		}
 	}
 	return outputs, stats
+}
+
+func countCanonicalPassthroughs(outputs []indexstore.CanonicalOutputRecord) int {
+	count := 0
+	for _, output := range outputs {
+		if output.Passthrough != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func makeCanonicalGroup(etag string, members []indexstore.QueryResult, rule indexstore.CanonicalTieBreak) indexstore.CanonicalObjectGroup {

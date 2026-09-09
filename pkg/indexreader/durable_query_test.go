@@ -33,7 +33,7 @@ func TestDurableQuery_WithoutIndexDB(t *testing.T) {
 	require.Equal(t, env.indexSetID, reader.Meta().IndexSetID)
 	require.Equal(t, env.baseURI, reader.Meta().BaseURI)
 
-	results, _, err := reader.QueryObjects(ctx, indexstore.QueryParams{
+	results, stats, err := reader.QueryObjects(ctx, indexstore.QueryParams{
 		IndexSetID: env.indexSetID,
 		Pattern:    "**/*.json",
 	})
@@ -41,6 +41,11 @@ func TestDurableQuery_WithoutIndexDB(t *testing.T) {
 	require.Len(t, results, 2)
 	require.Equal(t, "a/one.json", results[0].RelKey)
 	require.Equal(t, "b/three.json", results[1].RelKey)
+	require.EqualValues(t, 3, stats.Examined)
+	require.EqualValues(t, 2, stats.Matched)
+	require.Equal(t, 1, stats.SegmentsWalked)
+	require.Equal(t, 1, stats.SegmentsVerified)
+	require.Zero(t, stats.SegmentsManifestPruned)
 
 	count, err := reader.QueryObjectCount(ctx, indexstore.QueryParams{
 		IndexSetID: env.indexSetID,
@@ -124,6 +129,18 @@ func TestDurableQuery_CanonicalByETag(t *testing.T) {
 	require.Equal(t, 1, stats.PassthroughRows)
 	require.Equal(t, 2, stats.TotalRecords)
 	require.Len(t, out, 2)
+
+	out, stats, err = reader.QueryCanonicalObjects(ctx, indexstore.QueryParams{
+		IndexSetID:        env.indexSetID,
+		CanonicalTieBreak: indexstore.CanonicalTieBreakMinKey,
+		Limit:             1,
+	})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, 1, stats.TotalRecords)
+	require.Equal(t, 2, stats.AvailableRecords)
+	require.Equal(t, 1, stats.AvailablePassthroughRows)
+	require.True(t, stats.Truncated)
 }
 
 func TestDurablePreferredWhenBothPresent(t *testing.T) {
@@ -440,7 +457,13 @@ func setupDurableTestEnv(t *testing.T, rows []indexsubstrate.CurrentObjectRow) d
 		IndexSetID:           identity.IndexSetID,
 		RunID:                runID,
 		CreatedAt:            createdAt,
+		RunStartedAt:         &createdAt,
 		TargetRowsPerSegment: 100,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
 	}, rows)
 	require.NoError(t, err)
 
@@ -494,7 +517,13 @@ func writeRunComplete(t *testing.T, env durableTestEnv, runID string, createdAt 
 		IndexSetID:           env.indexSetID,
 		RunID:                runID,
 		CreatedAt:            createdAt,
+		RunStartedAt:         &createdAt,
 		TargetRowsPerSegment: 100,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
 	}, nil)
 	require.NoError(t, err)
 	manifestPath := filepath.Join(runDir, "manifest.json")

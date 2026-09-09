@@ -3,8 +3,10 @@ package indexreader
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -19,6 +21,75 @@ const (
 	// FormatDurableV2 is the segment-backed durable snapshot format.
 	FormatDurableV2 Format = "durable-v2"
 )
+
+// SnapshotSourceKind identifies the authority shape behind verified snapshot
+// metadata. Acquired hub bundles join this closed set in a later slice.
+type SnapshotSourceKind string
+
+const (
+	SnapshotSourceLocalPublished SnapshotSourceKind = "local_published"
+	SnapshotSourceAcquiredHub    SnapshotSourceKind = "acquired_hub"
+
+	// SourceIdentitySchemaV1 identifies the existing public schema for the
+	// canonical IndexSetIdentityPayload.
+	SourceIdentitySchemaV1 = "gonimbus/v1.0.0/index-hub-identity"
+	// SourceIdentityProfileV1 freezes the artifact encoding: the exact
+	// ComputeIndexSetID canonical JSON payload followed by one LF.
+	SourceIdentityProfileV1 = "gonimbus.index_set_identity.canonical-json-lf.v1"
+)
+
+// CoverageSummary contains non-literal counts derived from a verified manifest.
+// It deliberately omits coverage scopes and gaps, which may contain object-key
+// material that does not belong in a transport-safe query receipt.
+type CoverageSummary struct {
+	Entries          int
+	CompleteEntries  int
+	ConfirmedEntries int
+	InferredEntries  int
+	GapCount         int
+}
+
+// DeclaredSnapshotCounts are manifest-declared bounds. They are not observed
+// query scan counts.
+type DeclaredSnapshotCounts struct {
+	Rows          int
+	ActiveRows    int
+	Tombstones    int
+	DistinctETags int
+	Segments      int
+}
+
+// VerifiedSnapshotMetadata is immutable, receipt-safe metadata copied from the
+// already-open verified snapshot. No path, base URI, provider coordinate,
+// credential handle, or coverage literal is exposed.
+type VerifiedSnapshotMetadata struct {
+	SourceKind            SnapshotSourceKind
+	IndexSetID            string
+	RunID                 string
+	RunStartedAt          time.Time
+	SnapshotCompletedAt   time.Time
+	HubCommittedAt        time.Time
+	HubCompleteSHA256     string
+	SourceIdentitySHA256  string
+	SourceIdentitySchema  string
+	SourceIdentityProfile string
+	ManifestSHA256        string
+	CoverageSHA256        string
+	Coverage              CoverageSummary
+	Declared              DeclaredSnapshotCounts
+}
+
+// ErrVerifiedSnapshotMetadataUnavailable is returned when a reader substrate
+// cannot provide the verified durable facts required by receipt-jsonl-v1.
+var ErrVerifiedSnapshotMetadataUnavailable = errors.New("verified snapshot metadata is unavailable")
+
+// VerifiedSnapshotMetadataReader is the narrow optional capability implemented
+// by readers that can provide receipt-safe facts from their verified open.
+// Keeping it separate avoids widening Reader for substrates and downstream
+// implementations that do not support receipt authority.
+type VerifiedSnapshotMetadataReader interface {
+	VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, error)
+}
 
 // Meta describes the resolved index identity.
 type Meta struct {

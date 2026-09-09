@@ -408,9 +408,71 @@ gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
 gonimbus index query 's3://bucket/prefix/' --pattern '**/*.xml' \
   --output s3://other-account-bucket/results.jsonl \
   --output-profile other-account
+
+# Machine framing against one exact published durable run
+gonimbus index query \
+  --index-set idx_<full-64-character-sha256> \
+  --run-id run_1783087200000000000 \
+  --pattern '**/*.xml' \
+  --output-format receipt-jsonl-v1
 ```
 
 When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
+
+#### Verified query receipt framing
+
+`--output-format receipt-jsonl-v1` is an explicit automation contract. It
+requires a full lowercase index-set ID and an exact durable run ID, opens that
+run without consulting `latest.json`, and leaves the default human JSONL/count
+output unchanged.
+
+Enumeration emits zero or more typed object records followed by exactly one
+newline-terminated `gonimbus.index.query_receipt.v1` success record. Standard
+enumeration admits `gonimbus.index.object.v1`; `--canonical-by-etag` admits
+`gonimbus.index.object.canonical.v1`. `--count` emits the receipt only, with the
+logical count in `results.logical_results`. The receipt is valid authority only
+when it is the final record and the process exits zero. A missing, duplicate,
+malformed, non-success, or non-terminal receipt—or any non-zero process
+exit—makes the stream non-consumable.
+
+Receipt-mode canonical queries fail before emitting a stream if any matching
+row has an empty ETag, because that row cannot use the canonical record type.
+The default non-receipt canonical output retains its standard-record
+passthrough behavior for empty ETags.
+
+The receipt distinguishes manifest-declared counts from observed query
+counters, and reports declared, walked, digest-verified, and manifest-pruned
+segments separately. `emitted` excludes the receipt. A limited enumeration
+probes one additional matching row to make `truncated` exact without claiming a
+full scan.
+
+`query.query_spec_sha256` binds a closed
+`gonimbus.index.query_spec.v1` value using RFC 8785 JSON Canonicalization Scheme
+bytes. It includes the exact set/run selectors and every effective
+result-changing filter or mode. Output destinations, credential handles, local
+paths, and observation times are excluded. Timestamps are normalized to UTC
+with exactly nine fractional digits. Storage-class values are deduplicated and
+sorted by Unicode scalar value before hashing. Literal glob/regex values and
+object keys are hashed but are never copied into the receipt; the receipt
+exposes only safe filter-kind and value-count summaries.
+
+`--output` remains a destination, not a format selector. In receipt mode the
+complete stream, including its terminal success receipt, is staged before the
+destination object is published. Publication is create-only: an existing
+destination is never replaced. Local-file output requires a pre-existing
+destination directory, uses a restricted same-directory temporary file, syncs
+the completed bytes, refuses symlink and special-file destinations, and
+publishes atomically without replacement.
+
+Receipt authority also requires the local set's exact canonical
+`identity.json`: the canonical index-set payload bytes followed by one newline.
+Missing, unreadable, differently encoded, or set-mismatched identity artifacts
+refuse receipt mode even though compatible human query paths may still inspect
+the pinned durable snapshot. The public receipt exposes only the SHA-256 of the
+complete identity file and its fixed schema/profile identifiers; it does not
+expose source coordinates.
+The public schema is
+[`index-query-receipt.v1.schema.json`](../../schemas/gonimbus/v1.0.0/index-query-receipt.v1.schema.json).
 
 If the latest run for the selected index is `failed-resumable`, `index query`
 still allows inspection of the local partial index but prints a stderr warning

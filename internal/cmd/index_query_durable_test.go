@@ -99,7 +99,9 @@ func newIndexQueryCommandForTest() *cobra.Command {
 	cmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule")
 	cmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
 	cmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run")
+	cmd.Flags().String("output-format", "", "Output framing")
 	cmd.Flags().String("index-set", "", "Explicit index set ID")
+	cmd.Flags().String("run-id", "", "Pin durable snapshot run")
 	cmd.Flags().String("output", "", "Output destination URI")
 	cmd.Flags().String("output-profile", "", "AWS profile for output destination")
 	cmd.Flags().String("output-region", "", "AWS region for output destination")
@@ -208,10 +210,12 @@ func collectJSONL(t *testing.T, ctx context.Context, reader indexreader.Reader, 
 }
 
 type durableCLIEnv struct {
-	baseURI     string
-	indexSetID  string
-	identityDir string
-	params      indexstore.IndexSetParams
+	baseURI        string
+	indexSetID     string
+	identityDir    string
+	identitySHA256 string
+	runID          string
+	params         indexstore.IndexSetParams
 }
 
 func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate.CurrentObjectRow) durableCLIEnv {
@@ -238,9 +242,12 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 
 	identityDir := filepath.Join(indexesRoot, identity.DirName)
 	require.NoError(t, os.MkdirAll(identityDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(identity.CanonicalJSON+"\n"), 0o600))
+	identityPath := filepath.Join(identityDir, "identity.json")
+	require.NoError(t, os.WriteFile(identityPath, []byte(identity.CanonicalJSON+"\n"), 0o600))
+	identitySHA256, err := fileSHA256Hex(identityPath)
+	require.NoError(t, err)
 
-	runID := "run_cli_1"
+	runID := "run_1783087200000000000"
 	segmentRoot := filepath.Join(segmentCacheRoot, identity.IndexSetID)
 	runDir := filepath.Join(segmentRoot, "runs", runID)
 	require.NoError(t, os.MkdirAll(runDir, 0o755))
@@ -262,7 +269,13 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 		IndexSetID:           identity.IndexSetID,
 		RunID:                runID,
 		CreatedAt:            createdAt,
+		RunStartedAt:         &createdAt,
 		TargetRowsPerSegment: 100,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
 	}, rows)
 	require.NoError(t, err)
 	manifestPath := filepath.Join(runDir, "manifest.json")
@@ -291,10 +304,12 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 	require.NoError(t, err)
 	require.NoError(t, lease.Release())
 	return durableCLIEnv{
-		baseURI:     baseURI,
-		indexSetID:  identity.IndexSetID,
-		identityDir: identityDir,
-		params:      params,
+		baseURI:        baseURI,
+		indexSetID:     identity.IndexSetID,
+		identityDir:    identityDir,
+		identitySHA256: identitySHA256,
+		runID:          runID,
+		params:         params,
 	}
 }
 
@@ -304,11 +319,11 @@ func durableCLIRow(relKey string, size int64, etag string, mod time.Time) indexs
 		SizeBytes:        size,
 		LastModified:     &mod,
 		ETag:             etag,
-		FirstSeenRunID:   "run_cli_1",
+		FirstSeenRunID:   "run_1783087200000000000",
 		FirstSeenAt:      mod,
-		LastChangedRunID: "run_cli_1",
+		LastChangedRunID: "run_1783087200000000000",
 		LastChangedAt:    mod,
-		LastSeenRunID:    "run_cli_1",
+		LastSeenRunID:    "run_1783087200000000000",
 		LastSeenAt:       mod,
 	}
 }

@@ -811,6 +811,9 @@ func TestQueryCanonicalObjects_MixedStreamCountLimitAndAlternates(t *testing.T) 
 	if stats.CanonicalGroups != 2 || stats.PassthroughRows != 2 || stats.TotalRecords != 4 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
+	if stats.AvailablePassthroughRows != 2 {
+		t.Fatalf("unexpected available passthrough count: %+v", stats)
+	}
 	if len(out) != 4 {
 		t.Fatalf("expected 4 output records, got %d", len(out))
 	}
@@ -837,6 +840,9 @@ func TestQueryCanonicalObjects_MixedStreamCountLimitAndAlternates(t *testing.T) 
 	}
 	if len(limited) != 2 || limitedStats.TotalRecords != 2 {
 		t.Fatalf("expected 2 limited output records, got len=%d stats=%+v", len(limited), limitedStats)
+	}
+	if limitedStats.AvailablePassthroughRows != 2 {
+		t.Fatalf("limited stats lost hidden passthrough count: %+v", limitedStats)
 	}
 }
 

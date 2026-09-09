@@ -88,6 +88,10 @@ func TestPinnedRun_RejectsIdentityMismatchMetadata(t *testing.T) {
 	// Snapshot trust still succeeds; wrong identity must not attach metadata.
 	require.Equal(t, "", reader.Meta().BaseURI)
 	require.Equal(t, "", reader.Meta().IdentityDir)
+	metadataReader, ok := reader.(VerifiedSnapshotMetadataReader)
+	require.True(t, ok)
+	_, err = metadataReader.VerifiedSnapshotMetadata()
+	require.ErrorContains(t, err, "exact canonical source identity is required")
 }
 
 func TestPinnedRun_RejectsCompleteSetRunMismatch(t *testing.T) {
@@ -134,4 +138,54 @@ func TestPinnedRun_RequiresIndexSetID(t *testing.T) {
 	}, ResolveTarget{RunID: "run_1"})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "run_id requires index_set_id")
+}
+
+func TestPinnedRun_VerifiedSnapshotMetadataIsBoundToOpen(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("x.txt", 1, "e1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{
+		IndexSetID: env.indexSetID,
+		RunID:      env.runID,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+
+	metadataReader, ok := reader.(VerifiedSnapshotMetadataReader)
+	require.True(t, ok)
+	meta, err := metadataReader.VerifiedSnapshotMetadata()
+	require.NoError(t, err)
+	require.Equal(t, SnapshotSourceLocalPublished, meta.SourceKind)
+	require.Equal(t, env.indexSetID, meta.IndexSetID)
+	require.Equal(t, env.runID, meta.RunID)
+	require.Equal(t, time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC), meta.RunStartedAt)
+	require.Equal(t, meta.RunStartedAt, meta.SnapshotCompletedAt)
+	identityBytes, err := os.ReadFile(filepath.Join(env.identityDir, "identity.json"))
+	require.NoError(t, err)
+	identitySum := sha256.Sum256(identityBytes)
+	require.Equal(t, hex.EncodeToString(identitySum[:]), meta.SourceIdentitySHA256)
+	require.Equal(t, SourceIdentitySchemaV1, meta.SourceIdentitySchema)
+	require.Equal(t, SourceIdentityProfileV1, meta.SourceIdentityProfile)
+	require.Len(t, meta.ManifestSHA256, 64)
+	require.Len(t, meta.CoverageSHA256, 64)
+	require.Equal(t, CoverageSummary{
+		Entries:          1,
+		CompleteEntries:  1,
+		ConfirmedEntries: 1,
+	}, meta.Coverage)
+	require.Equal(t, 1, meta.Declared.Rows)
+	require.Equal(t, 1, meta.Declared.ActiveRows)
+	require.Equal(t, 1, meta.Declared.DistinctETags)
+	require.Equal(t, 1, meta.Declared.Segments)
+
+	// The caller receives a value copy; changing it cannot mutate the reader's
+	// bound metadata. Replacing the named identity artifact after open likewise
+	// cannot create a second receipt trust path.
+	meta.IndexSetID = "idx_changed"
+	require.NoError(t, os.WriteFile(filepath.Join(env.identityDir, "identity.json"), []byte("{}\n"), 0o600))
+	again, err := metadataReader.VerifiedSnapshotMetadata()
+	require.NoError(t, err)
+	require.Equal(t, env.indexSetID, again.IndexSetID)
+	require.Equal(t, hex.EncodeToString(identitySum[:]), again.SourceIdentitySHA256)
 }

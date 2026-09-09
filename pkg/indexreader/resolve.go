@@ -2,7 +2,9 @@ package indexreader
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -664,6 +666,46 @@ type LocalIdentityFile struct {
 	IndexSetID string
 }
 
+type verifiedLocalIdentityFile struct {
+	Payload            indexstore.IndexSetIdentityPayload
+	IndexSetID         string
+	CompleteFileSHA256 string
+}
+
+// readVerifiedLocalIdentityFile binds and reads identity.json once, then
+// requires the frozen canonical artifact encoding used by receipt authority:
+// exact ComputeIndexSetID JSON bytes followed by exactly one LF.
+func readVerifiedLocalIdentityFile(path string, maxBytes int64, expectedIndexSetID string) (verifiedLocalIdentityFile, error) {
+	data, err := readBoundedFile(path, maxBytes)
+	if err != nil {
+		return verifiedLocalIdentityFile{}, err
+	}
+	if len(data) < 2 || data[len(data)-1] != '\n' {
+		return verifiedLocalIdentityFile{}, fmt.Errorf("identity.json must end with exactly one LF")
+	}
+	payloadBytes := data[:len(data)-1]
+	var payload indexstore.IndexSetIdentityPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return verifiedLocalIdentityFile{}, fmt.Errorf("parse identity.json: %w", err)
+	}
+	identity, err := computeIndexSetIdentityFromPayload(payload)
+	if err != nil {
+		return verifiedLocalIdentityFile{}, err
+	}
+	if string(payloadBytes) != identity.CanonicalJSON {
+		return verifiedLocalIdentityFile{}, fmt.Errorf("identity.json is not the exact canonical payload plus one LF")
+	}
+	if identity.IndexSetID != expectedIndexSetID {
+		return verifiedLocalIdentityFile{}, fmt.Errorf("identity.json derives index_set_id %q, expected %q", identity.IndexSetID, expectedIndexSetID)
+	}
+	sum := sha256.Sum256(data)
+	return verifiedLocalIdentityFile{
+		Payload:            payload,
+		IndexSetID:         identity.IndexSetID,
+		CompleteFileSHA256: hex.EncodeToString(sum[:]),
+	}, nil
+}
+
 // ReadLocalIdentityFile reads and parses identity.json with the same bounded
 // single-open posture as durable marker discovery. Prefer this over unbounded
 // os.ReadFile + ad-hoc ComputeIndexSetID assembly at call sites.
@@ -684,6 +726,13 @@ func ReadLocalIdentityFile(path string, maxBytes int64) (LocalIdentityFile, erro
 		Raw:     []byte(trimmed),
 		Payload: payload,
 	}
+	if identity, err := computeIndexSetIdentityFromPayload(payload); err == nil {
+		out.IndexSetID = identity.IndexSetID
+	}
+	return out, nil
+}
+
+func computeIndexSetIdentityFromPayload(payload indexstore.IndexSetIdentityPayload) (*indexstore.IndexSetIdentityResult, error) {
 	params := indexstore.IndexSetParams{
 		BaseURI:         payload.BaseURI,
 		Provider:        payload.Provider,
@@ -710,8 +759,5 @@ func ReadLocalIdentityFile(path string, maxBytes int64) (LocalIdentityFile, erro
 			SegmentIndex: payload.PathDate.SegmentIndex,
 		}
 	}
-	if identity, err := indexstore.ComputeIndexSetID(params); err == nil {
-		out.IndexSetID = identity.IndexSetID
-	}
-	return out, nil
+	return indexstore.ComputeIndexSetID(params)
 }

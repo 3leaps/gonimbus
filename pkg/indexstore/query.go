@@ -139,6 +139,13 @@ type CanonicalQueryStats struct {
 	CanonicalGroups int
 	PassthroughRows int
 	TotalRecords    int
+	// AvailableRecords is the logical record count before an output limit.
+	AvailableRecords int
+	// AvailablePassthroughRows counts matching empty-ETag rows before an output
+	// limit. Receipt framing uses it to fail closed even when a limit would have
+	// hidden those rows from the returned slice.
+	AvailablePassthroughRows int
+	Truncated                bool
 }
 
 // QueryStats holds statistics about the query execution.
@@ -146,6 +153,19 @@ type QueryStats struct {
 	// TimestampParseErrors is the count of rows with unparseable timestamps.
 	// These rows are included in results but with nil timestamp fields.
 	TimestampParseErrors int64
+	// Examined is the number of rows actually evaluated by the reader.
+	Examined int64
+	// Matched is the number of examined rows that satisfied all filters.
+	Matched int64
+	// SegmentsWalked is the number of durable segments whose row stream was
+	// entered. SQLite readers leave segment counters at zero.
+	SegmentsWalked int
+	// SegmentsVerified is the number of durable segment digests verified before
+	// any row from the segment was exposed.
+	SegmentsVerified int
+	// SegmentsManifestPruned is the number of durable segments skipped using
+	// bounds from the already-verified manifest.
+	SegmentsManifestPruned int
 }
 
 // HeadEnrichmentCandidate is an object row selected for HEAD enrichment.
@@ -286,6 +306,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 			&firstSeenRunID, &firstSeenAt, &lastChangedRunID, &lastChangedAt, &deletedAt); err != nil {
 			return nil, stats, fmt.Errorf("scan row: %w", err)
 		}
+		stats.Examined++
 
 		// Apply glob pattern filter (client-side, after prefix pushdown)
 		if params.Pattern != "" {
@@ -370,6 +391,7 @@ func QueryObjects(ctx context.Context, db *sql.DB, params QueryParams) ([]QueryR
 		}
 
 		results = append(results, result)
+		stats.Matched++
 
 		// Apply limit after all client-side filters
 		if params.Limit > 0 && len(results) >= params.Limit {
@@ -522,15 +544,20 @@ func QueryCanonicalObjects(ctx context.Context, db *sql.DB, params QueryParams) 
 		return canonicalOutputRelKey(outputs[i]) < canonicalOutputRelKey(outputs[j])
 	})
 
+	availableRecords := len(outputs)
+	availablePassthroughRows := countCanonicalPassthroughs(outputs)
 	if params.Limit > 0 && len(outputs) > params.Limit {
 		outputs = outputs[:params.Limit]
 	}
 
 	stats := CanonicalQueryStats{
-		QueryStats:      queryStats,
-		CanonicalGroups: 0,
-		PassthroughRows: 0,
-		TotalRecords:    len(outputs),
+		QueryStats:               queryStats,
+		CanonicalGroups:          0,
+		PassthroughRows:          0,
+		TotalRecords:             len(outputs),
+		AvailableRecords:         availableRecords,
+		AvailablePassthroughRows: availablePassthroughRows,
+		Truncated:                len(outputs) < availableRecords,
 	}
 	for _, output := range outputs {
 		if output.Group != nil {
@@ -542,6 +569,16 @@ func QueryCanonicalObjects(ctx context.Context, db *sql.DB, params QueryParams) 
 	}
 
 	return outputs, stats, nil
+}
+
+func countCanonicalPassthroughs(outputs []CanonicalOutputRecord) int {
+	count := 0
+	for _, output := range outputs {
+		if output.Passthrough != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func validateCanonicalTieBreak(rule CanonicalTieBreak) error {
