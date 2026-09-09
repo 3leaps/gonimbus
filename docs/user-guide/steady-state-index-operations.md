@@ -189,13 +189,18 @@ is plausible for the operational shard.
 
 ### Downstream deltas with `--since-run`
 
-After a successful top-up, downstream consumers can read current objects added
-or changed after a completed boundary run:
+After a successful top-up, a pinned durable query can read current objects
+added or changed after a completed boundary run:
 
 ```bash
+INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RUN_ID=run_1783173600000000000
+BASELINE_RUN_ID=run_1783087200000000000
+
 gonimbus index query \
-  --index-set idx_da038d8171b4a9ba \
-  --since-run run_1783087200000000000
+  --index-set "$INDEX_SET_ID" \
+  --run-id "$RUN_ID" \
+  --since-run "$BASELINE_RUN_ID"
 ```
 
 This is useful for "process only new or changed objects" flows. For example, a
@@ -221,13 +226,14 @@ is rejected rather than implying deletion history.
 5. Use `--since auto` for steady-state top-ups when the manifest identity stays
    stable.
 6. Confirm the since-plan signal reports the expected enumeration reduction.
-7. Use `index query --since-run <run_id>` for downstream current-state deltas.
+7. Use exact `--index-set`, `--run-id`, and `--since-run` pins for durable
+   current-state deltas.
 8. Freeze closed shards unless an audit or incident response requires a rebuild.
 9. Schedule periodic full-coverage audit builds when deletion detection matters.
 10. Compare run counts and stats after each scheduled build before treating the
     run as ready for downstream queries.
-11. Export validated runs to an index hub so other operators can hydrate the
-    current run without rebuilding.
+11. Export validated runs to an index hub so automation can acquire an exact
+    set/run bundle without rebuilding.
 
 ## Useful Commands
 
@@ -266,20 +272,44 @@ gonimbus index stats s3://bucket/data/ --runs --prefixes
 Publish a validated run to a hub:
 
 ```bash
+INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RUN_ID=run_1783173600000000000
+
 gonimbus index export \
   --hub s3://ops-bucket/index-hub/ \
-  --index-set idx_1234abcd5678ef90 \
+  --index-set "$INDEX_SET_ID" \
+  --run-id "$RUN_ID" \
   --hub-profile hub-admin
 ```
 
-Hydrate the latest published run:
+Acquire and query an exact published run:
 
 ```bash
-gonimbus index hydrate \
-  --hub s3://ops-bucket/index-hub/ \
-  --index-set idx_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \
-  --dest /tmp/gonimbus-indexes/
+INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RUN_ID=run_1783173600000000000
+BASELINE_RUN_ID=run_1783087200000000000
+BUNDLE_DIR="/var/lib/gonimbus/acquired/${INDEX_SET_ID}-${RUN_ID}-through-${BASELINE_RUN_ID}"
+
+gonimbus index acquire \
+  --hub-read-handle archive-read \
+  --index-set "$INDEX_SET_ID" \
+  --run-id "$RUN_ID" \
+  --proof-through-run "$BASELINE_RUN_ID" \
+  --dest "$BUNDLE_DIR"
+
+gonimbus index query \
+  --snapshot-dir "$BUNDLE_DIR" \
+  --since-run "$BASELINE_RUN_ID" \
+  --count \
+  --output-format receipt-jsonl-v1
 ```
+
+Configure `archive-read` under `hub_read_handles` with read-only credentials.
+The exact set/run pins come from the trusted producer handoff, never hub
+`latest.json`. Re-running acquire against the same valid bundle is idempotent.
+An ordinary hydrate directory or a bundle with different set, run, or
+proof-through identity is not reusable and is refused without overlay. The
+destination's parent directory must already exist.
 
 ## Current Limits
 

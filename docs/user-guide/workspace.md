@@ -63,14 +63,18 @@ destination:
 paths:
   data: data/ # Reflowed objects (clean, query-friendly)
   ops: ops/ # Operational artifacts
-  index_hub: ops/index-hub/ # Hub root for index export/hydrate
+  index_hub: ops/index-hub/ # Hub root for index export/acquire
   selections: ops/selections/ # Query result staging (input to reflow)
   logs: ops/logs/ # Run logs
+
+local_paths:
+  acquired_root: /var/lib/gonimbus/acquired/ # Replaceable exact bundles; never commit
 
 hub:
   uri: s3://dest-landing-zone/project-data/ops/index-hub/
   profile: dest-admin
   region: us-west-2
+  read_handle: archive-read # Logical hub_read_handles name for acquisition
 
 shard_strategy:
   type: per-site-month # See "Shard Strategies" below
@@ -87,7 +91,7 @@ s3://<dest-bucket>/<project-root>/
 ├── data/              <- Reflowed objects (clean lakehouse paths)
 │   └── <rewrite-to template output>
 └── ops/               <- Operational artifacts (not user-facing)
-    ├── index-hub/     <- Hub root for index export/hydrate
+    ├── index-hub/     <- Hub root for index export/acquire
     ├── selections/    <- Query result JSONL files (reflow input)
     └── logs/          <- Run logs, checkpoint summaries
 ```
@@ -128,32 +132,50 @@ Shard granularity controls the blast radius of failures:
 ### Build + Publish
 
 ```bash
-# Build index from manifest
-gonimbus index build --job manifests/store-01001-dec.yaml
+# Build index from manifest and retain the successful receipt
+gonimbus index build --job manifests/store-01001-dec.yaml --json
 
-# Export to hub
+# Export the exact set/run from that receipt
 gonimbus index export \
   --hub s3://dest-bucket/project/ops/index-hub/ \
-  --index-set idx_da038d8171b4a9ba... \
+  --index-set idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --run-id run_1783087200000000000 \
   --hub-profile dest-admin
 ```
 
-### Hydrate + Query
+### Exact Acquire + Query
 
 ```bash
-# Hydrate latest run to local disk
-gonimbus index hydrate \
-  --hub s3://dest-bucket/project/ops/index-hub/ \
-  --index-set idx_da038d8171b4a9ba... \
-  --dest /tmp/hydrated/ \
-  --hub-profile dest-admin
+# Exact values from the producer receipt
+INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RUN_ID=run_1783087200000000000
+BUNDLE_DIR="/var/lib/gonimbus/acquired/${INDEX_SET_ID}-${RUN_ID}"
 
-# Query the hydrated index
-gonimbus index query s3://source-bucket/production/data/ \
-  --index-set idx_da038d8171b4a9ba... \
-  --pattern '**/report-*.xml' \
-  --after 2025-12-01 --before 2026-01-01
+# Acquire the exact set/run named by the producer receipt
+gonimbus index acquire \
+  --hub-read-handle archive-read \
+  --index-set "$INDEX_SET_ID" \
+  --run-id "$RUN_ID" \
+  --dest "$BUNDLE_DIR"
+
+# Query only the verified acquired bundle
+gonimbus index query \
+  --snapshot-dir "$BUNDLE_DIR" \
+  --count \
+  --output-format receipt-jsonl-v1
 ```
+
+Automation should invoke `index acquire` before each query attempt. When the
+destination already contains a valid bundle for the same set, run, and optional
+proof-through boundary, acquisition validates it and succeeds idempotently. A
+directory's existence is not reuse authority: an unmarked hydrate directory,
+canonical index directory, corrupt bundle, or bundle with different identity
+is refused and never overlaid. The destination's parent directory must already
+exist.
+
+`index hydrate` remains available for human inspection and recovery. Its output
+is not query authority or a reusable acquisition destination, and its
+`latest.json` convenience selection must not be used by automation.
 
 ### Extract + Reflow
 

@@ -135,7 +135,8 @@ empty scope.
 - Build separate index sets for operational shards that need different coverage,
   such as site, month, or source family.
 - Export validated index runs to an index hub so other agents and pipeline
-  stages can hydrate and query without rebuilding.
+  stages can acquire an exact set/run bundle and query it without rebuilding.
+  Treat `index hydrate` as a human convenience, not automation query authority.
 
 Related docs:
 

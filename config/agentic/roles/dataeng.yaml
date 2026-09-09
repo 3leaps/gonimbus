@@ -2,7 +2,7 @@
 slug: dataeng
 name: Data Engineering
 description: Pipeline operations, manifest authoring, hub lifecycle, production dogfooding, and engagement-fit review for tool briefs and deliveries
-version: 1.4.1
+version: 1.4.2
 author: entarch
 status: review
 category: agentic
@@ -24,10 +24,10 @@ context: |
 
   This extends the crucible baseline dataeng with gonimbus-specific operational scope:
   crawl manifests, content probe configs, transfer reflow jobs, index lifecycle,
-  hub export/hydrate/maintenance, and workspace-pattern operations.
+  hub export/acquire/hydrate/maintenance, and workspace-pattern operations.
 
-  v0.1.8 capabilities the dataeng role exercises:
-  - Index build, query, export, hydrate (full chain)
+  Gonimbus capabilities the dataeng role exercises:
+  - Index build, query, export, acquire, hydrate
   - Hub CRUD: init, ls, show, set-latest, rm-run, gc
   - Transfer reflow with cross-account profiles and key rewriting
   - Content probe for derived fields (business date extraction)
@@ -35,7 +35,8 @@ context: |
 
   Key operational patterns:
   - Build -> export -> hub (publish immutable artifacts)
-  - Hydrate -> query -> reflow (consume and reorganize)
+  - Acquire exact set/run -> verified query receipt (automation)
+  - Hydrate (human inspection and recovery only)
   - Hub gc with --keep N retention (prune old runs)
   - Rewrite templates match FULL S3 key, not rel_key from index
   - Separate data/ (lakehouse output) from ops/ (pipeline artifacts)
@@ -166,7 +167,7 @@ scope:
   - Integration testing with real data
   - Production pipeline execution and validation
   - Index inventory management (build, query, doctor, gc)
-  - Hub lifecycle (init, export, hydrate, ls, show, set-latest, rm-run, gc)
+  - Hub lifecycle (init, export, acquire, hydrate, ls, show, set-latest, rm-run, gc)
   - Workspace setup and shard strategy implementation
   - Transfer reflow execution with cross-account (and eventually cross-cloud) profiles
   - Data quality validation (spot-checks, not just counts)
@@ -258,38 +259,40 @@ examples:
       Role: dataeng
       Committer-of-Record: Dave Thompson <dave.thompson@3leaps.net> [@3leapsdave]
   - type: other
-    title: Full pipeline chain
+    title: Exact hub query
     content: |
-      # Build -> Export -> Hydrate -> Query -> Reflow
+      # Build -> Export -> Acquire exact bundle -> Query
 
-      # 1. Build index
-      gonimbus index build --job manifests/sample-5sites-dec.yaml
+      # 1. Build index and retain the successful receipt
+      gonimbus index build --job manifests/sample-5sites-dec.yaml --json
+
+      # Exact values from the successful build receipt
+      INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      RUN_ID=run_1783087200000000000
+      # Ensure this parent exists with operator-appropriate permissions.
+      BUNDLE_DIR="/var/lib/gonimbus/acquired/${INDEX_SET_ID}-${RUN_ID}"
 
       # 2. Export to hub
       gonimbus index export --hub s3://dest/ops/index-hub/ \
-        --index-set idx_... --hub-profile dest-admin
+        --index-set "$INDEX_SET_ID" --run-id "$RUN_ID" \
+        --hub-profile dest-admin
 
-      # 3. Hydrate on another machine
-      gonimbus index hydrate --hub s3://dest/ops/index-hub/ \
-        --index-set idx_... --dest /tmp/hydrated/ --hub-profile dest-admin
+      # 3. Acquire the receipt-pinned run through a read-only logical handle
+      gonimbus index acquire --hub-read-handle archive-read \
+        --index-set "$INDEX_SET_ID" --run-id "$RUN_ID" \
+        --dest "$BUNDLE_DIR"
 
-      # 4. Query selection
-      gonimbus index query s3://source/production/data/ \
-        --index-set idx_... --pattern 'site-001/**/records/*.xml' \
-        --output s3://dest/ops/selections/sample-site-001-dec.jsonl \
-        --output-profile dest-admin
-
-      # 5. Reflow with business date rewriting
-      gonimbus transfer reflow --stdin \
-        --src-profile source-readonly \
-        --dest s3://dest/data/ --dest-profile dest-admin \
-        --rewrite-from 'production/data/{site}/{device}/{date}/{filename}' \
-        --rewrite-to '{business_date}/{site}/{filename}'
+      # 4. Query only that verified bundle
+      gonimbus index query \
+        --snapshot-dir "$BUNDLE_DIR" \
+        --count --output-format receipt-jsonl-v1
 checklists:
   pipeline_run:
     - "Dry-run completed successfully?"
     - "Checkpoint enabled for jobs >10K objects?"
     - "Profile names used (no raw credentials)?"
+    - "Automation pins the full index set and exact run without latest?"
+    - "Prior query bundle accepted by exact acquire rather than directory existence?"
     - "Spot-check validation (not just counts)?"
     - "Index integrity verified (index doctor)?"
     - "Resume tested after deliberate interruption?"
