@@ -445,6 +445,62 @@ version-control trees.
 The public final-marker contract is
 [`index-acquired-bundle.v1.schema.json`](../../schemas/gonimbus/v1.0.0/index-acquired-bundle.v1.schema.json).
 
+### Version-gated downstream inventory
+
+Downstream inventory automation can implement `count` and `find` modes over the
+same acquired-bundle contract. The consumer does not discover a hub run,
+inspect hub markers, or walk the live source bucket itself.
+
+Gate the Gonimbus binary before granting it storage access, and record
+`gonimbus version --extended` with the run. Pin an exact approved build from
+this contract lineage. The first release with the complete contract is
+`v0.4.3`; later releases must also be explicitly admitted by the consumer. A
+development version string is not sufficient by itself; its commit must match
+the consumer's allowlist. Version admission belongs to the deployment, not to a
+runtime fallback.
+
+After the gate passes, use exact values from a trusted producer receipt or
+handoff. When that handoff includes a delta baseline, also use
+`--proof-through-run` during acquisition and the same value as query
+`--since-run`:
+
+```bash
+INDEX_SET_ID=idx_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RUN_ID=run_1783087200000000000
+BUNDLE_DIR="/var/lib/gonimbus/acquired/${INDEX_SET_ID}-${RUN_ID}"
+
+gonimbus index acquire \
+  --hub-read-handle archive-read \
+  --index-set "$INDEX_SET_ID" \
+  --run-id "$RUN_ID" \
+  --dest "$BUNDLE_DIR"
+
+# count: stdout is the terminal receipt only
+gonimbus index query \
+  --snapshot-dir "$BUNDLE_DIR" \
+  --count \
+  --output-format receipt-jsonl-v1
+
+# find: stdout is zero or more typed object records, then the terminal receipt
+gonimbus index query \
+  --snapshot-dir "$BUNDLE_DIR" \
+  --pattern '**/report-*.xml' \
+  --output-format receipt-jsonl-v1
+```
+
+Both acquisition and query must exit zero. The query stream is authoritative
+only when it contains exactly one final
+`gonimbus.index.query_receipt.v1` record with `outcome: "success"` and the
+expected set/run identity. A count consumer reads
+`results.logical_results` from that receipt. A find consumer withholds action
+on every object record until the terminal receipt and process exit have
+validated the whole stream.
+
+An older binary that rejects `--output-format receipt-jsonl-v1` has failed the
+contract gate. Do not retry without the flag, parse legacy human output,
+synthesize a receipt, switch to `latest.json`, use a hydrate destination, or
+fall back to a live source-bucket walk.
+
 Large **SQLite** hub exports still use multipart upload when `index.db` crosses
 the default threshold. Durable export naturally stays under single-PUT walls by
 publishing segment objects; multipart remains available for large individual

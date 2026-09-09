@@ -2,7 +2,7 @@
 slug: dataeng
 name: Data Engineering
 description: Pipeline operations, manifest authoring, hub lifecycle, production dogfooding, and engagement-fit review for tool briefs and deliveries
-version: 1.4.2
+version: 1.4.3
 author: entarch
 status: review
 category: agentic
@@ -36,6 +36,7 @@ context: |
   Key operational patterns:
   - Build -> export -> hub (publish immutable artifacts)
   - Acquire exact set/run -> verified query receipt (automation)
+  - Version-gated count/find -> terminal receipt authority (downstream inventory)
   - Hydrate (human inspection and recovery only)
   - Hub gc with --keep N retention (prune old runs)
   - Rewrite templates match FULL S3 key, not rel_key from index
@@ -110,6 +111,24 @@ context: |
   optionally `shasum ~/.local/bin/gonimbus`) so PATH state is clear.
   After dataeng has finished evaluating, devlead may rebuild from main
   to restore the canonical binary, again with a channel announcement.
+
+  Downstream inventory binding:
+  - Gate the binary before storage access and retain `gonimbus version
+    --extended` with the run. Pin an exact approved build. v0.4.3 is the first
+    release with the complete contract; later releases still require explicit
+    consumer admission. A development label without an allowlisted commit is
+    not enough.
+  - Count and find automation must first acquire the exact set/run from a
+    trusted producer receipt or handoff, then query only `--snapshot-dir` with
+    `--output-format receipt-jsonl-v1`.
+  - Authority requires acquisition exit zero, query exit zero, and exactly one
+    final success receipt. Count reads `results.logical_results`; find
+    withholds action on object records until the terminal receipt and process
+    exit validate the complete stream.
+  - An older binary that rejects `--output-format` is a closed version gate.
+    Never retry with legacy output, manufacture a receipt, select latest,
+    inspect hub markers directly, query a hydrate destination, or walk the live
+    source bucket.
 
   v0.2.x operational gotchas (added v1.4.0 - do not rediscover):
 
@@ -263,7 +282,10 @@ examples:
     content: |
       # Build -> Export -> Acquire exact bundle -> Query
 
-      # 1. Build index and retain the successful receipt
+      # 1. Record and enforce the deployment's approved version/commit gate
+      gonimbus version --extended
+
+      # 2. Build index and retain the successful receipt
       gonimbus index build --job manifests/sample-5sites-dec.yaml --json
 
       # Exact values from the successful build receipt
@@ -272,20 +294,26 @@ examples:
       # Ensure this parent exists with operator-appropriate permissions.
       BUNDLE_DIR="/var/lib/gonimbus/acquired/${INDEX_SET_ID}-${RUN_ID}"
 
-      # 2. Export to hub
+      # 3. Export to hub
       gonimbus index export --hub s3://dest/ops/index-hub/ \
         --index-set "$INDEX_SET_ID" --run-id "$RUN_ID" \
         --hub-profile dest-admin
 
-      # 3. Acquire the receipt-pinned run through a read-only logical handle
+      # 4. Acquire the receipt-pinned run through a read-only logical handle
       gonimbus index acquire --hub-read-handle archive-read \
         --index-set "$INDEX_SET_ID" --run-id "$RUN_ID" \
         --dest "$BUNDLE_DIR"
 
-      # 4. Query only that verified bundle
+      # 5. Count against only that verified bundle
       gonimbus index query \
         --snapshot-dir "$BUNDLE_DIR" \
         --count --output-format receipt-jsonl-v1
+
+      # 6. Find against the same verified bundle
+      gonimbus index query \
+        --snapshot-dir "$BUNDLE_DIR" \
+        --pattern '**/report-*.xml' \
+        --output-format receipt-jsonl-v1
 checklists:
   pipeline_run:
     - "Dry-run completed successfully?"
@@ -293,6 +321,9 @@ checklists:
     - "Profile names used (no raw credentials)?"
     - "Automation pins the full index set and exact run without latest?"
     - "Prior query bundle accepted by exact acquire rather than directory existence?"
+    - "Consumer pins exact approved Gonimbus version/build provenance?"
+    - "Count/find accepts only exit zero plus exactly one final success receipt?"
+    - "Unknown receipt framing refuses without legacy-output fallback?"
     - "Spot-check validation (not just counts)?"
     - "Index integrity verified (index doctor)?"
     - "Resume tested after deliberate interruption?"
@@ -319,7 +350,7 @@ checklists:
     - "Business-date partitioning chosen if extraction is date-bounded?"
     - "Encoding declared/normalized at capture time (UTF-8 or content-marked)?"
     - "File-naming convention stable across waves (downstream globs need predictability)?"
-    - "Hub export run-tag carried into downstream recipe's provenance metadata?"
+    - "Exact acquired set/run and terminal query receipt carried into downstream provenance?"
   cadence_split:
     # Added v1.3.0 - checks when splitting one cohort into multiple
     # narrow reflow tracks by data-subject freshness cadence.

@@ -443,6 +443,15 @@ when it is the final record and the process exits zero. A missing, duplicate,
 malformed, non-success, or non-terminal receipt—or any non-zero process
 exit—makes the stream non-consumable.
 
+Version-gated downstream inventory consumers may now bind `count` and `find`
+operations to this framing after an exact acquired-bundle open. They must pin
+an exact approved Gonimbus build containing the contract (`v0.4.3` is the first
+release), reject unapproved development revisions, and treat an older binary's
+unknown-`--output-format` error as a closed gate rather than downgrading to
+legacy output. See
+[Version-gated downstream inventory](durable-index.md#version-gated-downstream-inventory)
+for the complete acquire/query sequence and acceptance rules.
+
 Receipt-mode canonical queries fail before emitting a stream if any matching
 row has an empty ETag, because that row cannot use the canonical record type.
 The default non-receipt canonical output retains its standard-record
