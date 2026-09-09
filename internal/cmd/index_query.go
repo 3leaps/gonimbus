@@ -114,6 +114,7 @@ func init() {
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
 	indexQueryCmd.Flags().String("run-id", "", "Pin durable snapshot run (requires --index-set; bypasses latest.json)")
+	indexQueryCmd.Flags().String("snapshot-dir", "", "Open a final-marked acquired bundle (exclusive with base-uri, --index-set, and --run-id)")
 
 	// Output destination
 	indexQueryCmd.Flags().String("output", "", "Output destination URI (s3://bucket/key.jsonl or file:///path/file.jsonl)")
@@ -207,6 +208,8 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	indexSetFlag, _ := cmd.Flags().GetString("index-set")
 	runIDFlag, _ := cmd.Flags().GetString("run-id")
 	runIDFlag = strings.TrimSpace(runIDFlag)
+	snapshotDir, _ := cmd.Flags().GetString("snapshot-dir")
+	snapshotDir = strings.TrimSpace(snapshotDir)
 	sinceRun, _ := cmd.Flags().GetString("since-run")
 	sinceRun = strings.TrimSpace(sinceRun)
 	outputFormat, _ := cmd.Flags().GetString("output-format")
@@ -218,12 +221,15 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	}
 	if outputFormat == indexQueryReceiptOutputFormat {
 		indexSetFlag = strings.TrimSpace(indexSetFlag)
-		if !validFullIndexSetID(indexSetFlag) || indexSetFlag != strings.ToLower(indexSetFlag) {
+		if snapshotDir == "" && (!validFullIndexSetID(indexSetFlag) || indexSetFlag != strings.ToLower(indexSetFlag)) {
 			return fmt.Errorf("--output-format %s requires a full lowercase --index-set ID", indexQueryReceiptOutputFormat)
 		}
-		if runIDFlag == "" {
+		if snapshotDir == "" && runIDFlag == "" {
 			return fmt.Errorf("--output-format %s requires --run-id", indexQueryReceiptOutputFormat)
 		}
+	}
+	if snapshotDir != "" && (len(args) != 0 || strings.TrimSpace(indexSetFlag) != "" || runIDFlag != "") {
+		return fmt.Errorf("--snapshot-dir is mutually exclusive with base-uri, --index-set, and --run-id")
 	}
 	if runIDFlag != "" {
 		if strings.TrimSpace(indexSetFlag) == "" {
@@ -243,7 +249,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	var baseURI string
 	if len(args) > 0 {
 		baseURI = normalizeQueryBaseURI(args[0])
-	} else if indexSetFlag == "" {
+	} else if indexSetFlag == "" && snapshotDir == "" {
 		return fmt.Errorf("<base-uri> is required unless --index-set is provided")
 	}
 
@@ -267,7 +273,15 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	outputRegion, _ := cmd.Flags().GetString("output-region")
 	outputEndpoint, _ := cmd.Flags().GetString("output-endpoint")
 	// Format-aware read seam: sqlite-v1 or durable-v2 (pinned run forces durable-v2).
-	reader, err := openIndexReader(ctx, baseURI, indexSetFlag, runIDFlag)
+	var reader indexreader.Reader
+	if snapshotDir != "" {
+		if err := refuseCanonicalSnapshotDir(snapshotDir); err != nil {
+			return err
+		}
+		reader, err = indexreader.OpenAcquiredBundle(indexreader.AcquiredOpenOptions{Directory: snapshotDir})
+	} else {
+		reader, err = openIndexReader(ctx, baseURI, indexSetFlag, runIDFlag)
+	}
 	if err != nil {
 		return err
 	}
@@ -276,7 +290,7 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 
 	// When --index-set is provided, use the reader's authoritative base_uri.
 	// A positional base-uri arg is accepted but ignored with a warning if it differs.
-	if indexSetFlag != "" {
+	if indexSetFlag != "" || snapshotDir != "" {
 		if baseURI != "" && meta.BaseURI != "" && baseURI != meta.BaseURI {
 			_, _ = fmt.Fprintf(os.Stderr, "warning: positional base-uri %s differs from index base_uri %s; using index value\n", baseURI, meta.BaseURI)
 		}
@@ -506,6 +520,26 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %d rows had unparseable timestamps (fields set to null)\n", stats.TimestampParseErrors)
 	}
 
+	return nil
+}
+
+func refuseCanonicalSnapshotDir(snapshotDir string) error {
+	root, err := indexRootDir()
+	if err != nil {
+		return err
+	}
+	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return err
+	}
+	snapshotAbs, err := filepath.Abs(filepath.Clean(snapshotDir))
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootAbs, snapshotAbs)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("--snapshot-dir refuses the canonical indexes namespace")
+	}
 	return nil
 }
 

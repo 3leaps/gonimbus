@@ -7,14 +7,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/fulmenhq/gofulmen/schema"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
@@ -315,6 +318,7 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	params := testIndexSetParams("s3://bucket/prefix/")
 	indexSet, _, err := indexstore.FindOrCreateIndexSet(ctx, db, params)
 	require.NoError(t, err)
+	writeCanonicalIdentityForHubTest(t, params, indexSet.IndexSetID)
 
 	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
 	require.NoError(t, err)
@@ -356,8 +360,15 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	var complete map[string]any
 	require.NoError(t, json.Unmarshal(completeData, &complete))
 	require.Equal(t, indexHubFormatDurableV2, complete["format"])
+	require.Equal(t, indexHubMarkerSchemaV2, complete["marker_schema_version"])
+	require.NotEmpty(t, complete["snapshot_completed_at"])
+	require.NotEmpty(t, complete["hub_committed_at"])
+	require.NotEqual(t, complete["snapshot_completed_at"], complete["hub_committed_at"])
+	require.Equal(t, complete["completed_at"], complete["hub_committed_at"])
+	require.FileExists(t, filepath.Join(runDir, "identity.json"))
 	require.NotContains(t, string(completeData), dataRoot)
 	require.NotContains(t, string(completeData), "s3://bucket")
+	validateHubCompleteAgainstSchema(t, completeData)
 
 	hydrateDir := t.TempDir()
 	hydrateCmd := &cobra.Command{Use: "hydrate", RunE: runIndexHydrate}
@@ -386,6 +397,32 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	rows, err := indexsubstrate.ReadManifestRows(filepath.Join(hydrateDir, "segments"), hydratedManifest)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
+
+	fileProvider, err := providerfile.New(providerfile.Config{BaseDir: hubDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fileProvider.Close() })
+	acquiredParent, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	acquiredDir := filepath.Join(acquiredParent, "acquired")
+	acquired, err := indexreader.AcquireBundle(ctx, &hubExactProviderAdapter{getter: fileProvider}, indexreader.AcquireBundleOptions{
+		IndexSetID: indexSet.IndexSetID, RunID: run.RunID, Destination: acquiredDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, indexreader.AcquiredBundleType, acquired.Type)
+	stdout, _, err := executeIndexQueryCommand(t,
+		"--snapshot-dir", acquiredDir,
+		"--count",
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.NoError(t, err)
+	var receipt indexQueryReceiptRecord
+	require.NoError(t, json.Unmarshal([]byte(stdout), &receipt))
+	require.Equal(t, string(indexreader.SnapshotSourceAcquiredHub), receipt.SourceKind)
+	require.Equal(t, indexSet.IndexSetID, receipt.IndexSetID)
+	require.Equal(t, run.RunID, receipt.RunID)
+	require.Equal(t, acquired.HubCommittedAt, receipt.HubCommittedAt)
+	require.NotEmpty(t, receipt.HubCompleteSHA256)
+	validateQueryReceiptAgainstSchema(t, receipt)
 }
 
 // TestRunIndexExportHydrate_StreamedDurableSegments proves export→hydrate
@@ -406,6 +443,7 @@ func TestRunIndexExportHydrate_StreamedDurableSegments(t *testing.T) {
 	params := testIndexSetParams("s3://bucket/prefix/")
 	indexSet, _, err := indexstore.FindOrCreateIndexSet(ctx, db, params)
 	require.NoError(t, err)
+	writeCanonicalIdentityForHubTest(t, params, indexSet.IndexSetID)
 
 	run, err := indexstore.CreateIndexRun(ctx, db, indexSet.IndexSetID, "crawl")
 	require.NoError(t, err)
@@ -545,6 +583,8 @@ func writeLocalDurableSnapshotStreamedForHubTest(t *testing.T, indexSetID, runID
 		IndexSetID:           indexSetID,
 		RunID:                runID,
 		CreatedAt:            base,
+		RunStartedAt:         &base,
+		Lineage:              &indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
 		TargetRowsPerSegment: 1,
 		Coverage: []indexsubstrate.CoverageAttestation{{
 			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
@@ -566,7 +606,7 @@ func writeLocalDurableSnapshotStreamedForHubTest(t *testing.T, indexSetID, runID
 		Type:           "gonimbus.index.complete.v1",
 		IndexSetID:     indexSetID,
 		RunID:          runID,
-		CompletedAt:    base.Format(time.RFC3339),
+		CompletedAt:    base.Add(2 * time.Minute).Format(time.RFC3339),
 		ManifestPath:   manifestPath,
 		ManifestSHA256: manifestSHA,
 		SegmentDir:     runDir,
@@ -820,6 +860,32 @@ func TestRunIndexHydrate_DurableRejectsOversizedManifestDeclaration(t *testing.T
 	require.Contains(t, err.Error(), "exceeds limit")
 }
 
+func TestDurableHubCompleteSchema_AcceptsLegacyV1WithoutIdentityTimes(t *testing.T) {
+	hubDir, indexSetID, runID := writeDurableHubRunForHydrateTest(t, nil, nil)
+	data, err := os.ReadFile(filepath.Join(
+		hubDir, "index-sets", indexSetID, "runs", runID, "complete.json",
+	))
+	require.NoError(t, err)
+	validateHubCompleteAgainstSchema(t, data)
+}
+
+func TestParseCanonicalHubTimeRefusesAlternateEncodings(t *testing.T) {
+	canonical := "2026-09-09T12:34:56.123456789Z"
+	parsed, ok := parseCanonicalHubTime(canonical)
+	require.True(t, ok)
+	require.Equal(t, canonical, parsed.UTC().Format(time.RFC3339Nano))
+
+	for _, raw := range []string{
+		" " + canonical,
+		canonical + " ",
+		"2026-09-09T08:34:56.123456789-04:00",
+		"2026-09-09T12:34:56.123456789+00:00",
+	} {
+		_, ok := parseCanonicalHubTime(raw)
+		require.False(t, ok, "accepted noncanonical timestamp %q", raw)
+	}
+}
+
 func TestRunIndexHydrate_DurableRejectsMarkerContractDrift(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1007,6 +1073,8 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 		IndexSetID:           indexSetID,
 		RunID:                runID,
 		CreatedAt:            base,
+		RunStartedAt:         &base,
+		Lineage:              &indexsubstrate.LineageRecord{Version: 1, Generation: 1, Baseline: true},
 		TargetRowsPerSegment: 1,
 		Coverage: []indexsubstrate.CoverageAttestation{{
 			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
@@ -1023,7 +1091,7 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 		Type:           "gonimbus.index.complete.v1",
 		IndexSetID:     indexSetID,
 		RunID:          runID,
-		CompletedAt:    base.Format(time.RFC3339),
+		CompletedAt:    base.Add(2 * time.Minute).Format(time.RFC3339),
 		ManifestPath:   manifestPath,
 		ManifestSHA256: manifestSHA,
 		SegmentDir:     runDir,
@@ -1043,6 +1111,21 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(segmentRoot, "latest.json"), append(latestData, '\n'), 0o600))
 	return manifest
+}
+
+func writeCanonicalIdentityForHubTest(t *testing.T, params indexstore.IndexSetParams, expectedIndexSetID string) {
+	t.Helper()
+	identity, err := indexstore.ComputeIndexSetID(params)
+	require.NoError(t, err)
+	require.Equal(t, expectedIndexSetID, identity.IndexSetID)
+	indexesRoot, err := indexRootDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(indexesRoot, identity.DirName), 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(indexesRoot, identity.DirName, "identity.json"),
+		[]byte(identity.CanonicalJSON+"\n"),
+		0o600,
+	))
 }
 
 func ptrTime(t time.Time) *time.Time {
@@ -1110,23 +1193,61 @@ func writeDurableHubRunForHydrateTest(t *testing.T, mutateComplete func(map[stri
 	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
 	manifestSHA, manifestSize, err := hashFile(manifestPath)
 	require.NoError(t, err)
-	run := &indexstore.IndexRun{RunID: runID, IndexSetID: indexSetID, StartedAt: base, Status: indexstore.RunStatusSuccess}
-	indexSet := &indexstore.IndexSet{IndexSetID: indexSetID}
-	completeBytes, err := buildDurableCompleteJSON(indexSet, run, durableExportSnapshot{
-		Manifest:     manifest,
-		ManifestPath: manifestPath,
-		ManifestSHA:  manifestSHA,
-		ManifestSize: manifestSize,
-		SegmentDir:   segmentDir,
-	})
-	require.NoError(t, err)
-	var complete map[string]any
-	require.NoError(t, json.Unmarshal(completeBytes, &complete))
+	segmentRefs := make([]any, 0, len(manifest.Segments))
+	for _, segment := range manifest.Segments {
+		segmentRefs = append(segmentRefs, map[string]any{
+			"path": "segments/" + segment.Path, "role": "segment", "required": true,
+			"size_bytes": segment.SizeBytes, "sha256": segment.Digest.Hex,
+		})
+	}
+	// These hydrate-negative fixtures deliberately model the accepted legacy v1
+	// durable marker. Export/acquire integration tests cover the identity/time
+	// bound v2 contract produced by current binaries.
+	complete := map[string]any{
+		"version": "1.0", "marker_schema_version": indexHubMarkerSchemaV1,
+		"format": indexHubFormatDurableV2, "format_version": "2",
+		"index_set_id": indexSetID, "run_id": runID,
+		"completed_at": base.Add(2 * time.Minute).Format(time.RFC3339Nano),
+		"exported_by":  "gonimbus/test",
+		"artifacts": map[string]any{
+			"manifest": map[string]any{
+				"path": "manifest.json", "role": "manifest", "required": true,
+				"size_bytes": manifestSize, "sha256": manifestSHA,
+			},
+			"segments": segmentRefs,
+		},
+		"durable": map[string]any{
+			"manifest_type": manifest.Type, "manifest_render": manifest.Render,
+			"index_schema_version": manifest.IndexSchemaVersion,
+			"segment_namespace":    manifest.Reachability.SegmentNamespace,
+			"segments":             len(manifest.Segments), "rows": manifest.Counts.Rows,
+		},
+	}
 	if mutateComplete != nil {
 		mutateComplete(complete)
 	}
-	completeBytes, err = json.MarshalIndent(complete, "", "  ")
+	completeBytes, err := json.MarshalIndent(complete, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(runDir, "complete.json"), append(completeBytes, '\n'), 0o600))
 	return hubDir, indexSetID, runID
+}
+
+func validateHubCompleteAgainstSchema(t *testing.T, data []byte) {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(
+		root, "schemas", "gonimbus", "v1.0.0", "index-hub-complete.schema.json",
+	))
+	require.NoError(t, err)
+	validator, err := schema.NewValidator(raw)
+	require.NoError(t, err)
+	diagnostics, err := validator.ValidateJSON(data)
+	require.NoError(t, err)
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == schema.SeverityError {
+			t.Fatalf("hub complete marker failed schema validation: %s: %s", diagnostic.Pointer, diagnostic.Message)
+		}
+	}
 }

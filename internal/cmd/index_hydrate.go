@@ -431,6 +431,9 @@ type completeMarker struct {
 	FormatVersion       string `json:"format_version,omitempty"`
 	IndexSetID          string `json:"index_set_id,omitempty"`
 	RunID               string `json:"run_id,omitempty"`
+	CompletedAt         string `json:"completed_at,omitempty"`
+	SnapshotCompletedAt string `json:"snapshot_completed_at,omitempty"`
+	HubCommittedAt      string `json:"hub_committed_at,omitempty"`
 	ExportedBy          string `json:"exported_by,omitempty"`
 	Artifacts           struct {
 		IndexDB      *artifactRef  `json:"index_db,omitempty"`

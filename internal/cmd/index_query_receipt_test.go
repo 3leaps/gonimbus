@@ -764,13 +764,7 @@ func TestIndexQueryReceiptQuerySpecNormalization(t *testing.T) {
 
 func validateQueryReceiptAgainstSchema(t *testing.T, receipt indexQueryReceiptRecord) {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	rawSchema, err := os.ReadFile(filepath.Join(root, "schemas", "gonimbus", "v1.0.0", "index-query-receipt.v1.schema.json"))
-	require.NoError(t, err)
-	validator, err := schema.NewValidator(rawSchema)
-	require.NoError(t, err)
+	validator := queryReceiptSchemaValidator(t)
 	data, err := json.Marshal(receipt)
 	require.NoError(t, err)
 	diagnostics, err := validator.ValidateJSON(data)
@@ -780,4 +774,40 @@ func validateQueryReceiptAgainstSchema(t *testing.T, receipt indexQueryReceiptRe
 			t.Fatalf("receipt failed schema validation: %s: %s", diagnostic.Pointer, diagnostic.Message)
 		}
 	}
+}
+
+func queryReceiptSchemaValidator(t testing.TB) *schema.Validator {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	rawSchema, err := os.ReadFile(filepath.Join(root, "schemas", "gonimbus", "v1.0.0", "index-query-receipt.v1.schema.json"))
+	require.NoError(t, err)
+	validator, err := schema.NewValidator(rawSchema)
+	require.NoError(t, err)
+	return validator
+}
+
+func FuzzIndexQueryReceiptSchema(f *testing.F) {
+	validator := queryReceiptSchemaValidator(f)
+	f.Add([]byte(`{"type":"gonimbus.index.query_receipt.v1"}`))
+	f.Add([]byte(`null`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 1<<20 {
+			t.Skip()
+		}
+		diagnostics, err := validator.ValidateJSON(data)
+		if err != nil {
+			return
+		}
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Severity == schema.SeverityError {
+				return
+			}
+		}
+		var receipt indexQueryReceiptRecord
+		if json.Unmarshal(data, &receipt) == nil {
+			_ = validateIndexQueryReceipt(receipt)
+		}
+	})
 }

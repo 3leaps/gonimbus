@@ -480,17 +480,6 @@ func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManif
 		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
 	}
 
-	var complete publishedCompleteDoc
-	if err := json.Unmarshal(completeData, &complete); err != nil {
-		return PublishedSnapshot{}, fmt.Errorf("parse complete marker: %w", err)
-	}
-	if strings.TrimSpace(complete.Type) != "gonimbus.index.complete.v1" {
-		if strings.TrimSpace(complete.Type) == "" {
-			return PublishedSnapshot{}, fmt.Errorf("complete marker type is required (expected gonimbus.index.complete.v1)")
-		}
-		return PublishedSnapshot{}, fmt.Errorf("complete marker type %q is not supported", complete.Type)
-	}
-
 	manifestCap := maxManifestBytes
 	if remaining < manifestCap {
 		manifestCap = remaining
@@ -498,7 +487,22 @@ func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManif
 	if manifestCap <= 0 {
 		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
 	}
-	manifestData, err := readFileBounded(complete.ManifestPath, manifestCap)
+	var complete publishedCompleteDoc
+	if err := json.Unmarshal(completeData, &complete); err != nil {
+		return PublishedSnapshot{}, fmt.Errorf("parse complete marker: %w", err)
+	}
+	if err := validatePublishedCompleteType(complete); err != nil {
+		return PublishedSnapshot{}, err
+	}
+	manifestPath, err := resolvePublishedArtifactPath(completePath, complete.ManifestPath, "manifest_path")
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	segmentDir, err := resolvePublishedArtifactPath(completePath, complete.SegmentDir, "segment_dir")
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	manifestData, err := readFileBounded(manifestPath, manifestCap)
 	if err != nil {
 		if strings.Contains(err.Error(), "size exceeds limit") {
 			return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
@@ -509,16 +513,66 @@ func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManif
 	hook = afterFileReadForTest
 	afterFileReadForTestMu.Unlock()
 	if hook != nil {
-		hook(complete.ManifestPath, len(manifestData))
+		hook(manifestPath, len(manifestData))
 	}
 	if afterManifestBytesReadForTest != nil {
-		afterManifestBytesReadForTest(complete.ManifestPath)
+		afterManifestBytesReadForTest(manifestPath)
 	}
 	remaining -= int64(len(manifestData))
 	if remaining < 0 {
 		return PublishedSnapshot{}, fmt.Errorf("aggregate byte budget exhausted")
 	}
 
+	return openPublishedSnapshotMaterial(
+		completePath, manifestPath, segmentDir, completeData, manifestData,
+	)
+}
+
+// OpenPublishedRunSnapshotMaterial verifies caller-bound complete and manifest
+// bytes without reopening their pathnames. completePath, manifestPath, and
+// segmentDir are descriptive locations beneath the caller's retained
+// filesystem capability.
+func OpenPublishedRunSnapshotMaterial(
+	completePath, manifestPath, segmentDir string,
+	completeData, manifestData []byte,
+	expectedIndexSetID, expectedRunID string,
+) (PublishedSnapshot, error) {
+	snap, err := openPublishedSnapshotMaterial(
+		completePath, manifestPath, segmentDir, completeData, manifestData,
+	)
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	resolvedManifestPath, err := resolvePublishedArtifactPath(completePath, snap.Complete.ManifestPath, "manifest_path")
+	if err != nil || filepath.Clean(resolvedManifestPath) != filepath.Clean(manifestPath) {
+		return PublishedSnapshot{}, errors.Join(fmt.Errorf("complete marker manifest_path disagrees with bound material"), err)
+	}
+	resolvedSegmentDir, err := resolvePublishedArtifactPath(completePath, snap.Complete.SegmentDir, "segment_dir")
+	if err != nil || filepath.Clean(resolvedSegmentDir) != filepath.Clean(segmentDir) {
+		return PublishedSnapshot{}, errors.Join(fmt.Errorf("complete marker segment_dir disagrees with bound material"), err)
+	}
+	expectedIndexSetID = strings.TrimSpace(expectedIndexSetID)
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if expectedIndexSetID != "" && snap.Complete.IndexSetID != expectedIndexSetID {
+		return PublishedSnapshot{}, fmt.Errorf("complete marker index_set_id mismatch")
+	}
+	if expectedRunID != "" && snap.Complete.RunID != expectedRunID {
+		return PublishedSnapshot{}, fmt.Errorf("complete marker run_id mismatch")
+	}
+	return snap, nil
+}
+
+func openPublishedSnapshotMaterial(
+	completePath, manifestPath, segmentDir string,
+	completeData, manifestData []byte,
+) (PublishedSnapshot, error) {
+	var complete publishedCompleteDoc
+	if err := json.Unmarshal(completeData, &complete); err != nil {
+		return PublishedSnapshot{}, fmt.Errorf("parse complete marker: %w", err)
+	}
+	if err := validatePublishedCompleteType(complete); err != nil {
+		return PublishedSnapshot{}, err
+	}
 	manifestDigest := sha256HexBytes(manifestData)
 	if manifestDigest != complete.ManifestSHA256 {
 		return PublishedSnapshot{}, fmt.Errorf("manifest digest mismatch")
@@ -539,10 +593,36 @@ func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManif
 		CompletePath:           completePath,
 		Complete:               complete,
 		Manifest:               manifest,
-		SegmentDir:             complete.SegmentDir,
+		SegmentDir:             segmentDir,
 		AccountedMarkerBytes:   int64(len(completeData)),
 		AccountedManifestBytes: int64(len(manifestData)),
 	}, nil
+}
+
+func validatePublishedCompleteType(complete publishedCompleteDoc) error {
+	if strings.TrimSpace(complete.Type) == "gonimbus.index.complete.v1" {
+		return nil
+	}
+	if strings.TrimSpace(complete.Type) == "" {
+		return fmt.Errorf("complete marker type is required (expected gonimbus.index.complete.v1)")
+	}
+	return fmt.Errorf("complete marker type %q is not supported", complete.Type)
+}
+
+func resolvePublishedArtifactPath(completePath, raw, label string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("complete marker %s is required", label)
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw), nil
+	}
+	clean := filepath.Clean(raw)
+	if clean != raw || strings.Contains(raw, "\\") ||
+		clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("complete marker %s is not a safe relative path", label)
+	}
+	return filepath.Join(filepath.Dir(completePath), clean), nil
 }
 
 // WalkLatestPublishedRows walks the latest published snapshot with streaming

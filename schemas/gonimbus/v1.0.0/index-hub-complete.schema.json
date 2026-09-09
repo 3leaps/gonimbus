@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gonimbus/v1.0.0/index-hub-complete",
   "title": "Gonimbus Index Hub Complete Marker",
-  "description": "Commit marker for an exported index run. Written last after all artifacts (index.db, identity.json) are uploaded. Presence of this file indicates the run is fully published and safe to hydrate.",
+  "description": "Commit marker for an exported SQLite or durable index run. Written last after every required artifact is uploaded.",
   "type": "object",
   "required": [
     "version",
@@ -22,6 +22,27 @@
       "const": "1.0",
       "description": "Complete marker schema version"
     },
+    "marker_schema_version": {
+      "type": "string",
+      "enum": [
+        "gonimbus.index.hub_marker.v1",
+        "gonimbus.index.hub_marker.v2"
+      ]
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "sqlite-v1",
+        "durable-v2"
+      ]
+    },
+    "format_version": {
+      "type": "string",
+      "enum": [
+        "1",
+        "2"
+      ]
+    },
     "index_set_id": {
       "type": "string",
       "pattern": "^idx_[0-9a-f]{64}$",
@@ -35,7 +56,17 @@
     "completed_at": {
       "type": "string",
       "format": "date-time",
-      "description": "When the export completed (RFC 3339)"
+      "description": "Compatibility timestamp for the hub commit (RFC 3339)"
+    },
+    "snapshot_completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the source durable snapshot completed"
+    },
+    "hub_committed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When publication of the hub run committed"
     },
     "exported_by": {
       "type": "string",
@@ -44,9 +75,6 @@
     "artifacts": {
       "type": "object",
       "description": "Checksums and sizes of exported artifacts for integrity verification",
-      "required": [
-        "index_db"
-      ],
       "additionalProperties": false,
       "properties": {
         "index_db": {
@@ -54,6 +82,52 @@
         },
         "identity_json": {
           "$ref": "#/$defs/artifact_entry"
+        },
+        "manifest": {
+          "$ref": "#/$defs/artifact_entry"
+        },
+        "segments": {
+          "type": "array",
+          "maxItems": 200000,
+          "items": {
+            "$ref": "#/$defs/artifact_entry"
+          }
+        }
+      }
+    },
+    "durable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_type",
+        "manifest_render",
+        "index_schema_version",
+        "segment_namespace",
+        "segments",
+        "rows"
+      ],
+      "properties": {
+        "manifest_type": {
+          "type": "string"
+        },
+        "manifest_render": {
+          "type": "string"
+        },
+        "index_schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "segment_namespace": {
+          "type": "string"
+        },
+        "segments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200000
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -110,6 +184,92 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "format"
+        ],
+        "properties": {
+          "format": {
+            "const": "durable-v2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "marker_schema_version",
+          "format_version",
+          "exported_by",
+          "durable"
+        ],
+        "properties": {
+          "format_version": {
+            "const": "2"
+          },
+          "artifacts": {
+            "required": [
+              "manifest",
+              "segments"
+            ],
+            "properties": {
+              "manifest": {
+                "$ref": "#/$defs/durable_artifact_entry"
+              },
+              "segments": {
+                "items": {
+                  "$ref": "#/$defs/durable_artifact_entry"
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "artifacts": {
+            "required": [
+              "index_db"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "marker_schema_version"
+        ],
+        "properties": {
+          "marker_schema_version": {
+            "const": "gonimbus.index.hub_marker.v2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "format",
+          "snapshot_completed_at",
+          "hub_committed_at"
+        ],
+        "properties": {
+          "format": {
+            "const": "durable-v2"
+          },
+          "artifacts": {
+            "required": [
+              "identity_json"
+            ],
+            "properties": {
+              "identity_json": {
+                "$ref": "#/$defs/durable_artifact_entry"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "artifact_entry": {
       "type": "object",
@@ -120,6 +280,17 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
         "size_bytes": {
           "type": "integer",
           "minimum": 0,
@@ -135,6 +306,20 @@
           "description": "Provider ETag returned after upload (for cache validation)"
         }
       }
+    },
+    "durable_artifact_entry": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifact_entry"
+        },
+        {
+          "required": [
+            "path",
+            "role",
+            "required"
+          ]
+        }
+      ]
     }
   }
 }

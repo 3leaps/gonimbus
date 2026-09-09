@@ -38,6 +38,7 @@ SQLite export layout:
 
 Durable export layout:
 
+  <hub>/index-sets/<index_set_id>/runs/<run_id>/identity.json
   <hub>/index-sets/<index_set_id>/runs/<run_id>/manifest.json
   <hub>/index-sets/<index_set_id>/runs/<run_id>/segments/...
   <hub>/index-sets/<index_set_id>/runs/<run_id>/complete.json
@@ -522,8 +523,16 @@ func runIndexExportDurable(ctx context.Context, cmd *cobra.Command, hub *hubDest
 	if err != nil {
 		return err
 	}
+	if err := bindDurableExportIdentity(ctx, indexSet.IndexSetID, run.RunID, &local); err != nil {
+		return err
+	}
 
 	runPrefix := []string{"index-sets", indexSet.IndexSetID, "runs", run.RunID}
+	identityKey := hubArtifactKey(hub, append(runPrefix, "identity.json")...)
+	_, _ = fmt.Fprintf(os.Stderr, "  uploading identity.json (%d bytes)...\n", local.IdentitySize)
+	if err := uploadBytes(ctx, putter, identityKey, local.Identity); err != nil {
+		return fmt.Errorf("upload canonical identity.json: %w", err)
+	}
 	for _, segment := range local.Manifest.Segments {
 		localPath, err := safeLocalArtifactPath(local.SegmentDir, segment.Path)
 		if err != nil {

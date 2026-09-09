@@ -102,6 +102,7 @@ func newIndexQueryCommandForTest() *cobra.Command {
 	cmd.Flags().String("output-format", "", "Output framing")
 	cmd.Flags().String("index-set", "", "Explicit index set ID")
 	cmd.Flags().String("run-id", "", "Pin durable snapshot run")
+	cmd.Flags().String("snapshot-dir", "", "Open acquired bundle")
 	cmd.Flags().String("output", "", "Output destination URI")
 	cmd.Flags().String("output-profile", "", "AWS profile for output destination")
 	cmd.Flags().String("output-region", "", "AWS region for output destination")

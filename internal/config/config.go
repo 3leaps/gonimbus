@@ -18,6 +18,20 @@ type Config struct {
 	// accepted as a compatibility alias; DataRoot wins when both are set.
 	DataRoot string `mapstructure:"data_root"`
 	DataDir  string `mapstructure:"data_dir"`
+	// HubReadHandles are logical read-only hub bindings used by index acquire.
+	// The resolved provider capability never crosses into the configuration-free
+	// acquisition library as this structure or as a handle name.
+	HubReadHandles map[string]HubReadHandleConfig `mapstructure:"hub_read_handles"`
+}
+
+// HubReadHandleConfig binds a logical config-plane name to one hub root and
+// provider read credential selection.
+type HubReadHandleConfig struct {
+	URI        string `mapstructure:"uri"`
+	Profile    string `mapstructure:"profile"`
+	Region     string `mapstructure:"region"`
+	Endpoint   string `mapstructure:"endpoint"`
+	GCPProject string `mapstructure:"gcp_project"`
 }
 
 // ServerConfig contains HTTP server configuration

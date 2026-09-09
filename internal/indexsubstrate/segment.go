@@ -451,6 +451,21 @@ func WalkSegmentFileVerified(dir string, descriptor SegmentDescriptor, visit fun
 		_ = file.Close()
 		_ = root.Close()
 	}()
+	return WalkSegmentFileHandleVerified(file, descriptor, visit)
+}
+
+// WalkSegmentFileHandleVerified verifies and walks a segment through the exact
+// already-bound file handle supplied by a retained filesystem capability.
+func WalkSegmentFileHandleVerified(file *os.File, descriptor SegmentDescriptor, visit func(CurrentObjectRow) error) error {
+	if file == nil {
+		return fmt.Errorf("segment file handle is required")
+	}
+	if descriptor.Digest.Algorithm != "sha256" {
+		return fmt.Errorf("unsupported segment digest algorithm %q", descriptor.Digest.Algorithm)
+	}
+	if strings.TrimSpace(descriptor.Digest.Hex) == "" {
+		return fmt.Errorf("segment digest is required")
+	}
 	got, err := sha256HexFileHandle(file)
 	if err != nil {
 		return err
@@ -459,7 +474,7 @@ func WalkSegmentFileVerified(dir string, descriptor SegmentDescriptor, visit fun
 		return fmt.Errorf("segment digest mismatch for %s", descriptor.Path)
 	}
 	if afterSegmentDigestVerifiedForTest != nil {
-		afterSegmentDigestVerifiedForTest(path)
+		afterSegmentDigestVerifiedForTest(file.Name())
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek segment after digest verify: %w", err)

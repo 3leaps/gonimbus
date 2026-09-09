@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -20,14 +21,22 @@ import (
 )
 
 type durableReader struct {
-	meta             Meta
-	opts             ResolveOptions
-	snap             indexsubstrate.PublishedSnapshot
-	sourceIdentity   verifiedLocalIdentityFile
-	segmentCacheRoot string
-	pinned           bool
-	sinceMu          sync.RWMutex
-	sinceFilters     map[string]indexstore.SinceRunFilter
+	meta                 Meta
+	opts                 ResolveOptions
+	snap                 indexsubstrate.PublishedSnapshot
+	sourceIdentity       verifiedLocalIdentityFile
+	segmentCacheRoot     string
+	pinned               bool
+	sourceKind           SnapshotSourceKind
+	snapshotCompletedAt  time.Time
+	hubCommittedAt       time.Time
+	hubCompleteSHA256    string
+	acquiredRoot         *boundAcquiredRoot
+	acquiredSinceFilters map[string]indexstore.SinceRunFilter
+	closeOnce            sync.Once
+	closeErr             error
+	sinceMu              sync.RWMutex
+	sinceFilters         map[string]indexstore.SinceRunFilter
 }
 
 func openDurableReader(opts ResolveOptions, c candidate) (*durableReader, error) {
@@ -183,6 +192,9 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 	if err != nil || completedAt.IsZero() {
 		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at is invalid", ErrVerifiedSnapshotMetadataUnavailable)
 	}
+	if !r.snapshotCompletedAt.IsZero() {
+		completedAt = r.snapshotCompletedAt
+	}
 	if completedAt.Before(*manifest.RunStartedAt) {
 		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at precedes run_started_at", ErrVerifiedSnapshotMetadataUnavailable)
 	}
@@ -209,12 +221,18 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 		}
 		coverage.GapCount += len(entry.Gaps)
 	}
+	sourceKind := r.sourceKind
+	if sourceKind == "" {
+		sourceKind = SnapshotSourceLocalPublished
+	}
 	return VerifiedSnapshotMetadata{
-		SourceKind:            SnapshotSourceLocalPublished,
+		SourceKind:            sourceKind,
 		IndexSetID:            manifest.IndexSetID,
 		RunID:                 manifest.RunID,
 		RunStartedAt:          manifest.RunStartedAt.UTC(),
 		SnapshotCompletedAt:   completedAt.UTC(),
+		HubCommittedAt:        r.hubCommittedAt.UTC(),
+		HubCompleteSHA256:     r.hubCompleteSHA256,
 		SourceIdentitySHA256:  r.sourceIdentity.CompleteFileSHA256,
 		SourceIdentitySchema:  SourceIdentitySchemaV1,
 		SourceIdentityProfile: SourceIdentityProfileV1,
@@ -233,7 +251,15 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 
 func (r *durableReader) SQLiteDB() *sql.DB { return nil }
 
-func (r *durableReader) Close() error { return nil }
+func (r *durableReader) Close() error {
+	r.closeOnce.Do(func() {
+		if r.acquiredRoot != nil {
+			r.closeErr = r.acquiredRoot.close()
+			r.acquiredRoot = nil
+		}
+	})
+	return r.closeErr
+}
 
 func (r *durableReader) ResolveSinceRunFilter(ctx context.Context, runID string) (*indexstore.SinceRunFilter, error) {
 	if ctx == nil {
@@ -248,6 +274,23 @@ func (r *durableReader) ResolveSinceRunFilter(ctx context.Context, runID string)
 	}
 	if !r.pinned {
 		return nil, fmt.Errorf("%w: exact --run-id current selection is required", ErrDurableSinceRunUnsupported)
+	}
+	if r.acquiredRoot != nil {
+		filter, ok := r.acquiredSinceFilters[runID]
+		if !ok {
+			return nil, &indexsubstrate.LineageError{
+				Code:    indexsubstrate.LineageCodeBaselineNotAncestor,
+				Message: "requested baseline is not present in the acquired proof",
+			}
+		}
+		out := cloneSinceRunFilter(filter)
+		r.sinceMu.Lock()
+		if r.sinceFilters == nil {
+			r.sinceFilters = make(map[string]indexstore.SinceRunFilter)
+		}
+		r.sinceFilters[out.RunID] = cloneSinceRunFilter(out)
+		r.sinceMu.Unlock()
+		return &out, nil
 	}
 	budget := indexsubstrate.DefaultAncestryBudget()
 	budget.MaxMarkerBytes = r.opts.MaxMarkerBytes
@@ -449,7 +492,18 @@ func (r *durableReader) walkFiltered(ctx context.Context, filter *rowFilter, par
 			continue
 		}
 		entered := false
-		if err := indexsubstrate.WalkSegmentFileVerified(r.snap.SegmentDir, segment, func(row indexsubstrate.CurrentObjectRow) error {
+		walk := func(visit func(indexsubstrate.CurrentObjectRow) error) error {
+			if r.acquiredRoot == nil {
+				return indexsubstrate.WalkSegmentFileVerified(r.snap.SegmentDir, segment, visit)
+			}
+			file, err := r.acquiredRoot.openRegular(path.Join(r.snap.SegmentDir, segment.Path))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = file.Close() }()
+			return indexsubstrate.WalkSegmentFileHandleVerified(file, segment, visit)
+		}
+		if err := walk(func(row indexsubstrate.CurrentObjectRow) error {
 			if !entered {
 				// WalkSegmentFileVerified hashes the same file descriptor before
 				// invoking the first row callback.

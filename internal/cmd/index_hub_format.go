@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,11 +12,13 @@ import (
 	"time"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
 
 const (
 	indexHubMarkerSchemaV1  = "gonimbus.index.hub_marker.v1"
+	indexHubMarkerSchemaV2  = "gonimbus.index.hub_marker.v2"
 	indexHubFormatSQLiteV1  = "sqlite-v1"
 	indexHubFormatDurableV2 = "durable-v2"
 
@@ -27,11 +30,15 @@ const (
 )
 
 type durableExportSnapshot struct {
-	Manifest     indexsubstrate.InternalManifest
-	ManifestPath string
-	ManifestSHA  string
-	ManifestSize int64
-	SegmentDir   string
+	Manifest            indexsubstrate.InternalManifest
+	ManifestPath        string
+	ManifestSHA         string
+	ManifestSize        int64
+	SegmentDir          string
+	Identity            []byte
+	IdentitySHA         string
+	IdentitySize        int64
+	SnapshotCompletedAt time.Time
 }
 
 type durableLocalCompleteDoc struct {
@@ -43,6 +50,39 @@ type durableLocalCompleteDoc struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 	SegmentDir     string `json:"segment_dir"`
 	Segments       int    `json:"segments"`
+}
+
+func bindDurableExportIdentity(ctx context.Context, indexSetID, runID string, snapshot *durableExportSnapshot) error {
+	reader, err := openIndexReader(ctx, "", indexSetID, runID)
+	if err != nil {
+		return fmt.Errorf("open pinned durable identity authority: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+	metadataReader, ok := reader.(indexreader.VerifiedSnapshotMetadataReader)
+	if !ok {
+		return fmt.Errorf("pinned durable identity authority has no verified metadata")
+	}
+	verified, err := metadataReader.VerifiedSnapshotMetadata()
+	if err != nil {
+		return fmt.Errorf("verify pinned durable identity authority: %w", err)
+	}
+	if verified.IndexSetID != indexSetID || verified.RunID != runID ||
+		verified.ManifestSHA256 != snapshot.ManifestSHA ||
+		!verified.SnapshotCompletedAt.Equal(snapshot.SnapshotCompletedAt) {
+		return fmt.Errorf("pinned durable identity authority changed during export")
+	}
+	identity, err := indexreader.ReadCanonicalLocalIdentityFile(
+		filepath.Join(reader.Meta().IdentityDir, "identity.json"),
+		int64(maxHubMarkerBytes),
+		indexSetID,
+	)
+	if err != nil {
+		return fmt.Errorf("read canonical identity.json: %w", err)
+	}
+	snapshot.Identity = identity.Raw
+	snapshot.IdentitySHA = identity.SHA256
+	snapshot.IdentitySize = int64(len(identity.Raw))
+	return nil
 }
 
 func normalizeIndexHubFormat(raw string) (string, error) {
@@ -66,8 +106,9 @@ func completeMarkerFormat(complete completeMarker) string {
 
 func validateDurableCompleteMarker(indexSetID, runID string, complete completeMarker) error {
 	switch {
-	case complete.MarkerSchemaVersion != indexHubMarkerSchemaV1:
-		return fmt.Errorf("durable complete marker schema version must be %s", indexHubMarkerSchemaV1)
+	case complete.MarkerSchemaVersion != indexHubMarkerSchemaV1 &&
+		complete.MarkerSchemaVersion != indexHubMarkerSchemaV2:
+		return fmt.Errorf("durable complete marker schema version must be %s or %s", indexHubMarkerSchemaV1, indexHubMarkerSchemaV2)
 	case complete.Format != indexHubFormatDurableV2:
 		return fmt.Errorf("durable complete marker format must be %s", indexHubFormatDurableV2)
 	case complete.FormatVersion != "2":
@@ -80,9 +121,36 @@ func validateDurableCompleteMarker(indexSetID, runID string, complete completeMa
 		return fmt.Errorf("durable complete marker run_id mismatch")
 	case complete.Artifacts.Manifest == nil:
 		return fmt.Errorf("durable hub run is missing manifest artifact")
-	default:
-		return nil
 	}
+	if complete.MarkerSchemaVersion == indexHubMarkerSchemaV2 {
+		if complete.Artifacts.IdentityJSON == nil {
+			return fmt.Errorf("durable-v2 hub marker is missing canonical identity artifact")
+		}
+		snapshotCompletedAt, snapshotOK := parseCanonicalHubTime(complete.SnapshotCompletedAt)
+		hubCommittedAt, hubOK := parseCanonicalHubTime(complete.HubCommittedAt)
+		completedAt, completedOK := parseCanonicalHubTime(complete.CompletedAt)
+		if !snapshotOK {
+			return fmt.Errorf("durable-v2 hub marker snapshot_completed_at is invalid")
+		}
+		if !hubOK {
+			return fmt.Errorf("durable-v2 hub marker hub_committed_at is invalid")
+		}
+		if !completedOK || !completedAt.Equal(hubCommittedAt) {
+			return fmt.Errorf("durable-v2 hub marker completed_at must equal hub_committed_at")
+		}
+		if hubCommittedAt.Before(snapshotCompletedAt) {
+			return fmt.Errorf("durable-v2 hub marker hub_committed_at precedes snapshot_completed_at")
+		}
+	}
+	return nil
+}
+
+func parseCanonicalHubTime(raw string) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || parsed.IsZero() || raw != parsed.UTC().Format(time.RFC3339Nano) {
+		return time.Time{}, false
+	}
+	return parsed, true
 }
 
 func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportSnapshot, error) {
@@ -126,12 +194,17 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 	if err := verifyLocalDurableSegments(complete.SegmentDir, manifest); err != nil {
 		return durableExportSnapshot{}, err
 	}
+	snapshotCompletedAt, err := time.Parse(time.RFC3339Nano, complete.CompletedAt)
+	if err != nil || snapshotCompletedAt.IsZero() {
+		return durableExportSnapshot{}, fmt.Errorf("local durable completed_at is invalid")
+	}
 	return durableExportSnapshot{
-		Manifest:     manifest,
-		ManifestPath: complete.ManifestPath,
-		ManifestSHA:  manifestSHA,
-		ManifestSize: manifestSize,
-		SegmentDir:   complete.SegmentDir,
+		Manifest:            manifest,
+		ManifestPath:        complete.ManifestPath,
+		ManifestSHA:         manifestSHA,
+		ManifestSize:        manifestSize,
+		SegmentDir:          complete.SegmentDir,
+		SnapshotCompletedAt: snapshotCompletedAt,
 	}, nil
 }
 
@@ -187,6 +260,17 @@ func verifyLocalDurableSegments(segmentDir string, manifest indexsubstrate.Inter
 }
 
 func buildDurableCompleteJSON(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, snapshot durableExportSnapshot) ([]byte, error) {
+	if indexSet == nil || run == nil {
+		return nil, fmt.Errorf("durable hub marker requires index set and run")
+	}
+	if snapshot.SnapshotCompletedAt.IsZero() {
+		return nil, fmt.Errorf("durable hub marker requires snapshot completion time")
+	}
+	if snapshot.IdentitySize != int64(len(snapshot.Identity)) ||
+		!validSHA256Hex(snapshot.IdentitySHA) ||
+		sha256HexBytes(snapshot.Identity) != snapshot.IdentitySHA {
+		return nil, fmt.Errorf("durable hub marker requires bound canonical identity bytes")
+	}
 	type durableInfo struct {
 		ManifestType       string `json:"manifest_type"`
 		ManifestRender     string `json:"manifest_render"`
@@ -196,6 +280,7 @@ func buildDurableCompleteJSON(indexSet *indexstore.IndexSet, run *indexstore.Ind
 		Rows               int    `json:"rows"`
 	}
 	type artifacts struct {
+		Identity artifactRef   `json:"identity_json"`
 		Manifest artifactRef   `json:"manifest"`
 		Segments []artifactRef `json:"segments"`
 	}
@@ -207,6 +292,8 @@ func buildDurableCompleteJSON(indexSet *indexstore.IndexSet, run *indexstore.Ind
 		IndexSetID          string      `json:"index_set_id"`
 		RunID               string      `json:"run_id"`
 		CompletedAt         string      `json:"completed_at"`
+		SnapshotCompletedAt string      `json:"snapshot_completed_at"`
+		HubCommittedAt      string      `json:"hub_committed_at"`
 		ExportedBy          string      `json:"exported_by"`
 		Artifacts           artifacts   `json:"artifacts"`
 		Durable             durableInfo `json:"durable"`
@@ -221,16 +308,29 @@ func buildDurableCompleteJSON(indexSet *indexstore.IndexSet, run *indexstore.Ind
 			SHA256:    segment.Digest.Hex,
 		})
 	}
+	hubCommittedAt := time.Now().UTC()
+	if hubCommittedAt.Before(snapshot.SnapshotCompletedAt) {
+		return nil, fmt.Errorf("hub commit time precedes snapshot completion")
+	}
 	doc := completeDoc{
 		Version:             "1.0",
-		MarkerSchemaVersion: indexHubMarkerSchemaV1,
+		MarkerSchemaVersion: indexHubMarkerSchemaV2,
 		Format:              indexHubFormatDurableV2,
 		FormatVersion:       "2",
 		IndexSetID:          indexSet.IndexSetID,
 		RunID:               run.RunID,
-		CompletedAt:         time.Now().UTC().Format(time.RFC3339),
+		CompletedAt:         hubCommittedAt.Format(time.RFC3339Nano),
+		SnapshotCompletedAt: snapshot.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+		HubCommittedAt:      hubCommittedAt.Format(time.RFC3339Nano),
 		ExportedBy:          exportedByString(),
 		Artifacts: artifacts{
+			Identity: artifactRef{
+				Path:      "identity.json",
+				Role:      "identity",
+				Required:  true,
+				SizeBytes: snapshot.IdentitySize,
+				SHA256:    snapshot.IdentitySHA,
+			},
 			Manifest: artifactRef{
 				Path:      "manifest.json",
 				Role:      "manifest",

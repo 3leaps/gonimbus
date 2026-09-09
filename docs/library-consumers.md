@@ -37,8 +37,13 @@ Experimental workflow surface:
   [Durable index builds (pkg/indexbuild)](#durable-index-builds-pkgindexbuild) below.
 - `github.com/3leaps/gonimbus/pkg/indexreader` is the format-aware local index
   read seam: `ResolveIndexReader` dispatches on `sqlite-v1` / `durable-v2`
-  markers and exposes streaming query over durable segments. **Experimental**;
-  durable-v2 remains internal-render-only.
+  markers and exposes streaming query over durable segments.
+  `AcquireBundle` accepts only a caller-resolved `HubExactObjectReader`
+  capability and an immutable set/run target; it has no provider-construction,
+  configuration, listing, latest, write, or delete surface.
+  `OpenAcquiredBundle` revalidates a final-marked acquired artifact chain for
+  exact local query. **Experimental**; durable-v2 remains
+  internal-render-only.
 
 Gonimbus is pre-v1.0. Stable packages are supported for embedded use under the
 notification protocol documented in [`docs/api-stability.md`](api-stability.md);

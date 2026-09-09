@@ -72,3 +72,7 @@ workers: 4
 # Empty uses the platform app-data default. Set data_root in user config for a
 # persistent relocation, or set GONIMBUS_DATA_DIR for a one-process override.
 data_root: ""
+# Named read-only bindings for exact durable hub acquisition. Each handle owns
+# its hub URI and provider read credential selection; commands receive only the
+# logical name.
+hub_read_handles: {}

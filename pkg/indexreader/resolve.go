@@ -670,6 +670,7 @@ type verifiedLocalIdentityFile struct {
 	Payload            indexstore.IndexSetIdentityPayload
 	IndexSetID         string
 	CompleteFileSHA256 string
+	Raw                []byte
 }
 
 // readVerifiedLocalIdentityFile binds and reads identity.json once, then
@@ -680,6 +681,10 @@ func readVerifiedLocalIdentityFile(path string, maxBytes int64, expectedIndexSet
 	if err != nil {
 		return verifiedLocalIdentityFile{}, err
 	}
+	return readVerifiedLocalIdentityBytes(data, expectedIndexSetID)
+}
+
+func readVerifiedLocalIdentityBytes(data []byte, expectedIndexSetID string) (verifiedLocalIdentityFile, error) {
 	if len(data) < 2 || data[len(data)-1] != '\n' {
 		return verifiedLocalIdentityFile{}, fmt.Errorf("identity.json must end with exactly one LF")
 	}
@@ -703,6 +708,29 @@ func readVerifiedLocalIdentityFile(path string, maxBytes int64, expectedIndexSet
 		Payload:            payload,
 		IndexSetID:         identity.IndexSetID,
 		CompleteFileSHA256: hex.EncodeToString(sum[:]),
+		Raw:                append([]byte(nil), data...),
+	}, nil
+}
+
+// CanonicalLocalIdentityFile is an exact, single-open canonical identity
+// artifact. Raw includes the required final LF and SHA256 covers all Raw bytes.
+type CanonicalLocalIdentityFile struct {
+	Payload    indexstore.IndexSetIdentityPayload
+	IndexSetID string
+	Raw        []byte
+	SHA256     string
+}
+
+// ReadCanonicalLocalIdentityFile performs the frozen canonical identity check
+// and returns the exact same bytes that were parsed and hashed.
+func ReadCanonicalLocalIdentityFile(path string, maxBytes int64, expectedIndexSetID string) (CanonicalLocalIdentityFile, error) {
+	verified, err := readVerifiedLocalIdentityFile(path, maxBytes, expectedIndexSetID)
+	if err != nil {
+		return CanonicalLocalIdentityFile{}, err
+	}
+	return CanonicalLocalIdentityFile{
+		Payload: verified.Payload, IndexSetID: verified.IndexSetID,
+		Raw: append([]byte(nil), verified.Raw...), SHA256: verified.CompleteFileSHA256,
 	}, nil
 }
 

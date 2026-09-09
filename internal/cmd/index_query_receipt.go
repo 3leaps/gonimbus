@@ -119,10 +119,15 @@ func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts i
 	if err != nil {
 		return fmt.Errorf("%s requires verified durable metadata: %w", indexQueryReceiptOutputFormat, err)
 	}
-	if verified.SourceKind != indexreader.SnapshotSourceLocalPublished {
+	if verified.SourceKind != indexreader.SnapshotSourceLocalPublished &&
+		verified.SourceKind != indexreader.SnapshotSourceAcquiredHub {
 		return fmt.Errorf("%s does not yet support source kind %q", indexQueryReceiptOutputFormat, verified.SourceKind)
 	}
 
+	hubCommittedAt := ""
+	if !verified.HubCommittedAt.IsZero() {
+		hubCommittedAt = verified.HubCommittedAt.UTC().Format(time.RFC3339Nano)
+	}
 	querySummary, err := buildIndexQueryReceiptQuery(verified, opts)
 	if err != nil {
 		return err
@@ -267,6 +272,7 @@ func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts i
 		RunID:                 verified.RunID,
 		RunStartedAt:          verified.RunStartedAt.UTC().Format(time.RFC3339Nano),
 		SnapshotCompletedAt:   verified.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+		HubCommittedAt:        hubCommittedAt,
 		HubCompleteSHA256:     verified.HubCompleteSHA256,
 		SourceIdentitySHA256:  verified.SourceIdentitySHA256,
 		SourceIdentitySchema:  verified.SourceIdentitySchema,
@@ -444,7 +450,7 @@ func indexQueryResultMode(countOnly, canonical bool) string {
 }
 
 func indexQueryFilterKinds(params indexstore.QueryParams) []string {
-	var kinds []string
+	kinds := make([]string, 0, 10)
 	if params.Pattern != "" {
 		kinds = append(kinds, "pattern")
 	}

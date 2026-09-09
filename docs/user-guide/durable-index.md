@@ -58,9 +58,9 @@ gonimbus index build --job index.yaml --format both
 | Local `enrich-with-head`                                      | `durable` or `sqlite` (format-aware)         |
 | Local inventory GC (`index gc`)                               | Format-aware plan; durable sets included     |
 | Canonical SQLite consumer artifact (`index.db`)               | `sqlite` only                                |
-| Latest-selected `query --since-run`                          | `sqlite`                                     |
-| Exact pinned `query --since-run`                             | `durable`                                    |
-| `stats --prefixes`, full `--resume-run`                      | `sqlite` (or build that produces `index.db`) |
+| Latest-selected `query --since-run`                           | `sqlite`                                     |
+| Exact pinned `query --since-run`                              | `durable`                                    |
+| `stats --prefixes`, full `--resume-run`                       | `sqlite` (or build that produces `index.db`) |
 | Dual-format LIST parity gate (durable + per-run SQLite check) | `both`                                       |
 
 **Existing `index.db` files are not rewritten or invalidated.** SQLite remains a
@@ -394,6 +394,56 @@ gonimbus index hydrate --hub s3://bucket/index-hub/ \
 - Durable hydrate verifies the manifest and **each segment digest** before
   trust, then restores `manifest.json` + segments — **not** `index.db`.
 - `index hub ls` / `show` surface per-run formats so mixed hubs stay legible.
+
+### Exact acquired bundles for automation
+
+`index hydrate` remains a human convenience. Automation that must prove an
+immutable hub selection uses `index acquire` with a named, read-only
+`hub_read_handle`, a full index-set ID, and an exact run ID:
+
+```yaml
+# User configuration
+hub_read_handles:
+  archive-read:
+    uri: s3://example-index-hub/
+    profile: archive-reader
+    region: us-east-1
+```
+
+```bash
+gonimbus index acquire \
+  --hub-read-handle archive-read \
+  --index-set idx_<64-lowercase-hex> \
+  --run-id run_1783087200000000000 \
+  --dest /srv/gonimbus/acquired/run_1783087200000000000
+
+gonimbus index query \
+  --snapshot-dir /srv/gonimbus/acquired/run_1783087200000000000 \
+  --count --output-format receipt-jsonl-v1
+```
+
+Acquisition never lists the hub or reads `latest.json`. It downloads only the
+deterministic keys for the selected durable-v2 run, verifies the hub marker,
+canonical `identity.json`, manifest, and every current-run segment, writes
+`acquired.json` last in a sibling staging directory, and publishes the bundle
+atomically without replacing an existing different bundle. The snapshot
+completion time and later hub commit time remain distinct in the marker and
+query receipt.
+
+For an exact durable delta, add `--proof-through-run <baseline-run>` to acquire
+the bounded marker/manifest ancestry proof. Ancestor segments are not copied.
+The proof-through run is part of the acquisition identity, so acquiring a
+different proof into an existing destination is a conflict.
+
+`--snapshot-dir` opens only a final-marked acquired bundle and revalidates every
+bound artifact. It is mutually exclusive with canonical discovery selectors
+and refuses ordinary hydrate output and the canonical `indexes/` namespace.
+Acquired bundles contain the canonical source-identity artifact; store them in
+an access-controlled operational directory outside source repositories and
+version-control trees.
+
+The public final-marker contract is
+[`index-acquired-bundle.v1.schema.json`](../../schemas/gonimbus/v1.0.0/index-acquired-bundle.v1.schema.json).
 
 Large **SQLite** hub exports still use multipart upload when `index.db` crosses
 the default threshold. Durable export naturally stays under single-PUT walls by

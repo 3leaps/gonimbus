@@ -97,6 +97,38 @@
       "type": "string",
       "description": "Compatibility alias for data_root."
     },
+    "hub_read_handles": {
+      "type": "object",
+      "description": "Logical read-only hub bindings used only by exact index acquisition.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "uri"
+        ],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "pattern": "^(s3|gs|file)://"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "gcp_project": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "memory_budget": {
       "type": "string",
       "pattern": "^[0-9]+(\\.[0-9]+)?\\s*([KMGT]i?B?|[kmgt]i?b?|B|b)?$",

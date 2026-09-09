@@ -210,6 +210,7 @@ gonimbus index doctor          # Validate index integrity (format-aware)
 gonimbus index gc              # Reclaim old local sets from an audited format-aware plan
 gonimbus index export          # Export an index run to a hub (auto prefers durable)
 gonimbus index hydrate         # Download an index run from a hub (format-aware)
+gonimbus index acquire         # Acquire an exact durable run as a verified query bundle
 gonimbus index hub             # Manage index hubs
 
 # Job management (for long-running builds)

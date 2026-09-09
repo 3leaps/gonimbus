@@ -616,8 +616,12 @@ func TestRunIndexExport_AutoSelectsDurableWithoutSQLite(t *testing.T) {
 	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
 	ctx := context.Background()
 
-	indexSetID := "idx_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	params := testIndexSetParams("s3://bucket/durable-only/")
+	identity, err := indexstore.ComputeIndexSetID(params)
+	require.NoError(t, err)
+	indexSetID := identity.IndexSetID
 	runID := "run_1709654400000000001"
+	writeCanonicalIdentityForHubTest(t, params, indexSetID)
 	localManifest := writeLocalDurableSnapshotForHubTest(t, indexSetID, runID)
 	require.NotEmpty(t, localManifest.Segments)
 

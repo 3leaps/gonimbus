@@ -55,11 +55,11 @@ gonimbus index query 's3://my-bucket/data/' --pattern '**/report-*.xml' --count
 
 ### Artifact formats
 
-| Format                | Build flag         | What it produces                                            | Local consumers today                                                                    |
-| --------------------- | ------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare, `gc`     |
+| Format                | Build flag         | What it produces                                            | Local consumers today                                                                                    |
+| --------------------- | ------------------ | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **durable** (default) | `--format durable` | Segment-backed durable-v2 snapshot under the segment cache  | `query`, `list`, `stats`, `doctor`, `enrich-with-head`, export/hydrate/compare, `gc`                     |
 | **sqlite**            | `--format sqlite`  | Classic `index.db` under `indexes/idx_*/`                   | All local consumers; required for latest-selected `--since-run`, `stats --prefixes`, full `--resume-run` |
-| **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB    |
+| **both**              | `--format both`    | Durable publication + run-scoped SQLite parity verification | Durable surfaces; the SQLite side is per-run verification evidence, not a consumer DB                    |
 
 Durable is the default index artifact format. SQLite remains a first-class
 supported compatibility path (`--format sqlite` / `--format both`). Durable
@@ -463,6 +463,12 @@ with exactly nine fractional digits. Storage-class values are deduplicated and
 sorted by Unicode scalar value before hashing. Literal glob/regex values and
 object keys are hashed but are never copied into the receipt; the receipt
 exposes only safe filter-kind and value-count summaries.
+
+An acquired durable bundle opened with `--snapshot-dir` emits
+`source_kind: acquired_hub` and binds the source snapshot completion, hub
+commit, and hub-complete digest that were revalidated from the final
+`acquired.json` artifact chain. See
+[Exact acquired bundles for automation](durable-index.md#exact-acquired-bundles-for-automation).
 
 `--output` remains a destination, not a format selector. In receipt mode the
 complete stream, including its terminal success receipt, is staged before the
@@ -1233,12 +1239,16 @@ Hub runs carry an explicit format marker. `index export --format auto` (default)
 selects `durable-v2` when a local durable complete marker is present for the
 target run, otherwise `sqlite-v1`. Explicit `--format durable` resolves from the
 local durable snapshot (complete marker + segments) and does not require
-`index.db`. Explicit `--format sqlite` publishes `index.db` and optional
+`index.db`; it also publishes and digest-binds the exact canonical
+`identity.json`, and records source snapshot completion separately from the
+later hub commit. Explicit `--format sqlite` publishes `index.db` and optional
 `identity.json` as before. `index hydrate` reads the marker, rejects unknown
 formats, and for durable runs verifies the manifest and every referenced segment
 by digest before writing them under the destination directory. A durable hydrate
 does not create an `index.db`; downstream commands must explicitly support
-durable manifests before using that hydrated output.
+durable manifests before using that hydrated output. Machine consumers use
+[`index acquire` and `--snapshot-dir`](durable-index.md#exact-acquired-bundles-for-automation)
+instead of treating hydrate output as query authority.
 
 `index hub ls` and `index hub show` display hub run formats so mixed
 `sqlite-v1` / `durable-v2` hubs are legible. JSON output includes format counts
