@@ -109,7 +109,7 @@ func guardDoctorLeaseFlags(cmd *cobra.Command, leases, releaseStale bool) error 
 	if !leases && !releaseStale {
 		return nil
 	}
-	for _, name := range []string{"root", "db", "format", "stats", "detail", "verbose"} {
+	for _, name := range []string{"root", "db", "format", "snapshot-dir", "stats", "detail", "verbose"} {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s is an index-store health flag and does not apply to the lease surface; use 'index lease' for lease operations", name)
 		}

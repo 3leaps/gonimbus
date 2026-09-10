@@ -19,13 +19,16 @@ func executeIndexDoctorCommand(t *testing.T, args ...string) (string, string, er
 	oldRootDir := indexDoctorRootDir
 	oldDB := indexDoctorDB
 	oldFormat := indexDoctorFormat
+	oldSnapshotDir := indexDoctorSnapshotDir
 	indexDoctorRootDir = ""
 	indexDoctorDB = ""
 	indexDoctorFormat = ""
+	indexDoctorSnapshotDir = ""
 	t.Cleanup(func() {
 		indexDoctorRootDir = oldRootDir
 		indexDoctorDB = oldDB
 		indexDoctorFormat = oldFormat
+		indexDoctorSnapshotDir = oldSnapshotDir
 	})
 
 	cmd := newIndexDoctorCommand()
@@ -154,6 +157,97 @@ func TestIndexDoctorCommand_MissingPathDoesNotFallThroughToID(t *testing.T) {
 	require.Empty(t, stderr)
 	require.Contains(t, err.Error(), "index db not found")
 	require.Contains(t, err.Error(), missingPath)
+}
+
+func TestIndexDoctorCommand_SnapshotDirConflictsFailBeforeLookup(t *testing.T) {
+	// Nonexistent paths throughout: the mutual-exclusion error must win
+	// before any filesystem lookup.
+	missing := filepath.Join(t.TempDir(), "missing")
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"positional", []string{"--snapshot-dir", missing, "idx_1234"}, "mutually exclusive with a positional target"},
+		{"db", []string{"--snapshot-dir", missing, "--db", missing}, "mutually exclusive with --db"},
+		{"root", []string{"--snapshot-dir", missing, "--root", missing}, "mutually exclusive with --root"},
+		{"format", []string{"--snapshot-dir", missing, "--format", "durable-v2"}, "mutually exclusive with --format"},
+		{"whitespace-positional", []string{"--snapshot-dir", missing, "  "}, "mutually exclusive with a positional target"},
+		{"empty-db", []string{"--snapshot-dir", missing, "--db", ""}, "mutually exclusive with --db"},
+		{"empty-root", []string{"--snapshot-dir", missing, "--root", ""}, "mutually exclusive with --root"},
+		{"empty-format", []string{"--snapshot-dir", missing, "--format", ""}, "mutually exclusive with --format"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, err := executeIndexDoctorCommand(t, tc.args...)
+			require.Error(t, err)
+			require.Empty(t, stdout)
+			require.Empty(t, stderr)
+			require.Contains(t, err.Error(), "--snapshot-dir is "+tc.want)
+		})
+	}
+}
+
+func TestIndexDoctorCommand_SnapshotDirBlankNeverFallsIntoDiscovery(t *testing.T) {
+	idxDirName := seedDoctorAmbientIndex(t)
+
+	// Positive control: the seeded ambient index is discoverable, so the
+	// blank-selector errors below prove fail-closed, not empty ambient.
+	stdout, _, err := executeIndexDoctorCommand(t)
+	require.NoError(t, err)
+	require.Contains(t, stdout, idxDirName)
+
+	for _, blank := range []string{"", "  "} {
+		stdout, stderr, err := executeIndexDoctorCommand(t, "--snapshot-dir", blank)
+		require.Error(t, err, "blank=%q", blank)
+		require.Empty(t, stdout, "blank=%q", blank)
+		require.Empty(t, stderr, "blank=%q", blank)
+		require.Contains(t, err.Error(), "--snapshot-dir requires a nonblank directory")
+	}
+}
+
+func seedDoctorAmbientIndex(t *testing.T) string {
+	t.Helper()
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	resetAppDataRootTestState(t)
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	t.Setenv("GONIMBUS_DATA_ROOT", "")
+	idxDirName := "idx_" + strings.Repeat("ab", 32)
+	idxDir := filepath.Join(dataRoot, "indexes", idxDirName)
+	require.NoError(t, os.MkdirAll(idxDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(idxDir, "index.db"), []byte{}, 0o600))
+	return idxDirName
+}
+
+func TestIndexDoctorCommand_SnapshotDirMissingMarkerFailsClosed(t *testing.T) {
+	empty := t.TempDir()
+
+	stdout, stderr, err := executeIndexDoctorCommand(t, "--snapshot-dir", empty)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+	require.Empty(t, stderr)
+	require.Contains(t, strings.ToLower(err.Error()), "acquired")
+}
+
+func TestIndexDoctorCommand_SnapshotDirMalformedMarkerFailsClosed(t *testing.T) {
+	dest := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dest, "acquired.json"), []byte("not-json\n"), 0o600))
+
+	stdout, stderr, err := executeIndexDoctorCommand(t, "--snapshot-dir", dest)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+	require.Empty(t, stderr)
+	require.Contains(t, strings.ToLower(err.Error()), "acquired")
+}
+
+func TestIndexDoctorCommand_MarkerlessDirKeepsLegacyLookup(t *testing.T) {
+	empty := t.TempDir()
+
+	stdout, stderr, err := executeIndexDoctorCommand(t, empty)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+	require.Empty(t, stderr)
+	require.Contains(t, err.Error(), "no index.db or durable snapshot found")
 }
 
 func TestInspectIndexDBForDoctor_IdentityOK(t *testing.T) {

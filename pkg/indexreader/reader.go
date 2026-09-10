@@ -94,6 +94,25 @@ type VerifiedSnapshotMetadataReader interface {
 	VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, error)
 }
 
+// VerifiedAcquiredBundleReport carries acquired-marker presentation facts
+// from a verified open. Value-only: diagnostics may project it without
+// re-reading bundle files outside the bound root. Reference fields hold
+// fresh copies per call, so projecting them can never mutate reader state.
+type VerifiedAcquiredBundleReport struct {
+	MarkerType             string
+	MarkerSchema           string
+	HubMarkerSchemaVersion string
+	ManifestCreatedAt      time.Time
+	IdentityPayload        indexstore.IndexSetIdentityPayload
+	ManifestRaw            []byte
+}
+
+// VerifiedAcquiredBundleReporter is the narrow optional capability
+// implemented by readers opened from a verified acquired bundle.
+type VerifiedAcquiredBundleReporter interface {
+	VerifiedAcquiredBundleReport() (VerifiedAcquiredBundleReport, error)
+}
+
 // Meta describes the resolved index identity.
 type Meta struct {
 	Format     Format

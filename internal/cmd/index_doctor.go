@@ -72,7 +72,11 @@ Examples:
   gonimbus index doctor idx_1234abcd --detail --format durable-v2
 
   # Machine-readable output
-  gonimbus index doctor --json`,
+  gonimbus index doctor --json
+
+  # Diagnose exactly one acquired bundle (same vocabulary as query);
+  # never consults the canonical cache for this target
+  gonimbus index doctor --snapshot-dir /path/to/bundle --json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runIndexDoctor,
 	}
@@ -80,6 +84,7 @@ Examples:
 	cmd.Flags().StringVar(&indexDoctorRootDir, "root", "", "Override index root directory (defaults to app data dir indexes)")
 	cmd.Flags().StringVar(&indexDoctorDB, "db", "", "Inspect a specific index db path or index directory (optional)")
 	cmd.Flags().StringVar(&indexDoctorFormat, "format", "", "Select substrate for multi-format sets: sqlite-v1 or durable-v2")
+	cmd.Flags().StringVar(&indexDoctorSnapshotDir, "snapshot-dir", "", "Inspect exactly one acquired bundle directory (mutually exclusive with positional target, --db, --root, and --format)")
 	cmd.Flags().Bool("json", false, "Output as JSON")
 	cmd.Flags().Bool("verbose", false, "Include identity payload details")
 	cmd.Flags().Bool("stats", false, "Include object counts (may be expensive on very large sqlite indexes)")
@@ -93,9 +98,10 @@ Examples:
 }
 
 var (
-	indexDoctorRootDir string
-	indexDoctorDB      string
-	indexDoctorFormat  string
+	indexDoctorRootDir     string
+	indexDoctorDB          string
+	indexDoctorFormat      string
+	indexDoctorSnapshotDir string
 )
 
 func init() {
@@ -154,6 +160,13 @@ type indexDoctorEntry struct {
 	DurableManifestSHA  string `json:"durable_manifest_sha256,omitempty"`
 	DurableSegmentCount int    `json:"durable_segment_count,omitempty"`
 
+	// Acquired-bundle mode (--snapshot-dir or positional auto-detect).
+	// Additive projection only; durable_latest_path stays empty here.
+	AcquiredMarkerPath   string `json:"acquired_marker_path,omitempty"`
+	AcquiredMarkerType   string `json:"acquired_marker_type,omitempty"`
+	AcquiredMarkerSchema string `json:"acquired_marker_schema,omitempty"`
+	HubMarkerSchema      string `json:"hub_marker_schema_version,omitempty"`
+
 	// Run-scoped SQLite parity-verification projections retained under
 	// <set>/verification/<attempt>/. Inventory classification only: these are
 	// non-canonical dual-format parity artifacts; run-scoping grants
@@ -187,6 +200,51 @@ type indexDoctorTarget struct {
 	DBPath string
 	// Meta is set when discovery used the reader seam (both formats).
 	Meta indexreader.Meta
+	// AcquiredDir is set for acquired-bundle mode (--snapshot-dir or
+	// positional auto-detect). Inspection opens exactly that directory
+	// and never consults the canonical cache.
+	AcquiredDir string
+}
+
+// guardDoctorSnapshotDirFlags fails closed on contradictory target
+// selectors before any filesystem lookup. Intent binds to presence, never
+// to trimmed values: an explicitly passed blank --snapshot-dir errors
+// instead of silently falling into ambient discovery, and explicitly
+// passed (even empty) conflicting selectors are contradictions.
+func guardDoctorSnapshotDirFlags(cmd *cobra.Command, args []string) error {
+	if !cmd.Flags().Changed("snapshot-dir") {
+		return nil
+	}
+	if strings.TrimSpace(indexDoctorSnapshotDir) == "" {
+		return fmt.Errorf("--snapshot-dir requires a nonblank directory")
+	}
+	if len(args) > 0 {
+		return fmt.Errorf("--snapshot-dir is mutually exclusive with a positional target")
+	}
+	for _, name := range []string{"db", "root", "format"} {
+		if cmd.Flags().Changed(name) {
+			return fmt.Errorf("--snapshot-dir is mutually exclusive with --%s", name)
+		}
+	}
+	return nil
+}
+
+func acquiredDoctorTarget(dir string) indexDoctorTarget {
+	clean := filepath.Clean(strings.TrimSpace(dir))
+	return indexDoctorTarget{
+		Format:      indexreader.FormatDurableV2,
+		AcquiredDir: clean,
+		Meta: indexreader.Meta{
+			Format:      indexreader.FormatDurableV2,
+			IdentityDir: clean,
+			SourcePath:  filepath.Join(clean, "acquired.json"),
+		},
+	}
+}
+
+func isAcquiredBundleDir(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, "acquired.json"))
+	return err == nil && !st.IsDir()
 }
 
 func runIndexDoctor(cmd *cobra.Command, args []string) error {
@@ -219,8 +277,17 @@ func runIndexDoctor(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		target = args[0]
 	}
+	if err := guardDoctorSnapshotDirFlags(cmd, args); err != nil {
+		return err
+	}
 
-	targets, err := resolveIndexDoctorTargets(ctx, target)
+	// Snapshot selection binds to flag presence: non-empty here provably
+	// means explicitly passed with a nonblank value (guard-enforced).
+	snapshotDir := ""
+	if cmd.Flags().Changed("snapshot-dir") {
+		snapshotDir = indexDoctorSnapshotDir
+	}
+	targets, err := resolveIndexDoctorTargets(ctx, target, snapshotDir)
 	if err != nil {
 		return err
 	}
@@ -256,6 +323,9 @@ func runIndexDoctor(cmd *cobra.Command, args []string) error {
 	for _, t := range targets {
 		entry, err := inspectIndexForDoctor(ctx, t, opts)
 		if err != nil {
+			if t.AcquiredDir != "" {
+				return err
+			}
 			entries = append(entries, indexDoctorEntry{
 				Format:  formatLabel(t.Format),
 				DBPath:  t.DBPath,
@@ -282,6 +352,9 @@ func inspectIndexForDoctor(ctx context.Context, target indexDoctorTarget, opts i
 	case indexreader.FormatSQLiteV1:
 		return inspectIndexDBForDoctor(ctx, target.DBPath, opts)
 	case indexreader.FormatDurableV2:
+		if target.AcquiredDir != "" {
+			return inspectAcquiredBundleForDoctor(target.AcquiredDir, opts)
+		}
 		return inspectDurableForDoctor(target.Meta, opts)
 	default:
 		if target.DBPath != "" {
@@ -317,7 +390,7 @@ func filterDoctorTargetsByFormat(targets []indexDoctorTarget, formatFlag string)
 	return out, nil
 }
 
-func resolveIndexDoctorTargets(ctx context.Context, target string) ([]indexDoctorTarget, error) {
+func resolveIndexDoctorTargets(ctx context.Context, target string, snapshotDir string) ([]indexDoctorTarget, error) {
 	_ = ctx
 	target = strings.TrimSpace(target)
 	explicitDB := strings.TrimSpace(indexDoctorDB)
@@ -327,6 +400,9 @@ func resolveIndexDoctorTargets(ctx context.Context, target string) ([]indexDocto
 
 	if explicitDB != "" {
 		return resolveExplicitDoctorPath(explicitDB)
+	}
+	if snapshotDir != "" {
+		return []indexDoctorTarget{acquiredDoctorTarget(snapshotDir)}, nil
 	}
 	if target != "" {
 		return resolveNamedDoctorTarget(target)
@@ -589,6 +665,12 @@ func resolveExplicitDoctorPath(path string) ([]indexDoctorTarget, error) {
 	}
 
 	if info.IsDir() {
+		// Acquired bundle directory: bind exactly this directory. Identity
+		// directories never carry acquired.json, so presence selects acquired
+		// mode without changing legacy lookup for anything else.
+		if isAcquiredBundleDir(path) {
+			return []indexDoctorTarget{acquiredDoctorTarget(path)}, nil
+		}
 		// Segment-set directory under cache/segments/<idx_*>: durable-only selection
 		// that retains the real identity directory when present.
 		if isDoctorSegmentSetPath(opts.SegmentCacheRoot, path) {
@@ -892,6 +974,113 @@ func inspectDurableForDoctor(meta indexreader.Meta, opts indexDoctorOptions) (*i
 	// (e.g. the expected Shape-2 verification-projection retention note) are
 	// excluded so a healthy durable-canonical both build reports identity_ok=true.
 	entry.IdentityOK = entry.IndexSetID != "" && markerOK && len(entry.Notes)-entry.infoNoteCount == 0
+	return entry, nil
+}
+
+// inspectAcquiredBundleForDoctor reports exactly one acquired bundle.
+// OpenAcquiredBundle is the validation gate: a missing or malformed marker
+// fails here, and no canonical-cache lookup happens on this path. Every
+// reported fact comes from the verified open (reader metadata plus the
+// narrow verified capabilities); nothing re-reads bundle files by pathname
+// after the binding gate, so a swapped destination cannot be described.
+func inspectAcquiredBundleForDoctor(dest string, opts indexDoctorOptions) (*indexDoctorEntry, error) {
+	dest = filepath.Clean(strings.TrimSpace(dest))
+	reader, err := indexreader.OpenAcquiredBundle(indexreader.AcquiredOpenOptions{Directory: dest})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+
+	meta := reader.Meta()
+	verifiedReader, ok := reader.(indexreader.VerifiedSnapshotMetadataReader)
+	if !ok {
+		return nil, fmt.Errorf("acquired bundle reader cannot provide verified snapshot facts")
+	}
+	verified, err := verifiedReader.VerifiedSnapshotMetadata()
+	if err != nil {
+		return nil, err
+	}
+	reportReader, ok := reader.(indexreader.VerifiedAcquiredBundleReporter)
+	if !ok {
+		return nil, fmt.Errorf("acquired bundle reader cannot provide verified marker facts")
+	}
+	report, err := reportReader.VerifiedAcquiredBundleReport()
+	if err != nil {
+		return nil, err
+	}
+
+	entry := &indexDoctorEntry{
+		Format:               formatLabel(meta.Format),
+		Dir:                  dest,
+		DirName:              filepath.Base(dest),
+		IndexSetID:           verified.IndexSetID,
+		BaseURI:              meta.BaseURI,
+		Provider:             meta.Provider,
+		LatestRunID:          verified.RunID,
+		CreatedAt:            report.ManifestCreatedAt,
+		AcquiredMarkerPath:   filepath.Join(dest, "acquired.json"),
+		AcquiredMarkerType:   report.MarkerType,
+		AcquiredMarkerSchema: report.MarkerSchema,
+		HubMarkerSchema:      report.HubMarkerSchemaVersion,
+		DurableManifestSHA:   verified.ManifestSHA256,
+		DurableSegmentCount:  verified.Declared.Segments,
+		Notes:                nil,
+	}
+
+	// Identity and run manifest were verified by the open; project presence
+	// and validity from that fact, never from a fresh pathname read.
+	// The open requires the frozen encoding (exact canonical JSON plus one
+	// LF) bound to this set, so the canonical-content hash below is the set
+	// ID hash itself — the same value canonical mode reports after trimming.
+	entry.IdentityPath = filepath.Join(dest, "identity.json")
+	entry.IdentityPresent = true
+	entry.IdentityValidJSON = true
+	entry.IdentityHash = strings.TrimPrefix(verified.IndexSetID, "idx_")
+	entry.IdentityIndexSetID = verified.IndexSetID
+	entry.IdentityDirName = "idx_" + entry.IdentityHash[:16]
+	entry.IdentityDirMatches = entry.DirName == entry.IdentityDirName
+	if !entry.IdentityDirMatches && strings.HasPrefix(entry.DirName, "idx_") && len(entry.DirName) == len(entry.IdentityDirName) {
+		entry.Notes = append(entry.Notes, fmt.Sprintf("dir name mismatch (expected %s)", entry.IdentityDirName))
+	}
+	entry.IdentityHashMatchesDB = entry.IdentityIndexSetID == entry.IndexSetID
+	if !entry.IdentityHashMatchesDB {
+		entry.Notes = append(entry.Notes, fmt.Sprintf("identity hash mismatch (identity %s, acquired %s)", entry.IdentityIndexSetID, entry.IndexSetID))
+	}
+	entry.IdentityBaseURIMatch = report.IdentityPayload.BaseURI == entry.BaseURI || entry.BaseURI == ""
+	entry.IdentityProviderMatch = report.IdentityPayload.Provider == entry.Provider || entry.Provider == ""
+	if entry.BaseURI == "" {
+		entry.BaseURI = report.IdentityPayload.BaseURI
+	}
+	if entry.Provider == "" {
+		entry.Provider = report.IdentityPayload.Provider
+	}
+	entry.StorageProvider = report.IdentityPayload.StorageProvider
+	entry.CloudProvider = report.IdentityPayload.CloudProvider
+	entry.Region = report.IdentityPayload.Region
+	entry.RegionKind = report.IdentityPayload.RegionKind
+	entry.EndpointHost = report.IdentityPayload.EndpointHost
+	if opts.IncludeIdentityPayload {
+		payload := report.IdentityPayload
+		entry.IdentityPayload = &payload
+	}
+
+	entry.ManifestPath = filepath.Join(dest, "runs", verified.RunID, "manifest.json")
+	entry.ManifestPresent = true
+	entry.ManifestValidJSON = true
+	if opts.IncludeManifest {
+		entry.ManifestRaw = json.RawMessage(append([]byte(nil), report.ManifestRaw...))
+	}
+
+	if opts.IncludeStats {
+		active := int64(verified.Declared.ActiveRows)
+		deleted := int64(verified.Declared.Tombstones)
+		entry.ActiveObjectCount = &active
+		entry.DeletedObjectCount = &deleted
+	}
+
+	markerOK := len(entry.Notes)-entry.infoNoteCount == 0
+	entry.DurableMarkerOK = &markerOK
+	entry.IdentityOK = entry.IndexSetID != "" && markerOK
 	return entry, nil
 }
 
