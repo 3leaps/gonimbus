@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/index-identity-declaration.v1.schema.json",
+  "title": "Gonimbus Index Set Identity Declaration",
+  "description": "Typed input for deterministic reconstruction of canonical index-set identity bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "base_uri",
+    "provider",
+    "build"
+  ],
+  "properties": {
+    "type": {
+      "const": "gonimbus.index_set_identity.declaration.v1"
+    },
+    "base_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "storage_provider": {
+      "type": "string"
+    },
+    "cloud_provider": {
+      "type": "string"
+    },
+    "region_kind": {
+      "type": "string"
+    },
+    "region": {
+      "type": "string"
+    },
+    "endpoint_host": {
+      "type": "string"
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_type",
+        "schema_version",
+        "includes",
+        "include_hidden"
+      ],
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gonimbus_version": {
+          "type": "string"
+        },
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "include_hidden": {
+          "type": "boolean"
+        },
+        "filters_hash": {
+          "type": "string"
+        },
+        "scope_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "path_date": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "regex"
+          ],
+          "properties": {
+            "method": {
+              "const": "regex"
+            },
+            "regex": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "segment_index"
+          ],
+          "properties": {
+            "method": {
+              "const": "segment"
+            },
+            "segment_index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    }
+  }
+}

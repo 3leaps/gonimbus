@@ -23,11 +23,14 @@ import (
 )
 
 const (
-	indexQueryReceiptOutputFormat = "receipt-jsonl-v1"
-	indexQueryReceiptType         = "gonimbus.index.query_receipt.v1"
-	indexQueryReceiptVersion      = "1.0.0"
-	indexQuerySpecType            = "gonimbus.index.query_spec.v1"
-	maxJCSSafeInteger             = int64(1<<53 - 1)
+	indexQueryReceiptOutputFormat   = "receipt-jsonl-v1"
+	indexQueryReceiptOutputFormatV2 = "receipt-jsonl-v2"
+	indexQueryReceiptType           = "gonimbus.index.query_receipt.v1"
+	indexQueryReceiptTypeV2         = "gonimbus.index.query_receipt.v2"
+	indexQueryReceiptVersion        = "1.0.0"
+	indexQueryReceiptVersionV2      = "2.0.0"
+	indexQuerySpecType              = "gonimbus.index.query_spec.v1"
+	maxJCSSafeInteger               = int64(1<<53 - 1)
 )
 
 type indexQueryReceiptRecord struct {
@@ -54,6 +57,31 @@ type indexQueryReceiptRecord struct {
 	Segments                    indexQueryReceiptSegments `json:"segments"`
 	Warnings                    []string                  `json:"warnings"`
 	Errors                      []string                  `json:"errors"`
+}
+
+type indexQueryReceiptV2Record struct {
+	Type                  string                         `json:"type"`
+	SchemaVersion         string                         `json:"schema_version"`
+	Outcome               string                         `json:"outcome"`
+	SourceKind            string                         `json:"source_kind"`
+	IndexSetID            string                         `json:"index_set_id"`
+	RunID                 string                         `json:"run_id"`
+	RunStart              indexreader.BridgeRunStart     `json:"run_start"`
+	SnapshotTime          indexreader.BridgeSnapshotTime `json:"snapshot_time"`
+	HubCommittedAt        string                         `json:"hub_committed_at,omitempty"`
+	HubCompleteSHA256     string                         `json:"hub_complete_sha256,omitempty"`
+	SourceIdentitySHA256  string                         `json:"source_identity_sha256"`
+	SourceIdentitySchema  string                         `json:"source_identity_schema"`
+	SourceIdentityProfile string                         `json:"source_identity_profile"`
+	ManifestSHA256        string                         `json:"manifest_sha256"`
+	CoverageSHA256        string                         `json:"coverage_sha256"`
+	Coverage              indexQueryReceiptCoverage      `json:"coverage"`
+	Declared              indexQueryReceiptDeclared      `json:"declared"`
+	Query                 indexQueryReceiptQuery         `json:"query"`
+	Results               indexQueryReceiptResults       `json:"results"`
+	Segments              indexQueryReceiptSegments      `json:"segments"`
+	Warnings              []string                       `json:"warnings"`
+	Errors                []string                       `json:"errors"`
 }
 
 type indexQueryReceiptCoverage struct {
@@ -101,6 +129,7 @@ type indexQueryReceiptSegments struct {
 }
 
 type indexQueryReceiptRunOptions struct {
+	OutputFormat      string
 	BaseURI           string
 	Params            indexstore.QueryParams
 	CountOnly         bool
@@ -113,17 +142,30 @@ type indexQueryReceiptRunOptions struct {
 }
 
 func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts indexQueryReceiptRunOptions) (err error) {
+	if opts.OutputFormat == "" {
+		opts.OutputFormat = indexQueryReceiptOutputFormat
+	}
+	if opts.OutputFormat != indexQueryReceiptOutputFormat && opts.OutputFormat != indexQueryReceiptOutputFormatV2 {
+		return fmt.Errorf("unsupported receipt output format %q", opts.OutputFormat)
+	}
 	metadataReader, ok := reader.(indexreader.VerifiedSnapshotMetadataReader)
 	if !ok {
-		return fmt.Errorf("%s requires a reader with verified durable metadata: %w", indexQueryReceiptOutputFormat, indexreader.ErrVerifiedSnapshotMetadataUnavailable)
+		return fmt.Errorf("%s requires a reader with verified durable metadata: %w", opts.OutputFormat, indexreader.ErrVerifiedSnapshotMetadataUnavailable)
 	}
 	verified, err := metadataReader.VerifiedSnapshotMetadata()
 	if err != nil {
-		return fmt.Errorf("%s requires verified durable metadata: %w", indexQueryReceiptOutputFormat, err)
+		return fmt.Errorf("%s requires verified durable metadata: %w", opts.OutputFormat, err)
 	}
 	if verified.SourceKind != indexreader.SnapshotSourceLocalPublished &&
 		verified.SourceKind != indexreader.SnapshotSourceAcquiredHub {
-		return fmt.Errorf("%s does not yet support source kind %q", indexQueryReceiptOutputFormat, verified.SourceKind)
+		return fmt.Errorf("%s does not yet support source kind %q", opts.OutputFormat, verified.SourceKind)
+	}
+	if opts.OutputFormat == indexQueryReceiptOutputFormat {
+		if err := validateReceiptV1Metadata(verified); err != nil {
+			return fmt.Errorf("%s requires exact snapshot time: %w", opts.OutputFormat, err)
+		}
+	} else if err := validateReceiptV2Metadata(verified); err != nil {
+		return fmt.Errorf("%s requires classified snapshot time: %w", opts.OutputFormat, err)
 	}
 
 	hubCommittedAt := ""
@@ -265,63 +307,86 @@ func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts i
 	if stats.TimestampParseErrors > 0 {
 		warnings = append(warnings, "timestamp_parse_anomaly")
 	}
-	receipt := indexQueryReceiptRecord{
-		Type:                        indexQueryReceiptType,
-		SchemaVersion:               indexQueryReceiptVersion,
-		Outcome:                     "success",
-		SourceKind:                  string(verified.SourceKind),
-		IndexSetID:                  verified.IndexSetID,
-		RunID:                       verified.RunID,
-		RunStartedAt:                verified.RunStartedAt.UTC().Format(time.RFC3339Nano),
-		SnapshotCompletedAt:         verified.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
-		SnapshotCompletionSemantics: verified.SnapshotCompletionSemantics,
-		HubCommittedAt:              hubCommittedAt,
-		HubCompleteSHA256:           verified.HubCompleteSHA256,
-		SourceIdentitySHA256:        verified.SourceIdentitySHA256,
-		SourceIdentitySchema:        verified.SourceIdentitySchema,
-		SourceIdentityProfile:       verified.SourceIdentityProfile,
-		ManifestSHA256:              verified.ManifestSHA256,
-		CoverageSHA256:              verified.CoverageSHA256,
-		Coverage: indexQueryReceiptCoverage{
-			Entries:          verified.Coverage.Entries,
-			CompleteEntries:  verified.Coverage.CompleteEntries,
-			ConfirmedEntries: verified.Coverage.ConfirmedEntries,
-			InferredEntries:  verified.Coverage.InferredEntries,
-			GapCount:         verified.Coverage.GapCount,
-		},
-		Declared: indexQueryReceiptDeclared{
-			Rows:          verified.Declared.Rows,
-			ActiveRows:    verified.Declared.ActiveRows,
-			Tombstones:    verified.Declared.Tombstones,
-			DistinctETags: verified.Declared.DistinctETags,
-			Segments:      verified.Declared.Segments,
-		},
-		Query: querySummary,
-		Results: indexQueryReceiptResults{
-			Examined:                stats.Examined,
-			Matched:                 stats.Matched,
-			Emitted:                 emitted,
-			LogicalResults:          logicalResults,
-			Truncated:               truncated,
-			TimestampParseAnomalies: stats.TimestampParseErrors,
-		},
-		Segments: indexQueryReceiptSegments{
-			Declared:       verified.Declared.Segments,
-			Walked:         stats.SegmentsWalked,
-			Verified:       stats.SegmentsVerified,
-			ManifestPruned: stats.SegmentsManifestPruned,
-		},
-		Warnings: warnings,
-		Errors:   []string{},
+	coverage := indexQueryReceiptCoverage{
+		Entries:          verified.Coverage.Entries,
+		CompleteEntries:  verified.Coverage.CompleteEntries,
+		ConfirmedEntries: verified.Coverage.ConfirmedEntries,
+		InferredEntries:  verified.Coverage.InferredEntries,
+		GapCount:         verified.Coverage.GapCount,
 	}
-	if !verified.HubCommittedAt.IsZero() {
-		receipt.HubCommittedAt = verified.HubCommittedAt.UTC().Format(time.RFC3339Nano)
+	declared := indexQueryReceiptDeclared{
+		Rows:          verified.Declared.Rows,
+		ActiveRows:    verified.Declared.ActiveRows,
+		Tombstones:    verified.Declared.Tombstones,
+		DistinctETags: verified.Declared.DistinctETags,
+		Segments:      verified.Declared.Segments,
 	}
-	if err := validateIndexQueryReceipt(receipt); err != nil {
-		return fmt.Errorf("query receipt invalid: %w", err)
+	results := indexQueryReceiptResults{
+		Examined:                stats.Examined,
+		Matched:                 stats.Matched,
+		Emitted:                 emitted,
+		LogicalResults:          logicalResults,
+		Truncated:               truncated,
+		TimestampParseAnomalies: stats.TimestampParseErrors,
 	}
-	if err := enc.Encode(receipt); err != nil {
-		return fmt.Errorf("encode terminal receipt: %w", err)
+	segments := indexQueryReceiptSegments{
+		Declared:       verified.Declared.Segments,
+		Walked:         stats.SegmentsWalked,
+		Verified:       stats.SegmentsVerified,
+		ManifestPruned: stats.SegmentsManifestPruned,
+	}
+	if opts.OutputFormat == indexQueryReceiptOutputFormatV2 {
+		receipt := indexQueryReceiptV2Record{
+			Type: indexQueryReceiptTypeV2, SchemaVersion: indexQueryReceiptVersionV2,
+			Outcome: "success", SourceKind: string(verified.SourceKind),
+			IndexSetID: verified.IndexSetID, RunID: verified.RunID,
+			RunStart: verified.RunStart, SnapshotTime: verified.SnapshotTime,
+			HubCommittedAt: hubCommittedAt, HubCompleteSHA256: verified.HubCompleteSHA256,
+			SourceIdentitySHA256:  verified.SourceIdentitySHA256,
+			SourceIdentitySchema:  verified.SourceIdentitySchema,
+			SourceIdentityProfile: verified.SourceIdentityProfile,
+			ManifestSHA256:        verified.ManifestSHA256, CoverageSHA256: verified.CoverageSHA256,
+			Coverage: coverage, Declared: declared, Query: querySummary, Results: results,
+			Segments: segments, Warnings: warnings, Errors: []string{},
+		}
+		if err := validateIndexQueryReceiptV2(receipt); err != nil {
+			return fmt.Errorf("query receipt invalid: %w", err)
+		}
+		if err := enc.Encode(receipt); err != nil {
+			return fmt.Errorf("encode terminal receipt: %w", err)
+		}
+	} else {
+		receipt := indexQueryReceiptRecord{
+			Type:                        indexQueryReceiptType,
+			SchemaVersion:               indexQueryReceiptVersion,
+			Outcome:                     "success",
+			SourceKind:                  string(verified.SourceKind),
+			IndexSetID:                  verified.IndexSetID,
+			RunID:                       verified.RunID,
+			RunStartedAt:                verified.RunStartedAt.UTC().Format(time.RFC3339Nano),
+			SnapshotCompletedAt:         verified.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+			SnapshotCompletionSemantics: verified.SnapshotCompletionSemantics,
+			HubCommittedAt:              hubCommittedAt,
+			HubCompleteSHA256:           verified.HubCompleteSHA256,
+			SourceIdentitySHA256:        verified.SourceIdentitySHA256,
+			SourceIdentitySchema:        verified.SourceIdentitySchema,
+			SourceIdentityProfile:       verified.SourceIdentityProfile,
+			ManifestSHA256:              verified.ManifestSHA256,
+			CoverageSHA256:              verified.CoverageSHA256,
+			Coverage:                    coverage,
+			Declared:                    declared,
+			Query:                       querySummary,
+			Results:                     results,
+			Segments:                    segments,
+			Warnings:                    warnings,
+			Errors:                      []string{},
+		}
+		if err := validateIndexQueryReceipt(receipt); err != nil {
+			return fmt.Errorf("query receipt invalid: %w", err)
+		}
+		if err := enc.Encode(receipt); err != nil {
+			return fmt.Errorf("encode terminal receipt: %w", err)
+		}
 	}
 
 	if outputFile != nil {
@@ -372,12 +437,16 @@ func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts i
 }
 
 func buildIndexQueryReceiptQuery(meta indexreader.VerifiedSnapshotMetadata, opts indexQueryReceiptRunOptions) (indexQueryReceiptQuery, error) {
+	outputFormat := opts.OutputFormat
+	if outputFormat == "" {
+		outputFormat = indexQueryReceiptOutputFormat
+	}
 	params := opts.Params
 	if params.Limit < 0 {
-		return indexQueryReceiptQuery{}, fmt.Errorf("--limit must not be negative with --output-format %s", indexQueryReceiptOutputFormat)
+		return indexQueryReceiptQuery{}, fmt.Errorf("--limit must not be negative with --output-format %s", outputFormat)
 	}
 	if params.MinSize < 0 || params.MaxSize < 0 {
-		return indexQueryReceiptQuery{}, fmt.Errorf("size filters must not be negative with --output-format %s", indexQueryReceiptOutputFormat)
+		return indexQueryReceiptQuery{}, fmt.Errorf("size filters must not be negative with --output-format %s", outputFormat)
 	}
 	storageClasses := sortedUniqueStrings(params.StorageClasses)
 	params.StorageClasses = storageClasses
@@ -409,7 +478,7 @@ func buildIndexQueryReceiptQuery(meta indexreader.VerifiedSnapshotMetadata, opts
 		"min_size_bytes":      params.MinSize,
 		"modified_after":      canonicalQueryTime(params.ModifiedAfter),
 		"modified_before":     canonicalQueryTime(params.ModifiedBefore),
-		"output_format":       indexQueryReceiptOutputFormat,
+		"output_format":       outputFormat,
 		"pattern":             params.Pattern,
 		"result_mode":         mode,
 		"run_id":              meta.RunID,
@@ -758,6 +827,137 @@ func validateIndexQueryReceipt(receipt indexQueryReceiptRecord) error {
 		return fmt.Errorf("snapshot completion is not exact-time eligible: %w", err)
 	}
 	return nil
+}
+
+func validateReceiptV1Metadata(meta indexreader.VerifiedSnapshotMetadata) error {
+	var hubCommittedAt time.Time
+	if meta.SourceKind == indexreader.SnapshotSourceAcquiredHub {
+		hubCommittedAt = meta.HubCommittedAt
+	}
+	return indexsubstrate.ValidateExactSnapshotCompletion(
+		meta.SnapshotCompletionSemantics,
+		meta.RunStartedAt,
+		meta.SnapshotCompletedAt,
+		hubCommittedAt,
+	)
+}
+
+func validateReceiptV2Metadata(meta indexreader.VerifiedSnapshotMetadata) error {
+	if meta.RunStart.StartedAt == "" || meta.RunStart.Basis == "" || meta.SnapshotTime.Basis == "" {
+		return fmt.Errorf("classified run and snapshot times are required")
+	}
+	runStartedAt, err := indexsubstrate.ParseCanonicalUTCTime(meta.RunStart.StartedAt)
+	if err != nil {
+		return fmt.Errorf("run_start.started_at must be canonical UTC: %w", err)
+	}
+	switch meta.SourceKind {
+	case indexreader.SnapshotSourceLocalPublished:
+		if meta.RunStart.Basis != indexreader.BridgeRunStartLocallyObserved {
+			return fmt.Errorf("local_published run_start basis must be %s", indexreader.BridgeRunStartLocallyObserved)
+		}
+		if !meta.HubCommittedAt.IsZero() || meta.HubCompleteSHA256 != "" {
+			return fmt.Errorf("local_published metadata must not claim hub authority")
+		}
+	case indexreader.SnapshotSourceAcquiredHub:
+		if meta.RunStart.Basis != indexreader.BridgeRunStartLegacyAsserted {
+			return fmt.Errorf("acquired_hub run_start basis must be %s", indexreader.BridgeRunStartLegacyAsserted)
+		}
+		if meta.HubCommittedAt.IsZero() || !validSHA256Hex(meta.HubCompleteSHA256) {
+			return fmt.Errorf("acquired_hub metadata requires hub authority")
+		}
+	default:
+		return fmt.Errorf("unsupported source kind %q", meta.SourceKind)
+	}
+	switch {
+	case meta.SourceIdentitySchema == indexreader.SourceIdentitySchemaV1 &&
+		meta.SourceIdentityProfile == indexreader.SourceIdentityProfileV1:
+	case meta.SourceIdentitySchema == indexreader.BridgeIdentitySchema &&
+		meta.SourceIdentityProfile == indexreader.BridgeIdentityProfile:
+	default:
+		return fmt.Errorf("source identity schema/profile pair is invalid")
+	}
+	switch meta.SnapshotTime.Basis {
+	case indexreader.BridgeSnapshotTimeLegacyUnavailable:
+		if meta.SnapshotTime.CompletedAt != "" ||
+			meta.SnapshotTime.EvidenceType != "" ||
+			meta.SnapshotTime.EvidenceSHA256 != "" {
+			return fmt.Errorf("legacy_unavailable snapshot must not claim exact-time fields")
+		}
+	case indexreader.BridgeSnapshotTimeExactCommit:
+		if meta.SnapshotTime.EvidenceType != indexsubstrate.CompleteMarkerTypeV2 ||
+			!validSHA256Hex(meta.SnapshotTime.EvidenceSHA256) {
+			return fmt.Errorf("exact_commit snapshot evidence is invalid")
+		}
+		completedAt, parseErr := indexsubstrate.ParseCanonicalUTCTime(meta.SnapshotTime.CompletedAt)
+		if parseErr != nil {
+			return fmt.Errorf("snapshot_time.completed_at must be canonical UTC: %w", parseErr)
+		}
+		var hubCommittedAt time.Time
+		if meta.SourceKind == indexreader.SnapshotSourceAcquiredHub {
+			hubCommittedAt = meta.HubCommittedAt
+		}
+		if err := indexsubstrate.ValidateExactSnapshotCompletion(
+			indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+			runStartedAt,
+			completedAt,
+			hubCommittedAt,
+		); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported snapshot_time basis %q", meta.SnapshotTime.Basis)
+	}
+	return nil
+}
+
+func validateIndexQueryReceiptV2(receipt indexQueryReceiptV2Record) error {
+	if receipt.Type != indexQueryReceiptTypeV2 {
+		return fmt.Errorf("type must be %s", indexQueryReceiptTypeV2)
+	}
+	if receipt.SchemaVersion != indexQueryReceiptVersionV2 {
+		return fmt.Errorf("schema_version must be %s", indexQueryReceiptVersionV2)
+	}
+	runStartedAt, err := indexsubstrate.ParseCanonicalUTCTime(receipt.RunStart.StartedAt)
+	if err != nil {
+		return fmt.Errorf("run_start.started_at must be canonical UTC: %w", err)
+	}
+	meta := indexreader.VerifiedSnapshotMetadata{
+		SourceKind:            indexreader.SnapshotSourceKind(receipt.SourceKind),
+		RunStart:              receipt.RunStart,
+		SnapshotTime:          receipt.SnapshotTime,
+		HubCompleteSHA256:     receipt.HubCompleteSHA256,
+		SourceIdentitySchema:  receipt.SourceIdentitySchema,
+		SourceIdentityProfile: receipt.SourceIdentityProfile,
+	}
+	if receipt.HubCommittedAt != "" {
+		meta.HubCommittedAt, err = indexsubstrate.ParseCanonicalUTCTime(receipt.HubCommittedAt)
+		if err != nil {
+			return fmt.Errorf("hub_committed_at must be canonical UTC: %w", err)
+		}
+	}
+	if err := validateReceiptV2Metadata(meta); err != nil {
+		return err
+	}
+
+	// Reuse the v1 structural and counter validation with an exact synthetic
+	// time pair; classified time and identity have already been validated above.
+	surrogate := indexQueryReceiptRecord{
+		Type: indexQueryReceiptType, SchemaVersion: indexQueryReceiptVersion,
+		Outcome: receipt.Outcome, SourceKind: receipt.SourceKind,
+		IndexSetID: receipt.IndexSetID, RunID: receipt.RunID,
+		RunStartedAt:                runStartedAt.Format(time.RFC3339Nano),
+		SnapshotCompletedAt:         runStartedAt.Format(time.RFC3339Nano),
+		SnapshotCompletionSemantics: indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		HubCommittedAt:              receipt.HubCommittedAt, HubCompleteSHA256: receipt.HubCompleteSHA256,
+		SourceIdentitySHA256:  receipt.SourceIdentitySHA256,
+		SourceIdentitySchema:  indexreader.SourceIdentitySchemaV1,
+		SourceIdentityProfile: indexreader.SourceIdentityProfileV1,
+		ManifestSHA256:        receipt.ManifestSHA256, CoverageSHA256: receipt.CoverageSHA256,
+		Coverage: receipt.Coverage, Declared: receipt.Declared, Query: receipt.Query,
+		Results: receipt.Results, Segments: receipt.Segments,
+		Warnings: receipt.Warnings, Errors: receipt.Errors,
+	}
+	return validateIndexQueryReceipt(surrogate)
 }
 
 func validSHA256Hex(value string) bool {

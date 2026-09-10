@@ -3680,6 +3680,10 @@ func withTransferReflowTestState(t *testing.T) {
 	oldStateStore := newReflowStateStore
 	oldResourceProbe := reflowResourceProbeForRun
 
+	// Clear the higher-precedence app-data overrides so an ambient caller
+	// cannot redirect hermetic checkpoint state outside this test root.
+	t.Setenv("GONIMBUS_DATA_DIR", "")
+	t.Setenv("GONIMBUS_DATA_ROOT", "")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	appIdentity = &appidentity.Identity{
 		BinaryName: "gonimbus",

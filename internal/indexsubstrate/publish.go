@@ -366,9 +366,11 @@ type PublishedSnapshot struct {
 	LatestPath string
 	// CompletePath is the complete marker path used for this open when known.
 	CompletePath string
-	Complete     publishedCompleteDoc
-	Manifest     InternalManifest
-	SegmentDir   string
+	// CompleteSHA256 binds the exact complete-marker bytes parsed for this open.
+	CompleteSHA256 string
+	Complete       publishedCompleteDoc
+	Manifest       InternalManifest
+	SegmentDir     string
 	// AccountedMarkerBytes / AccountedManifestBytes are the exact on-disk byte
 	// lengths of the complete marker and manifest slices that were digested and
 	// parsed for this open (same-bytes trust). Used by ancestry aggregate budgets.
@@ -675,6 +677,7 @@ func openPublishedSnapshotMaterial(
 	}
 	snapshot := PublishedSnapshot{
 		CompletePath:           completePath,
+		CompleteSHA256:         sha256HexBytes(completeData),
 		Complete:               complete,
 		Manifest:               manifest,
 		SegmentDir:             segmentDir,

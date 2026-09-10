@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,235 @@ func TestAcquireBundle_ExactCurrentOpenAndIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, after)
 	require.NoFileExists(t, filepath.Join(dest, "latest.json"))
+}
+
+func TestAcquiredBundleLimitsCannotWidenFrozenProtocol(t *testing.T) {
+	wide := AcquiredBundleLimits{
+		MaxMarkerBytes:    maxBridgeJSONCount + 1,
+		MaxManifestBytes:  maxBridgeJSONCount + 1,
+		MaxIdentityBytes:  maxBridgeJSONCount + 1,
+		MaxSegmentBytes:   maxBridgeJSONCount + 1,
+		MaxSegments:       maxAcquiredSegments + 1,
+		MaxLineageNodes:   maxAcquiredLineageNodes + 1,
+		MaxAggregateBytes: maxBridgeJSONCount + 1,
+		MaxMetadataBytes:  maxBridgeJSONCount + 1,
+	}.normalize()
+	require.Equal(t, maxBridgeJSONCount, wide.MaxMarkerBytes)
+	require.Equal(t, maxBridgeJSONCount, wide.MaxManifestBytes)
+	require.Equal(t, maxBridgeJSONCount, wide.MaxIdentityBytes)
+	require.Equal(t, maxBridgeJSONCount, wide.MaxSegmentBytes)
+	require.Equal(t, maxBridgeJSONCount, wide.MaxAggregateBytes)
+	require.Equal(t, maxBridgeJSONCount, wide.MaxMetadataBytes)
+	require.Equal(t, maxAcquiredSegments, wide.MaxSegments)
+	require.Equal(t, maxAcquiredLineageNodes, wide.MaxLineageNodes)
+
+	lower := AcquiredBundleLimits{
+		MaxMarkerBytes: 7, MaxSegments: 8, MaxLineageNodes: 9,
+	}.normalize()
+	require.Equal(t, int64(7), lower.MaxMarkerBytes)
+	require.Equal(t, 8, lower.MaxSegments)
+	require.Equal(t, 9, lower.MaxLineageNodes)
+
+	fx := newAcquiredHubFixture(t)
+	completeKey := exactHubKey(fx.indexSetID, fx.currentRun, "complete.json")
+	var hub acquiredHubComplete
+	require.NoError(t, json.Unmarshal(fx.hub.objects[completeKey], &hub))
+
+	tooManySegments := hub
+	tooManySegments.Artifacts.Segments = make([]acquiredHubArtifact, maxAcquiredSegments+1)
+	tooManySegments.Durable.Segments = len(tooManySegments.Artifacts.Segments)
+	require.ErrorContains(t,
+		validateAcquiredHubComplete(fx.indexSetID, fx.currentRun, tooManySegments, wide),
+		"artifact count exceeds",
+	)
+
+	tooLargeArtifact := hub
+	tooLargeArtifact.Artifacts.Identity.SizeBytes = maxBridgeJSONCount + 1
+	require.ErrorContains(t,
+		validateAcquiredHubComplete(fx.indexSetID, fx.currentRun, tooLargeArtifact, wide),
+		"artifact contract mismatch",
+	)
+
+	tooLargeRowCount := maxBridgeJSONCount
+	tooLargeRowCount++
+	if int64(int(tooLargeRowCount)) == tooLargeRowCount {
+		tooManyRows := hub
+		tooManyRows.Durable.Rows = int(tooLargeRowCount)
+		require.ErrorContains(t,
+			validateAcquiredHubComplete(fx.indexSetID, fx.currentRun, tooManyRows, wide),
+			"artifact count exceeds",
+		)
+	}
+
+	hash := strings.Repeat("a", 64)
+	startedAt := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	lineage := make([]AcquiredLineageNode, maxAcquiredLineageNodes+1)
+	marker := AcquiredBundleMarker{
+		Type: AcquiredBundleTypeV2, Schema: AcquiredBundleSchemaV2,
+		IndexSetID: "idx_" + hash, RunID: "run_1",
+		SourceIdentitySHA256: hash, SourceIdentitySchema: BridgeIdentitySchema,
+		SourceIdentityProfile:  BridgeIdentityProfile,
+		HubMarkerSchemaVersion: HubMarkerSchemaV3,
+		RunStart: &BridgeRunStart{
+			Basis: BridgeRunStartLegacyAsserted, StartedAt: startedAt.Format(time.RFC3339Nano),
+		},
+		SnapshotTime:             &BridgeSnapshotTime{Basis: BridgeSnapshotTimeLegacyUnavailable},
+		ConversionIdentitySHA256: hash,
+		HubCommittedAt:           startedAt.Add(time.Minute).Format(time.RFC3339Nano),
+		HubCompleteSHA256:        hash, ManifestSHA256: hash,
+		AcquiredAt: startedAt.Add(2 * time.Minute).Format(time.RFC3339Nano),
+		Lineage:    lineage,
+	}
+	require.ErrorContains(t, validateAcquiredMarker(marker, wide), "lineage node limit exceeded")
+
+	marker.Lineage = make([]AcquiredLineageNode, maxAcquiredLineageNodes)
+	marker.Artifacts = []AcquiredArtifact{{
+		Path: "identity.json", Role: acquiredIdentityRole, SizeBytes: 1, SHA256: hash,
+	}}
+	for i := range marker.Lineage {
+		runID := "run_" + strconv.Itoa(i+1)
+		marker.Lineage[i] = AcquiredLineageNode{
+			IndexSetID: marker.IndexSetID, RunID: runID,
+			MarkerSchemaVersion: HubMarkerSchemaV2,
+			HubCompleteSHA256:   hash, ManifestSHA256: hash,
+		}
+		if i == 0 {
+			marker.Lineage[i].MarkerSchemaVersion = HubMarkerSchemaV3
+			marker.Lineage[i].ConversionIdentitySHA256 = hash
+		}
+		prefix := "runs/" + runID + "/"
+		marker.Artifacts = append(marker.Artifacts,
+			AcquiredArtifact{
+				Path: prefix + "hub-complete.json", Role: acquiredHubCompleteRole,
+				SizeBytes: 1, SHA256: hash,
+			},
+			AcquiredArtifact{
+				Path: prefix + "manifest.json", Role: acquiredManifestRole,
+				SizeBytes: 1, SHA256: hash,
+			},
+		)
+	}
+	marker.ProofThroughRunID = marker.Lineage[len(marker.Lineage)-1].RunID
+	require.NoError(t, validateAcquiredMarker(marker, wide))
+}
+
+func TestAcquireBundleV2_PreservesBridgeTimeClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		evidence      func(*legacyBridgeFixture) []byte
+		wantBasis     string
+		wantCompleted bool
+	}{
+		{
+			name:      "legacy unavailable",
+			wantBasis: BridgeSnapshotTimeLegacyUnavailable,
+		},
+		{
+			name: "exact commit",
+			evidence: func(fixture *legacyBridgeFixture) []byte {
+				return fixture.completeV2Evidence(t)
+			},
+			wantBasis:     BridgeSnapshotTimeExactCommit,
+			wantCompleted: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newLegacyBridgeFixture(t)
+			target := newBridgeMemoryHub()
+			var evidence []byte
+			if tc.evidence != nil {
+				evidence = tc.evidence(fixture)
+			}
+			_, err := BridgeLegacyDurableRun(
+				context.Background(),
+				fixture.source,
+				target,
+				CanonicalIdentityAuthority{CanonicalJSONLF: fixture.identityBytes},
+				evidence,
+				fixture.options(t),
+			)
+			require.NoError(t, err)
+
+			dest := filepath.Join(realTempDir(t), "bundle")
+			marker, err := AcquireBundle(context.Background(), target, AcquireBundleOptions{
+				IndexSetID:  fixture.indexSetID,
+				RunID:       fixture.runID,
+				Destination: dest,
+			})
+			require.NoError(t, err)
+			require.Equal(t, AcquiredBundleTypeV2, marker.Type)
+			require.Equal(t, AcquiredBundleSchemaV2, marker.Schema)
+			require.Equal(t, HubMarkerSchemaV3, marker.HubMarkerSchemaVersion)
+			require.Equal(t, BridgeIdentitySchema, marker.SourceIdentitySchema)
+			require.Equal(t, BridgeIdentityProfile, marker.SourceIdentityProfile)
+			require.Equal(t, tc.wantBasis, marker.SnapshotTime.Basis)
+			require.NoFileExists(t, filepath.Join(dest, "runs", fixture.runID, "complete.json"))
+
+			data, err := os.ReadFile(filepath.Join(dest, "acquired.json"))
+			require.NoError(t, err)
+			diagnostics, err := acquiredBundleSchemaValidatorVersion(
+				t, "index-acquired-bundle.v2.schema.json",
+			).ValidateJSON(data)
+			require.NoError(t, err)
+			for _, diagnostic := range diagnostics {
+				if diagnostic.Severity == schema.SeverityError {
+					t.Fatalf("acquired v2 marker failed schema validation: %s: %s", diagnostic.Pointer, diagnostic.Message)
+				}
+			}
+
+			reader, err := OpenAcquiredBundle(AcquiredOpenOptions{Directory: dest})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, reader.Close()) }()
+			verified, err := reader.(VerifiedSnapshotMetadataReader).VerifiedSnapshotMetadata()
+			require.NoError(t, err)
+			require.Equal(t, SnapshotSourceAcquiredHub, verified.SourceKind)
+			require.Equal(t, BridgeRunStartLegacyAsserted, verified.RunStart.Basis)
+			require.Equal(t, tc.wantBasis, verified.SnapshotTime.Basis)
+			require.Equal(t, tc.wantCompleted, !verified.SnapshotCompletedAt.IsZero())
+			count, err := reader.QueryObjectCount(context.Background(), indexstore.QueryParams{})
+			require.NoError(t, err)
+			require.Equal(t, int64(1), count)
+		})
+	}
+}
+
+func TestAcquireBundle_RefusesRawLegacyV1Marker(t *testing.T) {
+	fixture := newLegacyBridgeFixture(t)
+	_, err := AcquireBundle(context.Background(), fixture.source, AcquireBundleOptions{
+		IndexSetID:  fixture.indexSetID,
+		RunID:       fixture.runID,
+		Destination: filepath.Join(realTempDir(t), "bundle"),
+	})
+	require.ErrorContains(t, err, "durable hub complete marker contract mismatch")
+}
+
+func TestAcquireBundleV2_RefusesRewrittenBridgeClassification(t *testing.T) {
+	fixture := newLegacyBridgeFixture(t)
+	target := newBridgeMemoryHub()
+	_, err := BridgeLegacyDurableRun(
+		context.Background(),
+		fixture.source,
+		target,
+		CanonicalIdentityAuthority{CanonicalJSONLF: fixture.identityBytes},
+		nil,
+		fixture.options(t),
+	)
+	require.NoError(t, err)
+	completeKey := exactHubKey(fixture.indexSetID, fixture.runID, "complete.json")
+	var marker acquiredHubComplete
+	require.NoError(t, json.Unmarshal(target.object(completeKey), &marker))
+	marker.ConversionIdentitySHA256 = strings.Repeat("b", 64)
+	data, err := json.MarshalIndent(marker, "", "  ")
+	require.NoError(t, err)
+	target.put(completeKey, append(data, '\n'))
+
+	_, err = AcquireBundle(context.Background(), target, AcquireBundleOptions{
+		IndexSetID:  fixture.indexSetID,
+		RunID:       fixture.runID,
+		Destination: filepath.Join(realTempDir(t), "bundle"),
+	})
+	require.ErrorContains(t, err, "conversion identity mismatch")
 }
 
 func TestAcquireBundle_PreFixV2IsStructurallyValidButTimeIneligible(t *testing.T) {
@@ -590,12 +820,16 @@ func TestAcquireBundleMarker_ConformsToPublicSchema(t *testing.T) {
 }
 
 func acquiredBundleSchemaValidator(t testing.TB) *schema.Validator {
+	return acquiredBundleSchemaValidatorVersion(t, "index-acquired-bundle.v1.schema.json")
+}
+
+func acquiredBundleSchemaValidatorVersion(t testing.TB, name string) *schema.Validator {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	require.True(t, ok)
 	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	raw, err := os.ReadFile(filepath.Join(
-		root, "schemas", "gonimbus", "v1.0.0", "index-acquired-bundle.v1.schema.json",
+		root, "schemas", "gonimbus", "v1.0.0", name,
 	))
 	require.NoError(t, err)
 	validator, err := schema.NewValidator(raw)

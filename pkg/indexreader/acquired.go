@@ -26,7 +26,11 @@ import (
 const (
 	AcquiredBundleType        = "gonimbus.index.acquired_bundle.v1"
 	AcquiredBundleSchema      = "gonimbus/v1.0.0/index-acquired-bundle.v1"
+	AcquiredBundleTypeV2      = "gonimbus.index.acquired_bundle.v2"
+	AcquiredBundleSchemaV2    = "gonimbus/v1.0.0/index-acquired-bundle.v2"
 	HubMarkerSchemaV2         = "gonimbus.index.hub_marker.v2"
+	maxAcquiredSegments       = 200_000
+	maxAcquiredLineageNodes   = 64
 	acquiredHubFormat         = "durable-v2"
 	acquiredIdentityRole      = "source_identity"
 	acquiredHubCompleteRole   = "hub_complete"
@@ -91,31 +95,32 @@ type AcquiredBundleLimits struct {
 }
 
 func (l AcquiredBundleLimits) normalize() AcquiredBundleLimits {
-	if l.MaxMarkerBytes <= 0 {
-		l.MaxMarkerBytes = 1 << 20
+	l.MaxMarkerBytes = normalizeAcquiredByteLimit(l.MaxMarkerBytes, 1<<20)
+	l.MaxManifestBytes = normalizeAcquiredByteLimit(l.MaxManifestBytes, 64<<20)
+	l.MaxIdentityBytes = normalizeAcquiredByteLimit(l.MaxIdentityBytes, 1<<20)
+	l.MaxSegmentBytes = normalizeAcquiredByteLimit(l.MaxSegmentBytes, 1<<40)
+	l.MaxAggregateBytes = normalizeAcquiredByteLimit(l.MaxAggregateBytes, 100<<40)
+	l.MaxMetadataBytes = normalizeAcquiredByteLimit(
+		l.MaxMetadataBytes,
+		indexsubstrate.DefaultAncestryMaxAggregateBytes,
+	)
+	if l.MaxSegments <= 0 || l.MaxSegments > maxAcquiredSegments {
+		l.MaxSegments = maxAcquiredSegments
 	}
-	if l.MaxManifestBytes <= 0 {
-		l.MaxManifestBytes = 64 << 20
-	}
-	if l.MaxIdentityBytes <= 0 {
-		l.MaxIdentityBytes = 1 << 20
-	}
-	if l.MaxSegmentBytes <= 0 {
-		l.MaxSegmentBytes = 1 << 40
-	}
-	if l.MaxSegments <= 0 {
-		l.MaxSegments = 200_000
-	}
-	if l.MaxLineageNodes <= 0 {
-		l.MaxLineageNodes = indexsubstrate.DefaultAncestryMaxNodes
-	}
-	if l.MaxAggregateBytes <= 0 {
-		l.MaxAggregateBytes = 100 << 40
-	}
-	if l.MaxMetadataBytes <= 0 {
-		l.MaxMetadataBytes = indexsubstrate.DefaultAncestryMaxAggregateBytes
+	if l.MaxLineageNodes <= 0 || l.MaxLineageNodes > maxAcquiredLineageNodes {
+		l.MaxLineageNodes = maxAcquiredLineageNodes
 	}
 	return l
+}
+
+func normalizeAcquiredByteLimit(value, defaultValue int64) int64 {
+	if value <= 0 {
+		value = defaultValue
+	}
+	if value > maxBridgeJSONCount {
+		return maxBridgeJSONCount
+	}
+	return value
 }
 
 // AcquiredArtifact binds one bundle-internal relative path.
@@ -128,10 +133,12 @@ type AcquiredArtifact struct {
 
 // AcquiredLineageNode binds the hub and manifest bytes for one verified node.
 type AcquiredLineageNode struct {
-	IndexSetID        string `json:"index_set_id"`
-	RunID             string `json:"run_id"`
-	HubCompleteSHA256 string `json:"hub_complete_sha256"`
-	ManifestSHA256    string `json:"manifest_sha256"`
+	IndexSetID               string `json:"index_set_id"`
+	RunID                    string `json:"run_id"`
+	MarkerSchemaVersion      string `json:"marker_schema_version,omitempty"`
+	HubCompleteSHA256        string `json:"hub_complete_sha256"`
+	ManifestSHA256           string `json:"manifest_sha256"`
+	ConversionIdentitySHA256 string `json:"conversion_identity_sha256,omitempty"`
 }
 
 // AcquiredBundleMarker is the final acquisition receipt. It intentionally
@@ -145,7 +152,11 @@ type AcquiredBundleMarker struct {
 	SourceIdentitySHA256        string                `json:"source_identity_sha256"`
 	SourceIdentitySchema        string                `json:"source_identity_schema"`
 	SourceIdentityProfile       string                `json:"source_identity_profile"`
-	SnapshotCompletedAt         string                `json:"snapshot_completed_at"`
+	HubMarkerSchemaVersion      string                `json:"hub_marker_schema_version,omitempty"`
+	RunStart                    *BridgeRunStart       `json:"run_start,omitempty"`
+	SnapshotTime                *BridgeSnapshotTime   `json:"snapshot_time,omitempty"`
+	ConversionIdentitySHA256    string                `json:"conversion_identity_sha256,omitempty"`
+	SnapshotCompletedAt         string                `json:"snapshot_completed_at,omitempty"`
 	SnapshotCompletionSemantics string                `json:"snapshot_completion_semantics,omitempty"`
 	HubCommittedAt              string                `json:"hub_committed_at"`
 	HubCompleteSHA256           string                `json:"hub_complete_sha256"`
@@ -164,17 +175,24 @@ type acquiredHubArtifact struct {
 }
 
 type acquiredHubComplete struct {
-	Version                     string `json:"version"`
-	MarkerSchemaVersion         string `json:"marker_schema_version"`
-	Format                      string `json:"format"`
-	FormatVersion               string `json:"format_version"`
-	IndexSetID                  string `json:"index_set_id"`
-	RunID                       string `json:"run_id"`
-	CompletedAt                 string `json:"completed_at"`
-	SnapshotCompletedAt         string `json:"snapshot_completed_at"`
-	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
-	HubCommittedAt              string `json:"hub_committed_at"`
-	ExportedBy                  string `json:"exported_by"`
+	Version                     string             `json:"version"`
+	MarkerSchemaVersion         string             `json:"marker_schema_version"`
+	Format                      string             `json:"format"`
+	FormatVersion               string             `json:"format_version"`
+	IndexSetID                  string             `json:"index_set_id"`
+	RunID                       string             `json:"run_id"`
+	LegacyMarkerSchemaVersion   string             `json:"legacy_marker_schema_version,omitempty"`
+	LegacyMarkerSHA256          string             `json:"legacy_marker_sha256,omitempty"`
+	IdentitySchema              string             `json:"identity_schema,omitempty"`
+	IdentityProfile             string             `json:"identity_profile,omitempty"`
+	RunStart                    BridgeRunStart     `json:"run_start,omitempty"`
+	SnapshotTime                BridgeSnapshotTime `json:"snapshot_time,omitempty"`
+	ConversionIdentitySHA256    string             `json:"conversion_identity_sha256,omitempty"`
+	CompletedAt                 string             `json:"completed_at"`
+	SnapshotCompletedAt         string             `json:"snapshot_completed_at"`
+	SnapshotCompletionSemantics string             `json:"snapshot_completion_semantics,omitempty"`
+	HubCommittedAt              string             `json:"hub_committed_at"`
+	ExportedBy                  string             `json:"exported_by"`
 	Artifacts                   struct {
 		Identity acquiredHubArtifact   `json:"identity_json"`
 		Manifest acquiredHubArtifact   `json:"manifest"`
@@ -190,12 +208,60 @@ type acquiredHubComplete struct {
 	} `json:"durable"`
 }
 
+func (hub acquiredHubComplete) bridgeV3() bridgeHubCompleteV3 {
+	return bridgeHubCompleteV3{
+		Version:                   hub.Version,
+		MarkerSchemaVersion:       hub.MarkerSchemaVersion,
+		Format:                    hub.Format,
+		FormatVersion:             hub.FormatVersion,
+		IndexSetID:                hub.IndexSetID,
+		RunID:                     hub.RunID,
+		LegacyMarkerSchemaVersion: hub.LegacyMarkerSchemaVersion,
+		LegacyMarkerSHA256:        hub.LegacyMarkerSHA256,
+		IdentitySchema:            hub.IdentitySchema,
+		IdentityProfile:           hub.IdentityProfile,
+		RunStart:                  hub.RunStart,
+		SnapshotTime:              hub.SnapshotTime,
+		ConversionIdentitySHA256:  hub.ConversionIdentitySHA256,
+		HubCommittedAt:            hub.HubCommittedAt,
+		ExportedBy:                hub.ExportedBy,
+		Artifacts: bridgeV3Artifacts{
+			Identity: acquiredBridgeArtifactRef(hub.Artifacts.Identity),
+			Manifest: acquiredBridgeArtifactRef(hub.Artifacts.Manifest),
+			Segments: acquiredBridgeArtifactRefs(hub.Artifacts.Segments),
+		},
+		Durable: bridgeDurableSummary{
+			ManifestType:       hub.Durable.ManifestType,
+			ManifestRender:     hub.Durable.ManifestRender,
+			IndexSchemaVersion: hub.Durable.IndexSchemaVersion,
+			SegmentNamespace:   hub.Durable.SegmentNamespace,
+			Segments:           hub.Durable.Segments,
+			Rows:               hub.Durable.Rows,
+		},
+	}
+}
+
+func acquiredBridgeArtifactRef(ref acquiredHubArtifact) bridgeArtifactRef {
+	return bridgeArtifactRef{
+		Path: ref.Path, Role: ref.Role, Required: ref.Required,
+		SizeBytes: ref.SizeBytes, SHA256: ref.SHA256,
+	}
+}
+
+func acquiredBridgeArtifactRefs(refs []acquiredHubArtifact) []bridgeArtifactRef {
+	out := make([]bridgeArtifactRef, len(refs))
+	for i := range refs {
+		out[i] = acquiredBridgeArtifactRef(refs[i])
+	}
+	return out
+}
+
 type acquiredLocalComplete struct {
 	Type                        string `json:"type"`
 	IndexSetID                  string `json:"index_set_id"`
 	RunID                       string `json:"run_id"`
-	SnapshotCompletedAt         string `json:"snapshot_completed_at"`
-	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics"`
+	SnapshotCompletedAt         string `json:"snapshot_completed_at,omitempty"`
+	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
 	ManifestPath                string `json:"manifest_path"`
 	ManifestSHA256              string `json:"manifest_sha256"`
 	SegmentDir                  string `json:"segment_dir"`
@@ -658,7 +724,7 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 		if err := validateAcquiredManifest(opts.IndexSetID, runID, hub, manifest); err != nil {
 			return acquiredRunMaterial{}, nil, err
 		}
-		if err := validateAcquiredHubExactTime(hub, manifest); err != nil {
+		if err := validateAcquiredHubTime(hub, manifest); err != nil {
 			return acquiredRunMaterial{}, nil, err
 		}
 
@@ -692,8 +758,12 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 	if err != nil {
 		return AcquiredBundleMarker{}, err
 	}
+	identityKey := exactHubKey(opts.IndexSetID, opts.RunID, "identity.json")
+	if current.hub.MarkerSchemaVersion == HubMarkerSchemaV3 {
+		identityKey = path.Join("index-sets", opts.IndexSetID, "identity.json")
+	}
 	identityArtifact, identityData, err := downloadExactMetadataArtifact(ctx, source, stage,
-		exactHubKey(opts.IndexSetID, opts.RunID, "identity.json"),
+		identityKey,
 		"identity.json", current.hub.Artifacts.Identity, limits.MaxIdentityBytes)
 	if err != nil {
 		return AcquiredBundleMarker{}, err
@@ -751,32 +821,44 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 		return AcquiredBundleMarker{}, fmt.Errorf("verify acquired lineage proof: %w", err)
 	}
 
-	// Relative adapter markers keep the bundle movable.
+	acquiredV2 := current.hub.MarkerSchemaVersion == HubMarkerSchemaV3
+
+	// Relative adapter markers keep v1 bundles movable. Acquired v2 binds its
+	// classified time directly and deliberately has no synthetic complete file.
 	localCompleteArtifacts := make([]AcquiredArtifact, 0, len(runs))
-	for _, run := range runs {
-		completeRel := run.runDirRel + "/complete.json"
-		completeData, err := acquiredLocalCompleteJSON(
-			filepath.Join(stage.rootPath, filepath.FromSlash(run.runDirRel)),
-			run.hub, run.manifestSHA, len(run.manifest.Segments))
-		if err != nil {
-			return AcquiredBundleMarker{}, err
+	if !acquiredV2 {
+		for _, run := range runs {
+			completeRel := run.runDirRel + "/complete.json"
+			completeData, err := acquiredLocalCompleteJSON(
+				filepath.Join(stage.rootPath, filepath.FromSlash(run.runDirRel)),
+				run.hub, run.manifestSHA, len(run.manifest.Segments))
+			if err != nil {
+				return AcquiredBundleMarker{}, err
+			}
+			artifact, err := stage.writeBytes(completeRel, completeData)
+			if err != nil {
+				return AcquiredBundleMarker{}, err
+			}
+			artifact.Role = acquiredLocalCompleteRole
+			localCompleteArtifacts = append(localCompleteArtifacts, artifact)
 		}
-		artifact, err := stage.writeBytes(completeRel, completeData)
-		if err != nil {
-			return AcquiredBundleMarker{}, err
-		}
-		artifact.Role = acquiredLocalCompleteRole
-		localCompleteArtifacts = append(localCompleteArtifacts, artifact)
 	}
 
 	artifacts = append(artifacts, localCompleteArtifacts...)
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
 	lineage := make([]AcquiredLineageNode, 0, len(runs))
 	for _, run := range runs {
-		lineage = append(lineage, AcquiredLineageNode{
+		node := AcquiredLineageNode{
 			IndexSetID: opts.IndexSetID, RunID: run.manifest.RunID,
 			HubCompleteSHA256: run.hubSHA, ManifestSHA256: run.manifestSHA,
-		})
+		}
+		if acquiredV2 {
+			node.MarkerSchemaVersion = run.hub.MarkerSchemaVersion
+			if run.hub.MarkerSchemaVersion == HubMarkerSchemaV3 {
+				node.ConversionIdentitySHA256 = run.hub.ConversionIdentitySHA256
+			}
+		}
+		lineage = append(lineage, node)
 	}
 	marker := AcquiredBundleMarker{
 		Type: AcquiredBundleType, Schema: AcquiredBundleSchema,
@@ -789,6 +871,20 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 		HubCompleteSHA256:           current.hubSHA, ManifestSHA256: current.manifestSHA,
 		AcquiredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Lineage:    lineage, Artifacts: artifacts,
+	}
+	if acquiredV2 {
+		runStart := current.hub.RunStart
+		snapshotTime := current.hub.SnapshotTime
+		marker.Type = AcquiredBundleTypeV2
+		marker.Schema = AcquiredBundleSchemaV2
+		marker.SourceIdentitySchema = BridgeIdentitySchema
+		marker.SourceIdentityProfile = BridgeIdentityProfile
+		marker.HubMarkerSchemaVersion = HubMarkerSchemaV3
+		marker.RunStart = &runStart
+		marker.SnapshotTime = &snapshotTime
+		marker.ConversionIdentitySHA256 = current.hub.ConversionIdentitySHA256
+		marker.SnapshotCompletedAt = ""
+		marker.SnapshotCompletionSemantics = ""
 	}
 	markerData, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
@@ -868,22 +964,89 @@ func acquiredLocalCompleteJSON(_ string, hub acquiredHubComplete, manifestSHA st
 	return append(data, '\n'), nil
 }
 
+func acquiredClassifiedCompleteJSON(
+	marker AcquiredBundleMarker,
+	manifestSHA string,
+	segments int,
+) ([]byte, error) {
+	if marker.RunStart == nil || marker.SnapshotTime == nil {
+		return nil, fmt.Errorf("classified acquired time is required")
+	}
+	doc := acquiredLocalComplete{
+		Type:           indexsubstrate.CompleteMarkerTypeV1,
+		IndexSetID:     marker.IndexSetID,
+		RunID:          marker.RunID,
+		ManifestPath:   "manifest.json",
+		ManifestSHA256: manifestSHA,
+		SegmentDir:     "segments",
+		Segments:       segments,
+	}
+	if marker.SnapshotTime.Basis == BridgeSnapshotTimeExactCommit {
+		doc.Type = indexsubstrate.CompleteMarkerTypeV2
+		doc.SnapshotCompletedAt = marker.SnapshotTime.CompletedAt
+		doc.SnapshotCompletionSemantics = indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit
+	} else if marker.SnapshotTime.Basis != BridgeSnapshotTimeLegacyUnavailable {
+		return nil, fmt.Errorf("classified acquired snapshot time is invalid")
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode classified acquired adapter marker: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
 func validateAcquiredHubComplete(indexSetID, runID string, hub acquiredHubComplete, limits AcquiredBundleLimits) error {
-	if hub.Version != "1.0" || hub.MarkerSchemaVersion != HubMarkerSchemaV2 ||
+	if hub.Version != "1.0" ||
 		hub.Format != acquiredHubFormat || hub.FormatVersion != "2" ||
 		hub.IndexSetID != indexSetID || hub.RunID != runID || strings.TrimSpace(hub.ExportedBy) == "" {
 		return fmt.Errorf("durable hub complete marker contract mismatch")
 	}
-	snapshotAt, snapshotOK := parseCanonicalAcquiredTime(hub.SnapshotCompletedAt)
-	hubAt, hubOK := parseCanonicalAcquiredTime(hub.HubCommittedAt)
-	completedAt, completedOK := parseCanonicalAcquiredTime(hub.CompletedAt)
-	if !snapshotOK || !hubOK || !completedOK ||
-		hubAt.Before(snapshotAt) || !completedAt.Equal(hubAt) {
-		return fmt.Errorf("durable hub completion times are invalid")
-	}
-	if hub.SnapshotCompletionSemantics != "" &&
-		hub.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
-		return fmt.Errorf("durable hub snapshot completion semantics are invalid")
+	switch hub.MarkerSchemaVersion {
+	case HubMarkerSchemaV2:
+		if hub.LegacyMarkerSchemaVersion != "" || hub.LegacyMarkerSHA256 != "" ||
+			hub.IdentitySchema != "" || hub.IdentityProfile != "" ||
+			hub.RunStart.Basis != "" || hub.SnapshotTime.Basis != "" ||
+			hub.ConversionIdentitySHA256 != "" {
+			return fmt.Errorf("durable hub v2 marker contains v3 fields")
+		}
+		snapshotAt, snapshotOK := parseCanonicalAcquiredTime(hub.SnapshotCompletedAt)
+		hubAt, hubOK := parseCanonicalAcquiredTime(hub.HubCommittedAt)
+		completedAt, completedOK := parseCanonicalAcquiredTime(hub.CompletedAt)
+		if !snapshotOK || !hubOK || !completedOK ||
+			hubAt.Before(snapshotAt) || !completedAt.Equal(hubAt) {
+			return fmt.Errorf("durable hub completion times are invalid")
+		}
+		if hub.SnapshotCompletionSemantics != "" &&
+			hub.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
+			return fmt.Errorf("durable hub snapshot completion semantics are invalid")
+		}
+	case HubMarkerSchemaV3:
+		if hub.CompletedAt != "" || hub.SnapshotCompletedAt != "" ||
+			hub.SnapshotCompletionSemantics != "" ||
+			hub.LegacyMarkerSchemaVersion != HubMarkerSchemaV1 ||
+			!validSHA256(hub.LegacyMarkerSHA256) ||
+			hub.IdentitySchema != BridgeIdentitySchema ||
+			hub.IdentityProfile != BridgeIdentityProfile ||
+			hub.RunStart.Basis != BridgeRunStartLegacyAsserted ||
+			!validSHA256(hub.ConversionIdentitySHA256) {
+			return fmt.Errorf("durable hub v3 marker contract mismatch")
+		}
+		runStartedAt, runStartOK := parseCanonicalAcquiredTime(hub.RunStart.StartedAt)
+		hubAt, hubOK := parseCanonicalAcquiredTime(hub.HubCommittedAt)
+		if !runStartOK || !hubOK ||
+			validateBridgeSnapshotTime(hub.SnapshotTime, runStartedAt, hubAt) != nil {
+			return fmt.Errorf("durable hub v3 classified times are invalid")
+		}
+		conversion, err := json.Marshal(bridgeConversionFromMarker(hub.bridgeV3()))
+		if err != nil {
+			return fmt.Errorf("durable hub v3 conversion identity is invalid")
+		}
+		conversion = append(conversion, '\n')
+		if sha256Hex(conversion) != hub.ConversionIdentitySHA256 {
+			return fmt.Errorf("durable hub v3 conversion identity mismatch")
+		}
+	default:
+		return fmt.Errorf("durable hub complete marker contract mismatch")
 	}
 	if err := validateHubArtifact(hub.Artifacts.Identity, "identity.json", "identity", limits.MaxIdentityBytes); err != nil {
 		return err
@@ -892,7 +1055,8 @@ func validateAcquiredHubComplete(indexSetID, runID string, hub acquiredHubComple
 		return err
 	}
 	if len(hub.Artifacts.Segments) > limits.MaxSegments ||
-		hub.Durable.Segments != len(hub.Artifacts.Segments) || hub.Durable.Rows < 0 {
+		hub.Durable.Segments != len(hub.Artifacts.Segments) ||
+		hub.Durable.Rows < 0 || int64(hub.Durable.Rows) > maxBridgeJSONCount {
 		return fmt.Errorf("durable hub artifact count exceeds acquisition limits")
 	}
 	seen := make(map[string]struct{}, len(hub.Artifacts.Segments))
@@ -915,9 +1079,23 @@ func validateAcquiredHubComplete(indexSetID, runID string, hub acquiredHubComple
 	return nil
 }
 
-func validateAcquiredHubExactTime(hub acquiredHubComplete, manifest indexsubstrate.InternalManifest) error {
+func validateAcquiredHubTime(hub acquiredHubComplete, manifest indexsubstrate.InternalManifest) error {
 	if manifest.RunStartedAt == nil {
-		return fmt.Errorf("durable manifest run_started_at is required for exact-time acquisition")
+		return fmt.Errorf("durable manifest run_started_at is required for acquisition")
+	}
+	if hub.MarkerSchemaVersion == HubMarkerSchemaV3 {
+		startedAt, err := indexsubstrate.ParseCanonicalUTCTime(hub.RunStart.StartedAt)
+		if err != nil || !startedAt.Equal(*manifest.RunStartedAt) {
+			return fmt.Errorf("durable hub run_start disagrees with manifest")
+		}
+		hubAt, err := indexsubstrate.ParseCanonicalUTCTime(hub.HubCommittedAt)
+		if err != nil {
+			return fmt.Errorf("durable hub hub_committed_at is invalid")
+		}
+		if err := validateBridgeSnapshotTime(hub.SnapshotTime, startedAt, hubAt); err != nil {
+			return fmt.Errorf("durable hub classified snapshot time is invalid")
+		}
+		return nil
 	}
 	snapshotAt, err := indexsubstrate.ParseCanonicalUTCTime(hub.SnapshotCompletedAt)
 	if err != nil {
@@ -1205,10 +1383,22 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 	}
 	if hub.Artifacts.Identity.SHA256 != marker.SourceIdentitySHA256 ||
 		hub.Artifacts.Manifest.SHA256 != marker.ManifestSHA256 ||
-		hub.SnapshotCompletedAt != marker.SnapshotCompletedAt ||
-		hub.SnapshotCompletionSemantics != marker.SnapshotCompletionSemantics ||
 		hub.HubCommittedAt != marker.HubCommittedAt {
 		return nil, fmt.Errorf("%w: acquired marker binding mismatch", ErrNotAcquiredBundle)
+	}
+	if marker.Type == AcquiredBundleTypeV2 {
+		if marker.RunStart == nil || marker.SnapshotTime == nil ||
+			hub.MarkerSchemaVersion != marker.HubMarkerSchemaVersion ||
+			hub.RunStart != *marker.RunStart ||
+			hub.SnapshotTime != *marker.SnapshotTime ||
+			hub.ConversionIdentitySHA256 != marker.ConversionIdentitySHA256 ||
+			hub.IdentitySchema != marker.SourceIdentitySchema ||
+			hub.IdentityProfile != marker.SourceIdentityProfile {
+			return nil, fmt.Errorf("%w: acquired v2 marker binding mismatch", ErrNotAcquiredBundle)
+		}
+	} else if hub.SnapshotCompletedAt != marker.SnapshotCompletedAt ||
+		hub.SnapshotCompletionSemantics != marker.SnapshotCompletionSemantics {
+		return nil, fmt.Errorf("%w: acquired marker time binding mismatch", ErrNotAcquiredBundle)
 	}
 	identityRef := byPath["identity.json"]
 	if identityRef.Role != acquiredIdentityRole ||
@@ -1219,9 +1409,18 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 	completeRel := currentPrefix + "complete.json"
 	manifestRel := currentPrefix + "manifest.json"
 	segmentRel := currentPrefix + "segments"
+	completeData := verifiedData[completeRel]
+	if marker.Type == AcquiredBundleTypeV2 {
+		completeData, err = acquiredClassifiedCompleteJSON(
+			marker, marker.ManifestSHA256, len(hub.Artifacts.Segments),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("%w: classified snapshot adapter failed", ErrNotAcquiredBundle)
+		}
+	}
 	snap, err := indexsubstrate.OpenPublishedRunSnapshotMaterial(
 		completeRel, manifestRel, segmentRel,
-		verifiedData[completeRel], verifiedData[manifestRel],
+		completeData, verifiedData[manifestRel],
 		marker.IndexSetID, marker.RunID,
 	)
 	if err != nil || snap.Complete.ManifestSHA256 != marker.ManifestSHA256 {
@@ -1233,7 +1432,9 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 		prefix := "runs/" + node.RunID + "/"
 		expectedArtifacts[prefix+"hub-complete.json"] = acquiredHubCompleteRole
 		expectedArtifacts[prefix+"manifest.json"] = acquiredManifestRole
-		expectedArtifacts[prefix+"complete.json"] = acquiredLocalCompleteRole
+		if marker.Type != AcquiredBundleTypeV2 {
+			expectedArtifacts[prefix+"complete.json"] = acquiredLocalCompleteRole
+		}
 		nodeHubData := verifiedData[prefix+"hub-complete.json"]
 		if sha256Hex(nodeHubData) != node.HubCompleteSHA256 {
 			return nil, fmt.Errorf("%w: lineage hub complete verification failed", ErrNotAcquiredBundle)
@@ -1247,6 +1448,11 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 			nodeHub.Artifacts.Manifest.SHA256 != node.ManifestSHA256 {
 			return nil, fmt.Errorf("%w: lineage hub complete binding mismatch", ErrNotAcquiredBundle)
 		}
+		if marker.Type == AcquiredBundleTypeV2 &&
+			(nodeHub.MarkerSchemaVersion != node.MarkerSchemaVersion ||
+				nodeHub.ConversionIdentitySHA256 != node.ConversionIdentitySHA256) {
+			return nil, fmt.Errorf("%w: classified lineage marker binding mismatch", ErrNotAcquiredBundle)
+		}
 		nodeManifestData := verifiedData[prefix+"manifest.json"]
 		if sha256Hex(nodeManifestData) != node.ManifestSHA256 {
 			return nil, fmt.Errorf("%w: lineage manifest verification failed", ErrNotAcquiredBundle)
@@ -1259,15 +1465,22 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 			return nil, fmt.Errorf("%w: lineage manifest binding mismatch", ErrNotAcquiredBundle)
 		}
 		lineageManifests = append(lineageManifests, nodeManifest)
-		for _, required := range []struct {
+		requiredArtifacts := []struct {
 			path string
 			role string
 			sha  string
 		}{
 			{prefix + "hub-complete.json", acquiredHubCompleteRole, node.HubCompleteSHA256},
 			{prefix + "manifest.json", acquiredManifestRole, node.ManifestSHA256},
-			{prefix + "complete.json", acquiredLocalCompleteRole, ""},
-		} {
+		}
+		if marker.Type != AcquiredBundleTypeV2 {
+			requiredArtifacts = append(requiredArtifacts, struct {
+				path string
+				role string
+				sha  string
+			}{prefix + "complete.json", acquiredLocalCompleteRole, ""})
+		}
+		for _, required := range requiredArtifacts {
 			ref := byPath[required.path]
 			if ref.Role != required.role || (required.sha != "" && ref.SHA256 != required.sha) {
 				return nil, fmt.Errorf("%w: lineage artifact role binding mismatch", ErrNotAcquiredBundle)
@@ -1309,7 +1522,7 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 	}
 	snapshotAt, _ := time.Parse(time.RFC3339Nano, marker.SnapshotCompletedAt)
 	hubAt, _ := time.Parse(time.RFC3339Nano, marker.HubCommittedAt)
-	return &durableReader{
+	reader := &durableReader{
 		meta: Meta{
 			Format: FormatDurableV2, IndexSetID: marker.IndexSetID,
 			BaseURI: identity.Payload.BaseURI, Provider: identity.Payload.Provider,
@@ -1324,34 +1537,68 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 		snapshotCompletionSemantics: marker.SnapshotCompletionSemantics,
 		hubCommittedAt:              hubAt, hubCompleteSHA256: marker.HubCompleteSHA256,
 		acquiredRoot: root, acquiredSinceFilters: acquiredFilters,
-	}, nil
+	}
+	if marker.Type == AcquiredBundleTypeV2 {
+		reader.runStart = *marker.RunStart
+		reader.snapshotTime = *marker.SnapshotTime
+		reader.sourceIdentitySchema = marker.SourceIdentitySchema
+		reader.sourceIdentityProfile = marker.SourceIdentityProfile
+	}
+	return reader, nil
 }
 
 func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLimits) error {
-	if marker.Type != AcquiredBundleType || marker.Schema != AcquiredBundleSchema ||
-		!fullAcquiredIndexSetRE.MatchString(marker.IndexSetID) ||
+	v2 := marker.Type == AcquiredBundleTypeV2 && marker.Schema == AcquiredBundleSchemaV2
+	v1 := marker.Type == AcquiredBundleType && marker.Schema == AcquiredBundleSchema
+	if (!v1 && !v2) || !fullAcquiredIndexSetRE.MatchString(marker.IndexSetID) ||
 		!acquiredRunIDRE.MatchString(marker.RunID) ||
 		(marker.ProofThroughRunID != "" && !acquiredRunIDRE.MatchString(marker.ProofThroughRunID)) ||
 		!validSHA256(marker.SourceIdentitySHA256) ||
-		marker.SourceIdentitySchema != SourceIdentitySchemaV1 ||
-		marker.SourceIdentityProfile != SourceIdentityProfileV1 ||
 		!validSHA256(marker.HubCompleteSHA256) || !validSHA256(marker.ManifestSHA256) {
 		return fmt.Errorf("acquired marker contract mismatch")
 	}
 	if _, ok := parseCanonicalAcquiredTime(marker.AcquiredAt); !ok {
 		return fmt.Errorf("acquired_at is invalid")
 	}
-	if marker.SnapshotCompletionSemantics != "" &&
-		marker.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
-		return fmt.Errorf("acquired snapshot completion semantics are invalid")
-	}
-	snapshotAt, snapshotOK := parseCanonicalAcquiredTime(marker.SnapshotCompletedAt)
 	hubAt, hubOK := parseCanonicalAcquiredTime(marker.HubCommittedAt)
-	if !snapshotOK || !hubOK || hubAt.Before(snapshotAt) {
-		return fmt.Errorf("acquired source times are invalid")
+	if !hubOK {
+		return fmt.Errorf("acquired hub commit time is invalid")
 	}
-	if len(marker.Lineage) == 0 || len(marker.Lineage) > limits.MaxLineageNodes ||
-		marker.Lineage[0].IndexSetID != marker.IndexSetID ||
+	if v2 {
+		if marker.SourceIdentitySchema != BridgeIdentitySchema ||
+			marker.SourceIdentityProfile != BridgeIdentityProfile ||
+			marker.HubMarkerSchemaVersion != HubMarkerSchemaV3 ||
+			marker.RunStart == nil || marker.SnapshotTime == nil ||
+			!validSHA256(marker.ConversionIdentitySHA256) ||
+			marker.SnapshotCompletedAt != "" ||
+			marker.SnapshotCompletionSemantics != "" {
+			return fmt.Errorf("acquired v2 marker contract mismatch")
+		}
+		startedAt, ok := parseCanonicalAcquiredTime(marker.RunStart.StartedAt)
+		if !ok || marker.RunStart.Basis != BridgeRunStartLegacyAsserted ||
+			validateBridgeSnapshotTime(*marker.SnapshotTime, startedAt, hubAt) != nil {
+			return fmt.Errorf("acquired v2 classified times are invalid")
+		}
+	} else {
+		if marker.SourceIdentitySchema != SourceIdentitySchemaV1 ||
+			marker.SourceIdentityProfile != SourceIdentityProfileV1 ||
+			marker.HubMarkerSchemaVersion != "" || marker.RunStart != nil ||
+			marker.SnapshotTime != nil || marker.ConversionIdentitySHA256 != "" {
+			return fmt.Errorf("acquired v1 marker contract mismatch")
+		}
+		if marker.SnapshotCompletionSemantics != "" &&
+			marker.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
+			return fmt.Errorf("acquired snapshot completion semantics are invalid")
+		}
+		snapshotAt, snapshotOK := parseCanonicalAcquiredTime(marker.SnapshotCompletedAt)
+		if !snapshotOK || hubAt.Before(snapshotAt) {
+			return fmt.Errorf("acquired source times are invalid")
+		}
+	}
+	if len(marker.Lineage) == 0 || len(marker.Lineage) > limits.MaxLineageNodes {
+		return fmt.Errorf("acquired lineage node limit exceeded")
+	}
+	if marker.Lineage[0].IndexSetID != marker.IndexSetID ||
 		marker.Lineage[0].RunID != marker.RunID ||
 		marker.Lineage[0].HubCompleteSHA256 != marker.HubCompleteSHA256 ||
 		marker.Lineage[0].ManifestSHA256 != marker.ManifestSHA256 {
@@ -1364,17 +1611,42 @@ func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLi
 		return fmt.Errorf("proof-through lineage boundary mismatch")
 	}
 	seenRuns := make(map[string]struct{}, len(marker.Lineage))
-	for _, node := range marker.Lineage {
+	for i, node := range marker.Lineage {
 		if node.IndexSetID != marker.IndexSetID || !acquiredRunIDRE.MatchString(node.RunID) ||
 			!validSHA256(node.HubCompleteSHA256) || !validSHA256(node.ManifestSHA256) {
 			return fmt.Errorf("acquired lineage node is invalid")
+		}
+		if v2 {
+			switch node.MarkerSchemaVersion {
+			case HubMarkerSchemaV2:
+				if node.ConversionIdentitySHA256 != "" {
+					return fmt.Errorf("acquired v2 lineage conversion identity is invalid")
+				}
+			case HubMarkerSchemaV3:
+				if !validSHA256(node.ConversionIdentitySHA256) {
+					return fmt.Errorf("acquired v3 lineage conversion identity is invalid")
+				}
+			default:
+				return fmt.Errorf("acquired lineage marker schema is invalid")
+			}
+			if i == 0 &&
+				(node.MarkerSchemaVersion != marker.HubMarkerSchemaVersion ||
+					node.ConversionIdentitySHA256 != marker.ConversionIdentitySHA256) {
+				return fmt.Errorf("acquired lineage root classification mismatch")
+			}
+		} else if node.MarkerSchemaVersion != "" || node.ConversionIdentitySHA256 != "" {
+			return fmt.Errorf("acquired v1 lineage classification is invalid")
 		}
 		if _, exists := seenRuns[node.RunID]; exists {
 			return fmt.Errorf("acquired lineage node is duplicated")
 		}
 		seenRuns[node.RunID] = struct{}{}
 	}
-	if len(marker.Artifacts) == 0 || len(marker.Artifacts) > limits.MaxSegments+3*limits.MaxLineageNodes+1 {
+	maxArtifacts := limits.MaxSegments + 3*limits.MaxLineageNodes + 1
+	if v2 && maxArtifacts > 200128 {
+		maxArtifacts = 200128
+	}
+	if len(marker.Artifacts) == 0 || len(marker.Artifacts) > maxArtifacts {
 		return fmt.Errorf("acquired artifacts are required")
 	}
 	seenPaths := make(map[string]struct{}, len(marker.Artifacts))
@@ -1382,7 +1654,8 @@ func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLi
 		normalized, err := normalizeBundleRelativePath(artifact.Path, false)
 		if err != nil || normalized != artifact.Path || strings.Contains(artifact.Path, "%") ||
 			len(artifact.Path) > 1024 ||
-			artifact.SizeBytes < 0 || !validSHA256(artifact.SHA256) {
+			artifact.SizeBytes < 0 || artifact.SizeBytes > maxBridgeJSONCount ||
+			!validSHA256(artifact.SHA256) {
 			return fmt.Errorf("acquired artifact is invalid")
 		}
 		switch artifact.Role {
@@ -1390,9 +1663,13 @@ func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLi
 			if artifact.Path != "identity.json" || artifact.SizeBytes > limits.MaxIdentityBytes {
 				return fmt.Errorf("acquired identity artifact is invalid")
 			}
-		case acquiredHubCompleteRole, acquiredLocalCompleteRole:
+		case acquiredHubCompleteRole:
 			if artifact.SizeBytes > limits.MaxMarkerBytes {
 				return fmt.Errorf("acquired marker artifact exceeds limit")
+			}
+		case acquiredLocalCompleteRole:
+			if v2 || artifact.SizeBytes > limits.MaxMarkerBytes {
+				return fmt.Errorf("acquired local marker artifact is invalid")
 			}
 		case acquiredManifestRole:
 			if artifact.SizeBytes > limits.MaxManifestBytes {
@@ -1414,7 +1691,9 @@ func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLi
 		"identity.json",
 		"runs/" + marker.RunID + "/hub-complete.json",
 		"runs/" + marker.RunID + "/manifest.json",
-		"runs/" + marker.RunID + "/complete.json",
+	}
+	if !v2 {
+		required = append(required, "runs/"+marker.RunID+"/complete.json")
 	}
 	for _, requiredPath := range required {
 		if _, ok := seenPaths[requiredPath]; !ok {

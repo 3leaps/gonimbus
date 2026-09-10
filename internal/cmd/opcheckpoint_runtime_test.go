@@ -36,6 +36,8 @@ func TestOpenDefaultOperationCheckpointStoreRejectsRepoRootFromNestedCwd(t *test
 		EnvPrefix:  "GONIMBUS_",
 	}
 	t.Cleanup(func() { appIdentity = originalIdentity })
+	t.Setenv("GONIMBUS_DATA_DIR", "")
+	t.Setenv("GONIMBUS_DATA_ROOT", "")
 	t.Setenv("XDG_DATA_HOME", repoRoot)
 
 	_, err = openDefaultOperationCheckpointStore(context.Background())

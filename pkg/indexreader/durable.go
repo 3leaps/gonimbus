@@ -28,10 +28,14 @@ type durableReader struct {
 	segmentCacheRoot            string
 	pinned                      bool
 	sourceKind                  SnapshotSourceKind
+	runStart                    BridgeRunStart
+	snapshotTime                BridgeSnapshotTime
 	snapshotCompletedAt         time.Time
 	snapshotCompletionSemantics string
 	hubCommittedAt              time.Time
 	hubCompleteSHA256           string
+	sourceIdentitySchema        string
+	sourceIdentityProfile       string
 	acquiredRoot                *boundAcquiredRoot
 	acquiredSinceFilters        map[string]indexstore.SinceRunFilter
 	closeOnce                   sync.Once
@@ -189,28 +193,56 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 	if manifest.RunStartedAt == nil || manifest.RunStartedAt.IsZero() {
 		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable manifest run_started_at is required", ErrVerifiedSnapshotMetadataUnavailable)
 	}
-	completedAt, err := r.snap.ExactSnapshotCompletedAt()
-	if err != nil {
-		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
+	runStart := r.runStart
+	snapshotTime := r.snapshotTime
+	var completedAt time.Time
+	semantics := ""
+	if runStart.Basis == "" {
+		runStart = BridgeRunStart{
+			Basis:     BridgeRunStartLocallyObserved,
+			StartedAt: manifest.RunStartedAt.UTC().Format(time.RFC3339Nano),
+		}
 	}
-	semantics := complete.SnapshotCompletionSemantics
-	if !r.snapshotCompletedAt.IsZero() {
-		if !completedAt.Equal(r.snapshotCompletedAt) {
+	runStartedAt, err := indexsubstrate.ParseCanonicalUTCTime(runStart.StartedAt)
+	if err != nil || !runStartedAt.Equal(*manifest.RunStartedAt) ||
+		(runStart.Basis != BridgeRunStartLegacyAsserted &&
+			runStart.Basis != BridgeRunStartLocallyObserved) {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: classified run start is invalid", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	if snapshotTime.Basis == "" {
+		completedAt, err = r.snap.ExactSnapshotCompletedAt()
+		if err != nil {
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
+		}
+		semantics = complete.SnapshotCompletionSemantics
+		if !r.snapshotCompletedAt.IsZero() && !completedAt.Equal(r.snapshotCompletedAt) {
 			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: local and acquired snapshot completion times disagree", ErrVerifiedSnapshotMetadataUnavailable)
 		}
-	}
-	if r.snapshotCompletionSemantics != "" {
-		if semantics != r.snapshotCompletionSemantics {
+		if r.snapshotCompletionSemantics != "" && semantics != r.snapshotCompletionSemantics {
 			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: local and acquired snapshot completion semantics disagree", ErrVerifiedSnapshotMetadataUnavailable)
 		}
-	}
-	if err := indexsubstrate.ValidateExactSnapshotCompletion(
-		semantics,
-		*manifest.RunStartedAt,
-		completedAt,
-		r.hubCommittedAt,
-	); err != nil {
-		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
+		if err := indexsubstrate.ValidateExactSnapshotCompletion(
+			semantics,
+			*manifest.RunStartedAt,
+			completedAt,
+			r.hubCommittedAt,
+		); err != nil {
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
+		}
+		snapshotTime = BridgeSnapshotTime{
+			Basis:          BridgeSnapshotTimeExactCommit,
+			CompletedAt:    completedAt.UTC().Format(time.RFC3339Nano),
+			EvidenceType:   indexsubstrate.CompleteMarkerTypeV2,
+			EvidenceSHA256: r.snap.CompleteSHA256,
+		}
+	} else {
+		if err := validateBridgeSnapshotTime(snapshotTime, runStartedAt, r.hubCommittedAt); err != nil {
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: classified snapshot time is invalid", ErrVerifiedSnapshotMetadataUnavailable)
+		}
+		if snapshotTime.Basis == BridgeSnapshotTimeExactCommit {
+			completedAt, _ = indexsubstrate.ParseCanonicalUTCTime(snapshotTime.CompletedAt)
+			semantics = indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit
+		}
 	}
 	if r.sourceIdentity.IndexSetID != manifest.IndexSetID ||
 		len(r.sourceIdentity.CompleteFileSHA256) != 64 {
@@ -239,18 +271,28 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 	if sourceKind == "" {
 		sourceKind = SnapshotSourceLocalPublished
 	}
+	sourceIdentitySchema := r.sourceIdentitySchema
+	sourceIdentityProfile := r.sourceIdentityProfile
+	if sourceIdentitySchema == "" {
+		sourceIdentitySchema = SourceIdentitySchemaV1
+	}
+	if sourceIdentityProfile == "" {
+		sourceIdentityProfile = SourceIdentityProfileV1
+	}
 	return VerifiedSnapshotMetadata{
 		SourceKind:                  sourceKind,
 		IndexSetID:                  manifest.IndexSetID,
 		RunID:                       manifest.RunID,
-		RunStartedAt:                manifest.RunStartedAt.UTC(),
+		RunStart:                    runStart,
+		SnapshotTime:                snapshotTime,
+		RunStartedAt:                runStartedAt,
 		SnapshotCompletedAt:         completedAt.UTC(),
 		SnapshotCompletionSemantics: semantics,
 		HubCommittedAt:              r.hubCommittedAt.UTC(),
 		HubCompleteSHA256:           r.hubCompleteSHA256,
 		SourceIdentitySHA256:        r.sourceIdentity.CompleteFileSHA256,
-		SourceIdentitySchema:        SourceIdentitySchemaV1,
-		SourceIdentityProfile:       SourceIdentityProfileV1,
+		SourceIdentitySchema:        sourceIdentitySchema,
+		SourceIdentityProfile:       sourceIdentityProfile,
 		ManifestSHA256:              complete.ManifestSHA256,
 		CoverageSHA256:              coverageSHA256,
 		Coverage:                    coverage,

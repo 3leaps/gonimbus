@@ -90,6 +90,8 @@ shard_by: [event_date]
 func withAtlasCommandTestState(t *testing.T) {
 	t.Helper()
 	oldIdentity := appIdentity
+	t.Setenv("GONIMBUS_DATA_DIR", "")
+	t.Setenv("GONIMBUS_DATA_ROOT", "")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	appIdentity = &appidentity.Identity{BinaryName: "gonimbus", ConfigName: "gonimbus"}
 	t.Cleanup(func() { appIdentity = oldIdentity })

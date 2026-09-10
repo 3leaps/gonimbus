@@ -66,6 +66,8 @@ type VerifiedSnapshotMetadata struct {
 	SourceKind                  SnapshotSourceKind
 	IndexSetID                  string
 	RunID                       string
+	RunStart                    BridgeRunStart
+	SnapshotTime                BridgeSnapshotTime
 	RunStartedAt                time.Time
 	SnapshotCompletedAt         time.Time
 	SnapshotCompletionSemantics string

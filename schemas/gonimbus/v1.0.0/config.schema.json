@@ -99,7 +99,39 @@
     },
     "hub_read_handles": {
       "type": "object",
-      "description": "Logical read-only hub bindings used only by exact index acquisition.",
+      "description": "Logical read-only hub bindings used by exact index acquisition and durable custody bridge sources.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "uri"
+        ],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "pattern": "^(s3|gs|file)://"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "gcp_project": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hub_publish_handles": {
+      "type": "object",
+      "description": "Logical exact-read plus atomic conditional-create hub bindings used only by durable custody bridge publication.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
       },

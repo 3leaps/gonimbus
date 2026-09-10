@@ -18,15 +18,30 @@ type Config struct {
 	// accepted as a compatibility alias; DataRoot wins when both are set.
 	DataRoot string `mapstructure:"data_root"`
 	DataDir  string `mapstructure:"data_dir"`
-	// HubReadHandles are logical read-only hub bindings used by index acquire.
-	// The resolved provider capability never crosses into the configuration-free
-	// acquisition library as this structure or as a handle name.
+	// HubReadHandles are logical read-only hub bindings used by exact acquisition
+	// and as custody bridge sources. The resolved provider capability never
+	// crosses into the configuration-free libraries as this structure or as a
+	// handle name.
 	HubReadHandles map[string]HubReadHandleConfig `mapstructure:"hub_read_handles"`
+	// HubPublishHandles are logical exact-read plus conditional-create bindings
+	// used by custody bridge publication. They deliberately do not grant list,
+	// overwrite, delete, or destination-administration authority.
+	HubPublishHandles map[string]HubPublishHandleConfig `mapstructure:"hub_publish_handles"`
 }
 
 // HubReadHandleConfig binds a logical config-plane name to one hub root and
 // provider read credential selection.
 type HubReadHandleConfig struct {
+	URI        string `mapstructure:"uri"`
+	Profile    string `mapstructure:"profile"`
+	Region     string `mapstructure:"region"`
+	Endpoint   string `mapstructure:"endpoint"`
+	GCPProject string `mapstructure:"gcp_project"`
+}
+
+// HubPublishHandleConfig binds a logical config-plane name to one create-only
+// hub root and provider credential selection.
+type HubPublishHandleConfig struct {
 	URI        string `mapstructure:"uri"`
 	Profile    string `mapstructure:"profile"`
 	Region     string `mapstructure:"region"`
