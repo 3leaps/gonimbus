@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.3leaps.dev/gonimbus/v1.0.0/index-hub-complete.v3.schema.json",
+  "title": "Gonimbus Durable Custody Bridge Hub Marker",
+  "description": "Final marker for a verified legacy durable-v2 run republished under a versioned custody envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "marker_schema_version",
+    "format",
+    "format_version",
+    "index_set_id",
+    "run_id",
+    "legacy_marker_schema_version",
+    "legacy_marker_sha256",
+    "identity_schema",
+    "identity_profile",
+    "run_start",
+    "snapshot_time",
+    "conversion_identity_sha256",
+    "hub_committed_at",
+    "exported_by",
+    "artifacts",
+    "durable"
+  ],
+  "properties": {
+    "version": {
+      "const": "1.0"
+    },
+    "marker_schema_version": {
+      "const": "gonimbus.index.hub_marker.v3"
+    },
+    "format": {
+      "const": "durable-v2"
+    },
+    "format_version": {
+      "const": "2"
+    },
+    "index_set_id": {
+      "$ref": "#/$defs/index_set_id"
+    },
+    "run_id": {
+      "$ref": "#/$defs/run_id"
+    },
+    "legacy_marker_schema_version": {
+      "const": "gonimbus.index.hub_marker.v1"
+    },
+    "legacy_marker_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "identity_schema": {
+      "const": "gonimbus.index_set_identity.canonical-json-lf.v1"
+    },
+    "identity_profile": {
+      "const": "default"
+    },
+    "run_start": {
+      "$ref": "#/$defs/run_start"
+    },
+    "snapshot_time": {
+      "$ref": "#/$defs/snapshot_time"
+    },
+    "conversion_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "hub_committed_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "exported_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_json",
+        "manifest",
+        "segments"
+      ],
+      "properties": {
+        "identity_json": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifact"
+            },
+            {
+              "properties": {
+                "path": {
+                  "const": "identity.json"
+                },
+                "role": {
+                  "const": "identity"
+                }
+              }
+            }
+          ]
+        },
+        "manifest": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifact"
+            },
+            {
+              "properties": {
+                "path": {
+                  "const": "manifest.json"
+                },
+                "role": {
+                  "const": "manifest"
+                }
+              }
+            }
+          ]
+        },
+        "segments": {
+          "type": "array",
+          "maxItems": 200000,
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/artifact"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^segments/[A-Za-z0-9._-]+$"
+                  },
+                  "role": {
+                    "const": "segment"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "durable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_type",
+        "manifest_render",
+        "index_schema_version",
+        "segment_namespace",
+        "segments",
+        "rows"
+      ],
+      "properties": {
+        "manifest_type": {
+          "const": "gonimbus.index.manifest.v1"
+        },
+        "manifest_render": {
+          "const": "internal"
+        },
+        "index_schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "segment_namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "segments": {
+          "$ref": "#/$defs/count"
+        },
+        "rows": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "index_set_id": {
+      "type": "string",
+      "pattern": "^idx_[0-9a-f]{64}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_([0-9]{1,32}|[0-9A-HJKMNP-TV-Z]{26})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{0,8}[1-9])?Z$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "role",
+        "required",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "const": true
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "run_start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "started_at"
+      ],
+      "properties": {
+        "basis": {
+          "const": "legacy_asserted"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "snapshot_time": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "basis",
+            "completed_at",
+            "evidence_type",
+            "evidence_sha256"
+          ],
+          "properties": {
+            "basis": {
+              "const": "exact_commit"
+            },
+            "completed_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "evidence_type": {
+              "const": "gonimbus.index.complete.v2"
+            },
+            "evidence_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "basis"
+          ],
+          "properties": {
+            "basis": {
+              "const": "legacy_unavailable"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

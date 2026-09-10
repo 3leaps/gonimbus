@@ -109,7 +109,7 @@ func init() {
 	indexQueryCmd.Flags().String("canonical-tie-break", string(indexstore.CanonicalTieBreakMinKey), "Canonical selection rule for --canonical-by-etag: min-key, min-modified, max-modified")
 	indexQueryCmd.Flags().Bool("include-alternates", false, "Populate alternates[] on canonical ETag records")
 	indexQueryCmd.Flags().String("since-run", "", "Only emit current objects first seen or changed after this successful run (durable requires exact --index-set and --run-id)")
-	indexQueryCmd.Flags().String("output-format", "", "Output framing (default human JSONL/count, or receipt-jsonl-v1 for a pinned verified query)")
+	indexQueryCmd.Flags().String("output-format", "", "Output framing (default human JSONL/count, receipt-jsonl-v1, or receipt-jsonl-v2 for a pinned verified query)")
 
 	// Index selection
 	indexQueryCmd.Flags().String("index-set", "", "Explicit index set ID (e.g., idx_da038d8171b4a9ba); skips auto-selection")
@@ -215,17 +215,17 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 	outputFormat, _ := cmd.Flags().GetString("output-format")
 	outputFormat = strings.TrimSpace(outputFormat)
 	switch outputFormat {
-	case "", indexQueryReceiptOutputFormat:
+	case "", indexQueryReceiptOutputFormat, indexQueryReceiptOutputFormatV2:
 	default:
-		return fmt.Errorf("unsupported --output-format %q; available values: %s", outputFormat, indexQueryReceiptOutputFormat)
+		return fmt.Errorf("unsupported --output-format %q; available values: %s, %s", outputFormat, indexQueryReceiptOutputFormat, indexQueryReceiptOutputFormatV2)
 	}
-	if outputFormat == indexQueryReceiptOutputFormat {
+	if outputFormat == indexQueryReceiptOutputFormat || outputFormat == indexQueryReceiptOutputFormatV2 {
 		indexSetFlag = strings.TrimSpace(indexSetFlag)
 		if snapshotDir == "" && (!validFullIndexSetID(indexSetFlag) || indexSetFlag != strings.ToLower(indexSetFlag)) {
-			return fmt.Errorf("--output-format %s requires a full lowercase --index-set ID", indexQueryReceiptOutputFormat)
+			return fmt.Errorf("--output-format %s requires a full lowercase --index-set ID", outputFormat)
 		}
 		if snapshotDir == "" && runIDFlag == "" {
-			return fmt.Errorf("--output-format %s requires --run-id", indexQueryReceiptOutputFormat)
+			return fmt.Errorf("--output-format %s requires --run-id", outputFormat)
 		}
 	}
 	if snapshotDir != "" && (len(args) != 0 || strings.TrimSpace(indexSetFlag) != "" || runIDFlag != "") {
@@ -371,8 +371,9 @@ func runIndexQuery(cmd *cobra.Command, args []string) (err error) {
 		params.EnrichedAfter = t
 	}
 
-	if outputFormat == indexQueryReceiptOutputFormat {
+	if outputFormat == indexQueryReceiptOutputFormat || outputFormat == indexQueryReceiptOutputFormatV2 {
 		return runIndexQueryReceipt(ctx, reader, indexQueryReceiptRunOptions{
+			OutputFormat:      outputFormat,
 			BaseURI:           baseURI,
 			Params:            params,
 			CountOnly:         countOnly,

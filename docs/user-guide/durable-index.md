@@ -442,8 +442,19 @@ Acquired bundles contain the canonical source-identity artifact; store them in
 an access-controlled operational directory outside source repositories and
 version-control trees.
 
-The public final-marker contract is
-[`index-acquired-bundle.v1.schema.json`](../../schemas/gonimbus/v1.0.0/index-acquired-bundle.v1.schema.json).
+The acquired destination's existing ancestry is opened no-follow. Pass a
+physical resolved path, not a symlinked convenience alias. For example, when a
+platform's familiar temporary-directory name resolves through a symlink, use
+the resolved physical directory or another operator-controlled physical
+directory and create the destination parent there first. Symlink-ambiguous
+ancestry is deliberately refused; do not weaken this check for temporary
+storage.
+
+The public final-marker contracts are
+[`index-acquired-bundle.v1.schema.json`](../../schemas/gonimbus/v1.0.0/index-acquired-bundle.v1.schema.json)
+for exact-time publications and
+[`index-acquired-bundle.v2.schema.json`](../../schemas/gonimbus/v1.0.0/index-acquired-bundle.v2.schema.json)
+for classified custody-bridge publications.
 
 ### Version-gated downstream inventory
 
@@ -505,6 +516,66 @@ Large **SQLite** hub exports still use multipart upload when `index.db` crosses
 the default threshold. Durable export naturally stays under single-PUT walls by
 publishing segment objects; multipart remains available for large individual
 artifacts when needed.
+
+### Bridge one legacy durable run into current custody
+
+The custody bridge converts one exact legacy durable-v1 run into the current
+immutable hub envelope. Configure a read-only source handle and a separate
+exact-read plus conditional-create target handle:
+
+```yaml
+hub_read_handles:
+  legacy-read:
+    uri: s3://legacy-hub.example/
+    profile: legacy-reader
+
+hub_publish_handles:
+  custody-publish:
+    uri: s3://current-hub.example/
+    profile: custody-publisher
+```
+
+Then name the full set and run from a trusted handoff and supply independently
+controlled canonical identity authority:
+
+```bash
+gonimbus index hub bridge-durable \
+  --source-hub-read-handle legacy-read \
+  --target-hub-publish-handle custody-publish \
+  --index-set idx_<64-lowercase-hex> \
+  --run-id run_<exact-id> \
+  --identity-file /srv/gonimbus/authority/identity.json \
+  --output-format custody-bridge-receipt-jsonl-v1
+```
+
+Use `--identity-declaration` instead of `--identity-file` when identity must be
+reconstructed from a typed declaration. When an authoritative corrected local
+complete marker is available, `--snapshot-completion-evidence` may name that
+bounded evidence file. Keep all identity and evidence inputs outside source
+repositories and version-control trees.
+
+The command never lists the source, selects `latest.json`, overwrites, deletes,
+or walks the live source. The source and target handles must use the same
+provider and resolve to provably disjoint canonical ranges. Equal or nested
+ranges, provider mismatches, endpoint or access-point aliases, and any range
+whose separation cannot be proved are refused before bridge I/O.
+
+After a successful bridge, acquire from the target through a read-only handle
+configured for that target root, then query with
+`--output-format receipt-jsonl-v2`. Validate the bridge and query terminal
+receipts before treating any result as authoritative. A bridged
+`legacy_unavailable` snapshot has no exact completion timestamp; receipt v1
+therefore refuses it rather than inventing one.
+
+Namespace disjointness is not proof of independent administration, retention,
+or failure domains. Operators own that custody separation. If policy requires a
+cross-medium copy, perform and validate it as a separate controlled operation;
+different URI schemes are not accepted as proof of separation by this command.
+
+For `file://` handles, configure existing physical directories with no symlink
+components. Source and target must be separate, non-nested physical roots. If a
+familiar path is an alias, resolve it first and configure the resolved path; the
+bridge deliberately refuses unresolved or symlink-ambiguous roots.
 
 ## Format-aware local commands
 

@@ -213,6 +213,7 @@ gonimbus index export          # Export an index run to a hub (auto prefers dura
 gonimbus index hydrate         # Download an index run from a hub (format-aware)
 gonimbus index acquire         # Acquire an exact durable run as a verified query bundle
 gonimbus index hub             # Manage index hubs
+gonimbus index hub bridge-durable  # Bridge one exact legacy durable run into current custody
 
 # Job management (for long-running builds)
 gonimbus index jobs list       # List running and recent jobs

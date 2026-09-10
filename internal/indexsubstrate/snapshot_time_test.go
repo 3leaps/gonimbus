@@ -71,7 +71,7 @@ func TestCompleteV2PublicSchemaFreezesExactTimeDiscriminator(t *testing.T) {
 		"type":                          CompleteMarkerTypeV2,
 		"index_set_id":                  "idx_" + strings.Repeat("a", 64),
 		"run_id":                        "run_1709654400000000000",
-		"snapshot_completed_at":         "2026-09-10T12:01:00Z",
+		"snapshot_completed_at":         "2026-09-10T12:01:00.123456789Z",
 		"snapshot_completion_semantics": SnapshotCompletionSemanticsCompleteMarkerCommit,
 		"manifest_path":                 "/app-data/cache/segments/set/runs/run/manifest.json",
 		"manifest_sha256":               strings.Repeat("b", 64),
@@ -84,6 +84,8 @@ func TestCompleteV2PublicSchemaFreezesExactTimeDiscriminator(t *testing.T) {
 		func(doc map[string]any) { delete(doc, "snapshot_completion_semantics") },
 		func(doc map[string]any) { doc["snapshot_completion_semantics"] = "manifest_write" },
 		func(doc map[string]any) { doc["type"] = CompleteMarkerTypeV1 },
+		func(doc map[string]any) { doc["snapshot_completed_at"] = "2026-09-10T13:01:00+01:00" },
+		func(doc map[string]any) { doc["snapshot_completed_at"] = "2026-09-10T12:01:00.120Z" },
 	} {
 		doc := make(map[string]any, len(valid))
 		for key, value := range valid {

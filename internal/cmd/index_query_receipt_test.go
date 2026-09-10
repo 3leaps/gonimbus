@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -17,6 +18,23 @@ import (
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 )
+
+type classifiedReceiptTestReader struct {
+	indexreader.Reader
+	metadata indexreader.VerifiedSnapshotMetadata
+}
+
+func (r *classifiedReceiptTestReader) VerifiedSnapshotMetadata() (indexreader.VerifiedSnapshotMetadata, error) {
+	return r.metadata, nil
+}
+
+func (r *classifiedReceiptTestReader) WalkObjects(
+	_ context.Context,
+	_ indexstore.QueryParams,
+	_ indexreader.VisitObject,
+) (indexstore.QueryStats, error) {
+	return indexstore.QueryStats{}, nil
+}
 
 func TestIndexQueryReceiptJSONL_TerminalSuccessAndCounters(t *testing.T) {
 	resetAppDataRootTestState(t)
@@ -72,6 +90,90 @@ func TestIndexQueryReceiptJSONL_TerminalSuccessAndCounters(t *testing.T) {
 	require.NotContains(t, lines[1], "manifest_path")
 	require.NotContains(t, lines[1], "segment_dir")
 	validateQueryReceiptAgainstSchema(t, receipt)
+}
+
+func TestIndexQueryReceiptV2JSONL_ClassifiesLocalExactTime(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	env := seedDurableOnlyAppData(t, dataRoot, []indexsubstrate.CurrentObjectRow{
+		durableCLIRow("data/one.json", 10, "e1", time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC)),
+	})
+
+	stdout, stderr, err := executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", env.runID,
+		"--count",
+		"--output-format", indexQueryReceiptOutputFormatV2,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines := nonEmptyLines(stdout)
+	require.Len(t, lines, 1)
+
+	var receipt indexQueryReceiptV2Record
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &receipt))
+	require.Equal(t, indexQueryReceiptTypeV2, receipt.Type)
+	require.Equal(t, indexQueryReceiptVersionV2, receipt.SchemaVersion)
+	require.Equal(t, indexreader.BridgeRunStartLocallyObserved, receipt.RunStart.Basis)
+	require.Equal(t, indexreader.BridgeSnapshotTimeExactCommit, receipt.SnapshotTime.Basis)
+	require.Equal(t, indexsubstrate.CompleteMarkerTypeV2, receipt.SnapshotTime.EvidenceType)
+	require.Len(t, receipt.SnapshotTime.EvidenceSHA256, 64)
+	require.Empty(t, receipt.HubCommittedAt)
+	require.Empty(t, receipt.HubCompleteSHA256)
+	require.NoError(t, validateIndexQueryReceiptV2(receipt))
+	validateQueryReceiptV2AgainstSchema(t, receipt)
+}
+
+func TestIndexQueryReceiptV2JSONL_AdmitsLegacyUnavailableAndV1RefusesBeforeQuery(t *testing.T) {
+	startedAt := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	hubAt := startedAt.Add(3 * time.Minute)
+	hash := strings.Repeat("a", 64)
+	reader := &classifiedReceiptTestReader{metadata: indexreader.VerifiedSnapshotMetadata{
+		SourceKind: indexreader.SnapshotSourceAcquiredHub,
+		IndexSetID: "idx_" + hash,
+		RunID:      "run_1709654400000000000",
+		RunStart: indexreader.BridgeRunStart{
+			Basis: indexreader.BridgeRunStartLegacyAsserted, StartedAt: startedAt.Format(time.RFC3339Nano),
+		},
+		SnapshotTime: indexreader.BridgeSnapshotTime{
+			Basis: indexreader.BridgeSnapshotTimeLegacyUnavailable,
+		},
+		RunStartedAt:          startedAt,
+		HubCommittedAt:        hubAt,
+		HubCompleteSHA256:     hash,
+		SourceIdentitySHA256:  hash,
+		SourceIdentitySchema:  indexreader.BridgeIdentitySchema,
+		SourceIdentityProfile: indexreader.BridgeIdentityProfile,
+		ManifestSHA256:        hash,
+		CoverageSHA256:        hash,
+	}}
+
+	v1Path := filepath.Join(t.TempDir(), "v1.jsonl")
+	err := runIndexQueryReceipt(context.Background(), reader, indexQueryReceiptRunOptions{
+		OutputFormat: indexQueryReceiptOutputFormat,
+		CountOnly:    true,
+		OutputURI:    "file://" + v1Path,
+	})
+	require.ErrorContains(t, err, "requires exact snapshot time")
+	require.NoFileExists(t, v1Path)
+
+	v2Path := filepath.Join(t.TempDir(), "v2.jsonl")
+	err = runIndexQueryReceipt(context.Background(), reader, indexQueryReceiptRunOptions{
+		OutputFormat: indexQueryReceiptOutputFormatV2,
+		CountOnly:    true,
+		OutputURI:    "file://" + v2Path,
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(v2Path)
+	require.NoError(t, err)
+	lines := nonEmptyLines(string(data))
+	require.Len(t, lines, 1)
+	var receipt indexQueryReceiptV2Record
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &receipt))
+	require.Equal(t, indexreader.BridgeSnapshotTimeLegacyUnavailable, receipt.SnapshotTime.Basis)
+	require.Empty(t, receipt.SnapshotTime.CompletedAt)
+	require.NoError(t, validateIndexQueryReceiptV2(receipt))
+	validateQueryReceiptV2AgainstSchema(t, receipt)
 }
 
 func TestIndexQueryReceiptSchema_RequiresSourceIdentityForAllSourceKinds(t *testing.T) {
@@ -156,7 +258,7 @@ func TestIndexQueryReceiptJSONL_RequiresExactPin(t *testing.T) {
 	_, _, err = executeIndexQueryCommand(t,
 		"--index-set", env.indexSetID,
 		"--run-id", env.runID,
-		"--output-format", "receipt-jsonl-v2",
+		"--output-format", "receipt-jsonl-v3",
 	)
 	require.ErrorContains(t, err, "unsupported --output-format")
 }
@@ -753,6 +855,12 @@ func TestIndexQueryReceiptQuerySpecNormalization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, first.SpecSHA256, withDifferentBaseURI.SpecSHA256)
 
+	base.BaseURI = ""
+	base.OutputFormat = indexQueryReceiptOutputFormatV2
+	v2, err := buildIndexQueryReceiptQuery(meta, base)
+	require.NoError(t, err)
+	require.NotEqual(t, first.SpecSHA256, v2.SpecSHA256)
+
 	canonical, err := marshalJCSSubset(map[string]any{
 		"b": "line\n",
 		"a": "\u2028\u2029<>&",
@@ -780,12 +888,30 @@ func validateQueryReceiptAgainstSchema(t *testing.T, receipt indexQueryReceiptRe
 	}
 }
 
+func validateQueryReceiptV2AgainstSchema(t *testing.T, receipt indexQueryReceiptV2Record) {
+	t.Helper()
+	validator := queryReceiptSchemaValidatorVersion(t, "index-query-receipt.v2.schema.json")
+	data, err := json.Marshal(receipt)
+	require.NoError(t, err)
+	diagnostics, err := validator.ValidateJSON(data)
+	require.NoError(t, err)
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == schema.SeverityError {
+			t.Fatalf("receipt failed schema validation: %s: %s", diagnostic.Pointer, diagnostic.Message)
+		}
+	}
+}
+
 func queryReceiptSchemaValidator(t testing.TB) *schema.Validator {
+	return queryReceiptSchemaValidatorVersion(t, "index-query-receipt.v1.schema.json")
+}
+
+func queryReceiptSchemaValidatorVersion(t testing.TB, name string) *schema.Validator {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	require.True(t, ok)
 	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	rawSchema, err := os.ReadFile(filepath.Join(root, "schemas", "gonimbus", "v1.0.0", "index-query-receipt.v1.schema.json"))
+	rawSchema, err := os.ReadFile(filepath.Join(root, "schemas", "gonimbus", "v1.0.0", name))
 	require.NoError(t, err)
 	validator, err := schema.NewValidator(rawSchema)
 	require.NoError(t, err)
