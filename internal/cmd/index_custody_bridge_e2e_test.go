@@ -457,9 +457,31 @@ func TestCustodyBridgeE2E_LegacyDirectoryCoverageBridges(t *testing.T) {
 	})
 	require.NoError(t, acquireCmd.Execute())
 
-	doctorStdout, _, err := executeIndexDoctorCommand(t, bundleDir)
-	require.NoError(t, err)
-	require.NotEmpty(t, doctorStdout)
+	doctorStdout, doctorStderr, err := executeIndexDoctorCommand(t,
+		"--snapshot-dir", bundleDir, "--json",
+	)
+	require.NoError(t, err, "stderr=%q", doctorStderr)
+	var doctorEntries []indexDoctorEntry
+	require.NoError(t, json.Unmarshal([]byte(doctorStdout), &doctorEntries))
+	require.Len(t, doctorEntries, 1)
+	doctorEntry := doctorEntries[0]
+	require.Equal(t, "durable-v2", doctorEntry.Format)
+	require.Equal(t, bundleDir, doctorEntry.Dir)
+	require.Equal(t, fixture.env.indexSetID, doctorEntry.IndexSetID)
+	require.Equal(t, fixture.env.runID, doctorEntry.LatestRunID)
+	require.True(t, doctorEntry.ManifestPresent)
+	require.Equal(t, filepath.Join(bundleDir, "runs", fixture.env.runID, "manifest.json"), doctorEntry.ManifestPath)
+	require.Equal(t, filepath.Join(bundleDir, "acquired.json"), doctorEntry.AcquiredMarkerPath)
+	require.Equal(t, indexreader.AcquiredBundleTypeV2, doctorEntry.AcquiredMarkerType)
+	require.Equal(t, indexreader.AcquiredBundleSchemaV2, doctorEntry.AcquiredMarkerSchema)
+	require.Equal(t, indexreader.HubMarkerSchemaV3, doctorEntry.HubMarkerSchema)
+	require.Empty(t, doctorEntry.DurableLatestPath)
+	require.NotNil(t, doctorEntry.DurableMarkerOK)
+	require.True(t, *doctorEntry.DurableMarkerOK)
+	require.Equal(t, bridgeReceipt.ManifestSHA256, doctorEntry.DurableManifestSHA)
+	require.Equal(t, 2, doctorEntry.DurableSegmentCount)
+	require.True(t, doctorEntry.IdentityOK)
+	require.NotContains(t, doctorStdout, fixture.env.segmentRoot)
 
 	stdout, stderr, err := executeIndexQueryCommand(t,
 		"--snapshot-dir", bundleDir,
@@ -550,6 +572,160 @@ func TestCustodyBridgeE2E_InvalidCoverageGapFailsClosed(t *testing.T) {
 	require.ErrorContains(t, err, indexreader.BridgeErrorManifestInvalid)
 	require.Empty(t, output.String())
 	require.Empty(t, mustReadCustodyE2EDirectory(t, fixture.targetRoot))
+}
+
+func TestCustodyBridgeE2E_DoctorSnapshotDirBinding(t *testing.T) {
+	fixture := newCustodyE2ELegacyPrefixFixture(t, []indexsubstrate.CoverageAttestation{{
+		Scope:    &indexsubstrate.Scope{Prefix: "shard-a/2026-02-01/"},
+		Basis:    indexsubstrate.CoverageBasisConfirmed,
+		Complete: true,
+	}})
+	_, _ = runCustodyE2EBridge(t, context.Background(), fixture, "")
+	bundleDir := filepath.Join(filepath.Dir(fixture.sourceRoot), "acquired")
+	acquireCmd := newIndexAcquireCommandForTest()
+	acquireCmd.SetArgs([]string{
+		"--hub-read-handle", "custody-read",
+		"--index-set", fixture.env.indexSetID,
+		"--run-id", fixture.env.runID,
+		"--dest", bundleDir,
+	})
+	require.NoError(t, acquireCmd.Execute())
+
+	// Positional auto-detect on a marker-bearing bundle reports the bundle,
+	// even with a same-set ambient cache present in the fixture app-data.
+	stdout, stderr, err := executeIndexDoctorCommand(t, bundleDir, "--json")
+	require.NoError(t, err, "stderr=%q", stderr)
+	var entries []indexDoctorEntry
+	require.NoError(t, json.Unmarshal([]byte(stdout), &entries))
+	require.Len(t, entries, 1)
+	require.Equal(t, filepath.Join(bundleDir, "acquired.json"), entries[0].AcquiredMarkerPath)
+	require.Empty(t, entries[0].DurableLatestPath)
+	require.NotContains(t, stdout, fixture.env.segmentRoot)
+
+	// Corrupt marker: both selectors fail closed, no ambient fallback.
+	markerPath := filepath.Join(bundleDir, "acquired.json")
+	originalMarker := mustReadCustodyE2EFile(t, markerPath)
+	require.NoError(t, os.WriteFile(markerPath, []byte("corrupt\n"), 0o600))
+	stdout, _, err = executeIndexDoctorCommand(t, "--snapshot-dir", bundleDir)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+	stdout, _, err = executeIndexDoctorCommand(t, bundleDir)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+
+	// Missing marker: --snapshot-dir fails closed; the positional form
+	// falls back to legacy lookup and must not report acquired mode.
+	require.NoError(t, os.Remove(markerPath))
+	stdout, _, err = executeIndexDoctorCommand(t, "--snapshot-dir", bundleDir)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+	stdout, _, err = executeIndexDoctorCommand(t, bundleDir)
+	require.NoError(t, err)
+	require.NotContains(t, stdout, "acquired_marker_path")
+
+	require.NoError(t, os.WriteFile(markerPath, originalMarker, 0o600))
+}
+
+func TestCustodyBridgeE2E_DoctorSnapshotDirSymlinkFailsClosed(t *testing.T) {
+	fixture := newCustodyE2ELegacyPrefixFixture(t, []indexsubstrate.CoverageAttestation{{
+		Scope:    &indexsubstrate.Scope{Prefix: "shard-a/2026-02-01/"},
+		Basis:    indexsubstrate.CoverageBasisConfirmed,
+		Complete: true,
+	}})
+	_, _ = runCustodyE2EBridge(t, context.Background(), fixture, "")
+	bundleDir := filepath.Join(filepath.Dir(fixture.sourceRoot), "acquired")
+	acquireCmd := newIndexAcquireCommandForTest()
+	acquireCmd.SetArgs([]string{
+		"--hub-read-handle", "custody-read",
+		"--index-set", fixture.env.indexSetID,
+		"--run-id", fixture.env.runID,
+		"--dest", bundleDir,
+	})
+	require.NoError(t, acquireCmd.Execute())
+
+	manifestPath := filepath.Join(bundleDir, "runs", fixture.env.runID, "manifest.json")
+	linkTarget := filepath.Join(bundleDir, "acquired.json")
+	require.NoError(t, os.Remove(manifestPath))
+	require.NoError(t, os.Symlink(linkTarget, manifestPath))
+
+	stdout, _, err := executeIndexDoctorCommand(t, "--snapshot-dir", bundleDir)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+}
+
+func TestCustodyBridgeE2E_DoctorSnapshotDirSwappedSegmentFailsClosed(t *testing.T) {
+	fixture := newCustodyE2ELegacyPrefixFixture(t, []indexsubstrate.CoverageAttestation{{
+		Scope:    &indexsubstrate.Scope{Prefix: "shard-a/2026-02-01/"},
+		Basis:    indexsubstrate.CoverageBasisConfirmed,
+		Complete: true,
+	}})
+	_, _ = runCustodyE2EBridge(t, context.Background(), fixture, "")
+	bundleDir := filepath.Join(filepath.Dir(fixture.sourceRoot), "acquired")
+	acquireCmd := newIndexAcquireCommandForTest()
+	acquireCmd.SetArgs([]string{
+		"--hub-read-handle", "custody-read",
+		"--index-set", fixture.env.indexSetID,
+		"--run-id", fixture.env.runID,
+		"--dest", bundleDir,
+	})
+	require.NoError(t, acquireCmd.Execute())
+
+	segmentFiles, err := filepath.Glob(filepath.Join(bundleDir, "runs", fixture.env.runID, "segments", "*"))
+	require.NoError(t, err)
+	require.NotEmpty(t, segmentFiles)
+	original, err := os.ReadFile(segmentFiles[0])
+	require.NoError(t, err)
+	swapped := bytes.Repeat([]byte("X"), len(original))
+	require.NotEqual(t, original, swapped)
+	require.NoError(t, os.WriteFile(segmentFiles[0], swapped, 0o600))
+
+	stdout, _, err := executeIndexDoctorCommand(t, "--snapshot-dir", bundleDir)
+	require.Error(t, err)
+	require.Empty(t, stdout)
+}
+
+func TestCustodyBridgeE2E_DoctorSnapshotDirDetailVerbose(t *testing.T) {
+	fixture := newCustodyE2ELegacyPrefixFixture(t, []indexsubstrate.CoverageAttestation{{
+		Scope:    &indexsubstrate.Scope{Prefix: "shard-a/2026-02-01/"},
+		Basis:    indexsubstrate.CoverageBasisConfirmed,
+		Complete: true,
+	}})
+	_, _ = runCustodyE2EBridge(t, context.Background(), fixture, "")
+	bundleDir := filepath.Join(filepath.Dir(fixture.sourceRoot), "acquired")
+	acquireCmd := newIndexAcquireCommandForTest()
+	acquireCmd.SetArgs([]string{
+		"--hub-read-handle", "custody-read",
+		"--index-set", fixture.env.indexSetID,
+		"--run-id", fixture.env.runID,
+		"--dest", bundleDir,
+	})
+	require.NoError(t, acquireCmd.Execute())
+
+	stdout, stderr, err := executeIndexDoctorCommand(t,
+		"--snapshot-dir", bundleDir, "--detail", "--json",
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	var detail indexDoctorEntry
+	require.NoError(t, json.Unmarshal([]byte(stdout), &detail))
+	require.NotNil(t, detail.IdentityPayload)
+	require.Equal(t, "s3://test-bucket/data/", detail.IdentityPayload.BaseURI)
+	require.Equal(t, "s3", detail.IdentityPayload.Provider)
+	require.NotNil(t, detail.ManifestRaw)
+	var rawManifest indexsubstrate.InternalManifest
+	require.NoError(t, json.Unmarshal(detail.ManifestRaw, &rawManifest))
+	require.Equal(t, fixture.env.runID, rawManifest.RunID)
+	require.Len(t, rawManifest.Segments, 2)
+
+	stdout, stderr, err = executeIndexDoctorCommand(t,
+		"--snapshot-dir", bundleDir, "--verbose", "--json",
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	var entries []indexDoctorEntry
+	require.NoError(t, json.Unmarshal([]byte(stdout), &entries))
+	require.Len(t, entries, 1)
+	require.NotNil(t, entries[0].IdentityPayload)
+	require.Equal(t, "s3://test-bucket/data/", entries[0].IdentityPayload.BaseURI)
+	require.Nil(t, []byte(entries[0].ManifestRaw))
 }
 
 func TestCustodyBridgeE2E_RootSentinelCoverageStillBridges(t *testing.T) {

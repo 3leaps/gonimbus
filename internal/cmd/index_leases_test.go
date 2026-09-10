@@ -177,6 +177,7 @@ func TestGuardDoctorLeaseFlags(t *testing.T) {
 	// never silently mutate the default store because it errors out first).
 	require.Error(t, guardDoctorLeaseFlags(set(newIndexDoctorCommand(), "leases", "root"), true, false))
 	require.Error(t, guardDoctorLeaseFlags(set(newIndexDoctorCommand(), "release-stale", "db"), false, true))
+	require.Error(t, guardDoctorLeaseFlags(set(newIndexDoctorCommand(), "leases", "snapshot-dir"), true, false))
 	// --leases and --release-stale are mutually exclusive.
 	require.Error(t, guardDoctorLeaseFlags(set(newIndexDoctorCommand(), "leases", "release-stale"), true, true))
 	// --confirm/--force require --release-stale.

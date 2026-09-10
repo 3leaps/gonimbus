@@ -37,6 +37,11 @@ type durableReader struct {
 	sourceIdentitySchema        string
 	sourceIdentityProfile       string
 	acquiredRoot                *boundAcquiredRoot
+	acquiredMarkerType          string
+	acquiredMarkerSchema        string
+	acquiredHubMarkerSchema     string
+	acquiredIdentityPayload     indexstore.IndexSetIdentityPayload
+	acquiredManifestRaw         []byte
 	acquiredSinceFilters        map[string]indexstore.SinceRunFilter
 	closeOnce                   sync.Once
 	closeErr                    error
@@ -304,6 +309,32 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 			Segments:      len(manifest.Segments),
 		},
 	}, nil
+}
+
+func (r *durableReader) VerifiedAcquiredBundleReport() (VerifiedAcquiredBundleReport, error) {
+	if r == nil || r.acquiredRoot == nil {
+		return VerifiedAcquiredBundleReport{}, fmt.Errorf("%w: not an acquired bundle reader", ErrVerifiedSnapshotMetadataUnavailable)
+	}
+	return VerifiedAcquiredBundleReport{
+		MarkerType:             r.acquiredMarkerType,
+		MarkerSchema:           r.acquiredMarkerSchema,
+		HubMarkerSchemaVersion: r.acquiredHubMarkerSchema,
+		ManifestCreatedAt:      r.snap.Manifest.CreatedAt,
+		IdentityPayload:        cloneAcquiredIdentityPayload(r.acquiredIdentityPayload),
+		ManifestRaw:            append([]byte(nil), r.acquiredManifestRaw...),
+	}, nil
+}
+
+// cloneAcquiredIdentityPayload deep-copies the reference fields of a
+// verified identity payload so capability callers receive immutable data.
+func cloneAcquiredIdentityPayload(payload indexstore.IndexSetIdentityPayload) indexstore.IndexSetIdentityPayload {
+	payload.Build.Includes = append([]string(nil), payload.Build.Includes...)
+	payload.Build.Excludes = append([]string(nil), payload.Build.Excludes...)
+	if payload.PathDate != nil {
+		dupe := *payload.PathDate
+		payload.PathDate = &dupe
+	}
+	return payload
 }
 
 func (r *durableReader) SQLiteDB() *sql.DB { return nil }

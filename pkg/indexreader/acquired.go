@@ -1536,7 +1536,10 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 		sourceKind: SnapshotSourceAcquiredHub, snapshotCompletedAt: snapshotAt,
 		snapshotCompletionSemantics: marker.SnapshotCompletionSemantics,
 		hubCommittedAt:              hubAt, hubCompleteSHA256: marker.HubCompleteSHA256,
-		acquiredRoot: root, acquiredSinceFilters: acquiredFilters,
+		acquiredRoot: root, acquiredMarkerType: marker.Type,
+		acquiredMarkerSchema: marker.Schema, acquiredHubMarkerSchema: marker.HubMarkerSchemaVersion,
+		acquiredIdentityPayload: identity.Payload, acquiredManifestRaw: verifiedData[manifestRel],
+		acquiredSinceFilters: acquiredFilters,
 	}
 	if marker.Type == AcquiredBundleTypeV2 {
 		reader.runStart = *marker.RunStart
