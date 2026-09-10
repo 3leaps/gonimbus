@@ -1346,7 +1346,7 @@ func indexBuildEngineAdapterTestConfig(t *testing.T, name string) indexbuild.Con
 			Complete: true,
 		}},
 		RunStartedAt:         base,
-		CreatedAt:            base.Add(time.Minute),
+		ManifestCreatedAt:    base.Add(time.Minute),
 		Clock:                func() time.Time { return base.Add(2 * time.Minute) },
 		TargetRowsPerSegment: 1,
 	}

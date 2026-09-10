@@ -13,6 +13,7 @@
     "run_id",
     "run_started_at",
     "snapshot_completed_at",
+    "snapshot_completion_semantics",
     "source_identity_sha256",
     "source_identity_schema",
     "source_identity_profile",
@@ -55,6 +56,9 @@
     },
     "snapshot_completed_at": {
       "$ref": "#/$defs/timestamp"
+    },
+    "snapshot_completion_semantics": {
+      "const": "complete_marker_commit"
     },
     "hub_committed_at": {
       "$ref": "#/$defs/timestamp"

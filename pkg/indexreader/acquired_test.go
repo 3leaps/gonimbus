@@ -108,6 +108,7 @@ func TestAcquireBundle_ExactCurrentOpenAndIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SnapshotSourceAcquiredHub, verified.SourceKind)
 	require.NotZero(t, verified.SnapshotCompletedAt)
+	require.Equal(t, indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit, verified.SnapshotCompletionSemantics)
 	require.NotZero(t, verified.HubCommittedAt)
 	require.Len(t, verified.HubCompleteSHA256, 64)
 	sameRun, err := reader.ResolveSinceRunFilter(context.Background(), fx.currentRun)
@@ -128,6 +129,34 @@ func TestAcquireBundle_ExactCurrentOpenAndIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, after)
 	require.NoFileExists(t, filepath.Join(dest, "latest.json"))
+}
+
+func TestAcquireBundle_PreFixV2IsStructurallyValidButTimeIneligible(t *testing.T) {
+	fx := newAcquiredHubFixture(t)
+	completeKey := exactHubKey(fx.indexSetID, fx.currentRun, "complete.json")
+	var complete acquiredHubComplete
+	require.NoError(t, json.Unmarshal(fx.hub.objects[completeKey], &complete))
+	complete.SnapshotCompletionSemantics = ""
+	complete.ExportedBy = "gonimbus/99.0.0"
+	require.NotEqual(t, complete.SnapshotCompletedAt, complete.HubCommittedAt)
+	require.NoError(t, validateAcquiredHubComplete(
+		fx.indexSetID,
+		fx.currentRun,
+		complete,
+		AcquiredBundleLimits{}.normalize(),
+	))
+	data, err := json.MarshalIndent(complete, "", "  ")
+	require.NoError(t, err)
+	fx.hub.objects[completeKey] = data
+
+	dest := filepath.Join(realTempDir(t), "bundle")
+	_, err = AcquireBundle(context.Background(), fx.hub, AcquireBundleOptions{
+		IndexSetID:  fx.indexSetID,
+		RunID:       fx.currentRun,
+		Destination: dest,
+	})
+	require.ErrorContains(t, err, "not exact-time eligible")
+	require.NoDirExists(t, dest)
 }
 
 func TestAcquireBundle_ProofThroughSupportsPinnedDelta(t *testing.T) {
@@ -700,6 +729,7 @@ func addFixtureHubRun(
 	complete.IndexSetID = indexSetID
 	complete.RunID = runID
 	complete.SnapshotCompletedAt = runStarted.Add(2 * time.Minute).Format(time.RFC3339Nano)
+	complete.SnapshotCompletionSemantics = indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit
 	complete.HubCommittedAt = runStarted.Add(3 * time.Minute).Format(time.RFC3339Nano)
 	complete.CompletedAt = complete.HubCommittedAt
 	complete.ExportedBy = "gonimbus/0.4.3-dev"

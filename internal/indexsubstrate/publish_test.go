@@ -86,7 +86,7 @@ func TestPublishEnrichOnlyRejectsForgedCoverageToken(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	require.NoError(t, jw.Seal(cfg2.CreatedAt))
+	require.NoError(t, jw.Seal(cfg2.ManifestCreatedAt))
 	require.NoError(t, jw.Close())
 	cfg2.JournalPaths = []string{jpath}
 	// Rebind lease to the parent's segment root (cfg2 fixture root must not authorize cfg.LatestPath).
@@ -150,7 +150,7 @@ func TestPublishEnrichOnlyRejectsCoverageDigestMismatch(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	require.NoError(t, jw.Seal(cfg2.CreatedAt))
+	require.NoError(t, jw.Seal(cfg2.ManifestCreatedAt))
 	require.NoError(t, jw.Close())
 	cfg2.JournalPaths = []string{jpath}
 	rebindPublishLease(t, &cfg2, filepath.Dir(cfg.LatestPath), cfg.WriteLease)
@@ -327,9 +327,20 @@ func TestPublishSnapshotAdvancesLatestAfterCompletePipeline(t *testing.T) {
 	}, steps)
 	require.Equal(t, ManifestType, result.Manifest.Type)
 	require.Equal(t, config.Coverage, result.Manifest.Coverage)
+	require.Equal(t, config.RunStartedAt.Add(4*time.Minute), result.SnapshotCompletedAt)
+	require.True(t, result.SnapshotCompletedAt.After(config.RunStartedAt))
 	require.FileExists(t, config.ManifestPath)
 	require.FileExists(t, config.CompletePath)
 	require.FileExists(t, config.LatestPath)
+
+	snapshot, err := OpenLatestPublishedSnapshot(config.LatestPath)
+	require.NoError(t, err)
+	require.Equal(t, CompleteMarkerTypeV2, snapshot.Complete.Type)
+	require.Empty(t, snapshot.Complete.CompletedAt)
+	require.Equal(t, SnapshotCompletionSemanticsCompleteMarkerCommit, snapshot.Complete.SnapshotCompletionSemantics)
+	exactCompletedAt, err := snapshot.ExactSnapshotCompletedAt()
+	require.NoError(t, err)
+	require.Equal(t, result.SnapshotCompletedAt, exactCompletedAt)
 
 	manifest, rows, err := ReadLatestPublishedRows(config.LatestPath)
 	require.NoError(t, err)
@@ -405,16 +416,29 @@ func TestPublishSnapshotPersistsParentReachabilityMetadata(t *testing.T) {
 
 func TestPublishSnapshotFailureAfterCompleteCanAdvanceLatestOnRetry(t *testing.T) {
 	config, expectedRows := publishTestConfig(t)
+	clockCalls := 0
+	config.SnapshotCompletionClock = func() time.Time {
+		clockCalls++
+		return config.RunStartedAt.Add(time.Duration(4+clockCalls) * time.Minute)
+	}
 	config.AfterStep = failAfterStep(PublishStepCompleteWritten)
-	_, err := PublishSnapshot(config)
+	first, err := PublishSnapshot(config)
 	require.Error(t, err)
+	require.Equal(t, 1, clockCalls)
 	require.FileExists(t, config.ManifestPath)
 	require.FileExists(t, config.CompletePath)
 	require.NoFileExists(t, config.LatestPath)
+	completeBefore, err := os.ReadFile(config.CompletePath)
+	require.NoError(t, err)
 
 	config.AfterStep = nil
-	_, err = PublishSnapshot(config)
+	retried, err := PublishSnapshot(config)
 	require.NoError(t, err)
+	require.Equal(t, 1, clockCalls, "retry must adopt the committed completion fact")
+	require.Equal(t, first.SnapshotCompletedAt, retried.SnapshotCompletedAt)
+	completeAfter, err := os.ReadFile(config.CompletePath)
+	require.NoError(t, err)
+	require.Equal(t, completeBefore, completeAfter)
 	_, rows, err := ReadLatestPublishedRows(config.LatestPath)
 	require.NoError(t, err)
 	require.Equal(t, expectedRows, rows)
@@ -529,19 +553,20 @@ func publishTestConfig(t *testing.T) (PublishConfig, []CurrentObjectRow) {
 	t.Cleanup(func() { _ = lease.Release() })
 
 	config := PublishConfig{
-		IndexSetID:           "idx_test",
-		RunID:                "run_test",
-		RunStartedAt:         runStartedAt,
-		CreatedAt:            runStartedAt.Add(3 * time.Minute),
-		PriorRows:            []CurrentObjectRow{old},
-		JournalPaths:         []string{journalPath},
-		Coverage:             []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
-		SegmentDir:           filepath.Join(root, "segments"),
-		ManifestPath:         filepath.Join(root, "manifests", "manifest.json"),
-		CompletePath:         filepath.Join(root, "complete.json"),
-		LatestPath:           filepath.Join(root, "latest.json"),
-		TargetRowsPerSegment: 1,
-		WriteLease:           lease,
+		IndexSetID:              "idx_test",
+		RunID:                   "run_test",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       runStartedAt.Add(3 * time.Minute),
+		SnapshotCompletionClock: func() time.Time { return runStartedAt.Add(4 * time.Minute) },
+		PriorRows:               []CurrentObjectRow{old},
+		JournalPaths:            []string{journalPath},
+		Coverage:                []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:              filepath.Join(root, "segments"),
+		ManifestPath:            filepath.Join(root, "manifests", "manifest.json"),
+		CompletePath:            filepath.Join(root, "complete.json"),
+		LatestPath:              filepath.Join(root, "latest.json"),
+		TargetRowsPerSegment:    1,
+		WriteLease:              lease,
 	}
 	result, err := CompactJournalFiles(CompactionInput{
 		IndexSetID:   config.IndexSetID,
@@ -651,18 +676,19 @@ func publishRecordBudgetTestConfig(t *testing.T) PublishConfig {
 	t.Cleanup(func() { _ = lease.Release() })
 
 	return PublishConfig{
-		IndexSetID:           "idx_test",
-		RunID:                "run_test",
-		RunStartedAt:         runStartedAt,
-		CreatedAt:            runStartedAt.Add(3 * time.Minute),
-		JournalPaths:         []string{journalPath},
-		Coverage:             []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
-		SegmentDir:           filepath.Join(root, "segments"),
-		ManifestPath:         filepath.Join(root, "manifests", "manifest.json"),
-		CompletePath:         filepath.Join(root, "complete.json"),
-		LatestPath:           filepath.Join(root, "latest.json"),
-		TargetRowsPerSegment: 1,
-		WriteLease:           lease,
+		IndexSetID:              "idx_test",
+		RunID:                   "run_test",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       runStartedAt.Add(3 * time.Minute),
+		SnapshotCompletionClock: func() time.Time { return runStartedAt.Add(4 * time.Minute) },
+		JournalPaths:            []string{journalPath},
+		Coverage:                []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:              filepath.Join(root, "segments"),
+		ManifestPath:            filepath.Join(root, "manifests", "manifest.json"),
+		CompletePath:            filepath.Join(root, "complete.json"),
+		LatestPath:              filepath.Join(root, "latest.json"),
+		TargetRowsPerSegment:    1,
+		WriteLease:              lease,
 	}
 }
 

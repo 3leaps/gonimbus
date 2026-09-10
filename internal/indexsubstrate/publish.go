@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	ErrInvalidCoverage      = errors.New("invalid coverage evidence")
-	ErrSnapshotNotPublished = errors.New("snapshot not published")
+	ErrInvalidCoverage        = errors.New("invalid coverage evidence")
+	ErrSnapshotNotPublished   = errors.New("snapshot not published")
+	ErrSnapshotTimeIneligible = errors.New("snapshot completion time is not exact-time eligible")
 	// ErrStaleParent is returned when ExpectedParent no longer matches the
 	// authoritative latest pointer at advance time (lost CAS race).
 	ErrStaleParent = errors.New("stale parent: latest advanced since capture")
@@ -48,11 +49,15 @@ type ExpectedParentToken struct {
 }
 
 type PublishConfig struct {
-	IndexSetID      string
-	RunID           string
-	RunStartedAt    time.Time
-	CreatedAt       time.Time
-	ParentManifests []ManifestReference
+	IndexSetID        string
+	RunID             string
+	RunStartedAt      time.Time
+	ManifestCreatedAt time.Time
+	// SnapshotCompletionClock is sampled immediately before the immutable
+	// complete marker commit, after the manifest and referenced segments have
+	// been written and verified. Nil uses the UTC wall clock.
+	SnapshotCompletionClock func() time.Time
+	ParentManifests         []ManifestReference
 	// PriorRows seeds prior current-state when no ParentSource is supplied (the
 	// slice adapter path, used by enrich and tests). When ParentSource is set it
 	// takes precedence and PriorRows is ignored.
@@ -101,20 +106,24 @@ type PublishResult struct {
 	// ManifestSHA256 is the digest of the committed manifest bytes (same value
 	// written into complete.json). Prefer this over re-hashing after publish.
 	ManifestSHA256 string
+	// SnapshotCompletedAt is the exact local complete-marker commit time.
+	SnapshotCompletedAt time.Time
 	// LatestAdvanced is true after latest.json was successfully written.
 	// Callers must treat this as committed even if a later post-advance hook fails.
 	LatestAdvanced bool
 }
 
 type publishedCompleteDoc struct {
-	Type           string `json:"type"`
-	IndexSetID     string `json:"index_set_id"`
-	RunID          string `json:"run_id"`
-	CompletedAt    string `json:"completed_at"`
-	ManifestPath   string `json:"manifest_path"`
-	ManifestSHA256 string `json:"manifest_sha256"`
-	SegmentDir     string `json:"segment_dir"`
-	Segments       int    `json:"segments"`
+	Type                        string `json:"type"`
+	IndexSetID                  string `json:"index_set_id"`
+	RunID                       string `json:"run_id"`
+	CompletedAt                 string `json:"completed_at,omitempty"`
+	SnapshotCompletedAt         string `json:"snapshot_completed_at,omitempty"`
+	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
+	ManifestPath                string `json:"manifest_path"`
+	ManifestSHA256              string `json:"manifest_sha256"`
+	SegmentDir                  string `json:"segment_dir"`
+	Segments                    int    `json:"segments"`
 }
 
 type publishedLatestDoc struct {
@@ -212,7 +221,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		Dir:                    config.SegmentDir,
 		IndexSetID:             config.IndexSetID,
 		RunID:                  config.RunID,
-		CreatedAt:              config.CreatedAt,
+		CreatedAt:              config.ManifestCreatedAt,
 		TargetRowsPerSegment:   config.TargetRowsPerSegment,
 		AllowExistingIdentical: true,
 		ParentManifests:        config.ParentManifests,
@@ -251,16 +260,37 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		return result, fmt.Errorf("hash manifest: %w", err)
 	}
 	result.ManifestSHA256 = manifestDigest
-	complete := publishedCompleteDoc{
-		Type:           "gonimbus.index.complete.v1",
-		IndexSetID:     config.IndexSetID,
-		RunID:          config.RunID,
-		CompletedAt:    config.CreatedAt.Format(time.RFC3339Nano),
-		ManifestPath:   config.ManifestPath,
-		ManifestSHA256: manifestDigest,
-		SegmentDir:     config.SegmentDir,
-		Segments:       len(manifest.Segments),
+	snapshotCompletedAt, adopted, err := existingSnapshotCompletion(
+		config,
+		manifest,
+		manifestDigest,
+	)
+	if err != nil {
+		return result, err
 	}
+	if !adopted {
+		snapshotCompletedAt = config.SnapshotCompletionClock()
+		if err := ValidateExactSnapshotCompletion(
+			SnapshotCompletionSemanticsCompleteMarkerCommit,
+			config.RunStartedAt,
+			snapshotCompletedAt,
+			time.Time{},
+		); err != nil {
+			return result, fmt.Errorf("sample snapshot completion: %w", err)
+		}
+	}
+	complete := publishedCompleteDoc{
+		Type:                        CompleteMarkerTypeV2,
+		IndexSetID:                  config.IndexSetID,
+		RunID:                       config.RunID,
+		SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+		SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
+		ManifestPath:                config.ManifestPath,
+		ManifestSHA256:              manifestDigest,
+		SegmentDir:                  config.SegmentDir,
+		Segments:                    len(manifest.Segments),
+	}
+	result.SnapshotCompletedAt = snapshotCompletedAt.UTC()
 	if err := writeJSONImmutableOrEqual(config.CompletePath, complete); err != nil {
 		return result, fmt.Errorf("write complete marker: %w", err)
 	}
@@ -300,6 +330,35 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 	return result, nil
 }
 
+func existingSnapshotCompletion(
+	config PublishConfig,
+	manifest InternalManifest,
+	manifestDigest string,
+) (time.Time, bool, error) {
+	existing, err := readCompleteDocFile(config.CompletePath)
+	if err != nil {
+		if errors.Is(err, ErrSnapshotNotPublished) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	if existing.Type != CompleteMarkerTypeV2 ||
+		existing.IndexSetID != config.IndexSetID ||
+		existing.RunID != config.RunID ||
+		existing.ManifestPath != config.ManifestPath ||
+		existing.ManifestSHA256 != manifestDigest ||
+		existing.SegmentDir != config.SegmentDir ||
+		existing.Segments != len(manifest.Segments) {
+		return time.Time{}, false, nil
+	}
+	snapshot := PublishedSnapshot{Complete: existing, Manifest: manifest}
+	completedAt, err := snapshot.ExactSnapshotCompletedAt()
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("validate existing complete marker: %w", err)
+	}
+	return completedAt, true, nil
+}
+
 // PublishedSnapshot is a verified local durable snapshot opened from a latest
 // pointer + complete marker + digest-checked manifest. Segments are verified
 // per-file when walked.
@@ -320,6 +379,31 @@ type PublishedSnapshot struct {
 // AccountedBytes returns marker+manifest bytes charged for this open.
 func (s PublishedSnapshot) AccountedBytes() int64 {
 	return s.AccountedMarkerBytes + s.AccountedManifestBytes
+}
+
+// ExactSnapshotCompletedAt returns the verified completion time only for a
+// corrected complete.v2 marker. Legacy markers remain structurally readable
+// but cannot produce exact-time authority.
+func (s PublishedSnapshot) ExactSnapshotCompletedAt() (time.Time, error) {
+	if strings.TrimSpace(s.Complete.Type) != CompleteMarkerTypeV2 {
+		return time.Time{}, ErrSnapshotTimeIneligible
+	}
+	if s.Manifest.RunStartedAt == nil {
+		return time.Time{}, fmt.Errorf("%w: manifest run_started_at is required", ErrSnapshotTimeIneligible)
+	}
+	completedAt, err := ParseCanonicalUTCTime(s.Complete.SnapshotCompletedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: snapshot_completed_at is invalid", ErrSnapshotTimeIneligible)
+	}
+	if err := ValidateExactSnapshotCompletion(
+		s.Complete.SnapshotCompletionSemantics,
+		*s.Manifest.RunStartedAt,
+		completedAt,
+		time.Time{},
+	); err != nil {
+		return time.Time{}, fmt.Errorf("%w: %v", ErrSnapshotTimeIneligible, err)
+	}
+	return completedAt, nil
 }
 
 // DefaultMaxPublishedMarkerBytes is the default bound for latest/complete JSON.
@@ -589,22 +673,32 @@ func openPublishedSnapshotMaterial(
 	if err := ValidateManifestLineageStructure(manifest); err != nil {
 		return PublishedSnapshot{}, err
 	}
-	return PublishedSnapshot{
+	snapshot := PublishedSnapshot{
 		CompletePath:           completePath,
 		Complete:               complete,
 		Manifest:               manifest,
 		SegmentDir:             segmentDir,
 		AccountedMarkerBytes:   int64(len(completeData)),
 		AccountedManifestBytes: int64(len(manifestData)),
-	}, nil
+	}
+	// complete.v2 is the exact-time schema: malformed or false authority is
+	// unreadable. Legacy complete.v1 remains structurally readable, while
+	// ExactSnapshotCompletedAt refuses to promote its timestamp.
+	if strings.TrimSpace(complete.Type) == CompleteMarkerTypeV2 {
+		if _, err := snapshot.ExactSnapshotCompletedAt(); err != nil {
+			return PublishedSnapshot{}, err
+		}
+	}
+	return snapshot, nil
 }
 
 func validatePublishedCompleteType(complete publishedCompleteDoc) error {
-	if strings.TrimSpace(complete.Type) == "gonimbus.index.complete.v1" {
+	switch strings.TrimSpace(complete.Type) {
+	case CompleteMarkerTypeV1, CompleteMarkerTypeV2:
 		return nil
 	}
 	if strings.TrimSpace(complete.Type) == "" {
-		return fmt.Errorf("complete marker type is required (expected gonimbus.index.complete.v1)")
+		return fmt.Errorf("complete marker type is required")
 	}
 	return fmt.Errorf("complete marker type %q is not supported", complete.Type)
 }
@@ -667,11 +761,14 @@ func normalizePublishConfig(config PublishConfig) PublishConfig {
 	if !config.RunStartedAt.IsZero() {
 		config.RunStartedAt = config.RunStartedAt.UTC()
 	}
-	if config.CreatedAt.IsZero() {
-		config.CreatedAt = config.RunStartedAt
+	if config.ManifestCreatedAt.IsZero() {
+		config.ManifestCreatedAt = config.RunStartedAt
 	}
-	if !config.CreatedAt.IsZero() {
-		config.CreatedAt = config.CreatedAt.UTC()
+	if !config.ManifestCreatedAt.IsZero() {
+		config.ManifestCreatedAt = config.ManifestCreatedAt.UTC()
+	}
+	if config.SnapshotCompletionClock == nil {
+		config.SnapshotCompletionClock = func() time.Time { return time.Now().UTC() }
 	}
 	if config.TargetRowsPerSegment <= 0 {
 		config.TargetRowsPerSegment = DefaultTargetRowsPerSegment

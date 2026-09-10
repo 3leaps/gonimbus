@@ -50,6 +50,8 @@ func TestIndexQueryReceiptJSONL_TerminalSuccessAndCounters(t *testing.T) {
 	require.Equal(t, "local_published", receipt.SourceKind)
 	require.Equal(t, env.indexSetID, receipt.IndexSetID)
 	require.Equal(t, env.runID, receipt.RunID)
+	require.Equal(t, indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit, receipt.SnapshotCompletionSemantics)
+	require.NotEqual(t, receipt.RunStartedAt, receipt.SnapshotCompletedAt)
 	require.Equal(t, env.identitySHA256, receipt.SourceIdentitySHA256)
 	require.Equal(t, indexreader.SourceIdentitySchemaV1, receipt.SourceIdentitySchema)
 	require.Equal(t, indexreader.SourceIdentityProfileV1, receipt.SourceIdentityProfile)
@@ -90,6 +92,8 @@ func TestIndexQueryReceiptSchema_RequiresSourceIdentityForAllSourceKinds(t *test
 	require.Contains(t, document.Required, "source_identity_sha256")
 	require.Contains(t, document.Required, "source_identity_schema")
 	require.Contains(t, document.Required, "source_identity_profile")
+	require.Contains(t, document.Required, "snapshot_completion_semantics")
+	require.Equal(t, indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit, document.Properties["snapshot_completion_semantics"].Const)
 	require.Equal(t, indexreader.SourceIdentitySchemaV1, document.Properties["source_identity_schema"].Const)
 	require.Equal(t, indexreader.SourceIdentityProfileV1, document.Properties["source_identity_profile"].Const)
 	require.ElementsMatch(t,

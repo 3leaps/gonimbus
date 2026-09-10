@@ -1,5 +1,7 @@
 package indexbuild
 
+import "time"
+
 type Summary struct {
 	IndexSetID      string
 	RunID           string
@@ -9,7 +11,10 @@ type Summary struct {
 	// ManifestSHA256 is the digest written into the durable complete marker at
 	// publish time. Prefer this over re-hashing the manifest path after commit.
 	ManifestSHA256 string
-	Manifest       ManifestSummary
+	// SnapshotCompletedAt is sampled at the immutable local complete-marker
+	// commit boundary and is independent of the run start.
+	SnapshotCompletedAt time.Time
+	Manifest            ManifestSummary
 	// PeakWorkspaceBytes is the high-water live on-disk spill workspace observed
 	// during the durable merge (0 when nothing spilled or on the SQLite path).
 	// Observational capacity evidence for sizing successive builds.

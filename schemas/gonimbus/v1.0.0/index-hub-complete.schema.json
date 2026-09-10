@@ -63,6 +63,11 @@
       "format": "date-time",
       "description": "When the source durable snapshot completed"
     },
+    "snapshot_completion_semantics": {
+      "type": "string",
+      "const": "complete_marker_commit",
+      "description": "Exact-time eligibility discriminator for corrected durable-v2 markers"
+    },
     "hub_committed_at": {
       "type": "string",
       "format": "date-time",

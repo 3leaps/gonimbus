@@ -992,6 +992,8 @@ func TestOpenPublishedSnapshot_LegacyStillOpens(t *testing.T) {
 	require.Nil(t, reopened.Manifest.Lineage)
 	require.Greater(t, reopened.AccountedBytes(), int64(0))
 	require.Equal(t, fx.completePath, reopened.CompletePath)
+	_, err = reopened.ExactSnapshotCompletedAt()
+	require.ErrorIs(t, err, ErrSnapshotTimeIneligible)
 }
 
 func TestOpenPublishedSnapshot_MalformedLineageRefused(t *testing.T) {

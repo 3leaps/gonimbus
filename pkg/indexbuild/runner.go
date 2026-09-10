@@ -143,7 +143,7 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 		Coverage:             cfg.Coverage,
 		ExpectedParent:       cfg.ExpectedParent,
 		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
+		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 		Spill:                cfg.Spill,
@@ -307,23 +307,24 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	}
 
 	result, err := indexsubstrate.PublishSnapshotContext(ctx, indexsubstrate.PublishConfig{
-		IndexSetID:           cfg.IndexSetID,
-		RunID:                cfg.RunID,
-		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
-		JournalPaths:         append([]string(nil), cfg.JournalPaths...),
-		Coverage:             toSubstrateCoverage(coverage),
-		SegmentDir:           cfg.Paths.SegmentDir,
-		ManifestPath:         cfg.Paths.ManifestPath,
-		CompletePath:         cfg.Paths.CompletePath,
-		LatestPath:           cfg.Paths.LatestPath,
-		ExpectedParent:       substrateParent,
-		ParentSource:         continuity.parentSource,
-		StateParent:          continuity.stateParent,
-		Lineage:              continuity.lineage,
-		ParentManifests:      continuity.parentManifests,
-		WriteLease:           lease,
-		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
+		IndexSetID:              cfg.IndexSetID,
+		RunID:                   cfg.RunID,
+		RunStartedAt:            cfg.RunStartedAt,
+		ManifestCreatedAt:       cfg.ManifestCreatedAt,
+		SnapshotCompletionClock: func() time.Time { return cfg.Clock() },
+		JournalPaths:            append([]string(nil), cfg.JournalPaths...),
+		Coverage:                toSubstrateCoverage(coverage),
+		SegmentDir:              cfg.Paths.SegmentDir,
+		ManifestPath:            cfg.Paths.ManifestPath,
+		CompletePath:            cfg.Paths.CompletePath,
+		LatestPath:              cfg.Paths.LatestPath,
+		ExpectedParent:          substrateParent,
+		ParentSource:            continuity.parentSource,
+		StateParent:             continuity.stateParent,
+		Lineage:                 continuity.lineage,
+		ParentManifests:         continuity.parentManifests,
+		WriteLease:              lease,
+		TargetRowsPerSegment:    cfg.TargetRowsPerSegment,
 		SpillBudget: indexsubstrate.SpillMergeBudget{
 			MaxWorkspaceBytes: cfg.Spill.WorkspaceBytes,
 			MaxRecordBytes:    cfg.Spill.RecordBytes,
@@ -335,12 +336,13 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		return Summary{}, err
 	}
 	summary := Summary{
-		IndexSetID:         cfg.IndexSetID,
-		RunID:              cfg.RunID,
-		JournalPaths:       append([]string(nil), cfg.JournalPaths...),
-		ManifestSHA256:     result.ManifestSHA256,
-		Manifest:           manifestSummary(result.Manifest),
-		PeakWorkspaceBytes: result.Compaction.PeakWorkspaceBytes,
+		IndexSetID:          cfg.IndexSetID,
+		RunID:               cfg.RunID,
+		JournalPaths:        append([]string(nil), cfg.JournalPaths...),
+		ManifestSHA256:      result.ManifestSHA256,
+		SnapshotCompletedAt: result.SnapshotCompletedAt,
+		Manifest:            manifestSummary(result.Manifest),
+		PeakWorkspaceBytes:  result.Compaction.PeakWorkspaceBytes,
 	}
 	if err := emitEvent(ctx, cfg.Events, Event{
 		Type:  EventTypeSnapshotPublished,
@@ -1047,10 +1049,10 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, err
 	}
 	cfg.RunStartedAt = runStartedAt
-	if cfg.CreatedAt.IsZero() {
-		cfg.CreatedAt = cfg.RunStartedAt
+	if cfg.ManifestCreatedAt.IsZero() {
+		cfg.ManifestCreatedAt = cfg.RunStartedAt
 	}
-	cfg.CreatedAt = cfg.CreatedAt.UTC()
+	cfg.ManifestCreatedAt = cfg.ManifestCreatedAt.UTC()
 	if cfg.TargetRowsPerSegment <= 0 {
 		cfg.TargetRowsPerSegment = indexsubstrate.DefaultTargetRowsPerSegment
 	}
@@ -1087,10 +1089,10 @@ func normalizeRetryConfig(cfg RetryConfig) (RetryConfig, error) {
 		return RetryConfig{}, err
 	}
 	cfg.RunStartedAt = runStartedAt
-	if cfg.CreatedAt.IsZero() {
-		cfg.CreatedAt = cfg.RunStartedAt
+	if cfg.ManifestCreatedAt.IsZero() {
+		cfg.ManifestCreatedAt = cfg.RunStartedAt
 	}
-	cfg.CreatedAt = cfg.CreatedAt.UTC()
+	cfg.ManifestCreatedAt = cfg.ManifestCreatedAt.UTC()
 	if cfg.TargetRowsPerSegment <= 0 {
 		cfg.TargetRowsPerSegment = indexsubstrate.DefaultTargetRowsPerSegment
 	}
