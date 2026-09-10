@@ -160,7 +160,8 @@ func TestPinnedRun_VerifiedSnapshotMetadataIsBoundToOpen(t *testing.T) {
 	require.Equal(t, env.indexSetID, meta.IndexSetID)
 	require.Equal(t, env.runID, meta.RunID)
 	require.Equal(t, time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC), meta.RunStartedAt)
-	require.Equal(t, meta.RunStartedAt, meta.SnapshotCompletedAt)
+	require.Equal(t, meta.RunStartedAt.Add(time.Minute), meta.SnapshotCompletedAt)
+	require.Equal(t, indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit, meta.SnapshotCompletionSemantics)
 	identityBytes, err := os.ReadFile(filepath.Join(env.identityDir, "identity.json"))
 	require.NoError(t, err)
 	identitySum := sha256.Sum256(identityBytes)
@@ -188,4 +189,37 @@ func TestPinnedRun_VerifiedSnapshotMetadataIsBoundToOpen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, env.indexSetID, again.IndexSetID)
 	require.Equal(t, hex.EncodeToString(identitySum[:]), again.SourceIdentitySHA256)
+}
+
+func TestPinnedRun_LegacyCompleteIsReadableButNotExactTimeEligible(t *testing.T) {
+	ctx := context.Background()
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("x.txt", 1, "e1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	completePath := filepath.Join(env.segmentRoot, "runs", env.runID, "complete.json")
+	data, err := os.ReadFile(completePath)
+	require.NoError(t, err)
+	var complete map[string]any
+	require.NoError(t, json.Unmarshal(data, &complete))
+	complete["type"] = indexsubstrate.CompleteMarkerTypeV1
+	complete["completed_at"] = "2025-01-15T12:00:00Z"
+	delete(complete, "snapshot_completed_at")
+	delete(complete, "snapshot_completion_semantics")
+	writeJSON(t, completePath, complete)
+
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{
+		IndexSetID: env.indexSetID,
+		RunID:      env.runID,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+	count, err := reader.QueryObjectCount(ctx, indexstore.QueryParams{IndexSetID: env.indexSetID})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+
+	metadataReader, ok := reader.(VerifiedSnapshotMetadataReader)
+	require.True(t, ok)
+	_, err = metadataReader.VerifiedSnapshotMetadata()
+	require.ErrorIs(t, err, ErrVerifiedSnapshotMetadataUnavailable)
+	require.ErrorContains(t, err, "not exact-time eligible")
 }

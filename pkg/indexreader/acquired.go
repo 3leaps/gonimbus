@@ -137,21 +137,22 @@ type AcquiredLineageNode struct {
 // AcquiredBundleMarker is the final acquisition receipt. It intentionally
 // contains no source coordinates, provider configuration, or credential handle.
 type AcquiredBundleMarker struct {
-	Type                  string                `json:"type"`
-	Schema                string                `json:"schema"`
-	IndexSetID            string                `json:"index_set_id"`
-	RunID                 string                `json:"run_id"`
-	ProofThroughRunID     string                `json:"proof_through_run_id,omitempty"`
-	SourceIdentitySHA256  string                `json:"source_identity_sha256"`
-	SourceIdentitySchema  string                `json:"source_identity_schema"`
-	SourceIdentityProfile string                `json:"source_identity_profile"`
-	SnapshotCompletedAt   string                `json:"snapshot_completed_at"`
-	HubCommittedAt        string                `json:"hub_committed_at"`
-	HubCompleteSHA256     string                `json:"hub_complete_sha256"`
-	ManifestSHA256        string                `json:"manifest_sha256"`
-	AcquiredAt            string                `json:"acquired_at"`
-	Lineage               []AcquiredLineageNode `json:"lineage"`
-	Artifacts             []AcquiredArtifact    `json:"artifacts"`
+	Type                        string                `json:"type"`
+	Schema                      string                `json:"schema"`
+	IndexSetID                  string                `json:"index_set_id"`
+	RunID                       string                `json:"run_id"`
+	ProofThroughRunID           string                `json:"proof_through_run_id,omitempty"`
+	SourceIdentitySHA256        string                `json:"source_identity_sha256"`
+	SourceIdentitySchema        string                `json:"source_identity_schema"`
+	SourceIdentityProfile       string                `json:"source_identity_profile"`
+	SnapshotCompletedAt         string                `json:"snapshot_completed_at"`
+	SnapshotCompletionSemantics string                `json:"snapshot_completion_semantics,omitempty"`
+	HubCommittedAt              string                `json:"hub_committed_at"`
+	HubCompleteSHA256           string                `json:"hub_complete_sha256"`
+	ManifestSHA256              string                `json:"manifest_sha256"`
+	AcquiredAt                  string                `json:"acquired_at"`
+	Lineage                     []AcquiredLineageNode `json:"lineage"`
+	Artifacts                   []AcquiredArtifact    `json:"artifacts"`
 }
 
 type acquiredHubArtifact struct {
@@ -163,17 +164,18 @@ type acquiredHubArtifact struct {
 }
 
 type acquiredHubComplete struct {
-	Version             string `json:"version"`
-	MarkerSchemaVersion string `json:"marker_schema_version"`
-	Format              string `json:"format"`
-	FormatVersion       string `json:"format_version"`
-	IndexSetID          string `json:"index_set_id"`
-	RunID               string `json:"run_id"`
-	CompletedAt         string `json:"completed_at"`
-	SnapshotCompletedAt string `json:"snapshot_completed_at"`
-	HubCommittedAt      string `json:"hub_committed_at"`
-	ExportedBy          string `json:"exported_by"`
-	Artifacts           struct {
+	Version                     string `json:"version"`
+	MarkerSchemaVersion         string `json:"marker_schema_version"`
+	Format                      string `json:"format"`
+	FormatVersion               string `json:"format_version"`
+	IndexSetID                  string `json:"index_set_id"`
+	RunID                       string `json:"run_id"`
+	CompletedAt                 string `json:"completed_at"`
+	SnapshotCompletedAt         string `json:"snapshot_completed_at"`
+	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
+	HubCommittedAt              string `json:"hub_committed_at"`
+	ExportedBy                  string `json:"exported_by"`
+	Artifacts                   struct {
 		Identity acquiredHubArtifact   `json:"identity_json"`
 		Manifest acquiredHubArtifact   `json:"manifest"`
 		Segments []acquiredHubArtifact `json:"segments"`
@@ -189,14 +191,15 @@ type acquiredHubComplete struct {
 }
 
 type acquiredLocalComplete struct {
-	Type           string `json:"type"`
-	IndexSetID     string `json:"index_set_id"`
-	RunID          string `json:"run_id"`
-	CompletedAt    string `json:"completed_at"`
-	ManifestPath   string `json:"manifest_path"`
-	ManifestSHA256 string `json:"manifest_sha256"`
-	SegmentDir     string `json:"segment_dir"`
-	Segments       int    `json:"segments"`
+	Type                        string `json:"type"`
+	IndexSetID                  string `json:"index_set_id"`
+	RunID                       string `json:"run_id"`
+	SnapshotCompletedAt         string `json:"snapshot_completed_at"`
+	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics"`
+	ManifestPath                string `json:"manifest_path"`
+	ManifestSHA256              string `json:"manifest_sha256"`
+	SegmentDir                  string `json:"segment_dir"`
+	Segments                    int    `json:"segments"`
 }
 
 type acquiredRunMaterial struct {
@@ -655,6 +658,9 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 		if err := validateAcquiredManifest(opts.IndexSetID, runID, hub, manifest); err != nil {
 			return acquiredRunMaterial{}, nil, err
 		}
+		if err := validateAcquiredHubExactTime(hub, manifest); err != nil {
+			return acquiredRunMaterial{}, nil, err
+		}
 
 		artifacts := []AcquiredArtifact{hubArtifact, manifestArtifact}
 		if current {
@@ -777,9 +783,10 @@ func AcquireBundle(ctx context.Context, source HubExactObjectReader, opts Acquir
 		IndexSetID: opts.IndexSetID, RunID: opts.RunID, ProofThroughRunID: opts.ProofThroughRunID,
 		SourceIdentitySHA256: identity.CompleteFileSHA256,
 		SourceIdentitySchema: SourceIdentitySchemaV1, SourceIdentityProfile: SourceIdentityProfileV1,
-		SnapshotCompletedAt: current.hub.SnapshotCompletedAt,
-		HubCommittedAt:      current.hub.HubCommittedAt,
-		HubCompleteSHA256:   current.hubSHA, ManifestSHA256: current.manifestSHA,
+		SnapshotCompletedAt:         current.hub.SnapshotCompletedAt,
+		SnapshotCompletionSemantics: current.hub.SnapshotCompletionSemantics,
+		HubCommittedAt:              current.hub.HubCommittedAt,
+		HubCompleteSHA256:           current.hubSHA, ManifestSHA256: current.manifestSHA,
 		AcquiredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Lineage:    lineage, Artifacts: artifacts,
 	}
@@ -848,9 +855,10 @@ func bindAcquiredDestination(raw string) (finalPath, parentPath, finalBase strin
 
 func acquiredLocalCompleteJSON(_ string, hub acquiredHubComplete, manifestSHA string, segments int) ([]byte, error) {
 	doc := acquiredLocalComplete{
-		Type: "gonimbus.index.complete.v1", IndexSetID: hub.IndexSetID, RunID: hub.RunID,
-		CompletedAt:  hub.SnapshotCompletedAt,
-		ManifestPath: "manifest.json", ManifestSHA256: manifestSHA,
+		Type: indexsubstrate.CompleteMarkerTypeV2, IndexSetID: hub.IndexSetID, RunID: hub.RunID,
+		SnapshotCompletedAt:         hub.SnapshotCompletedAt,
+		SnapshotCompletionSemantics: hub.SnapshotCompletionSemantics,
+		ManifestPath:                "manifest.json", ManifestSHA256: manifestSHA,
 		SegmentDir: "segments", Segments: segments,
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
@@ -872,6 +880,10 @@ func validateAcquiredHubComplete(indexSetID, runID string, hub acquiredHubComple
 	if !snapshotOK || !hubOK || !completedOK ||
 		hubAt.Before(snapshotAt) || !completedAt.Equal(hubAt) {
 		return fmt.Errorf("durable hub completion times are invalid")
+	}
+	if hub.SnapshotCompletionSemantics != "" &&
+		hub.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
+		return fmt.Errorf("durable hub snapshot completion semantics are invalid")
 	}
 	if err := validateHubArtifact(hub.Artifacts.Identity, "identity.json", "identity", limits.MaxIdentityBytes); err != nil {
 		return err
@@ -899,6 +911,29 @@ func validateAcquiredHubComplete(indexSetID, runID string, hub acquiredHubComple
 			return fmt.Errorf("durable hub segment path is duplicated")
 		}
 		seen[ref.Path] = struct{}{}
+	}
+	return nil
+}
+
+func validateAcquiredHubExactTime(hub acquiredHubComplete, manifest indexsubstrate.InternalManifest) error {
+	if manifest.RunStartedAt == nil {
+		return fmt.Errorf("durable manifest run_started_at is required for exact-time acquisition")
+	}
+	snapshotAt, err := indexsubstrate.ParseCanonicalUTCTime(hub.SnapshotCompletedAt)
+	if err != nil {
+		return fmt.Errorf("durable hub snapshot_completed_at is invalid")
+	}
+	hubAt, err := indexsubstrate.ParseCanonicalUTCTime(hub.HubCommittedAt)
+	if err != nil {
+		return fmt.Errorf("durable hub hub_committed_at is invalid")
+	}
+	if err := indexsubstrate.ValidateExactSnapshotCompletion(
+		hub.SnapshotCompletionSemantics,
+		*manifest.RunStartedAt,
+		snapshotAt,
+		hubAt,
+	); err != nil {
+		return fmt.Errorf("durable hub snapshot completion is not exact-time eligible: %w", err)
 	}
 	return nil
 }
@@ -1171,6 +1206,7 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 	if hub.Artifacts.Identity.SHA256 != marker.SourceIdentitySHA256 ||
 		hub.Artifacts.Manifest.SHA256 != marker.ManifestSHA256 ||
 		hub.SnapshotCompletedAt != marker.SnapshotCompletedAt ||
+		hub.SnapshotCompletionSemantics != marker.SnapshotCompletionSemantics ||
 		hub.HubCommittedAt != marker.HubCommittedAt {
 		return nil, fmt.Errorf("%w: acquired marker binding mismatch", ErrNotAcquiredBundle)
 	}
@@ -1285,7 +1321,8 @@ func openAcquiredBundleBound(root *boundAcquiredRoot, limits AcquiredBundleLimit
 		},
 		snap: snap, sourceIdentity: identity, segmentCacheRoot: root.path, pinned: true,
 		sourceKind: SnapshotSourceAcquiredHub, snapshotCompletedAt: snapshotAt,
-		hubCommittedAt: hubAt, hubCompleteSHA256: marker.HubCompleteSHA256,
+		snapshotCompletionSemantics: marker.SnapshotCompletionSemantics,
+		hubCommittedAt:              hubAt, hubCompleteSHA256: marker.HubCompleteSHA256,
 		acquiredRoot: root, acquiredSinceFilters: acquiredFilters,
 	}, nil
 }
@@ -1303,6 +1340,10 @@ func validateAcquiredMarker(marker AcquiredBundleMarker, limits AcquiredBundleLi
 	}
 	if _, ok := parseCanonicalAcquiredTime(marker.AcquiredAt); !ok {
 		return fmt.Errorf("acquired_at is invalid")
+	}
+	if marker.SnapshotCompletionSemantics != "" &&
+		marker.SnapshotCompletionSemantics != indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit {
+		return fmt.Errorf("acquired snapshot completion semantics are invalid")
 	}
 	snapshotAt, snapshotOK := parseCanonicalAcquiredTime(marker.SnapshotCompletedAt)
 	hubAt, hubOK := parseCanonicalAcquiredTime(marker.HubCommittedAt)

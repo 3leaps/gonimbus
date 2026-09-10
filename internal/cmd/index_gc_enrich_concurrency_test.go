@@ -464,7 +464,7 @@ func TestRecoveredGCPostQuarantineBlocksPublicLibraryWritersAndConverges(t *test
 		IndexSetID: env.indexSetID, RunID: "run_library_block", BaseURI: env.params.BaseURI,
 		Source: indexbuild.Source{Provider: prov, ProviderName: "s3"}, Match: indexbuild.MatchConfig{Includes: []string{"**"}},
 		Paths: buildPaths, Coverage: []indexbuild.CoverageAttestation{{Scope: &indexbuild.Scope{Prefix: "data/"}, Basis: indexbuild.CoverageBasisConfirmed, Complete: true}},
-		RunStartedAt: base, CreatedAt: base, TargetRowsPerSegment: 100,
+		RunStartedAt: base, ManifestCreatedAt: base, TargetRowsPerSegment: 100,
 	}).Build(context.Background())
 	require.ErrorIs(t, err, indexcoord.ErrHeld)
 	require.NoDirExists(t, segmentRoot)
@@ -473,7 +473,7 @@ func TestRecoveredGCPostQuarantineBlocksPublicLibraryWritersAndConverges(t *test
 		IndexSetID: env.indexSetID, RunID: "run_library_retry", BaseURI: env.params.BaseURI,
 		Paths: buildPaths, JournalPaths: []string{filepath.Join(buildPaths.JournalDir, "shard-0001.jsonl")},
 		Coverage:     []indexbuild.CoverageAttestation{{Scope: &indexbuild.Scope{Prefix: "data/"}, Basis: indexbuild.CoverageBasisConfirmed, Complete: true}},
-		RunStartedAt: base, CreatedAt: base,
+		RunStartedAt: base, ManifestCreatedAt: base,
 	})
 	require.ErrorIs(t, err, indexcoord.ErrHeld)
 	require.NoDirExists(t, segmentRoot)

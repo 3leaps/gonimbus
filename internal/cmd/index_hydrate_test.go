@@ -327,6 +327,10 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	localManifest := writeLocalDurableSnapshotForHubTest(t, indexSet.IndexSetID, run.RunID)
+	hubCommittedAt := time.Date(2026, 7, 8, 16, 3, 0, 0, time.UTC)
+	originalHubClock := durableHubCommitClock
+	durableHubCommitClock = func() time.Time { return hubCommittedAt }
+	t.Cleanup(func() { durableHubCommitClock = originalHubClock })
 	hubDir := t.TempDir()
 	hubURI := "file://" + hubDir + "/"
 
@@ -361,9 +365,9 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	require.NoError(t, json.Unmarshal(completeData, &complete))
 	require.Equal(t, indexHubFormatDurableV2, complete["format"])
 	require.Equal(t, indexHubMarkerSchemaV2, complete["marker_schema_version"])
-	require.NotEmpty(t, complete["snapshot_completed_at"])
-	require.NotEmpty(t, complete["hub_committed_at"])
-	require.NotEqual(t, complete["snapshot_completed_at"], complete["hub_committed_at"])
+	require.Equal(t, "2026-07-08T16:02:00Z", complete["snapshot_completed_at"])
+	require.Equal(t, indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit, complete["snapshot_completion_semantics"])
+	require.Equal(t, hubCommittedAt.Format(time.RFC3339Nano), complete["hub_committed_at"])
 	require.Equal(t, complete["completed_at"], complete["hub_committed_at"])
 	require.FileExists(t, filepath.Join(runDir, "identity.json"))
 	require.NotContains(t, string(completeData), dataRoot)
@@ -420,6 +424,8 @@ func TestRunIndexExportHydrate_DurableFileHub(t *testing.T) {
 	require.Equal(t, string(indexreader.SnapshotSourceAcquiredHub), receipt.SourceKind)
 	require.Equal(t, indexSet.IndexSetID, receipt.IndexSetID)
 	require.Equal(t, run.RunID, receipt.RunID)
+	require.Equal(t, complete["snapshot_completed_at"], receipt.SnapshotCompletedAt)
+	require.Equal(t, complete["snapshot_completion_semantics"], receipt.SnapshotCompletionSemantics)
 	require.Equal(t, acquired.HubCommittedAt, receipt.HubCommittedAt)
 	require.NotEmpty(t, receipt.HubCompleteSHA256)
 	validateQueryReceiptAgainstSchema(t, receipt)
@@ -603,14 +609,15 @@ func writeLocalDurableSnapshotStreamedForHubTest(t *testing.T, indexSetID, runID
 	manifestSHA, _, err := hashFile(manifestPath)
 	require.NoError(t, err)
 	complete := durableLocalCompleteDoc{
-		Type:           "gonimbus.index.complete.v1",
-		IndexSetID:     indexSetID,
-		RunID:          runID,
-		CompletedAt:    base.Add(2 * time.Minute).Format(time.RFC3339),
-		ManifestPath:   manifestPath,
-		ManifestSHA256: manifestSHA,
-		SegmentDir:     runDir,
-		Segments:       len(manifest.Segments),
+		Type:                        indexsubstrate.CompleteMarkerTypeV2,
+		IndexSetID:                  indexSetID,
+		RunID:                       runID,
+		SnapshotCompletedAt:         base.Add(2 * time.Minute).Format(time.RFC3339),
+		SnapshotCompletionSemantics: indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		ManifestPath:                manifestPath,
+		ManifestSHA256:              manifestSHA,
+		SegmentDir:                  runDir,
+		Segments:                    len(manifest.Segments),
 	}
 	data, err := json.MarshalIndent(complete, "", "  ")
 	require.NoError(t, err)
@@ -1088,14 +1095,15 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 	manifestSHA, _, err := hashFile(manifestPath)
 	require.NoError(t, err)
 	complete := durableLocalCompleteDoc{
-		Type:           "gonimbus.index.complete.v1",
-		IndexSetID:     indexSetID,
-		RunID:          runID,
-		CompletedAt:    base.Add(2 * time.Minute).Format(time.RFC3339),
-		ManifestPath:   manifestPath,
-		ManifestSHA256: manifestSHA,
-		SegmentDir:     runDir,
-		Segments:       len(manifest.Segments),
+		Type:                        indexsubstrate.CompleteMarkerTypeV2,
+		IndexSetID:                  indexSetID,
+		RunID:                       runID,
+		SnapshotCompletedAt:         base.Add(2 * time.Minute).Format(time.RFC3339),
+		SnapshotCompletionSemantics: indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		ManifestPath:                manifestPath,
+		ManifestSHA256:              manifestSHA,
+		SegmentDir:                  runDir,
+		Segments:                    len(manifest.Segments),
 	}
 	data, err := json.MarshalIndent(complete, "", "  ")
 	require.NoError(t, err)

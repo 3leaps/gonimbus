@@ -217,7 +217,7 @@ type Config struct {
 	Authority *indexcoord.Lease
 
 	RunStartedAt         time.Time
-	CreatedAt            time.Time
+	ManifestCreatedAt    time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
 	// Spill is host/operator capacity configuration for the durable streaming
@@ -317,7 +317,7 @@ type RetryConfig struct {
 	Authority *indexcoord.Lease
 
 	RunStartedAt         time.Time
-	CreatedAt            time.Time
+	ManifestCreatedAt    time.Time
 	Clock                Clock
 	TargetRowsPerSegment int
 	// Spill follows Config.Spill semantics for public Retry.

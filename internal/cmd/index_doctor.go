@@ -852,9 +852,7 @@ func inspectDurableForDoctor(meta indexreader.Meta, opts indexDoctorOptions) (*i
 	entry.DurableManifestSHA = snap.Complete.ManifestSHA256
 	entry.DurableSegmentCount = len(snap.Manifest.Segments)
 	entry.CreatedAt = snap.Manifest.CreatedAt
-	if ts, parseErr := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); parseErr == nil {
-		entry.LatestRunAt = &ts
-	}
+	entry.LatestRunAt = durableSnapshotDisplayTime(snap)
 	if entry.IdentityIndexSetID != "" {
 		entry.IdentityHashMatchesDB = entry.IdentityIndexSetID == entry.IndexSetID
 		if !entry.IdentityHashMatchesDB {

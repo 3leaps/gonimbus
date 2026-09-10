@@ -629,7 +629,7 @@ func publishEnrich(
 		return indexsubstrate.PublishResult{}, err
 	}
 	coverage := append([]indexsubstrate.CoverageAttestation(nil), snap.Manifest.Coverage...)
-	createdAt := cfg.Clock()
+	manifestCreatedAt := cfg.Clock()
 
 	var after func(indexsubstrate.PublishStep) error
 	if hooks.afterPublishStep != nil {
@@ -640,10 +640,11 @@ func publishEnrich(
 
 	latestPath := filepath.Join(cfg.SegmentSetRoot, "latest.json")
 	result, err := indexsubstrate.PublishSnapshotContext(ctx, indexsubstrate.PublishConfig{
-		IndexSetID:   cfg.IndexSetID,
-		RunID:        runID,
-		RunStartedAt: runStartedAt,
-		CreatedAt:    createdAt,
+		IndexSetID:              cfg.IndexSetID,
+		RunID:                   runID,
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       manifestCreatedAt,
+		SnapshotCompletionClock: cfg.Clock,
 		ParentManifests: []indexsubstrate.ManifestReference{{
 			IndexSetID:     parentToken.IndexSetID,
 			RunID:          parentToken.RunID,

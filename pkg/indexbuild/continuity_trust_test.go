@@ -74,7 +74,7 @@ func retryConfigFor(cfg Config, sum Summary) RetryConfig {
 		JournalPaths:         sum.JournalPaths,
 		Coverage:             cfg.Coverage,
 		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
+		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 	}
 }
@@ -520,17 +520,17 @@ func TestBuildRefusesOffLayoutLegacyParentBeforeSinks(t *testing.T) {
 	lease, err := indexsubstrate.AcquireWriteLease(setRoot, "idx_cont", "legacy-fixture", 0)
 	require.NoError(t, err)
 	_, err = indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
-		IndexSetID:   "idx_cont",
-		RunID:        "runL",
-		RunStartedAt: base,
-		CreatedAt:    base,
-		JournalPaths: donorSum.JournalPaths,
-		Coverage:     donorSnap.Manifest.Coverage,
-		SegmentDir:   filepath.Join(legacyDir, "segments"),
-		ManifestPath: filepath.Join(legacyDir, "manifest.json"),
-		CompletePath: filepath.Join(legacyDir, "complete.json"),
-		LatestPath:   latestPath,
-		WriteLease:   lease,
+		IndexSetID:        "idx_cont",
+		RunID:             "runL",
+		RunStartedAt:      base,
+		ManifestCreatedAt: base,
+		JournalPaths:      donorSum.JournalPaths,
+		Coverage:          donorSnap.Manifest.Coverage,
+		SegmentDir:        filepath.Join(legacyDir, "segments"),
+		ManifestPath:      filepath.Join(legacyDir, "manifest.json"),
+		CompletePath:      filepath.Join(legacyDir, "complete.json"),
+		LatestPath:        latestPath,
+		WriteLease:        lease,
 	})
 	require.NoError(t, err)
 	require.NoError(t, lease.Release())

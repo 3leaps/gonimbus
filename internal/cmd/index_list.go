@@ -213,8 +213,8 @@ func loadDurableListDisplayEntry(opts indexreader.ResolveOptions, meta indexread
 	// Prefer durable publication/complete time. Do not invent wall-clock now when
 	// artifact times are absent (identical artifacts must render identically).
 	var listTime time.Time
-	if ts, parseErr := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); parseErr == nil {
-		listTime = ts
+	if completedAt := durableSnapshotDisplayTime(snap); completedAt != nil {
+		listTime = *completedAt
 	} else if !snap.Manifest.CreatedAt.IsZero() {
 		listTime = snap.Manifest.CreatedAt
 	}

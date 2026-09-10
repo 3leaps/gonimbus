@@ -393,7 +393,7 @@ func Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		},
 		Coverage:             coverage,
 		RunStartedAt:         now,
-		CreatedAt:            now,
+		ManifestCreatedAt:    now,
 		Clock:                func() time.Time { return now },
 		TargetRowsPerSegment: 100000,
 	}

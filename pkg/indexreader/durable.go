@@ -21,22 +21,23 @@ import (
 )
 
 type durableReader struct {
-	meta                 Meta
-	opts                 ResolveOptions
-	snap                 indexsubstrate.PublishedSnapshot
-	sourceIdentity       verifiedLocalIdentityFile
-	segmentCacheRoot     string
-	pinned               bool
-	sourceKind           SnapshotSourceKind
-	snapshotCompletedAt  time.Time
-	hubCommittedAt       time.Time
-	hubCompleteSHA256    string
-	acquiredRoot         *boundAcquiredRoot
-	acquiredSinceFilters map[string]indexstore.SinceRunFilter
-	closeOnce            sync.Once
-	closeErr             error
-	sinceMu              sync.RWMutex
-	sinceFilters         map[string]indexstore.SinceRunFilter
+	meta                        Meta
+	opts                        ResolveOptions
+	snap                        indexsubstrate.PublishedSnapshot
+	sourceIdentity              verifiedLocalIdentityFile
+	segmentCacheRoot            string
+	pinned                      bool
+	sourceKind                  SnapshotSourceKind
+	snapshotCompletedAt         time.Time
+	snapshotCompletionSemantics string
+	hubCommittedAt              time.Time
+	hubCompleteSHA256           string
+	acquiredRoot                *boundAcquiredRoot
+	acquiredSinceFilters        map[string]indexstore.SinceRunFilter
+	closeOnce                   sync.Once
+	closeErr                    error
+	sinceMu                     sync.RWMutex
+	sinceFilters                map[string]indexstore.SinceRunFilter
 }
 
 func openDurableReader(opts ResolveOptions, c candidate) (*durableReader, error) {
@@ -188,15 +189,28 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 	if manifest.RunStartedAt == nil || manifest.RunStartedAt.IsZero() {
 		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable manifest run_started_at is required", ErrVerifiedSnapshotMetadataUnavailable)
 	}
-	completedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(complete.CompletedAt))
-	if err != nil || completedAt.IsZero() {
-		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at is invalid", ErrVerifiedSnapshotMetadataUnavailable)
+	completedAt, err := r.snap.ExactSnapshotCompletedAt()
+	if err != nil {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
 	}
+	semantics := complete.SnapshotCompletionSemantics
 	if !r.snapshotCompletedAt.IsZero() {
-		completedAt = r.snapshotCompletedAt
+		if !completedAt.Equal(r.snapshotCompletedAt) {
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: local and acquired snapshot completion times disagree", ErrVerifiedSnapshotMetadataUnavailable)
+		}
 	}
-	if completedAt.Before(*manifest.RunStartedAt) {
-		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: durable complete marker completed_at precedes run_started_at", ErrVerifiedSnapshotMetadataUnavailable)
+	if r.snapshotCompletionSemantics != "" {
+		if semantics != r.snapshotCompletionSemantics {
+			return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: local and acquired snapshot completion semantics disagree", ErrVerifiedSnapshotMetadataUnavailable)
+		}
+	}
+	if err := indexsubstrate.ValidateExactSnapshotCompletion(
+		semantics,
+		*manifest.RunStartedAt,
+		completedAt,
+		r.hubCommittedAt,
+	); err != nil {
+		return VerifiedSnapshotMetadata{}, fmt.Errorf("%w: %v", ErrVerifiedSnapshotMetadataUnavailable, err)
 	}
 	if r.sourceIdentity.IndexSetID != manifest.IndexSetID ||
 		len(r.sourceIdentity.CompleteFileSHA256) != 64 {
@@ -226,19 +240,20 @@ func (r *durableReader) VerifiedSnapshotMetadata() (VerifiedSnapshotMetadata, er
 		sourceKind = SnapshotSourceLocalPublished
 	}
 	return VerifiedSnapshotMetadata{
-		SourceKind:            sourceKind,
-		IndexSetID:            manifest.IndexSetID,
-		RunID:                 manifest.RunID,
-		RunStartedAt:          manifest.RunStartedAt.UTC(),
-		SnapshotCompletedAt:   completedAt.UTC(),
-		HubCommittedAt:        r.hubCommittedAt.UTC(),
-		HubCompleteSHA256:     r.hubCompleteSHA256,
-		SourceIdentitySHA256:  r.sourceIdentity.CompleteFileSHA256,
-		SourceIdentitySchema:  SourceIdentitySchemaV1,
-		SourceIdentityProfile: SourceIdentityProfileV1,
-		ManifestSHA256:        complete.ManifestSHA256,
-		CoverageSHA256:        coverageSHA256,
-		Coverage:              coverage,
+		SourceKind:                  sourceKind,
+		IndexSetID:                  manifest.IndexSetID,
+		RunID:                       manifest.RunID,
+		RunStartedAt:                manifest.RunStartedAt.UTC(),
+		SnapshotCompletedAt:         completedAt.UTC(),
+		SnapshotCompletionSemantics: semantics,
+		HubCommittedAt:              r.hubCommittedAt.UTC(),
+		HubCompleteSHA256:           r.hubCompleteSHA256,
+		SourceIdentitySHA256:        r.sourceIdentity.CompleteFileSHA256,
+		SourceIdentitySchema:        SourceIdentitySchemaV1,
+		SourceIdentityProfile:       SourceIdentityProfileV1,
+		ManifestSHA256:              complete.ManifestSHA256,
+		CoverageSHA256:              coverageSHA256,
+		Coverage:                    coverage,
 		Declared: DeclaredSnapshotCounts{
 			Rows:          manifest.Counts.Rows,
 			ActiveRows:    manifest.Counts.ActiveRows,

@@ -63,20 +63,21 @@ type DeclaredSnapshotCounts struct {
 // already-open verified snapshot. No path, base URI, provider coordinate,
 // credential handle, or coverage literal is exposed.
 type VerifiedSnapshotMetadata struct {
-	SourceKind            SnapshotSourceKind
-	IndexSetID            string
-	RunID                 string
-	RunStartedAt          time.Time
-	SnapshotCompletedAt   time.Time
-	HubCommittedAt        time.Time
-	HubCompleteSHA256     string
-	SourceIdentitySHA256  string
-	SourceIdentitySchema  string
-	SourceIdentityProfile string
-	ManifestSHA256        string
-	CoverageSHA256        string
-	Coverage              CoverageSummary
-	Declared              DeclaredSnapshotCounts
+	SourceKind                  SnapshotSourceKind
+	IndexSetID                  string
+	RunID                       string
+	RunStartedAt                time.Time
+	SnapshotCompletedAt         time.Time
+	SnapshotCompletionSemantics string
+	HubCommittedAt              time.Time
+	HubCompleteSHA256           string
+	SourceIdentitySHA256        string
+	SourceIdentitySchema        string
+	SourceIdentityProfile       string
+	ManifestSHA256              string
+	CoverageSHA256              string
+	Coverage                    CoverageSummary
+	Declared                    DeclaredSnapshotCounts
 }
 
 // ErrVerifiedSnapshotMetadataUnavailable is returned when a reader substrate

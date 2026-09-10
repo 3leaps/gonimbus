@@ -671,14 +671,15 @@ func setupDurableTestEnv(t *testing.T, rows []indexsubstrate.CurrentObjectRow) d
 	require.NoError(t, err)
 
 	complete := map[string]any{
-		"type":            "gonimbus.index.complete.v1",
-		"index_set_id":    identity.IndexSetID,
-		"run_id":          runID,
-		"completed_at":    createdAt.Format(time.RFC3339Nano),
-		"manifest_path":   manifestPath,
-		"manifest_sha256": manifestSHA,
-		"segment_dir":     runDir,
-		"segments":        len(manifest.Segments),
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  identity.IndexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         createdAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
 	}
 	completePath := filepath.Join(runDir, "complete.json")
 	writeJSON(t, completePath, complete)
@@ -729,14 +730,15 @@ func writeRunComplete(t *testing.T, env durableTestEnv, runID string, createdAt 
 	manifestSHA, err := hashFileSHA256(manifestPath)
 	require.NoError(t, err)
 	writeJSON(t, filepath.Join(runDir, "complete.json"), map[string]any{
-		"type":            "gonimbus.index.complete.v1",
-		"index_set_id":    env.indexSetID,
-		"run_id":          runID,
-		"completed_at":    createdAt.Format(time.RFC3339Nano),
-		"manifest_path":   manifestPath,
-		"manifest_sha256": manifestSHA,
-		"segment_dir":     runDir,
-		"segments":        len(manifest.Segments),
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  env.indexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         createdAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
 	})
 }
 
@@ -776,14 +778,15 @@ func publishDurableLineageRun(
 	manifestSHA, err := hashFileSHA256(manifestPath)
 	require.NoError(t, err)
 	writeJSON(t, filepath.Join(runDir, "complete.json"), map[string]any{
-		"type":            "gonimbus.index.complete.v1",
-		"index_set_id":    env.indexSetID,
-		"run_id":          runID,
-		"completed_at":    startedAt.Format(time.RFC3339Nano),
-		"manifest_path":   manifestPath,
-		"manifest_sha256": manifestSHA,
-		"segment_dir":     runDir,
-		"segments":        len(manifest.Segments),
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  env.indexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         startedAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
 	})
 	return manifestSHA
 }

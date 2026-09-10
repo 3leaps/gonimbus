@@ -48,6 +48,9 @@
     "snapshot_completed_at": {
       "$ref": "#/$defs/timestamp"
     },
+    "snapshot_completion_semantics": {
+      "const": "complete_marker_commit"
+    },
     "hub_committed_at": {
       "$ref": "#/$defs/timestamp"
     },

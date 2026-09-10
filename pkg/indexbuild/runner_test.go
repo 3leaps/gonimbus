@@ -50,7 +50,7 @@ func TestRunnerBuildPublishesDeterministicSnapshotAndRetryParity(t *testing.T) {
 		JournalPaths:         summary.JournalPaths,
 		Coverage:             cfg.Coverage,
 		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
+		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 	})
@@ -80,7 +80,7 @@ func TestPublicRetryRejectsWhenWriteLeaseHeld(t *testing.T) {
 		JournalPaths:         summary.JournalPaths,
 		Coverage:             cfg.Coverage,
 		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
+		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 	})
@@ -104,14 +104,14 @@ func TestPublicBuildAndRetryRejectStableAuthorityAfterRootQuarantine(t *testing.
 	require.FileExists(t, filepath.Join(quarantine, "sentinel"))
 
 	_, err = Retry(context.Background(), RetryConfig{
-		IndexSetID:   cfg.IndexSetID,
-		RunID:        cfg.RunID,
-		BaseURI:      cfg.BaseURI,
-		Paths:        cfg.Paths,
-		JournalPaths: []string{filepath.Join(quarantine, "journal.jsonl")},
-		Coverage:     cfg.Coverage,
-		RunStartedAt: cfg.RunStartedAt,
-		CreatedAt:    cfg.CreatedAt,
+		IndexSetID:        cfg.IndexSetID,
+		RunID:             cfg.RunID,
+		BaseURI:           cfg.BaseURI,
+		Paths:             cfg.Paths,
+		JournalPaths:      []string{filepath.Join(quarantine, "journal.jsonl")},
+		Coverage:          cfg.Coverage,
+		RunStartedAt:      cfg.RunStartedAt,
+		ManifestCreatedAt: cfg.ManifestCreatedAt,
 	})
 	require.ErrorIs(t, err, indexcoord.ErrHeld)
 	require.NoDirExists(t, segmentRoot)
@@ -342,7 +342,7 @@ func TestPartialCrawlJournalIsNotPublishableByRetry(t *testing.T) {
 		JournalPaths:         []string{journalPath},
 		Coverage:             cfg.Coverage,
 		RunStartedAt:         cfg.RunStartedAt,
-		CreatedAt:            cfg.CreatedAt,
+		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		Clock:                cfg.Clock,
 		TargetRowsPerSegment: cfg.TargetRowsPerSegment,
 	})
@@ -535,7 +535,7 @@ func testConfig(t *testing.T, name string) Config {
 			Complete: true,
 		}},
 		RunStartedAt:         base,
-		CreatedAt:            base.Add(time.Minute),
+		ManifestCreatedAt:    base.Add(time.Minute),
 		Clock:                func() time.Time { return base.Add(2 * time.Minute) },
 		TargetRowsPerSegment: 1,
 	}

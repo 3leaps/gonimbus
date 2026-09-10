@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -30,28 +31,29 @@ const (
 )
 
 type indexQueryReceiptRecord struct {
-	Type                  string                    `json:"type"`
-	SchemaVersion         string                    `json:"schema_version"`
-	Outcome               string                    `json:"outcome"`
-	SourceKind            string                    `json:"source_kind"`
-	IndexSetID            string                    `json:"index_set_id"`
-	RunID                 string                    `json:"run_id"`
-	RunStartedAt          string                    `json:"run_started_at"`
-	SnapshotCompletedAt   string                    `json:"snapshot_completed_at"`
-	HubCommittedAt        string                    `json:"hub_committed_at,omitempty"`
-	HubCompleteSHA256     string                    `json:"hub_complete_sha256,omitempty"`
-	SourceIdentitySHA256  string                    `json:"source_identity_sha256"`
-	SourceIdentitySchema  string                    `json:"source_identity_schema"`
-	SourceIdentityProfile string                    `json:"source_identity_profile"`
-	ManifestSHA256        string                    `json:"manifest_sha256"`
-	CoverageSHA256        string                    `json:"coverage_sha256"`
-	Coverage              indexQueryReceiptCoverage `json:"coverage"`
-	Declared              indexQueryReceiptDeclared `json:"declared"`
-	Query                 indexQueryReceiptQuery    `json:"query"`
-	Results               indexQueryReceiptResults  `json:"results"`
-	Segments              indexQueryReceiptSegments `json:"segments"`
-	Warnings              []string                  `json:"warnings"`
-	Errors                []string                  `json:"errors"`
+	Type                        string                    `json:"type"`
+	SchemaVersion               string                    `json:"schema_version"`
+	Outcome                     string                    `json:"outcome"`
+	SourceKind                  string                    `json:"source_kind"`
+	IndexSetID                  string                    `json:"index_set_id"`
+	RunID                       string                    `json:"run_id"`
+	RunStartedAt                string                    `json:"run_started_at"`
+	SnapshotCompletedAt         string                    `json:"snapshot_completed_at"`
+	SnapshotCompletionSemantics string                    `json:"snapshot_completion_semantics"`
+	HubCommittedAt              string                    `json:"hub_committed_at,omitempty"`
+	HubCompleteSHA256           string                    `json:"hub_complete_sha256,omitempty"`
+	SourceIdentitySHA256        string                    `json:"source_identity_sha256"`
+	SourceIdentitySchema        string                    `json:"source_identity_schema"`
+	SourceIdentityProfile       string                    `json:"source_identity_profile"`
+	ManifestSHA256              string                    `json:"manifest_sha256"`
+	CoverageSHA256              string                    `json:"coverage_sha256"`
+	Coverage                    indexQueryReceiptCoverage `json:"coverage"`
+	Declared                    indexQueryReceiptDeclared `json:"declared"`
+	Query                       indexQueryReceiptQuery    `json:"query"`
+	Results                     indexQueryReceiptResults  `json:"results"`
+	Segments                    indexQueryReceiptSegments `json:"segments"`
+	Warnings                    []string                  `json:"warnings"`
+	Errors                      []string                  `json:"errors"`
 }
 
 type indexQueryReceiptCoverage struct {
@@ -264,21 +266,22 @@ func runIndexQueryReceipt(ctx context.Context, reader indexreader.Reader, opts i
 		warnings = append(warnings, "timestamp_parse_anomaly")
 	}
 	receipt := indexQueryReceiptRecord{
-		Type:                  indexQueryReceiptType,
-		SchemaVersion:         indexQueryReceiptVersion,
-		Outcome:               "success",
-		SourceKind:            string(verified.SourceKind),
-		IndexSetID:            verified.IndexSetID,
-		RunID:                 verified.RunID,
-		RunStartedAt:          verified.RunStartedAt.UTC().Format(time.RFC3339Nano),
-		SnapshotCompletedAt:   verified.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
-		HubCommittedAt:        hubCommittedAt,
-		HubCompleteSHA256:     verified.HubCompleteSHA256,
-		SourceIdentitySHA256:  verified.SourceIdentitySHA256,
-		SourceIdentitySchema:  verified.SourceIdentitySchema,
-		SourceIdentityProfile: verified.SourceIdentityProfile,
-		ManifestSHA256:        verified.ManifestSHA256,
-		CoverageSHA256:        verified.CoverageSHA256,
+		Type:                        indexQueryReceiptType,
+		SchemaVersion:               indexQueryReceiptVersion,
+		Outcome:                     "success",
+		SourceKind:                  string(verified.SourceKind),
+		IndexSetID:                  verified.IndexSetID,
+		RunID:                       verified.RunID,
+		RunStartedAt:                verified.RunStartedAt.UTC().Format(time.RFC3339Nano),
+		SnapshotCompletedAt:         verified.SnapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+		SnapshotCompletionSemantics: verified.SnapshotCompletionSemantics,
+		HubCommittedAt:              hubCommittedAt,
+		HubCompleteSHA256:           verified.HubCompleteSHA256,
+		SourceIdentitySHA256:        verified.SourceIdentitySHA256,
+		SourceIdentitySchema:        verified.SourceIdentitySchema,
+		SourceIdentityProfile:       verified.SourceIdentityProfile,
+		ManifestSHA256:              verified.ManifestSHA256,
+		CoverageSHA256:              verified.CoverageSHA256,
 		Coverage: indexQueryReceiptCoverage{
 			Entries:          verified.Coverage.Entries,
 			CompleteEntries:  verified.Coverage.CompleteEntries,
@@ -699,21 +702,13 @@ func validateIndexQueryReceipt(receipt indexQueryReceiptRecord) error {
 	case len(receipt.Errors) != 0:
 		return fmt.Errorf("success receipt errors must be empty")
 	}
-	runStartedAt, err := time.Parse(time.RFC3339Nano, receipt.RunStartedAt)
+	runStartedAt, err := indexsubstrate.ParseCanonicalUTCTime(receipt.RunStartedAt)
 	if err != nil {
-		return fmt.Errorf("run_started_at must be RFC3339: %w", err)
+		return fmt.Errorf("run_started_at must be canonical UTC: %w", err)
 	}
-	snapshotCompletedAt, err := time.Parse(time.RFC3339Nano, receipt.SnapshotCompletedAt)
+	snapshotCompletedAt, err := indexsubstrate.ParseCanonicalUTCTime(receipt.SnapshotCompletedAt)
 	if err != nil {
-		return fmt.Errorf("snapshot_completed_at must be RFC3339: %w", err)
-	}
-	_, runOffset := runStartedAt.Zone()
-	_, completeOffset := snapshotCompletedAt.Zone()
-	if runOffset != 0 || completeOffset != 0 {
-		return fmt.Errorf("receipt timestamps must be UTC")
-	}
-	if snapshotCompletedAt.Before(runStartedAt) {
-		return fmt.Errorf("snapshot_completed_at must not precede run_started_at")
+		return fmt.Errorf("snapshot_completed_at must be canonical UTC: %w", err)
 	}
 	if receipt.Results.LogicalResults > receipt.Results.Matched {
 		return fmt.Errorf("logical_results must not exceed matched")
@@ -740,19 +735,27 @@ func validateIndexQueryReceipt(receipt indexQueryReceiptRecord) error {
 	} else if receipt.Query.CanonicalTieBreak != "" || receipt.Query.IncludeAlternates {
 		return fmt.Errorf("non-canonical enumeration must not claim canonical options")
 	}
+	var hubCommittedAt time.Time
 	if receipt.SourceKind == string(indexreader.SnapshotSourceLocalPublished) {
 		if receipt.HubCommittedAt != "" || receipt.HubCompleteSHA256 != "" {
 			return fmt.Errorf("local_published receipt must not claim hub metadata")
 		}
 	} else {
-		hubCommittedAt, err := time.Parse(time.RFC3339Nano, receipt.HubCommittedAt)
+		hubCommittedAt, err = indexsubstrate.ParseCanonicalUTCTime(receipt.HubCommittedAt)
 		if err != nil {
-			return fmt.Errorf("hub_committed_at must be RFC3339: %w", err)
+			return fmt.Errorf("hub_committed_at must be canonical UTC: %w", err)
 		}
-		_, hubOffset := hubCommittedAt.Zone()
-		if hubOffset != 0 || !validSHA256Hex(receipt.HubCompleteSHA256) {
+		if !validSHA256Hex(receipt.HubCompleteSHA256) {
 			return fmt.Errorf("acquired_hub receipt requires UTC hub_committed_at and lowercase hub_complete_sha256")
 		}
+	}
+	if err := indexsubstrate.ValidateExactSnapshotCompletion(
+		receipt.SnapshotCompletionSemantics,
+		runStartedAt,
+		snapshotCompletedAt,
+		hubCommittedAt,
+	); err != nil {
+		return fmt.Errorf("snapshot completion is not exact-time eligible: %w", err)
 	}
 	return nil
 }

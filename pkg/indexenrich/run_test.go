@@ -127,7 +127,7 @@ func seedDurableParent(t *testing.T, root, indexSetID string, rows []indexsubstr
 		Scope: &indexsubstrate.Scope{Prefix: "hot/"}, Basis: indexsubstrate.CoverageBasisConfirmed, Complete: true,
 	}}
 	_, err = indexsubstrate.PublishSnapshot(indexsubstrate.PublishConfig{
-		IndexSetID: indexSetID, RunID: runID, RunStartedAt: started, CreatedAt: started.Add(2 * time.Minute),
+		IndexSetID: indexSetID, RunID: runID, RunStartedAt: started, ManifestCreatedAt: started.Add(2 * time.Minute),
 		PriorRows: prior, JournalPaths: []string{jpath}, Coverage: cov, SegmentDir: runDir,
 		ManifestPath: filepath.Join(runDir, "manifest.json"), CompletePath: filepath.Join(runDir, "complete.json"),
 		LatestPath: filepath.Join(segmentRoot, "latest.json"), WriteLease: lease, TargetRowsPerSegment: 100,
@@ -677,7 +677,7 @@ func TestBuildRejectsWhileEnrichHoldsLease(t *testing.T) {
 		}},
 		ObservationSinks:     []output.Writer{sink},
 		RunStartedAt:         base,
-		CreatedAt:            base.Add(time.Minute),
+		ManifestCreatedAt:    base.Add(time.Minute),
 		Clock:                func() time.Time { return base.Add(2 * time.Minute) },
 		TargetRowsPerSegment: 100,
 	}

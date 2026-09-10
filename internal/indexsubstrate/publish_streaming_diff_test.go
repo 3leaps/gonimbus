@@ -101,19 +101,20 @@ func TestPublishSnapshotStreamingMatchesLegacyCompaction(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lease.Release() })
 	config := PublishConfig{
-		IndexSetID:           "idx_diff",
-		RunID:                "run_diff",
-		RunStartedAt:         runStartedAt,
-		CreatedAt:            createdAt,
-		PriorRows:            priorRows,
-		JournalPaths:         []string{journalPath},
-		Coverage:             coverage,
-		SegmentDir:           filepath.Join(root, "segments"),
-		ManifestPath:         filepath.Join(root, "manifests", "manifest.json"),
-		CompletePath:         filepath.Join(root, "complete.json"),
-		LatestPath:           filepath.Join(root, "latest.json"),
-		TargetRowsPerSegment: 2,
-		WriteLease:           lease,
+		IndexSetID:              "idx_diff",
+		RunID:                   "run_diff",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       createdAt,
+		SnapshotCompletionClock: func() time.Time { return createdAt.Add(time.Minute) },
+		PriorRows:               priorRows,
+		JournalPaths:            []string{journalPath},
+		Coverage:                coverage,
+		SegmentDir:              filepath.Join(root, "segments"),
+		ManifestPath:            filepath.Join(root, "manifests", "manifest.json"),
+		CompletePath:            filepath.Join(root, "complete.json"),
+		LatestPath:              filepath.Join(root, "latest.json"),
+		TargetRowsPerSegment:    2,
+		WriteLease:              lease,
 	}
 	result, err := PublishSnapshotContext(context.Background(), config)
 	require.NoError(t, err)

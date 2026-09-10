@@ -132,9 +132,22 @@ func runIndexStatsSQLite(ctx context.Context, db *sql.DB, meta indexreader.Meta,
 // publication/completion times, not exact crawl run-start provenance.
 type durablePublishedRun struct {
 	RunID             string
-	PublishedAt       *time.Time // complete.completed_at when parseable
+	PublishedAt       *time.Time // exact v2 snapshot completion, or legacy completed_at
 	ManifestCreatedAt *time.Time // manifest.created_at when non-zero
 	Status            string
+}
+
+func durableSnapshotDisplayTime(snap indexsubstrate.PublishedSnapshot) *time.Time {
+	if snap.Complete.Type == indexsubstrate.CompleteMarkerTypeV2 {
+		if ts, err := snap.ExactSnapshotCompletedAt(); err == nil {
+			return &ts
+		}
+		return nil
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); err == nil {
+		return &ts
+	}
+	return nil
 }
 
 func runIndexStatsDurable(meta indexreader.Meta, jsonOutput, showRuns bool) error {
@@ -154,10 +167,7 @@ func runIndexStatsDurable(meta indexreader.Meta, jsonOutput, showRuns bool) erro
 		t := snap.Manifest.CreatedAt
 		manifestCreated = &t
 	}
-	var publishedAt *time.Time
-	if ts, parseErr := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); parseErr == nil {
-		publishedAt = &ts
-	}
+	publishedAt := durableSnapshotDisplayTime(snap)
 
 	// Marker-authoritative latest: the verified latest.json snapshot only.
 	// Do not re-derive "latest" from timestamp-sorted complete markers — a
@@ -248,10 +258,7 @@ func listDurablePublishedRuns(segmentSetRoot string, maxMarker, maxManifest int6
 		if err != nil {
 			continue
 		}
-		var publishedAt *time.Time
-		if ts, parseErr := time.Parse(time.RFC3339Nano, snap.Complete.CompletedAt); parseErr == nil {
-			publishedAt = &ts
-		}
+		publishedAt := durableSnapshotDisplayTime(snap)
 		var manifestCreated *time.Time
 		if !snap.Manifest.CreatedAt.IsZero() {
 			t := snap.Manifest.CreatedAt

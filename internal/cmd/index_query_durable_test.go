@@ -297,14 +297,15 @@ func seedDurableOnlyAppData(t *testing.T, dataRoot string, rows []indexsubstrate
 	require.NoError(t, err)
 	completePath := filepath.Join(runDir, "complete.json")
 	writeJSONFile(t, completePath, map[string]any{
-		"type":            "gonimbus.index.complete.v1",
-		"index_set_id":    identity.IndexSetID,
-		"run_id":          runID,
-		"completed_at":    createdAt.Format(time.RFC3339Nano),
-		"manifest_path":   manifestPath,
-		"manifest_sha256": manifestSHA,
-		"segment_dir":     runDir,
-		"segments":        len(manifest.Segments),
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  identity.IndexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         createdAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
 	})
 	writeJSONFile(t, filepath.Join(segmentRoot, "latest.json"), map[string]any{
 		"type":          "gonimbus.index.latest.v1",
@@ -363,14 +364,15 @@ func publishDurableCLILineageRun(
 	manifestSHA, err := fileSHA256Hex(manifestPath)
 	require.NoError(t, err)
 	writeJSONFile(t, filepath.Join(runDir, "complete.json"), map[string]any{
-		"type":            "gonimbus.index.complete.v1",
-		"index_set_id":    env.indexSetID,
-		"run_id":          runID,
-		"completed_at":    startedAt.Format(time.RFC3339Nano),
-		"manifest_path":   manifestPath,
-		"manifest_sha256": manifestSHA,
-		"segment_dir":     runDir,
-		"segments":        len(manifest.Segments),
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  env.indexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         startedAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
 	})
 	return manifestSHA
 }
