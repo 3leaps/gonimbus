@@ -4,6 +4,73 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## v0.4.3 (2026-09-11)
+
+**Reuse a finished durable inventory**
+
+Two operator stories, in this order: reuse a finished durable inventory
+instead of listing a very large bucket again; then prove which inventory
+you used and when that snapshot actually finished.
+
+v0.4.3 takes exact custody of an already-complete durable run and lets you
+query it under current acquire and receipt contracts **without listing the
+live object store**. Recrawl remains available; it is not required.
+Snapshot completion time is when the snapshot finished, distinct from later
+hub commit time.
+
+### Operator quick path
+
+```bash
+gonimbus index hub bridge-durable \
+  --source-hub-read-handle archive-read \
+  --target-hub-publish-handle custody-publish \
+  --index-set idx_<64-lowercase-hex> \
+  --run-id run_<exact-id> \
+  --identity-file /path/to/identity.json \
+  --output-format custody-bridge-receipt-jsonl-v1
+
+gonimbus index acquire \
+  --hub-read-handle archive-read \
+  --index-set idx_<64-lowercase-hex> \
+  --run-id run_<exact-id> \
+  --dest /var/lib/gonimbus/acquired/that-run
+
+gonimbus index query \
+  --snapshot-dir /var/lib/gonimbus/acquired/that-run \
+  --count --output-format receipt-jsonl-v1
+```
+
+### Also in this cut
+
+- **Query receipts** (`receipt-jsonl-v1`) and pinned durable deltas
+  (`--proof-through-run`).
+- **Truthful snapshot completion time.**
+- **`index doctor --snapshot-dir`** inspects that acquired dest, not ambient
+  cache.
+- Directory-form coverage prefixes (one terminal `/`) accepted in bridge
+  **validation only**.
+
+### Hygiene
+
+- grpc v1.83.2; goneat runner `v0.5.6` / contributor `v0.6.0`.
+
+### Boundary framing
+
+Durable-v2 remains a full-fidelity **internal render** — not a reduced-trust
+publication format. Acquire never follows `latest.json`. Do not fall back to
+a live bucket walk when a receipt is missing.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.3
+```
+
+See [docs/releases/v0.4.3.md](docs/releases/v0.4.3.md) for the complete
+release notes.
+
+---
+
 ## v0.4.2 (2026-08-13)
 
 **Library Reflow Data Plane + Independent Source/Dest Admission**
@@ -143,79 +210,3 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.1
 No format or schema break; existing durable and SQLite artifacts are read as-is.
 See [docs/releases/v0.4.1.md](docs/releases/v0.4.1.md) for the complete release
 notes.
-
----
-
-## v0.4.0 (2026-07-09)
-
-**Durable Index Format Is the Default**
-
-v0.4.0 is the index-substrate epoch. `index build` defaults to durable-v2
-snapshots (immutable Snappy-Parquet segments + internal manifest + hub markers)
-instead of centering the operator workflow on a single SQLite `index.db`.
-
-SQLite remains a first-class compatibility path via `--format sqlite` or dual
-`--format both`. Existing `index.db` files are not rewritten. Format-aware local
-consumers include `query`, `list`, `stats`, `doctor`, and `enrich-with-head`.
-**`index gc`** still needs an `index.db` today; other SQLite-only surfaces are
-narrowed in the durable-index operator guide (`query --since-run`,
-`stats --prefixes`, full `--resume-run` recovery).
-
-### Why this matters
-
-Large indexes hit single-object export ceilings when published as one database
-file. Durable packing splits the snapshot into segment objects (plus a small
-manifest), so hub export and hydrate scale past the old monolith wall while
-keeping row-level LIST-projection parity against SQLite on validated field runs.
-The largest individual hub PUT becomes a segment, not the whole inventory.
-
-### Operator quick path
-
-```bash
-# Default durable build
-gonimbus index build --job index.yaml
-
-# SQLite when you still need gc / --since-run / full --resume-run recovery
-gonimbus index build --job index.yaml --format sqlite
-
-# Dual-format parity + SQLite-only consumers from one crawl
-gonimbus index build --job index.yaml --format both
-
-# Export auto-selects durable when a local durable complete marker exists
-gonimbus index export --hub s3://bucket/index-hub/ --index-set idx_...
-
-# Temporal compare between two durable snapshots
-gonimbus index compare durable-delta \
-  --before-manifest /path/to/before/manifest.json \
-  --before-segments /path/to/before/segments \
-  --after-manifest /path/to/after/manifest.json \
-  --after-segments /path/to/after/segments
-```
-
-### Also in this cut
-
-- Format-aware hub export/hydrate (`sqlite-v1` / `durable-v2`) with digest
-  verification on durable artifacts
-- Scoped durable and `--format both` with fail-closed coverage equal to the
-  crawl prefix plan
-- stderr progress for durable crawl and segmenting tails
-- Compare result `projection_semantics` (green parity = LIST fidelity, not
-  reflow readiness)
-- Default segment packing of 500k rows (engine lever; not operator-configurable
-  in this cut)
-
-### Boundary framing
-
-Durable-v2 here is a full-fidelity **internal render** for trusted operators and
-pipelines — not a reduced-trust third-party publication format. A durable hub
-export is not a disclosure-controlled share format.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.0
-```
-
-See [docs/releases/v0.4.0.md](docs/releases/v0.4.0.md) for the complete release
-notes and [docs/user-guide/durable-index.md](docs/user-guide/durable-index.md)
-for the operator migration map.

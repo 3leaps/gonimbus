@@ -1,7 +1,7 @@
 # SDR-001: Temporary accept of x/crypto SSH advisories
 
 **Date:** 2026-09-08
-**Status:** Approved
+**Status:** Resolved 2026-09-11
 **Author:** @3leapsdave
 **Reviewer:** devrev
 
@@ -45,8 +45,14 @@ goneat assess --categories dependencies --check --fail-on high
 
 ## Action Items
 
-- [ ] Remove or verify expired accepts by 2026-09-10 (Goneat `until` expires at the start of that date)
-- [ ] Take `golang.org/x/crypto v0.56.0` after cooling and delete both allow entries
+- [x] Remove or verify expired accepts by 2026-09-10 (Goneat `until` expires at the start of that date)
+- [x] Take `golang.org/x/crypto v0.56.0` after cooling and delete both allow entries
+
+## Resolution
+
+2026-09-11: cooling cleared; took `golang.org/x/crypto v0.56.0`
+(`go` directive 1.26.0 as required by the module) and deleted both
+`accepted_risk` allow entries. Dependency gate passes with no accepts.
 
 ## References
 
