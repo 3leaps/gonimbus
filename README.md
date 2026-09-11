@@ -148,7 +148,9 @@ documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
 **Durable is the default index format** (`index build` publishes durable-v2
 segments + manifest unless you pass `--format sqlite` or `--format both`).
-Format-aware local consumers include `query`, `list`, `stats`, `doctor`,
+A finished durable run can be taken into current hub custody and queried as
+an exact acquired bundle without listing the live object store. Format-aware
+local consumers include `query`, `list`, `stats`, `doctor`,
 `enrich-with-head`, and whole-set `gc`. SQLite remains a first-class
 compatibility path; it is still required for latest-selected
 `query --since-run`, `stats --prefixes`, and full `--resume-run` checkpoint
@@ -157,7 +159,9 @@ recovery. Durable forward deltas require exact `--index-set`, current
 operator-tunable capacity budgets (16 GiB workspace / 16 MiB record defaults;
 flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
+[Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.4.3 release notes](docs/releases/v0.4.3.md),
 [v0.4.2 release notes](docs/releases/v0.4.2.md),
 [v0.4.1 release notes](docs/releases/v0.4.1.md), and
 [v0.4.0 release notes](docs/releases/v0.4.0.md).
@@ -211,9 +215,9 @@ gonimbus index doctor          # Validate index integrity (format-aware)
 gonimbus index gc              # Reclaim old local sets from an audited format-aware plan
 gonimbus index export          # Export an index run to a hub (auto prefers durable)
 gonimbus index hydrate         # Download an index run from a hub (format-aware)
-gonimbus index acquire         # Acquire an exact durable run as a verified query bundle
+gonimbus index acquire         # Materialize one exact durable run as a verified query bundle
 gonimbus index hub             # Manage index hubs
-gonimbus index hub bridge-durable  # Bridge one exact legacy durable run into current custody
+gonimbus index hub bridge-durable  # Copy one already-complete durable run into current custody
 
 # Job management (for long-running builds)
 gonimbus index jobs list       # List running and recent jobs

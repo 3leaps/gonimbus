@@ -5,17 +5,20 @@ Since **v0.4.0**, the **durable index format** is the default artifact of
 default: durable-only sets support everyday local work (`query`, `list`,
 `stats`, `doctor`, `enrich-with-head`) without an `index.db`, and durable
 publication runs through a memory-bounded streaming path under operator-tunable
-capacity budgets.
+capacity budgets. **v0.4.3** answers the next operator question: reuse a
+finished durable inventory instead of listing a very large bucket again, and
+prove which run you queried and when that snapshot finished.
 
-This page is the operator-facing map: what durable is, how SQLite remains a
-supported compatibility path, how to set streaming budgets, and how to validate
-a dual-format build with LIST parity.
+This page is the operator-facing map: what durable is, how to reuse an
+already-complete run, how SQLite remains a supported compatibility path, how
+to set streaming budgets, and how to validate a dual-format build with LIST
+parity.
 
 For the full index command surface, see [Local Index](index.md). For LIST vs
 ingest mental model, see [Index Build Mental Model](index-build-mental-model.md).
 Architecture notes for the parity projection live in
 [Index Compare Projection v1](../architecture/index-compare-projection-v1.md).
-Release narrative: [v0.4.1 release notes](../releases/v0.4.1.md).
+Release narrative: [v0.4.3 release notes](../releases/v0.4.3.md).
 
 ## Why durable exists
 
@@ -37,6 +40,32 @@ The largest individual hub PUT becomes a **segment** (typically tens of
 megabytes under default packing), not the whole inventory database. Field
 validation at multi-million object scale showed LIST-projection parity against
 SQLite and faithful coverage for scoped dual-format builds.
+
+### Reuse a finished inventory (do not list the bucket again)
+
+Once a durable snapshot is **complete** (sealed journals, packed segments,
+manifest, completion marker), listing a very large object store is already
+behind you. Current Gonimbus can take exact custody of that
+already-complete run and query it under acquire and receipt contracts
+**without walking the live bucket**. Recrawl remains a valid way to build a
+new snapshot; it is not required to adopt current custody, receipts, or
+query.
+
+The rest of the same story is proof. Exact acquire never follows
+`latest.json`. Query can emit a typed receipt for the dest you named.
+Snapshot completion time is when the snapshot finished, not when a later
+hub commit landed. `index doctor --snapshot-dir` inspects that dest and
+does not consult ambient cache.
+
+| Need                                                                 | Verb                                   |
+| -------------------------------------------------------------------- | -------------------------------------- |
+| Copy one exact already-complete durable run into current hub custody | `index hub bridge-durable`             |
+| Materialize that exact run locally                                   | `index acquire`                        |
+| Prove count/find against that dest                                   | `index query --snapshot-dir` + receipt |
+| Inspect that dest (not ambient cache)                                | `index doctor --snapshot-dir`          |
+
+See [Exact acquired bundles](#exact-acquired-bundles-for-automation) and
+[Bridge an already-complete durable run](#bridge-an-already-complete-durable-run).
 
 ## What changes in the operator workflow
 
@@ -397,9 +426,10 @@ gonimbus index hydrate --hub s3://bucket/index-hub/ \
 
 ### Exact acquired bundles for automation
 
-`index hydrate` remains a human convenience. Automation that must prove an
-immutable hub selection uses `index acquire` with a named, read-only
-`hub_read_handle`, a full index-set ID, and an exact run ID:
+`index hydrate` remains a human convenience. When you must prove you queried
+one named inventory — not whatever `latest.json` currently points at — use
+`index acquire` with a named, read-only `hub_read_handle`, a full index-set
+ID, and an exact run ID:
 
 ```yaml
 # User configuration
@@ -420,6 +450,8 @@ gonimbus index acquire \
 gonimbus index query \
   --snapshot-dir /srv/gonimbus/acquired/run_1783087200000000000 \
   --count --output-format receipt-jsonl-v1
+
+gonimbus index doctor --snapshot-dir /srv/gonimbus/acquired/run_1783087200000000000
 ```
 
 Acquisition never lists the hub or reads `latest.json`. It downloads only the
@@ -517,17 +549,18 @@ the default threshold. Durable export naturally stays under single-PUT walls by
 publishing segment objects; multipart remains available for large individual
 artifacts when needed.
 
-### Bridge one legacy durable run into current custody
+### Bridge an already-complete durable run
 
-The custody bridge converts one exact legacy durable-v1 run into the current
-immutable hub envelope. Configure a read-only source handle and a separate
-exact-read plus conditional-create target handle:
+If a complete durable run already exists, copy that exact run into current
+hub custody instead of listing the live store. The command does not list the
+source bucket or select `latest.json`. Configure a read-only source handle
+and a separate exact-read plus conditional-create target handle:
 
 ```yaml
 hub_read_handles:
-  legacy-read:
-    uri: s3://legacy-hub.example/
-    profile: legacy-reader
+  archive-read:
+    uri: s3://archive-hub.example/
+    profile: archive-reader
 
 hub_publish_handles:
   custody-publish:
@@ -540,7 +573,7 @@ controlled canonical identity authority:
 
 ```bash
 gonimbus index hub bridge-durable \
-  --source-hub-read-handle legacy-read \
+  --source-hub-read-handle archive-read \
   --target-hub-publish-handle custody-publish \
   --index-set idx_<64-lowercase-hex> \
   --run-id run_<exact-id> \
@@ -561,11 +594,12 @@ ranges, provider mismatches, endpoint or access-point aliases, and any range
 whose separation cannot be proved are refused before bridge I/O.
 
 After a successful bridge, acquire from the target through a read-only handle
-configured for that target root, then query with
-`--output-format receipt-jsonl-v2`. Validate the bridge and query terminal
-receipts before treating any result as authoritative. A bridged
-`legacy_unavailable` snapshot has no exact completion timestamp; receipt v1
-therefore refuses it rather than inventing one.
+configured for that target root, then query that dest with
+`--snapshot-dir` and `--output-format receipt-jsonl-v2`. Validate the bridge
+and query terminal receipts before treating any result as authoritative.
+`index doctor --snapshot-dir` inspects the same dest. A bridged snapshot
+classified `legacy_unavailable` has no exact completion timestamp; receipt
+v1 therefore refuses it rather than inventing one.
 
 Namespace disjointness is not proof of independent administration, retention,
 or failure domains. Operators own that custody separation. If policy requires a

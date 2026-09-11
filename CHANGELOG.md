@@ -15,19 +15,63 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-11
+
+**Reuse a finished durable inventory instead of listing the bucket again.**
+
+When a durable snapshot is already complete, listing a very large bucket
+again is optional — not the path to current custody. v0.4.3 takes exact
+custody of that already-complete run and lets you query it under current
+acquire and receipt contracts without walking the live object store.
+Recrawl remains available; it is not required. Automation can prove which
+inventory it used, and snapshot completion time is when that snapshot
+finished — distinct from a later hub commit.
+
+See [`docs/releases/v0.4.3.md`](docs/releases/v0.4.3.md) for the narrative
+walkthrough.
+
+### Added
+
+- **Custody of an already-complete durable run.**
+  `index hub bridge-durable` copies one exact complete durable run into
+  current hub custody. No source LIST, no `latest.json`, no overwrite.
+  Bridge validation accepts a safe relative coverage prefix with one
+  terminal `/` without rewriting historical manifest bytes.
+- **Exact durable acquisition.** `index acquire` materializes one named
+  index-set and run from a read-only hub handle into a local acquired bundle.
+  It does not list the hub or follow `latest.json`.
+- **Verified query receipts.** `index query` can emit a typed terminal
+  receipt (`receipt-jsonl-v1`) so count/find automation can prove which
+  inventory it used and the outcome.
+- **Doctor on a named acquired dest.** `index doctor --snapshot-dir`
+  inspects that acquired bundle in place and does not fall through to an
+  ambient canonical cache of the same set.
+- **Pinned durable deltas.** Exact `--index-set`, `--run-id`, and
+  `--since-run` / `--proof-through-run` pins for forward deltas without a
+  live bucket walk.
+
+### Fixed
+
+- **Truthful snapshot completion time.** Durable completion time is the
+  snapshot's completion, not a later hub commit clock.
+
 ### Changed
 
 - **CI and contributor goneat pin.** Workflows use
   `goneat-tools-runner-glibc:v0.5.6`. Local bootstrap is goneat `v0.6.0`,
-  matching the runner. Keep them paired so local `make fmt` matches CI
-  `format-check`.
-- **gRPC v1.83.1.** Indirect `google.golang.org/grpc` moves to the cooled
-  fix for GHSA-vp52-pcj8-j9qc.
-- **Temporary x/crypto advisory accepts.** GO-2026-6354 and GO-2026-6355
-  are accepted through 2026-09-10 only (`accepted_risk`), documented in
-  `docs/security/decisions/SDR-001-xcrypto-ssh-accepted-risk.md`. `fail_on`
-  stays `high`. Remove both accepts when taking `golang.org/x/crypto`
-  v0.56.0 after cooling.
+  matching the runner.
+- **gRPC v1.83.2.** Indirect `google.golang.org/grpc` for
+  GHSA-2v4p-qf9q-27wj (#200). Supersedes the v1.83.1 pin. Hygiene only.
+- **x/crypto v0.56.0.** Indirect `golang.org/x/crypto` for GO-2026-6354
+  and GO-2026-6355; the temporary `accepted_risk` entries are removed.
+  Hygiene only.
+
+### Documentation
+
+- User-guide reuse, acquire, receipt, and downstream-inventory contract on
+  `docs/user-guide/durable-index.md`.
+- Operator framing: reuse a finished durable inventory first; recrawl is
+  optional.
 
 ## [0.4.2] - 2026-08-13
 
@@ -1740,7 +1784,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/3leaps/gonimbus/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/3leaps/gonimbus/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/3leaps/gonimbus/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/3leaps/gonimbus/compare/v0.3.7...v0.4.0
