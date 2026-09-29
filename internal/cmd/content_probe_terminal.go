@@ -145,7 +145,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	jobID := uuid.NewString()
 	w := newProbeTerminalWriter(output.NewJSONLWriter(cmd.OutOrStdout(), jobID, commandOutputProviderForInputs(args, "s3")), cancel)
 	w.jobID = jobID
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	err := runContentProbeWork(cmd, args, ctx, w)
 	if failure := w.outputFailure(); failure != nil {
 		return probeExit(foundry.ExitFailure, "content probe output failed", failure)

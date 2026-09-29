@@ -249,6 +249,9 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 	}()
 
 	tasks := make(chan probeTask, contentProbeConcurrency*2)
+	// Output cleanup retains invocation values but cannot be suppressed by
+	// caller cancellation. The serialized latch still blocks failed streams.
+	outputCtx := context.WithoutCancel(ctx)
 	var wg sync.WaitGroup
 	for i := 0; i < contentProbeConcurrency; i++ {
 		wg.Add(1)
@@ -265,7 +268,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 						w.processed.Add(1)
 					}
 					errorCount.Add(1)
-					_ = emitContentProbeError(context.Background(), w, task.Key, "failed to connect to provider", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
+					_ = emitContentProbeError(outputCtx, w, task.Key, "failed to connect to provider", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
 
@@ -281,20 +284,20 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 						w.processed.Add(1)
 					}
 					errorCount.Add(1)
-					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe read failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
+					_ = emitContentProbeError(outputCtx, w, task.Key, "content probe read failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
 				if result.extractErr != nil {
 					w.processed.Add(1)
 					errorCount.Add(1)
-					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe extract failed", result.extractErr, map[string]any{"uri": task.URI, "base_input": task.BaseInput, "probe": result.audit})
+					_ = emitContentProbeError(outputCtx, w, task.Key, "content probe extract failed", result.extractErr, map[string]any{"uri": task.URI, "base_input": task.BaseInput, "probe": result.audit})
 					continue
 				}
 
 				w.processed.Add(1)
 				w.routed(result.routingClass)
 				if contentProbeEmit == "probe" || contentProbeEmit == "both" {
-					_ = w.WriteAny(context.Background(), "gonimbus.content.probe.v1", &contentProbeRecord{
+					_ = w.WriteAny(outputCtx, "gonimbus.content.probe.v1", &contentProbeRecord{
 						URI:              task.URI,
 						Key:              task.Key,
 						BytesRequested:   result.bytesRequested,
@@ -313,7 +316,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 						t := result.meta.LastModified.UTC()
 						sourceLastMod = &t
 					}
-					_ = w.WriteAny(context.Background(), "gonimbus.reflow.input.v1", &reflowInputRecord{
+					_ = w.WriteAny(outputCtx, "gonimbus.reflow.input.v1", &reflowInputRecord{
 						SourceURI:        task.URI,
 						SourceKey:        task.Key,
 						SourceETag:       result.meta.ETag,
