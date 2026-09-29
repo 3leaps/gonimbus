@@ -1431,7 +1431,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 				err = markObserved()
 			}
 			release()
-			return bytes, provider.PutResult{ETag: receipt.ETag, Version: receipt.Version}, nil, "complete", "", err
+			return bytes, provider.PutResult{}, nil, "complete", "", err
 		default:
 			release()
 			return 0, provider.PutResult{}, nil, "", "", headErr
@@ -1489,7 +1489,7 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
 	bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision, receipt)
-	return bytes, provider.PutResult{ETag: receipt.ETag, Version: receipt.Version}, collision, "complete", "", err
+	return bytes, provider.PutResult{}, collision, "complete", "", err
 }
 
 func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, stages *StageStats, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
