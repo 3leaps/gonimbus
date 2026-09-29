@@ -46,7 +46,10 @@ embedder map.
 
 Experimental `pkg/transfer.CopyObjectWithReceipt` returns an acknowledged
 streamed write's payload SHA-256, actual byte count, provider-returned ETag and
-revision, and source last-modified when supplied by the source read. Pass
+revision, and source last-modified when supplied by an explicitly admitted
+revision read. Unpinned copies retain the existing raw-read path and omit
+timestamps unavailable from that read; they do not fetch metadata or sidecars
+to populate a receipt. Pass
 `CopyReceiptOptions` to retain source revision admission, atomic destination
 preconditions, metadata options, and phase concurrency budgets. Existing copy
 functions remain callable and share the same implementation.

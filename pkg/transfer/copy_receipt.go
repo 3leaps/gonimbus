@@ -109,9 +109,9 @@ func getReceiptSource(ctx context.Context, src provider.Provider, key string, re
 		}
 		return getter.GetObjectRevision(ctx, key, *revision)
 	}
-	if getter, ok := src.(provider.VersionedGetter); ok {
-		return getter.GetObjectVersioned(ctx, key)
-	}
+	// VersionedGetter does not promise metadata from the existing read alone:
+	// some adapters issue a preceding metadata request or load a sidecar.
+	// Preserve the raw-read contract for unpinned copies.
 	getter, ok := src.(provider.ObjectGetter)
 	if !ok {
 		return nil, provider.ObjectMeta{}, errors.New("source provider does not support GetObject")

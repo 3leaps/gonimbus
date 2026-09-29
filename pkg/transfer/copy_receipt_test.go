@@ -23,6 +23,11 @@ func (p *receiptSource) GetObjectVersioned(context.Context, string) (io.ReadClos
 	return io.NopCloser(strings.NewReader("abcdefgh")), provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Size: 8, LastModified: p.lastModified}}, nil
 }
 
+func (p *receiptSource) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
+	p.reads++
+	return io.NopCloser(strings.NewReader("abcdefgh")), 8, nil
+}
+
 func (p *receiptSource) GetObjectRevision(ctx context.Context, key string, _ provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
 	p.revisions++
 	return p.GetObjectVersioned(ctx, key)
@@ -59,7 +64,11 @@ func TestCopyReceiptPhaseSplitAndRevision(t *testing.T) {
 		}
 		require.Equal(t, payloadSHA256("abcdefgh"), result.SHA256)
 		require.Equal(t, "returned-version", result.Version)
-		require.Equal(t, src.lastModified, result.SourceLastModified)
+		if revision != nil {
+			require.Equal(t, src.lastModified, result.SourceLastModified)
+		} else {
+			require.True(t, result.SourceLastModified.IsZero())
+		}
 		require.Equal(t, "abcdefgh", string(dst.payload))
 	}
 }
