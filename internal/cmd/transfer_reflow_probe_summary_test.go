@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,4 +63,28 @@ func TestReflowProbeSummaryCommandCompatibilityBothConsumers(t *testing.T) {
 	stdout, err := runTransferReflowWithProviders(t, newReflowMemoryProvider(), newReflowMemoryProvider(), control)
 	require.NoError(t, err)
 	requireNoRecordType(t, stdout, reflowpkg.RecordType)
+}
+
+func TestReflowPoolRejectsMalformedProbeSummaryHistogram(t *testing.T) {
+	for _, histogram := range []string{`{"INTERNAL":null}`, `{"INTERNAL":0.5}`, `{"INTERNAL":"0"}`, `{"INTERNAL":-1}`, `{"ACCESS_DENIED":1}`, `{"TIMEOUT":1}`, `{"THROTTLED":1}`, `{"TRANSIENT":1}`, `{"PROVIDER_UNAVAILABLE":1}`, `{"INVALID_INPUT":1}`} {
+		s := probe.Summary{ErrorsByCode: map[string]int64{}, Termination: "completed"}
+		if strings.HasSuffix(histogram, ":1}") {
+			s.Errors = 1
+			s.Termination = "completed_with_errors"
+			s.ExitCode = 60
+		}
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		payload := strings.Replace(string(raw), `"errors_by_code":{}`, `"errors_by_code":`+histogram, 1)
+		line := `{"type":"` + probe.SummaryRecordType + `","data":` + payload + `}`
+		class, _ := classifyReflowFirstRecord(line)
+		require.Equal(t, firstRecordRefuse, class, histogram)
+		queue := make(chan reflowTask, 1)
+		_, err = enqueueReflowLine(context.Background(), line, "existing", reflowSourceConfig{}, func(*uri.ObjectURI) (provider.Provider, provider.Provider, error) {
+			t.Fatal("malformed control must not resolve provider")
+			return nil, nil, nil
+		}, queue)
+		require.Error(t, err, histogram)
+		require.Empty(t, queue)
+	}
 }

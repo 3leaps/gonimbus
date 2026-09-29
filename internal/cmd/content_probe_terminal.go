@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
@@ -119,6 +122,23 @@ func probeExit(code int, message string, err error) error {
 	return &probeExitCause{code: code, message: message, cause: err}
 }
 
+// ProbeExitCode recognizes only content-probe's typed outcome. Other command
+// errors retain their existing process dispatch, regardless of message text.
+func ProbeExitCode(err error) (foundry.ExitCode, bool) {
+	var cause *probeExitCause
+	if errors.As(err, &cause) {
+		return foundry.ExitCode(cause.code), true
+	}
+	return 0, false
+}
+
+// Setup diagnostics are persistent evidence. Raw parser/regexp/file errors
+// can quote arbitrary configuration values, so neither Error nor Unwrap carries
+// that material into stdout or process-dispatch stderr.
+func probeSetupExit(code int, stage string) error {
+	return probeExit(code, stage, errors.New("probe setup rejected"))
+}
+
 func (w *probeTerminalWriter) markFatal(code int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -139,7 +159,13 @@ func (w *probeTerminalWriter) routed(route string) {
 
 func runContentProbe(cmd *cobra.Command, args []string) error {
 	started := time.Now()
-	caller := cmd.Context()
+	caller, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	// Let a broken stdout reach the typed output-failure path rather than the
+	// runtime's special immediate SIGPIPE exit for standard output descriptors.
+	pipeSignals := make(chan os.Signal, 1)
+	signal.Notify(pipeSignals, syscall.SIGPIPE)
+	defer signal.Stop(pipeSignals)
 	ctx, cancel := context.WithCancel(caller)
 	defer cancel()
 	jobID := uuid.NewString()

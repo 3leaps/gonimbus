@@ -166,6 +166,28 @@
           "errors": {
             "minimum": 1
           },
+          "errors_by_code": {
+            "properties": {
+              "ACCESS_DENIED": {
+                "const": 0
+              },
+              "TIMEOUT": {
+                "const": 0
+              },
+              "THROTTLED": {
+                "const": 0
+              },
+              "TRANSIENT": {
+                "const": 0
+              },
+              "PROVIDER_UNAVAILABLE": {
+                "const": 0
+              },
+              "INVALID_INPUT": {
+                "const": 0
+              }
+            }
+          },
           "invalid_inputs": {
             "const": 0
           }

@@ -66,6 +66,16 @@ func ParseSummary(raw json.RawMessage) (Summary, error) {
 	if err := requiredSummaryFields(fields["routing"], []string{"normal", "quarantine"}); err != nil {
 		return summary, err
 	}
+	var histogram map[string]json.RawMessage
+	if err := json.Unmarshal(fields["errors_by_code"], &histogram); err != nil || histogram == nil {
+		return summary, fmt.Errorf("invalid probe summary error histogram")
+	}
+	for code, rawCount := range histogram {
+		var count *int64
+		if err := json.Unmarshal(rawCount, &count); err != nil || count == nil || *count < 0 || !KnownErrorCode(code) {
+			return summary, fmt.Errorf("invalid probe summary error histogram")
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&summary); err != nil {
@@ -106,6 +116,13 @@ func (s Summary) Validate() error {
 			return fmt.Errorf("invalid probe summary error histogram")
 		}
 		remaining -= count
+		if count > 0 && (s.Termination == "completed" || s.Termination == "completed_with_errors") {
+			switch code {
+			case output.ErrCodeAccessDenied, output.ErrCodeTimeout, output.ErrCodeThrottled,
+				output.ErrCodeTransient, output.ErrCodeProviderUnavailable, output.ErrCodeInvalidInput:
+				return fmt.Errorf("inconsistent probe summary error classification")
+			}
+		}
 	}
 	if remaining != 0 {
 		return fmt.Errorf("inconsistent probe summary error histogram")

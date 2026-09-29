@@ -73,3 +73,28 @@ func TestSummaryCounterAndTerminationInvariants(t *testing.T) {
 		require.Error(t, s.Validate())
 	}
 }
+
+func TestSummaryRejectsRawHistogramAndPartialInfrastructure(t *testing.T) {
+	for _, value := range []string{"null", "0.5", `"0"`, "-1"} {
+		t.Run(value, func(t *testing.T) {
+			raw, err := json.Marshal(Summary{Termination: "completed", ErrorsByCode: map[string]int64{}})
+			require.NoError(t, err)
+			raw = []byte(strings.Replace(string(raw), `"errors_by_code":{}`, `"errors_by_code":{"INTERNAL":`+value+`}`, 1))
+			_, err = ParseSummary(raw)
+			require.Error(t, err, value)
+		})
+	}
+	for _, code := range []string{"ACCESS_DENIED", "TIMEOUT", "THROTTLED", "TRANSIENT", "PROVIDER_UNAVAILABLE", "INVALID_INPUT", "INTERNAL"} {
+		t.Run(code, func(t *testing.T) {
+			s := Summary{Errors: 1, ErrorsByCode: map[string]int64{code: 1}, Termination: "completed_with_errors", ExitCode: 60}
+			raw, err := json.Marshal(s)
+			require.NoError(t, err)
+			_, err = ParseSummary(raw)
+			if code == "INTERNAL" {
+				require.NoError(t, err, "typed local extraction remains a valid partial outcome")
+			} else {
+				require.Error(t, err, code)
+			}
+		})
+	}
+}

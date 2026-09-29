@@ -148,29 +148,29 @@ type reflowInputRecord struct {
 
 func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context, w *probeTerminalWriter) error {
 	if contentProbeConcurrency < 1 {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid --concurrency value", fmt.Errorf("concurrency must be >= 1"))
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe concurrency")
 	}
 	if err := validateContentProbeBytes(contentProbeBytes); err != nil {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid --bytes value", err)
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe read budget")
 	}
 	switch contentProbeEmit {
 	case "probe", "reflow-input", "both":
 		// ok
 	default:
-		return probeExit(foundry.ExitInvalidArgument, "Invalid --emit value", fmt.Errorf("emit must be one of: probe, reflow-input, both"))
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe emit mode")
 	}
 
 	cfgBytes, err := os.ReadFile(contentProbeConfigPath) // #nosec G304 -- operator-supplied probe config path is the CLI input being read.
 	if err != nil {
-		return probeExit(foundry.ExitFileReadError, "Failed to read probe config", err)
+		return probeSetupExit(foundry.ExitFileReadError, "Failed to read probe configuration")
 	}
 	probeCfg, err := loadProbeConfig(cfgBytes, contentProbeConfigPath)
 	if err != nil {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid probe config", err)
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe configuration encoding")
 	}
 	rewriteCapture, err := compileContentProbeRewriteCapture(contentProbeRewriteFrom)
 	if err != nil {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid --rewrite-from value", err)
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe rewrite configuration")
 	}
 	var rewriteCaptureNames []string
 	if rewriteCapture != nil {
@@ -178,7 +178,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 	}
 	prober, err := newContentProbeProber(probeCfg, rewriteCaptureNames)
 	if err != nil {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid probe config", err)
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe extraction configuration")
 	}
 
 	inputs := []string{}
@@ -186,7 +186,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 		lines, err := readLines(cmd.InOrStdin())
 		w.inputs.Store(int64(len(lines)))
 		if err != nil {
-			return probeExit(foundry.ExitInvalidArgument, "Failed to read stdin", err)
+			return probeSetupExit(foundry.ExitInvalidArgument, "Failed to read probe input")
 		}
 		inputs = append(inputs, lines...)
 	} else {
@@ -207,7 +207,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 	// Pre-resolve per-client admitted N before any construction.
 	admittedByClient, err := resolveContentAdmittedByClient(contentProbeConcurrency, inputs)
 	if err != nil {
-		return probeExit(foundry.ExitInvalidArgument, "Invalid content probe concurrency for connection pool", err)
+		return probeSetupExit(foundry.ExitInvalidArgument, "Invalid probe connection budget")
 	}
 
 	provMu := sync.Mutex{}
@@ -268,7 +268,7 @@ func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context,
 						w.processed.Add(1)
 					}
 					errorCount.Add(1)
-					_ = emitContentProbeError(outputCtx, w, task.Key, "failed to connect to provider", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
+					_ = emitContentProbeErrorWithCode(outputCtx, w, contentProbeErrCode(err), task.Key, "failed to connect to provider", errors.New("provider setup failed"), map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
 
@@ -772,7 +772,7 @@ func enqueueContentProbeInput(
 	if err != nil {
 		fatal()
 		errorCount.Add(1)
-		_ = emitContentProbeError(context.Background(), w, "", "failed to connect to provider", err, map[string]any{"uri": line})
+		_ = emitContentProbeErrorWithCode(context.Background(), w, contentProbeErrCode(err), "", "failed to connect to provider", errors.New("provider setup failed"), map[string]any{"uri": line})
 		return nil
 	}
 
