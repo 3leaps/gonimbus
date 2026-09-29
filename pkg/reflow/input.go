@@ -257,13 +257,14 @@ func (in reflowInput) sourceIdentity() string {
 // material removed) before it crosses the event boundary.
 func (in reflowInput) record(destURI, destKey, status string) Record {
 	return Record{
-		SourceURI:    sanitizeSourceURI(in.SourceURI),
-		SourceBucket: in.SourceBucket,
-		SourceKey:    in.SourceKey,
-		SourceETag:   in.SourceETag,
-		SourceSize:   in.SourceSize,
-		DestURI:      destURI,
-		DestKey:      destKey,
-		Status:       status,
+		SourceURI:          sanitizeSourceURI(in.SourceURI),
+		SourceBucket:       in.SourceBucket,
+		SourceKey:          in.SourceKey,
+		SourceETag:         in.SourceETag,
+		SourceSize:         in.SourceSize,
+		SourceLastModified: receiptTimestamp(in.SourceLastMod),
+		DestURI:            destURI,
+		DestKey:            destKey,
+		Status:             status,
 	}
 }

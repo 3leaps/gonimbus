@@ -15,6 +15,15 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- Terminal reflow v1 records optionally carry acknowledged-write SHA-256,
+  destination ETag/revision, and known source last-modified. Skips, failures,
+  dry runs, and in-progress records do not claim a new destination write.
+  `inspect-pair` preserves these upstream claims without changing its scope
+  admission or HEAD-based verdict. Unknown and unsafe identifiers are omitted.
+  These fields do not establish independent read-back verification.
+
 ### Library API
 
 - Add optional `provider.ResultPutter` and `MetadataAwareResultPutter`

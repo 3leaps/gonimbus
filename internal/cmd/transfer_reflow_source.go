@@ -100,6 +100,9 @@ func (t reflowTask) reflowRecord(destURI, destKey, status string) reflowpkg.Reco
 	case string(provider.ProviderS3), "":
 		rec.SourceBucket = t.SourceBucket
 	}
+	if !t.SourceLastMod.IsZero() {
+		rec.SourceLastModified = t.SourceLastMod.UTC().Format(time.RFC3339Nano)
+	}
 	return rec
 }
 
