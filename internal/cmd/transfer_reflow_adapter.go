@@ -14,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/partition"
+	"github.com/3leaps/gonimbus/pkg/probe"
 	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
@@ -297,17 +298,26 @@ func classifyReflowFirstRecord(line string) (firstRecordClass, string) {
 		return firstRecordFallback, ""
 	}
 	var env struct {
-		Type string `json:"type"`
-		Data struct {
-			SourceURI string `json:"source_uri"`
-		} `json:"data"`
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
 		return firstRecordRefuse, reflowRefuseMalformed
 	}
 	switch env.Type {
+	case probe.SummaryRecordType:
+		if _, err := probe.ParseSummary(env.Data); err != nil {
+			return firstRecordRefuse, reflowRefuseMalformed
+		}
+		return firstRecordFallback, ""
 	case "gonimbus.reflow.input.v1":
-		if strings.HasPrefix(strings.TrimSpace(env.Data.SourceURI), "s3://") {
+		var data struct {
+			SourceURI string `json:"source_uri"`
+		}
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return firstRecordRefuse, reflowRefuseMalformed
+		}
+		if strings.HasPrefix(strings.TrimSpace(data.SourceURI), "s3://") {
 			return firstRecordEngineReady, ""
 		}
 		return firstRecordFallback, ""

@@ -1084,6 +1084,9 @@ type plannedRecord struct {
 // non-nil error is an infrastructure (sink) failure that aborts the run.
 func (r *Runner) planInputLine(ctx context.Context, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, sourceIdentity *string, line string) (plannedRecord, bool, error) {
 	in, err := parseReflowInputLine(line)
+	if errors.Is(err, errProbeSummaryControl) {
+		return plannedRecord{}, false, nil
+	}
 	if err != nil {
 		stats.recordInvalidInput()
 		return plannedRecord{}, false, r.emitError(ctx, ErrorEvent{Code: ErrCodeInvalidInput, Message: FormatErrorMessage("invalid reflow input", err), Details: map[string]any{"error": err.Error()}})

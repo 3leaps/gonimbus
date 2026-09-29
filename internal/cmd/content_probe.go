@@ -15,12 +15,9 @@ import (
 	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
-	"github.com/3leaps/gonimbus/internal/observability"
 	"github.com/3leaps/gonimbus/pkg/content"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -149,32 +146,31 @@ type reflowInputRecord struct {
 	Probe            *probe.ProbeAudit `json:"probe,omitempty"`
 }
 
-func runContentProbe(cmd *cobra.Command, args []string) error {
-	ctx := cmd.Context()
+func runContentProbeWork(cmd *cobra.Command, args []string, ctx context.Context, w *probeTerminalWriter) error {
 	if contentProbeConcurrency < 1 {
-		return exitError(foundry.ExitInvalidArgument, "Invalid --concurrency value", fmt.Errorf("concurrency must be >= 1"))
+		return probeExit(foundry.ExitInvalidArgument, "Invalid --concurrency value", fmt.Errorf("concurrency must be >= 1"))
 	}
 	if err := validateContentProbeBytes(contentProbeBytes); err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid --bytes value", err)
+		return probeExit(foundry.ExitInvalidArgument, "Invalid --bytes value", err)
 	}
 	switch contentProbeEmit {
 	case "probe", "reflow-input", "both":
 		// ok
 	default:
-		return exitError(foundry.ExitInvalidArgument, "Invalid --emit value", fmt.Errorf("emit must be one of: probe, reflow-input, both"))
+		return probeExit(foundry.ExitInvalidArgument, "Invalid --emit value", fmt.Errorf("emit must be one of: probe, reflow-input, both"))
 	}
 
 	cfgBytes, err := os.ReadFile(contentProbeConfigPath) // #nosec G304 -- operator-supplied probe config path is the CLI input being read.
 	if err != nil {
-		return exitError(foundry.ExitFileReadError, "Failed to read probe config", err)
+		return probeExit(foundry.ExitFileReadError, "Failed to read probe config", err)
 	}
 	probeCfg, err := loadProbeConfig(cfgBytes, contentProbeConfigPath)
 	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid probe config", err)
+		return probeExit(foundry.ExitInvalidArgument, "Invalid probe config", err)
 	}
 	rewriteCapture, err := compileContentProbeRewriteCapture(contentProbeRewriteFrom)
 	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid --rewrite-from value", err)
+		return probeExit(foundry.ExitInvalidArgument, "Invalid --rewrite-from value", err)
 	}
 	var rewriteCaptureNames []string
 	if rewriteCapture != nil {
@@ -182,36 +178,36 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	}
 	prober, err := newContentProbeProber(probeCfg, rewriteCaptureNames)
 	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid probe config", err)
+		return probeExit(foundry.ExitInvalidArgument, "Invalid probe config", err)
 	}
 
 	inputs := []string{}
 	if contentProbeStdin {
 		lines, err := readLines(cmd.InOrStdin())
+		w.inputs.Store(int64(len(lines)))
 		if err != nil {
-			return exitError(foundry.ExitInvalidArgument, "Failed to read stdin", err)
+			return probeExit(foundry.ExitInvalidArgument, "Failed to read stdin", err)
 		}
 		inputs = append(inputs, lines...)
 	} else {
 		inputs = append(inputs, args[0])
+		w.inputs.Store(1)
 	}
 	if len(inputs) == 0 {
 		return nil
 	}
+	// Before workers or diagnostics start, retain the invocation ID while using
+	// the provider inferred from stdin, as the prior command did.
+	w.jsonl = output.NewJSONLWriter(cmd.OutOrStdout(), w.jobID, commandOutputProviderForInputs(inputs, string(provider.ProviderS3)))
+	w.Writer = w.jsonl
 
-	jobID := uuid.New().String()
-	w := output.NewJSONLWriter(cmd.OutOrStdout(), jobID, commandOutputProviderForInputs(inputs, string(provider.ProviderS3)))
-	defer func() { _ = w.Close() }()
-
-	var (
-		invalidCount atomic.Int64
-		errorCount   atomic.Int64
-	)
+	invalidCount := &w.invalid
+	var errorCount atomic.Int64
 
 	// Pre-resolve per-client admitted N before any construction.
 	admittedByClient, err := resolveContentAdmittedByClient(contentProbeConcurrency, inputs)
 	if err != nil {
-		return exitError(foundry.ExitInvalidArgument, "Invalid content probe concurrency for connection pool", err)
+		return probeExit(foundry.ExitInvalidArgument, "Invalid content probe concurrency for connection pool", err)
 	}
 
 	provMu := sync.Mutex{}
@@ -264,25 +260,41 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 				}
 				prov, err := getProvider(task.ProviderURI)
 				if err != nil {
+					w.markFatal(foundry.ExitExternalServiceUnavailable)
+					if ctx.Err() == nil {
+						w.processed.Add(1)
+					}
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "failed to connect to provider", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
 
 				result, err := runContentProbeTask(ctx, prov, task, prober, probeCfg, rewriteCapture)
+				if result != nil {
+					w.bytesRead.Add(result.bytesRead)
+				}
 				if err != nil {
+					if !provider.IsNotFound(err) {
+						w.markFatal(foundry.ExitExternalServiceUnavailable)
+					}
+					if ctx.Err() == nil {
+						w.processed.Add(1)
+					}
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe read failed", err, map[string]any{"uri": task.URI, "base_input": task.BaseInput})
 					continue
 				}
 				if result.extractErr != nil {
+					w.processed.Add(1)
 					errorCount.Add(1)
 					_ = emitContentProbeError(context.Background(), w, task.Key, "content probe extract failed", result.extractErr, map[string]any{"uri": task.URI, "base_input": task.BaseInput, "probe": result.audit})
 					continue
 				}
 
+				w.processed.Add(1)
+				w.routed(result.routingClass)
 				if contentProbeEmit == "probe" || contentProbeEmit == "both" {
-					_ = w.WriteAny(ctx, "gonimbus.content.probe.v1", &contentProbeRecord{
+					_ = w.WriteAny(context.Background(), "gonimbus.content.probe.v1", &contentProbeRecord{
 						URI:              task.URI,
 						Key:              task.Key,
 						BytesRequested:   result.bytesRequested,
@@ -301,7 +313,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 						t := result.meta.LastModified.UTC()
 						sourceLastMod = &t
 					}
-					_ = w.WriteAny(ctx, "gonimbus.reflow.input.v1", &reflowInputRecord{
+					_ = w.WriteAny(context.Background(), "gonimbus.reflow.input.v1", &reflowInputRecord{
 						SourceURI:        task.URI,
 						SourceKey:        task.Key,
 						SourceETag:       result.meta.ETag,
@@ -321,7 +333,8 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := enqueueContentProbeInput(ctx, in, tasks, w, getProvider, &invalidCount, &errorCount); err != nil {
+		if err := enqueueContentProbeInput(ctx, in, tasks, w, getProvider, invalidCount, &errorCount); err != nil {
+			w.markFatal(foundry.ExitExternalServiceUnavailable)
 			errorCount.Add(1)
 			_ = emitContentProbeError(context.Background(), w, "", "failed to enqueue input", err, map[string]any{"input": strings.TrimSpace(in)})
 		}
@@ -329,15 +342,6 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	close(tasks)
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		return exitError(foundry.ExitSignalInt, "content probe cancelled", ctx.Err())
-	}
-	if invalidCount.Load() > 0 {
-		return exitError(foundry.ExitInvalidArgument, "content probe completed with invalid inputs", fmt.Errorf("invalid_inputs=%d", invalidCount.Load()))
-	}
-	if errorCount.Load() > 0 {
-		return exitError(foundry.ExitExternalServiceUnavailable, "content probe completed with errors", fmt.Errorf("errors=%d", errorCount.Load()))
-	}
 	return nil
 }
 
@@ -390,9 +394,9 @@ func runContentProbeTask(ctx context.Context, prov contentProbeProvider, task pr
 		return runContentProbeUntilResolved(ctx, prov, task.Key, prober, cfg, initialVars)
 	}
 
-	b, meta, err := content.HeadBytes(ctx, prov, task.Key, contentProbeBytes)
+	b, meta, err := content.HeadBytesWithPartial(ctx, prov, task.Key, contentProbeBytes)
 	if err != nil {
-		return nil, err
+		return &contentProbeTaskResult{meta: meta, bytesRead: int64(len(b))}, err
 	}
 	termination := probe.TerminationAllRequiredResolved
 	if prober.HasPriorityExtractors() && fixedWindowHitBoundary(b, meta, contentProbeBytes) {
@@ -447,12 +451,12 @@ func runContentProbeUntilResolved(ctx context.Context, prov contentProbeProvider
 		}
 		body, _, err := ranger.GetRange(ctx, key, start, end)
 		if err != nil {
-			return nil, err
+			return &contentProbeTaskResult{meta: meta, bytesRead: bytesRead}, err
 		}
 		chunk, readErr := io.ReadAll(body)
 		_ = body.Close()
 		if readErr != nil {
-			return nil, readErr
+			return &contentProbeTaskResult{meta: meta, bytesRead: bytesRead + int64(len(chunk))}, readErr
 		}
 		if len(chunk) == 0 {
 			termination = probe.TerminationStreamExhausted
@@ -631,7 +635,7 @@ func readLines(r io.Reader) ([]string, error) {
 		out = append(out, line)
 	}
 	if err := s.Err(); err != nil {
-		return nil, err
+		return out, err
 	}
 	return out, nil
 }
@@ -645,6 +649,17 @@ func enqueueContentProbeInput(
 	invalidCount *atomic.Int64,
 	errorCount *atomic.Int64,
 ) error {
+	terminal, _ := w.(*probeTerminalWriter)
+	admitted := func() {
+		if terminal != nil {
+			terminal.enumerated.Add(1)
+		}
+	}
+	fatal := func() {
+		if terminal != nil {
+			terminal.markFatal(foundry.ExitExternalServiceUnavailable)
+		}
+	}
 	line := strings.TrimSpace(input)
 	if line == "" {
 		return nil
@@ -668,6 +683,17 @@ func enqueueContentProbeInput(
 				return nil
 			}
 			errorCount.Add(1)
+			if terminal != nil {
+				var upstream output.ErrorRecord
+				_ = json.Unmarshal(env.Data, &upstream)
+				switch upstream.Code {
+				case output.ErrCodeInvalidInput:
+					terminal.invalid.Add(1)
+				case output.ErrCodeNotFound, output.ErrCodeAlreadyExists:
+				default:
+					fatal()
+				}
+			}
 			return nil
 		}
 		if env.Type != "gonimbus.index.object.v1" {
@@ -714,6 +740,7 @@ func enqueueContentProbeInput(
 		}
 		select {
 		case ch <- probeTask{ProviderURI: target.ProviderURI, Key: key, URI: uri, BaseInput: "jsonl", ETag: data.ETag, Size: data.SizeBytes}:
+			admitted()
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -731,6 +758,7 @@ func enqueueContentProbeInput(
 	if !parsed.IsPrefix() && !parsed.IsPattern() {
 		select {
 		case ch <- probeTask{ProviderURI: target.ProviderURI, Key: target.QueryURI.Key, URI: parsed.String(), BaseInput: line}:
+			admitted()
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -739,6 +767,7 @@ func enqueueContentProbeInput(
 
 	prov, err := getProvider(target.ProviderURI)
 	if err != nil {
+		fatal()
 		errorCount.Add(1)
 		_ = emitContentProbeError(context.Background(), w, "", "failed to connect to provider", err, map[string]any{"uri": line})
 		return nil
@@ -756,12 +785,18 @@ func enqueueContentProbeInput(
 	}
 
 	var token string
+	seenTokens := map[string]bool{}
 	for {
 		res, err := prov.List(ctx, provider.ListOptions{Prefix: target.QueryURI.Key, ContinuationToken: token})
 		if err != nil {
+			fatal()
 			errorCount.Add(1)
 			_ = emitContentProbeError(context.Background(), w, parsed.Key, "list failed", err, map[string]any{"uri": line})
 			return nil
+		}
+		if res == nil {
+			fatal()
+			return fmt.Errorf("invalid provider listing result")
 		}
 		for _, obj := range res.Objects {
 			if matcher != nil && !matcher.Match(obj.Key) {
@@ -773,13 +808,19 @@ func enqueueContentProbeInput(
 			}
 			select {
 			case ch <- probeTask{ProviderURI: target.ProviderURI, Key: obj.Key, URI: uri, BaseInput: line, ETag: obj.ETag, Size: obj.Size}:
+				admitted()
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
-		if !res.IsTruncated || res.ContinuationToken == "" {
+		if !res.IsTruncated {
 			break
 		}
+		if res.ContinuationToken == "" || seenTokens[res.ContinuationToken] {
+			fatal()
+			return fmt.Errorf("invalid provider listing pagination")
+		}
+		seenTokens[res.ContinuationToken] = true
 		token = res.ContinuationToken
 	}
 	return nil
@@ -796,15 +837,14 @@ func emitContentProbeInputError(ctx context.Context, w output.Writer, key, msg s
 func emitContentProbeErrorWithCode(ctx context.Context, w output.Writer, code string, key, msg string, err error, details map[string]any) error {
 	safeDetails := sanitizeContentProbeDetails(details)
 	safeDetails["mode"] = "content_probe"
-	if werr := w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: reflowpkg.FormatErrorMessage(msg, err), Key: key, Details: safeDetails}); werr != nil {
-		observability.CLILogger.Debug("Failed to emit content probe error record", zap.Error(werr))
-	}
-	return nil
+	return w.WriteError(ctx, &output.ErrorRecord{Code: code, Message: reflowpkg.FormatErrorMessage(msg, err), Key: key, Details: safeDetails})
 }
 
 func contentProbeErrCode(err error) string {
 	code := output.ErrCodeInternal
 	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		code = output.ErrCodeTimeout
 	case provider.IsNotFound(err):
 		code = output.ErrCodeNotFound
 	case provider.IsAccessDenied(err):
@@ -824,8 +864,8 @@ func emitContentProbeErrorPassthrough(ctx context.Context, w output.Writer, data
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return err
 	}
-	if rec.Code == "" {
-		return fmt.Errorf("missing error code")
+	if !probe.KnownErrorCode(rec.Code) {
+		return fmt.Errorf("invalid upstream error code")
 	}
 	details := sanitizeContentProbeDetailsAny(rec.Details)
 	detailMap, ok := details.(map[string]any)
@@ -833,15 +873,12 @@ func emitContentProbeErrorPassthrough(ctx context.Context, w output.Writer, data
 		detailMap = map[string]any{}
 	}
 	detailMap["mode"] = "content_probe"
-	if werr := w.WriteError(ctx, &output.ErrorRecord{
+	return w.WriteError(ctx, &output.ErrorRecord{
 		Code:    rec.Code,
 		Message: reflowpkg.SanitizeOperationCauseMessage(errors.New(rec.Message)),
 		Key:     rec.Key,
 		Details: detailMap,
-	}); werr != nil {
-		observability.CLILogger.Debug("Failed to emit content probe error record", zap.Error(werr))
-	}
-	return nil
+	})
 }
 
 func sanitizeContentProbeDetails(details map[string]any) map[string]any {

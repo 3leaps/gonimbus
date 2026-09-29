@@ -369,6 +369,47 @@ gonimbus content probe --stdin --config probe.yaml --profile my-profile < uris.t
 gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt
 ```
 
+#### Probe termination and process result
+
+Handled invocations end with one `gonimbus.content.probe.summary.v1` record,
+after workers drain. All records share a job ID. This includes empty stdin and
+handled configuration errors, provided output remains writable. Flag rejection
+before execution, hard termination, crashes, and broken output may leave no
+summary. Absence means no terminal evidence; presence alone is not success.
+
+The summary includes `inputs` (nonblank top-level inputs), `enumerated`
+(admitted object tasks), `processed` (finished object outcomes), `emitted`
+counts for `reflow_input` and `probe`, and effective `routing` counts for
+`normal` and `quarantine`. `both` counts two emitted records but one routing
+outcome per successful object. `errors` counts written error records;
+`errors_by_code` is their bounded code histogram, and `invalid_inputs` overlaps
+those errors. `bytes_read` includes payload bytes delivered before extraction
+or read errors, not metadata or SDK retry traffic. `wall_ms` measures elapsed
+execution through drain. Zero counters and empty histograms remain present.
+
+`termination` and `exit_code` distinguish outcomes:
+
+| Termination             | Result                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| `completed`             | 0                                                                             |
+| `completed_with_errors` | 60 (`EXIT_DATA_INVALID`), previously 32 for mixed object-data failures        |
+| `failed`                | Cause-specific failure; provider failures remain 32, invalid inputs remain 40 |
+| `aborted`               | Nonzero cancellation result                                                   |
+
+Successful quarantine is a handled success. Authentication, transport,
+enumeration and invalid pagination are run failures, not completed data errors.
+Unknown upstream error codes are rejected without echoing the code. Output
+failure takes precedence over cancellation and all reported results; once a
+write fails, no later error or success summary is appended.
+
+Updated reflow consumers validate the exact summary type as control evidence,
+never as object work. This does not certify upstream completeness or undo
+earlier destination writes. Check the producer process result (use shell
+`pipefail`) and summary as well as the mover outcome. Upgrade producer and
+consumer together, or filter control records for older consumers; third-party
+consumers must dispatch on `type`. Upstream error-record handling remains
+explicit rather than silently treating errors as objects or success.
+
 #### Probe Configuration
 
 Create a `probe.yaml` file defining extraction rules:

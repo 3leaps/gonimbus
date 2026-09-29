@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gonimbus/v1.0.0/content-probe-summary.v1",
+  "title": "Gonimbus Content Probe Terminal Summary",
+  "description": "Terminal data payload for gonimbus.content.probe.summary.v1; reported termination is not proof of success or custody.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inputs",
+    "enumerated",
+    "processed",
+    "emitted",
+    "routing",
+    "errors",
+    "errors_by_code",
+    "invalid_inputs",
+    "termination",
+    "exit_code",
+    "bytes_read",
+    "wall_ms"
+  ],
+  "$defs": {
+    "counter": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "properties": {
+    "inputs": {
+      "$ref": "#/$defs/counter"
+    },
+    "enumerated": {
+      "$ref": "#/$defs/counter"
+    },
+    "processed": {
+      "$ref": "#/$defs/counter"
+    },
+    "emitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reflow_input",
+        "probe"
+      ],
+      "properties": {
+        "reflow_input": {
+          "$ref": "#/$defs/counter"
+        },
+        "probe": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "quarantine"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/counter"
+        },
+        "quarantine": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "errors": {
+      "$ref": "#/$defs/counter"
+    },
+    "errors_by_code": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ACCESS_DENIED": {
+          "$ref": "#/$defs/counter"
+        },
+        "NOT_FOUND": {
+          "$ref": "#/$defs/counter"
+        },
+        "TIMEOUT": {
+          "$ref": "#/$defs/counter"
+        },
+        "THROTTLED": {
+          "$ref": "#/$defs/counter"
+        },
+        "INTERNAL": {
+          "$ref": "#/$defs/counter"
+        },
+        "PROVIDER_UNAVAILABLE": {
+          "$ref": "#/$defs/counter"
+        },
+        "TRANSIENT": {
+          "$ref": "#/$defs/counter"
+        },
+        "ALREADY_EXISTS": {
+          "$ref": "#/$defs/counter"
+        },
+        "INVALID_INPUT": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "invalid_inputs": {
+      "$ref": "#/$defs/counter"
+    },
+    "termination": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "completed_with_errors",
+        "failed",
+        "aborted"
+      ]
+    },
+    "exit_code": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "bytes_read": {
+      "$ref": "#/$defs/counter"
+    },
+    "wall_ms": {
+      "$ref": "#/$defs/counter"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "termination": {
+            "const": "completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          },
+          "errors": {
+            "const": 0
+          },
+          "invalid_inputs": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "termination": {
+            "const": "completed_with_errors"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 60
+          },
+          "errors": {
+            "minimum": 1
+          },
+          "invalid_inputs": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "termination": {
+            "enum": [
+              "failed",
+              "aborted"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "minimum": 1,
+            "not": {
+              "const": 60
+            }
+          }
+        }
+      }
+    }
+  ]
+}
