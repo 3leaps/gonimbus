@@ -3,6 +3,8 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 )
 
@@ -15,6 +17,8 @@ const (
 type retryableBody struct {
 	reader  io.ReadSeeker
 	cleanup func() error
+	size    int64
+	sha256  string
 }
 
 func (b *retryableBody) Reader() io.ReadSeeker { return b.reader }
@@ -43,14 +47,19 @@ func newRetryableBodyWithTempDir(ctx context.Context, src io.ReadCloser, size in
 		size = maxMemoryBytes + 1
 	}
 
+	var prefix []byte
 	if size <= maxMemoryBytes {
-		buf := make([]byte, 0, minInt64(size, maxMemoryBytes))
-		data, err := io.ReadAll(io.LimitReader(src, size))
+		// Declared size is a buffering hint, not permission to truncate the
+		// source. Detect growth within the memory budget and spill when needed.
+		data, err := io.ReadAll(io.LimitReader(src, maxMemoryBytes+1))
 		if err != nil {
 			return nil, err
 		}
-		buf = append(buf, data...)
-		return &retryableBody{reader: bytes.NewReader(buf), cleanup: func() error { return nil }}, nil
+		if int64(len(data)) <= maxMemoryBytes {
+			digest := sha256.Sum256(data)
+			return &retryableBody{reader: bytes.NewReader(data), cleanup: func() error { return nil }, size: int64(len(data)), sha256: hex.EncodeToString(digest[:])}, nil
+		}
+		prefix = data
 	}
 
 	f, cleanup, err := createSecureTempFile(tempDir, "gonimbus-put-buffer-*")
@@ -58,7 +67,8 @@ func newRetryableBodyWithTempDir(ctx context.Context, src io.ReadCloser, size in
 		return nil, err
 	}
 
-	_, copyErr := io.Copy(f, src)
+	digest := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(f, digest), io.MultiReader(bytes.NewReader(prefix), src))
 	if copyErr != nil {
 		_ = cleanup()
 		return nil, copyErr
@@ -72,12 +82,7 @@ func newRetryableBodyWithTempDir(ctx context.Context, src io.ReadCloser, size in
 	return &retryableBody{
 		reader:  f,
 		cleanup: cleanup,
+		size:    n,
+		sha256:  hex.EncodeToString(digest.Sum(nil)),
 	}, nil
-}
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -15,6 +15,18 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- Add optional `provider.ResultPutter` and `MetadataAwareResultPutter`
+  capabilities, with S3 result-bearing unconditional PUT methods. Existing
+  error-only interfaces remain callable; providers without the new capabilities
+  retain their existing fallback behavior.
+- Experimental transfer uploads expose full logical-payload SHA-256 and actual
+  payload length after an acknowledged write. `CopyObjectWithReceipt` preserves
+  source revision and phase-budget admission while returning write handles and
+  source-read timestamps when available. These are transfer receipts, not
+  independent destination read-back verification.
+
 ## [0.4.3] - 2026-09-11
 
 **Reuse a finished durable inventory instead of listing the bucket again.**
