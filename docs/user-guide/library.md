@@ -42,6 +42,29 @@ revision-bound reads). See
 [Library consumers](../library-consumers.md#experimental-reflow-engine) for the
 embedder map.
 
+## Streamed write receipts
+
+Experimental `pkg/transfer.CopyObjectWithReceipt` returns an acknowledged
+streamed write's payload SHA-256, actual byte count, provider-returned ETag and
+revision, and source last-modified when supplied by an explicitly admitted
+revision read. Unpinned copies retain the existing raw-read path and omit
+timestamps unavailable from that read; they do not fetch metadata or sidecars
+to populate a receipt. Pass
+`CopyReceiptOptions` to retain source revision admission, atomic destination
+preconditions, metadata options, and phase concurrency budgets. Existing copy
+functions remain callable and share the same implementation.
+
+`UploadResult.SHA256` hashes the logical payload without counting SDK retries
+or multipart replays twice. Failed writes return no successful receipt. Neither
+the digest nor the returned version is an independent destination read-back
+check; receipts can fingerprint sensitive content and are not de-identification.
+
+Providers may implement optional `provider.ResultPutter` and
+`MetadataAwareResultPutter` capabilities to return handles from unconditional
+writes. Built-in S3 and GCS adapters use the write response itself. Providers
+with only the existing error-only methods still work, with unknown handles
+omitted; no later HEAD is used to invent write identity.
+
 Gonimbus is pre-v1.0. Public packages are intended for library use, but breaking
 changes may still happen across minor versions. Pin applications to specific
 release tags.

@@ -100,6 +100,9 @@ func (t reflowTask) reflowRecord(destURI, destKey, status string) reflowpkg.Reco
 	case string(provider.ProviderS3), "":
 		rec.SourceBucket = t.SourceBucket
 	}
+	if !t.SourceLastMod.IsZero() {
+		rec.SourceLastModified = t.SourceLastMod.UTC().Format(time.RFC3339Nano)
+	}
 	return rec
 }
 
@@ -345,6 +348,9 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 			return srcIdentity, err
 		}
 		switch env.Type {
+		case probe.SummaryRecordType:
+			_, err := probe.ParseSummary(env.Data)
+			return srcIdentity, err
 		case "gonimbus.index.object.v1":
 			var data struct {
 				BaseURI      string    `json:"base_uri"`

@@ -2,6 +2,7 @@ package reflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ import (
 // ReflowInputRecordType is the JSONL type for a preselected reflow-input record,
 // the line format a RecordStreamSource carries.
 const ReflowInputRecordType = "gonimbus.reflow.input.v1"
+
+var errProbeSummaryControl = errors.New("validated probe summary control")
 
 // ErrCodeInvalidInput is the error code for a reflow-input record the engine
 // cannot accept. It mirrors the command path's INVALID_INPUT wire value.
@@ -72,6 +75,11 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 		return reflowInput{}, err
 	}
 	switch env.Type {
+	case probe.SummaryRecordType:
+		if _, err := probe.ParseSummary(env.Data); err != nil {
+			return reflowInput{}, err
+		}
+		return reflowInput{}, errProbeSummaryControl
 	case ReflowInputRecordType:
 		return parseReflowInputData(env.Data)
 	case "gonimbus.index.object.v1":
@@ -257,13 +265,14 @@ func (in reflowInput) sourceIdentity() string {
 // material removed) before it crosses the event boundary.
 func (in reflowInput) record(destURI, destKey, status string) Record {
 	return Record{
-		SourceURI:    sanitizeSourceURI(in.SourceURI),
-		SourceBucket: in.SourceBucket,
-		SourceKey:    in.SourceKey,
-		SourceETag:   in.SourceETag,
-		SourceSize:   in.SourceSize,
-		DestURI:      destURI,
-		DestKey:      destKey,
-		Status:       status,
+		SourceURI:          sanitizeSourceURI(in.SourceURI),
+		SourceBucket:       in.SourceBucket,
+		SourceKey:          in.SourceKey,
+		SourceETag:         in.SourceETag,
+		SourceSize:         in.SourceSize,
+		SourceLastModified: receiptTimestamp(in.SourceLastMod),
+		DestURI:            destURI,
+		DestKey:            destKey,
+		Status:             status,
 	}
 }

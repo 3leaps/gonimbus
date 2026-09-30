@@ -26,6 +26,26 @@
       "type": "integer",
       "minimum": 0
     },
+    "source_last_modified": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Known source observation; not a revision binding or receipt time."
+    },
+    "dest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Full logical payload SHA-256 for an acknowledged write, not independent read-back verification."
+    },
+    "dest_version_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque revision from the acknowledged write response; omitted for unknown, null-version, or file destinations."
+    },
+    "dest_etag": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque acknowledged-write ETag, distinct from collision observations and payload SHA-256."
+    },
     "dest_uri": {
       "type": "string"
     },

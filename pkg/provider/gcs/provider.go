@@ -313,19 +313,28 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 	return p.PutObjectWithOptions(ctx, key, body, contentLength, provider.PutOptions{})
 }
 
-func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, _ int64, opts provider.PutOptions) error {
+func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	_, err := p.PutObjectResultWithOptions(ctx, key, body, contentLength, opts)
+	return err
+}
+
+func (p *Provider) PutObjectResult(ctx context.Context, key string, body io.Reader, contentLength int64) (provider.PutResult, error) {
+	return p.PutObjectResultWithOptions(ctx, key, body, contentLength, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectResultWithOptions(ctx context.Context, key string, body io.Reader, _ int64, opts provider.PutOptions) (provider.PutResult, error) {
 	if err := p.guardWrite("PutObject", key); err != nil {
-		return err
+		return provider.PutResult{}, err
 	}
 	writer := p.newWriter(ctx, p.client.Bucket(p.bucket).Object(key), opts)
 	if _, err := io.Copy(writer, body); err != nil {
 		_ = writer.Close()
-		return p.wrapError("PutObject", key, err)
+		return provider.PutResult{}, p.wrapError("PutObject", key, err)
 	}
 	if err := writer.Close(); err != nil {
-		return p.wrapError("PutObject", key, err)
+		return provider.PutResult{}, p.wrapError("PutObject", key, err)
 	}
-	return nil
+	return putResultFromAttrs(writer.Attrs()), nil
 }
 
 func (p *Provider) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentLength int64, precond provider.PutPrecondition) (provider.PutResult, error) {

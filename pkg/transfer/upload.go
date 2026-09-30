@@ -3,8 +3,11 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,6 +44,7 @@ type UploadProgress struct {
 
 type UploadResult struct {
 	Bytes   int64
+	SHA256  string
 	ETag    string
 	Version string
 	Mode    string
@@ -72,11 +76,11 @@ func UploadReaderWithSize(ctx context.Context, putter provider.ObjectPutter, key
 		return UploadResult{}, err
 	}
 	defer func() { _ = body.Close() }()
-	result, err := putSingle(ctx, putter, key, body.Reader(), size, opts)
+	result, err := putSingle(ctx, putter, key, body.Reader(), body.size, opts)
 	if err != nil {
 		return UploadResult{}, err
 	}
-	return UploadResult{Bytes: size, ETag: result.ETag, Version: result.Version, Mode: "single"}, nil
+	return UploadResult{Bytes: body.size, SHA256: body.sha256, ETag: result.ETag, Version: result.Version, Mode: "single"}, nil
 }
 
 func UploadFile(ctx context.Context, putter provider.ObjectPutter, key string, path string, opts UploadOptions) (UploadResult, error) {
@@ -109,6 +113,7 @@ type UploadSession struct {
 	partBuf   bytes.Buffer
 	bytes     int64
 	closed    bool
+	digest    hash.Hash
 }
 
 func NewUploadSession(ctx context.Context, putter provider.ObjectPutter, key string, opts UploadOptions) (*UploadSession, error) {
@@ -126,6 +131,7 @@ func NewUploadSession(ctx context.Context, putter provider.ObjectPutter, key str
 		spoolPath:    spool.Name(),
 		spoolCleanup: spoolCleanup,
 		partNum:      1,
+		digest:       sha256.New(),
 	}, nil
 }
 
@@ -138,6 +144,7 @@ func (s *UploadSession) Write(p []byte) (int, error) {
 		if !s.multipart {
 			n, err := s.spool.Write(p)
 			if n > 0 {
+				_, _ = s.digest.Write(p[:n])
 				s.bytes += int64(n)
 				written += n
 				p = p[n:]
@@ -163,6 +170,7 @@ func (s *UploadSession) Write(p []byte) (int, error) {
 			space = len(p)
 		}
 		n, err := s.partBuf.Write(p[:space])
+		_, _ = s.digest.Write(p[:n])
 		s.bytes += int64(n)
 		written += n
 		p = p[n:]
@@ -184,10 +192,10 @@ func (s *UploadSession) Close(ctx context.Context) (UploadResult, error) {
 	}
 	s.closed = true
 	if !s.multipart {
-		if err := s.spool.Close(); err != nil {
-			return UploadResult{}, joinAbortErr(fmt.Errorf("close temp spool: %w", err), s.cleanupSpool())
+		if _, err := s.spool.Seek(0, io.SeekStart); err != nil {
+			return UploadResult{}, joinAbortErr(fmt.Errorf("seek temp spool: %w", err), s.cleanupSpool())
 		}
-		result, err := UploadFile(ctx, s.putter, s.key, s.spoolPath, s.opts)
+		result, err := putSingle(ctx, s.putter, s.key, s.spool, s.bytes, s.opts)
 		cleanupErr := s.cleanupSpool()
 		if err != nil {
 			return UploadResult{}, joinAbortErr(err, cleanupErr)
@@ -195,7 +203,7 @@ func (s *UploadSession) Close(ctx context.Context) (UploadResult, error) {
 		if cleanupErr != nil {
 			return UploadResult{}, cleanupErr
 		}
-		return result, nil
+		return UploadResult{Bytes: s.bytes, SHA256: hex.EncodeToString(s.digest.Sum(nil)), ETag: result.ETag, Version: result.Version, Mode: "single"}, nil
 	}
 	if s.partBuf.Len() > 0 || len(s.parts) == 0 {
 		if err := s.flushPart(ctx, true); err != nil {
@@ -209,7 +217,7 @@ func (s *UploadSession) Close(ctx context.Context) (UploadResult, error) {
 	if err := s.cleanupSpool(); err != nil {
 		return UploadResult{}, err
 	}
-	return UploadResult{Bytes: s.bytes, ETag: result.ETag, Version: result.Version, Mode: "multipart"}, nil
+	return UploadResult{Bytes: s.bytes, SHA256: hex.EncodeToString(s.digest.Sum(nil)), ETag: result.ETag, Version: result.Version, Mode: "multipart"}, nil
 }
 
 func (s *UploadSession) Abort(ctx context.Context) error {
@@ -344,9 +352,11 @@ func uploadMultipartKnownSize(ctx context.Context, putter provider.ObjectPutter,
 	)
 	mu := putter.(provider.MultipartUploader)
 	buf := make([]byte, opts.PartSizeBytes)
+	digest := sha256.New()
 	for {
 		n, readErr := io.ReadFull(r, buf)
 		if n > 0 {
+			_, _ = digest.Write(buf[:n])
 			if len(parts) >= MaxMultipartParts {
 				err := fmt.Errorf("multipart upload exceeds %d part limit", MaxMultipartParts)
 				return UploadResult{}, joinAbortErr(err, mu.AbortMultipartUpload(ctx, key, uploadID))
@@ -382,7 +392,7 @@ func uploadMultipartKnownSize(ctx context.Context, putter provider.ObjectPutter,
 	if err != nil {
 		return UploadResult{}, joinAbortErr(fmt.Errorf("complete multipart upload: %w", err), mu.AbortMultipartUpload(ctx, key, uploadID))
 	}
-	return UploadResult{Bytes: size, ETag: result.ETag, Version: result.Version, Mode: "multipart"}, nil
+	return UploadResult{Bytes: transferred, SHA256: hex.EncodeToString(digest.Sum(nil)), ETag: result.ETag, Version: result.Version, Mode: "multipart"}, nil
 }
 
 func createMultipart(ctx context.Context, putter provider.ObjectPutter, key string, opts provider.PutOptions) (string, error) {
@@ -431,10 +441,16 @@ func putSingle(ctx context.Context, putter provider.ObjectPutter, key string, r 
 		return optioned.PutObjectConditionalWithOptions(ctx, key, r, size, opts.Precondition, opts.PutOptions)
 	}
 	if opts.PutOptions.Empty() {
+		if resultPutter, ok := putter.(provider.ResultPutter); ok {
+			return resultPutter.PutObjectResult(ctx, key, r, size)
+		}
 		if err := putter.PutObject(ctx, key, r, size); err != nil {
 			return provider.PutResult{}, err
 		}
 		return provider.PutResult{}, nil
+	}
+	if resultPutter, ok := putter.(provider.MetadataAwareResultPutter); ok {
+		return resultPutter.PutObjectResultWithOptions(ctx, key, r, size, opts.PutOptions)
 	}
 	optioned, ok := putter.(provider.MetadataAwarePutter)
 	if !ok {

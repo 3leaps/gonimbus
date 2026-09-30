@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fulmenhq/gofulmen/foundry"
 	"github.com/google/uuid"
@@ -107,13 +108,17 @@ func (s inspectPairScope) cacheKey() string {
 }
 
 type inspectPairReflowRecord struct {
-	SourceURI  string                      `json:"source_uri"`
-	DestURI    string                      `json:"dest_uri"`
-	SourceETag string                      `json:"source_etag,omitempty"`
-	SourceSize int64                       `json:"source_size_bytes,omitempty"`
-	Status     string                      `json:"status"`
-	Reason     string                      `json:"reason,omitempty"`
-	Collision  *inspectPairReflowCollision `json:"collision,omitempty"`
+	DestSHA256         string                      `json:"dest_sha256,omitempty"`
+	DestVersionID      string                      `json:"dest_version_id,omitempty"`
+	DestETag           string                      `json:"dest_etag,omitempty"`
+	SourceLastModified string                      `json:"source_last_modified,omitempty"`
+	SourceURI          string                      `json:"source_uri"`
+	DestURI            string                      `json:"dest_uri"`
+	SourceETag         string                      `json:"source_etag,omitempty"`
+	SourceSize         int64                       `json:"source_size_bytes,omitempty"`
+	Status             string                      `json:"status"`
+	Reason             string                      `json:"reason,omitempty"`
+	Collision          *inspectPairReflowCollision `json:"collision,omitempty"`
 }
 
 type inspectPairReflowCollision struct {
@@ -126,6 +131,11 @@ type inspectPairRawReflowEnvelope struct {
 }
 
 type inspectPairRecord struct {
+	// These fields are upstream claims, not independent HEAD observations.
+	DestSHA256         string `json:"dest_sha256,omitempty"`
+	DestVersionID      string `json:"dest_version_id,omitempty"`
+	DestETag           string `json:"dest_etag,omitempty"`
+	SourceLastModified string `json:"source_last_modified,omitempty"`
 	SourceURI          string `json:"source_uri,omitempty"`
 	DestURI            string `json:"dest_uri,omitempty"`
 	Verdict            string `json:"verdict"`
@@ -308,13 +318,23 @@ func parseInspectPairReflowLine(line string) (inspectPairReflowRecord, bool, err
 }
 
 func inspectPairRecordForReflow(rec inspectPairReflowRecord, scopes []inspectPairScope) (inspectPairRecord, inspectPairScope, bool) {
+	if observed, err := time.Parse(time.RFC3339Nano, rec.SourceLastModified); err != nil || observed.IsZero() {
+		rec.SourceLastModified = ""
+	}
+	if rec.DestVersionID == "null" {
+		rec.DestVersionID = ""
+	}
 	out := inspectPairRecord{
-		SourceURI:       rec.SourceURI,
-		DestURI:         rec.DestURI,
-		SourceSizeBytes: rec.SourceSize,
-		SourceETag:      rec.SourceETag,
-		UpstreamStatus:  rec.Status,
-		UpstreamReason:  rec.Reason,
+		SourceURI:          rec.SourceURI,
+		DestURI:            rec.DestURI,
+		SourceSizeBytes:    rec.SourceSize,
+		SourceETag:         rec.SourceETag,
+		UpstreamStatus:     rec.Status,
+		UpstreamReason:     rec.Reason,
+		DestSHA256:         reflowpkg.SafeReceiptSHA256(rec.DestSHA256),
+		DestVersionID:      reflowpkg.SafeReceiptHandle(rec.DestVersionID),
+		DestETag:           reflowpkg.SafeReceiptHandle(rec.DestETag),
+		SourceLastModified: rec.SourceLastModified,
 	}
 	if rec.Status == "skipped" || rec.Status == "failed" {
 		out.Verdict = "not_verified"

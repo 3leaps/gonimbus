@@ -15,6 +15,41 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- Terminal reflow v1 records optionally carry acknowledged-write SHA-256,
+  destination ETag/revision, and known source last-modified. Skips, failures,
+  dry runs, and in-progress records do not claim a new destination write.
+  `inspect-pair` preserves these upstream claims without changing its scope
+  admission or HEAD-based verdict. Unknown and unsafe identifiers are omitted.
+  These fields do not establish independent read-back verification.
+- `content probe` emits a terminal `gonimbus.content.probe.summary.v1` record
+  with task, output, routing, error and byte accounting on handled exits when
+  output remains writable. Updated reflow consumers validate this exact control
+  type without turning it into object work.
+
+### Changed
+
+- Completed probe runs with object-local data/extraction errors now exit **60**
+  (`EXIT_DATA_INVALID`), previously **32**. Provider/infrastructure failures
+  remain 32; invalid input remains 40. Typed probe outcomes reach actual process
+  dispatch, including cancellation and output failure. Scripts matching 32 for
+  mixed data outcomes must migrate. Upgrade producer and consumer together or
+  explicitly filter control records for older consumers; use `pipefail` and
+  inspect the producer summary, not only the mover's exit status.
+
+### Library API
+
+- Add optional `provider.ResultPutter` and `MetadataAwareResultPutter`
+  capabilities, with S3 result-bearing unconditional PUT methods. Existing
+  error-only interfaces remain callable; providers without the new capabilities
+  retain their existing fallback behavior.
+- Experimental transfer uploads expose full logical-payload SHA-256 and actual
+  payload length after an acknowledged write. `CopyObjectWithReceipt` preserves
+  source revision and phase-budget admission while returning write handles and
+  source-read timestamps when available. These are transfer receipts, not
+  independent destination read-back verification.
+
 ## [0.4.3] - 2026-09-11
 
 **Reuse a finished durable inventory instead of listing the bucket again.**

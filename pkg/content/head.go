@@ -27,6 +27,16 @@ type HeadBytesOptions struct {
 // - Uses GetRange when supported.
 // - Falls back to GetObject and reads up to n bytes.
 func HeadBytes(ctx context.Context, p provider.Provider, key string, n int64) ([]byte, *provider.ObjectMeta, error) {
+	b, meta, err := HeadBytesWithPartial(ctx, p, key, n)
+	if err != nil {
+		return nil, meta, err
+	}
+	return b, meta, nil
+}
+
+// HeadBytesWithPartial retains bytes delivered before a read error for accurate
+// probe accounting. It makes the same provider requests as HeadBytes.
+func HeadBytesWithPartial(ctx context.Context, p provider.Provider, key string, n int64) ([]byte, *provider.ObjectMeta, error) {
 	if n < 0 {
 		return nil, nil, errors.New("head bytes must be >= 0")
 	}
@@ -56,7 +66,7 @@ func HeadBytes(ctx context.Context, p provider.Provider, key string, n int64) ([
 		defer func() { _ = body.Close() }()
 		b, err := io.ReadAll(body)
 		if err != nil {
-			return nil, meta, err
+			return b, meta, err
 		}
 		return b, meta, nil
 	}
@@ -74,7 +84,7 @@ func HeadBytes(ctx context.Context, p provider.Provider, key string, n int64) ([
 
 	b, err := io.ReadAll(io.LimitReader(body, n))
 	if err != nil {
-		return nil, meta, err
+		return b, meta, err
 	}
 	return b, meta, nil
 }

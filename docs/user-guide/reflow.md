@@ -49,6 +49,32 @@ Not every data movement requires the full pipeline. Here's how to decide:
 
 The full Index → Probe → Reflow pipeline is for the hardest case: **the data you need to route on is inside the files, not in the paths**.
 
+## Terminal write receipts
+
+Terminal `gonimbus.reflow.v1` records optionally include:
+
+- `dest_sha256`: full logical-payload SHA-256 after an acknowledged write,
+  including the empty-object digest. Retries and multipart replay are not
+  counted twice. This is a transfer receipt, not independent read-back proof.
+- `dest_etag`: the write-response ETag, not a payload SHA-256 or the prior
+  `collision.dest_etag_observed` value.
+- `dest_version_id`: the write-response opaque revision string (S3 version or
+  GCS generation). Unknown, S3 null-version, and file revisions are omitted.
+- `source_last_modified`: a known input/listing or admitted source-read
+  observation, formatted in UTC. It does not bind a source revision.
+
+Destination claims are omitted for skips, failures, dry runs, and in-progress
+records. A successful quarantine reports the actual quarantine destination.
+Unknown or unsafe handles are omitted, never partially redacted into different
+identifiers. Receipt construction adds no provider requests. Digests can
+fingerprint sensitive content and are not de-identification.
+
+`inspect-pair` passes these fields through as upstream claims, including on
+mismatch or out-of-scope outcomes. They do not alter destination-scope admission
+or the verdict. `dest_etag_observed` remains the independent HEAD observation;
+passing a version or hash through does not verify either claim. Existing
+consumers may continue ignoring the additive fields in the unchanged v1 schema.
+
 ## Stage 1: Index Build
 
 Before probing or reflowing, you need to know _what's there_. For large buckets, a scoped index build avoids enumerating the entire bucket.
@@ -504,6 +530,21 @@ gonimbus transfer reflow --stdin \
 operation checkpoint and does not accept a second foreground config surface.
 
 The checkpoint database tracks which objects have been successfully copied.
+
+Even without an explicit `--checkpoint`, reflow creates an item database at
+`<data-root>/reflow/runs/<jobID>/state.db`. The job ID is the supplied `--run-id`
+or a fresh UUID. The data root follows the normal application resolution
+(`GONIMBUS_DATA_DIR`, its `GONIMBUS_DATA_ROOT` alias, configured `data_root`, then
+the platform/XDG application data directory). `gonimbus doctor` reports the
+resolved root. An explicit `--checkpoint` selects that file instead.
+
+These per-run databases are retained; repeated invocations can accumulate them.
+There is no automatic age-based reflow cleanup in this release. Keep failed or
+resumable runs and their operation-checkpoint metadata until recovery is no
+longer needed. Do not delete a live SQLite database or its WAL/SHM companions,
+and do not use index GC or file mtime as proof that reflow state is safe to
+remove. Plan retention separately after confirming no active or resumable run
+depends on the state.
 
 **Experimental (default off):** raw-exec savepoint elision may be enabled only
 for measured A/B via `GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS=1` (or `true`).

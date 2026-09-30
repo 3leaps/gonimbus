@@ -19,6 +19,18 @@ type ObjectPutter interface {
 	PutObject(ctx context.Context, key string, body io.Reader, contentLength int64) error
 }
 
+// ResultPutter optionally returns handles from the acknowledged unconditional
+// write itself. Callers must not reconstruct these handles with a later HEAD.
+type ResultPutter interface {
+	PutObjectResult(ctx context.Context, key string, body io.Reader, contentLength int64) (PutResult, error)
+}
+
+// MetadataAwareResultPutter is the result-bearing unconditional metadata PUT
+// capability. Existing error-only capabilities remain supported.
+type MetadataAwareResultPutter interface {
+	PutObjectResultWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts PutOptions) (PutResult, error)
+}
+
 // ConditionalPutter can create/replace objects only when a write precondition
 // holds atomically at the provider. Implementations that expose this capability
 // must honor every supported PutPrecondition predicate atomically.

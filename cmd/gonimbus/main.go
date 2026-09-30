@@ -33,6 +33,10 @@ func main() {
 
 	// Execute root command
 	if err := cmd.Execute(); err != nil {
+		if code, ok := cmd.ProbeExitCode(err); ok {
+			cmd.ExitWithCodeStderr(code, "Content probe failed", err)
+			return
+		}
 		// Command execution failed - delegate to exit helper
 		// Individual commands may have already logged specific errors
 		cmd.ExitWithCodeStderr(foundry.ExitFailure, "Command execution failed", err)

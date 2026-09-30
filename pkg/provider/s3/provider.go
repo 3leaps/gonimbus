@@ -422,8 +422,17 @@ func (p *Provider) PutObject(ctx context.Context, key string, body io.Reader, co
 }
 
 func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) error {
+	_, err := p.PutObjectResultWithOptions(ctx, key, body, contentLength, opts)
+	return err
+}
+
+func (p *Provider) PutObjectResult(ctx context.Context, key string, body io.Reader, contentLength int64) (provider.PutResult, error) {
+	return p.PutObjectResultWithOptions(ctx, key, body, contentLength, provider.PutOptions{})
+}
+
+func (p *Provider) PutObjectResultWithOptions(ctx context.Context, key string, body io.Reader, contentLength int64, opts provider.PutOptions) (provider.PutResult, error) {
 	if err := p.guardWrite("PutObject", key); err != nil {
-		return err
+		return provider.PutResult{}, err
 	}
 
 	input := &s3.PutObjectInput{
@@ -434,11 +443,11 @@ func (p *Provider) PutObjectWithOptions(ctx context.Context, key string, body io
 	}
 	applyPutOptions(input, opts)
 
-	_, err := p.client.PutObject(ctx, input)
+	out, err := p.client.PutObject(ctx, input)
 	if err != nil {
-		return p.wrapError("PutObject", key, err)
+		return provider.PutResult{}, p.wrapError("PutObject", key, err)
 	}
-	return nil
+	return provider.PutResult{ETag: cleanETag(aws.ToString(out.ETag)), Version: aws.ToString(out.VersionId)}, nil
 }
 
 // Compile-time assertions that the declared conditional-write capabilities are

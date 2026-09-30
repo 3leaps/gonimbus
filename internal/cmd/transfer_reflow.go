@@ -555,7 +555,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		_ = w.WriteAny(ctx, reflowpkg.RecordType, rec)
 	}
 	stageStats := reflowpkg.NewStageStats()
-	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions) (int64, error) {
+	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, error) {
 		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
 		if err != nil {
 			return 0, err
@@ -565,20 +565,20 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		// object B can overlap Put of object A (same ceiling; ADR-0006 parity
 		// with pkg/reflow limitedCopy).
 		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
-		bytes, err := transfer.CopyObjectWithGate(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), opts, gate)
+		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), PutOptions: opts}, Gate: gate})
 		concurrencyLimiter.ObserveProviderResult(err)
-		return bytes, err
+		return receipt.Bytes, err
 	}
-	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions) (int64, provider.PutResult, error) {
+	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, provider.PutResult, error) {
 		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
 		if err != nil {
 			return 0, provider.PutResult{}, err
 		}
 		defer releaseMem()
 		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
-		bytes, result, err := transfer.CopyObjectConditionalWithGate(ctx, src, dst, srcKey, dstKey, expectedSize, concurrencyLimiter.RetryBufferCap(), precond, opts, gate)
+		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), Precondition: precond, PutOptions: opts}, Gate: gate})
 		concurrencyLimiter.ObserveProviderResult(err)
-		return bytes, result, err
+		return receipt.Bytes, provider.PutResult{ETag: receipt.ETag, Version: receipt.Version}, err
 	}
 	// retryProbeHead bounds standalone HEAD probes on the adaptive limiter and
 	// retries throttled attempts without holding a slot during the retry delay.
@@ -787,6 +787,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 					continue
 				}
+				var receipt transfer.CopyReceipt
 				putOptions, err := metaCfg.PutOptions(sourceMeta)
 				if err == nil && destSpec.Provider == string(provider.ProviderS3) {
 					err = reflowpkg.ValidateMetadataBudget(putOptions.UserMetadata)
@@ -810,7 +811,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 						quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
 						quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
-						bytes, qerr := copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, provider.PutOptions{})
+						bytes, qerr := copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, provider.PutOptions{}, &receipt)
 						if qerr != nil {
 							if recordFatalReflowError(qerr) {
 								continue
@@ -862,6 +863,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						}
 						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 						rec.Reason = "metadata.derivation.quarantined"
+						rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
 						rec.Bytes = bytes
 						rec.RoutingClass = "quarantine"
 						rec.Provenance = sidecarRef
@@ -897,7 +899,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						continue
 					}
-					bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions)
+					bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, &receipt)
 				} else {
 					gate, releaseGate := destArbiter.acquire(dstKey)
 					// Keep active mutexes bounded to in-flight keys; durable per-run
@@ -926,12 +928,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								case headErr == nil:
 									err = &provider.ProviderError{Op: "Head", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
 								case provider.IsNotFound(headErr):
-									bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions)
+									bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, &receipt)
 								default:
 									err = headErr
 								}
 							} else {
-								bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfAbsent: true}, putOptions)
+								bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfAbsent: true}, putOptions, &receipt)
 							}
 							if err == nil || isConditionalExists(err) {
 								gate.observed = true
@@ -1070,7 +1072,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 
 							collision = newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
-							bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions)
+							bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions, &receipt)
 							if err != nil && isConditionalExists(err) {
 								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
@@ -1110,7 +1112,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 							quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
 							quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
-							bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, putOptions)
+							bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, putOptions, &receipt)
 							if err != nil {
 								if recordFatalReflowError(err) {
 									continue
@@ -1162,6 +1164,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 							rec.Reason = "collision.conflict.quarantined"
+							rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
 							rec.Bytes = bytes
 							rec.RoutingClass = "quarantine"
 							rec.Provenance = sidecarRef
@@ -1248,6 +1251,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					continue
 				}
 				rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "complete")
+				rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
 				rec.Bytes = bytes
 				rec.Provenance = sidecarRef
 				writeReflowRecord(ctx, recordWithCollision(rec, collision))
