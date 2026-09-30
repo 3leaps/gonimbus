@@ -410,6 +410,42 @@ consumer together, or filter control records for older consumers; third-party
 consumers must dispatch on `type`. Upstream error-record handling remains
 explicit rather than silently treating errors as objects or success.
 
+For Bash automation, capture each stage's result immediately after the pipeline:
+
+```bash
+set -o pipefail
+gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt \
+  | tee probe-output.jsonl \
+  | gonimbus transfer reflow --stdin --dest s3://destination/data/ \
+      --rewrite-from '{key}' --rewrite-to '{key}'
+stages=("${PIPESTATUS[@]}")
+printf 'probe=%s capture=%s mover=%s\n' "${stages[@]}"
+```
+
+Do not run another command before saving `PIPESTATUS`. Require the probe,
+capture and mover to succeed, and inspect the final probe summary. A summary
+with `failed` or `completed_with_errors` is still control evidence even when a
+consumer accepts it and exits zero. A streaming mover can already have copied
+earlier objects; this pipeline is not an all-or-nothing transaction.
+
+If an older mover must be retained, filter **only** the new control type (and
+keep a complete captured producer stream):
+
+```bash
+set -o pipefail
+gonimbus content probe --stdin --config probe.yaml --emit reflow-input < uris.txt \
+  | tee probe-output.jsonl \
+  | jq -c 'select(.type != "gonimbus.content.probe.summary.v1")' \
+  | gonimbus transfer reflow --stdin --dest s3://destination/data/ \
+      --rewrite-from '{key}' --rewrite-to '{key}'
+stages=("${PIPESTATUS[@]}")
+```
+
+This compatibility filter does not erase errors or replace producer-status
+checks. Scripts that previously matched code 32 for completed extraction errors
+must now handle code 60; code 32 remains a run-fatal provider outcome. Check the
+summary's termination rather than treating every nonzero result as retryable.
+
 #### Probe Configuration
 
 Create a `probe.yaml` file defining extraction rules:

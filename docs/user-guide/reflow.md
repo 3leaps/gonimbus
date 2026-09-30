@@ -531,6 +531,21 @@ operation checkpoint and does not accept a second foreground config surface.
 
 The checkpoint database tracks which objects have been successfully copied.
 
+Even without an explicit `--checkpoint`, reflow creates an item database at
+`<data-root>/reflow/runs/<jobID>/state.db`. The job ID is the supplied `--run-id`
+or a fresh UUID. The data root follows the normal application resolution
+(`GONIMBUS_DATA_DIR`, its `GONIMBUS_DATA_ROOT` alias, configured `data_root`, then
+the platform/XDG application data directory). `gonimbus doctor` reports the
+resolved root. An explicit `--checkpoint` selects that file instead.
+
+These per-run databases are retained; repeated invocations can accumulate them.
+There is no automatic age-based reflow cleanup in this release. Keep failed or
+resumable runs and their operation-checkpoint metadata until recovery is no
+longer needed. Do not delete a live SQLite database or its WAL/SHM companions,
+and do not use index GC or file mtime as proof that reflow state is safe to
+remove. Plan retention separately after confirming no active or resumable run
+depends on the state.
+
 **Experimental (default off):** raw-exec savepoint elision may be enabled only
 for measured A/B via `GONIMBUS_REFLOW_ELIDE_RAW_EXEC_SAVEPOINTS=1` (or `true`).
 It is not a product default and is not a recommended operator setting for

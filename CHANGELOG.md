@@ -23,6 +23,20 @@ changes.
   `inspect-pair` preserves these upstream claims without changing its scope
   admission or HEAD-based verdict. Unknown and unsafe identifiers are omitted.
   These fields do not establish independent read-back verification.
+- `content probe` emits a terminal `gonimbus.content.probe.summary.v1` record
+  with task, output, routing, error and byte accounting on handled exits when
+  output remains writable. Updated reflow consumers validate this exact control
+  type without turning it into object work.
+
+### Changed
+
+- Completed probe runs with object-local data/extraction errors now exit **60**
+  (`EXIT_DATA_INVALID`), previously **32**. Provider/infrastructure failures
+  remain 32; invalid input remains 40. Typed probe outcomes reach actual process
+  dispatch, including cancellation and output failure. Scripts matching 32 for
+  mixed data outcomes must migrate. Upgrade producer and consumer together or
+  explicitly filter control records for older consumers; use `pipefail` and
+  inspect the producer summary, not only the mover's exit status.
 
 ### Library API
 
