@@ -97,6 +97,10 @@ The signing ceremony follows the Fulmen "manifest-only" provenance pattern:
 - Sign manifests with minisign (primary) and optionally PGP
 - Ship trust anchors (public keys) with the release
 
+- [ ] The tag workflow is read-only: it verifies the signed tag, builds, and
+      uploads the artifacts as a workflow artifact. It does not create the
+      GitHub Release. Create the draft release from those artifacts before
+      `make release-download`.
 - [ ] Download CI-built artifacts and generate manifests:
 
   ```bash
@@ -130,15 +134,18 @@ The signing ceremony follows the Fulmen "manifest-only" provenance pattern:
 ### Tagging
 
 - [ ] Confirm tag/version match: `GONIMBUS_RELEASE_TAG=v<version> make release-guard-signing-tag`
-- [ ] Create annotated git tag: `git tag -a v<version> -m "Release v<version>"`
+- [ ] Create the signed annotated tag as `3 Leaps Infosec Team <infosec@3leaps.net>`
+      with the pinned signing subkey (`config/release/tagger-identity.txt`,
+      `docs/security/release-signing-keys.asc`)
+- [ ] Verify it against the committed pin: `GONIMBUS_RELEASE_TAG=v<version> ./scripts/verify-pinned-tag.sh`
 - [ ] Tag message includes brief release summary
 
 ### Publishing
 
 - [ ] Push commits: `git push origin main`
 - [ ] Push tag: `git push origin v<version>`
-- [ ] Verify GitHub release appears
-- [ ] Create GitHub Release notes
+- [ ] Confirm the tag workflow verified the tag and uploaded `release-artifacts-v<version>`
+- [ ] Create the draft GitHub Release from those artifacts with `docs/releases/v<version>.md` as the body
 
 ### Distribution
 

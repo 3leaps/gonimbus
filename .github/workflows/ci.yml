@@ -12,7 +12,7 @@ jobs:
   # Container-based format checking (LOW friction - v0.3.14+)
   # Uses goneat-tools-runner which has foundation tools pre-installed
   format-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.9@sha256:412a315241a59fc0313f4e79f182f7f373a04f194174c61b439cf8ba26174d54
       # goneat-tools-runner is a full CI runner image.
@@ -27,7 +27,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -49,7 +49,7 @@ jobs:
   # Runner provides foundation tools + goneat/sfetch; Go is set up separately.
   build-test:
     needs: [format-check]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.9@sha256:412a315241a59fc0313f4e79f182f7f373a04f194174c61b439cf8ba26174d54
       # goneat-tools-runner is a full CI runner image.
@@ -63,11 +63,11 @@ jobs:
       FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
       # GOPATH points to a workspace-relative path because goneat-tools-runner
       # v0.3+ runs as non-root (UID 1001) and /opt/gopath/bin is not writable
-      # by that user. actions/setup-go@v5 expects $GOPATH/bin to be writable.
+      # by that user. actions/setup-go expects $GOPATH/bin to be writable.
       GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -76,7 +76,7 @@ jobs:
         # does not fail with EACCES under the non-root runner user.
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26.9"
       - name: Verify runner + Go toolchain
@@ -99,9 +99,13 @@ jobs:
         run: |
           set -euo pipefail
           make api-stability
+      - name: Workflow pin and release permission checks
+        run: |
+          set -euo pipefail
+          make release-workflow-check
       - name: Install golangci-lint (v2)
         # goneat-tools-runner does not ship golangci-lint yet.
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
           version: v2.11.2
           args: --help
@@ -142,6 +146,19 @@ jobs:
         run: |
           set -euo pipefail
           GOOS=linux GOARCH=arm64 go build ./...
+  # The committed release pin and anchors are checked with gpg, which the
+  # tool container does not ship; the hosted image does.
+  release-anchors:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check committed release pin and anchors
+        run: |
+          set -euo pipefail
+          make release-anchors-check
   # Native Windows coverage for handle-relative job registry mutation, SQLite
   # snapshot binding, and leased GC quarantine/recovery. These cannot be
   # certified by cross-compilation because share masks, access masks,
@@ -154,19 +171,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-latest
+          - runner: windows-2025
             goarch: amd64
           - runner: windows-latest-arm64-s
             goarch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26.9"
       - name: Verify native runner architecture
@@ -218,7 +235,7 @@ jobs:
   # Runs on main branch and PRs to catch S3 SDK issues
   cloud-integration:
     needs: [build-test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.9@sha256:412a315241a59fc0313f4e79f182f7f373a04f194174c61b439cf8ba26174d54
       options: --user 1001
@@ -228,7 +245,7 @@ jobs:
         shell: bash
     services:
       moto:
-        image: motoserver/moto:latest
+        image: motoserver/moto:5.2.3@sha256:91fd602a21f49cf9eb82fdf474015a3c131d40104c8297ea6a2ca920708ae32c
         ports:
           - 5555:5000
     env:
@@ -239,14 +256,14 @@ jobs:
       GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Prepare Go directories
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26.9"
       - name: Build binary

@@ -4,6 +4,7 @@
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
+.PHONY: release-provenance-check release-workflow-check release-anchors-check release-verify-tag
 
 # Binary and version information
 BINARY_NAME := gonimbus
@@ -477,7 +478,19 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-check-all: fmt verify-embedded-identity api-stability lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
+release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
+
+release-workflow-check: ## Check workflow pins and the read-only release workflow
+	@./scripts/workflow-pins.test.sh
+	@./scripts/release-workflow-permissions.test.sh
+
+release-anchors-check: ## Check the committed public pin against the fingerprint anchors (needs gpg)
+	@./scripts/validate-release-anchors.sh
+
+release-verify-tag: ## Verify GONIMBUS_RELEASE_TAG against the public pin committed in the tagged commit
+	@./scripts/verify-pinned-tag.sh
+
+check-all: fmt verify-embedded-identity api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks

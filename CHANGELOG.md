@@ -46,6 +46,13 @@ changes.
 
 ### Security
 
+- The tag-triggered release workflow is read-only. It verifies the signed tag
+  against the public pin committed in the tagged commit, builds, and uploads
+  the artifacts as a workflow artifact. It no longer creates the GitHub
+  Release. All workflows are `contents: read`, pin actions by full commit SHA,
+  pin container images by digest, and use explicit runner images. The public
+  release identity (tagger, OpenPGP export, minisign public key, fingerprint
+  anchors) is committed under `config/release/`, `docs/security/` and `keys/`.
 - Update `golang.org/x/net` to v0.60.0 (GO-2026-6603, GO-2026-6610,
   GO-2026-6611, GO-2026-6612, GO-2026-6617) under a time-bounded cooling
   exception recorded in SDR-002, and `go.opentelemetry.io/otel/sdk` to v1.45.0
