@@ -37,6 +37,19 @@ changes.
   mixed data outcomes must migrate. Upgrade producer and consumer together or
   explicitly filter control records for older consumers; use `pipefail` and
   inspect the producer summary, not only the mover's exit status.
+- Build with Go toolchain `go1.26.9` (minimum supported patch for this line);
+  CI and release workflows pin `actions/setup-go` to `1.26.9`. The module `go`
+  directive stays `1.26.0`.
+- Refresh dependencies: AWS SDK v2 (S3 v1.114.0), Cloud Storage v1.69.0,
+  `google.golang.org/api` v0.300.0, `modernc.org/sqlite` v1.60.1 with
+  `modernc.org/libc` v1.77.1, parquet-go v0.32.0, and routine updates.
+
+### Security
+
+- Update `golang.org/x/net` to v0.60.0 (GO-2026-6603, GO-2026-6610,
+  GO-2026-6611, GO-2026-6612, GO-2026-6617) under a time-bounded cooling
+  exception recorded in SDR-002, and `go.opentelemetry.io/otel/sdk` to v1.45.0
+  (GO-2026-6505).
 
 ### Library API
 
