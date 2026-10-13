@@ -4,7 +4,7 @@
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
-.PHONY: release-provenance-check release-workflow-check release-anchors-check
+.PHONY: release-provenance-check release-workflow-check release-anchors-check pr-final
 .PHONY: release-create-draft release-export-pin release-guard-tag-name release-insert-anchors release-preflight release-prepare-tag-message release-publish release-push-tag release-tag release-tag-tests release-validate-pin release-verify-published-tag release-verify-remote-tag
 
 # Binary and version information
@@ -290,6 +290,8 @@ release-tag-tests: ## Signed-tag tooling tests (throwaway keys only; needs gpg, 
 	@./scripts/release-workflow-permissions.test.sh
 	@./scripts/workflow-pins.test.sh
 	@./scripts/release-ci-artifact-draft.test.sh
+	@./scripts/release-preflight.test.sh
+	@./scripts/release-verify-signatures.test.sh
 	@./scripts/release-publish.test.sh
 	@./scripts/release-pin-precursors.test.sh
 	@./scripts/sign-release-manifests.test.sh
@@ -317,39 +319,14 @@ release-sign: release-guard-tag-name release-verify-published-tag ## Sign checks
 release-export-keys: ## Export public signing keys into dist/release
 	@./scripts/export-release-keys.sh "$(DIST_RELEASE)"
 
-release-verify-keys: ## Verify exported public keys are public-only
-	@if [ -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then ./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/gonimbus-minisign.pub"; else echo "ℹ️  No minisign public key found (skipping)"; fi
-	@if [ -f "$(DIST_RELEASE)/gonimbus-release-signing-key.asc" ]; then ./scripts/verify-public-key.sh "$(DIST_RELEASE)/gonimbus-release-signing-key.asc"; else echo "ℹ️  No PGP public key found (skipping)"; fi
+release-verify-keys: ## Verify both exported public keys are present and public-only
+	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub; run make release-export-keys" >&2; exit 1; }
+	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc; run make release-export-keys" >&2; exit 1; }
+	@./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub"
+	@./scripts/verify-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc"
 
-release-verify-signatures: ## Verify signatures on checksum manifests
-	@echo "🔍 Verifying signatures in $(DIST_RELEASE)..."
-	@has_any=false; \
-	if [ -f "$(DIST_RELEASE)/SHA256SUMS.minisig" ]; then \
-		if [ ! -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then \
-			echo "❌ minisign public key not found; run 'make release-export-keys' first"; exit 1; \
-		fi; \
-		echo "🔐 Verifying minisign signatures..."; \
-		cd "$(DIST_RELEASE)" && minisign -V -p gonimbus-minisign.pub -m SHA256SUMS; \
-		if [ -f SHA512SUMS.minisig ]; then minisign -V -p gonimbus-minisign.pub -m SHA512SUMS; fi; \
-		echo "✅ Minisign signatures verified"; \
-		has_any=true; \
-	fi; \
-	if [ -f "$(DIST_RELEASE)/SHA256SUMS.asc" ]; then \
-		echo "🔐 Verifying PGP signatures..."; \
-		GPG_HOME="$${GONIMBUS_GPG_HOMEDIR:-}"; \
-		if [ -n "$$GPG_HOME" ]; then \
-			cd "$(DIST_RELEASE)" && gpg --homedir "$$GPG_HOME" --verify SHA256SUMS.asc SHA256SUMS; \
-			if [ -f SHA512SUMS.asc ]; then gpg --homedir "$$GPG_HOME" --verify SHA512SUMS.asc SHA512SUMS; fi; \
-		else \
-			cd "$(DIST_RELEASE)" && gpg --verify SHA256SUMS.asc SHA256SUMS; \
-			if [ -f SHA512SUMS.asc ]; then gpg --verify SHA512SUMS.asc SHA512SUMS; fi; \
-		fi; \
-		echo "✅ PGP signatures verified"; \
-		has_any=true; \
-	fi; \
-	if [ "$$has_any" = false ]; then \
-		echo "❌ No signatures found to verify"; exit 1; \
-	fi
+release-verify-signatures: ## Verify all four manifest signatures and both public keys (fail closed)
+	@./scripts/release-verify-signatures.sh "$(DIST_RELEASE)"
 
 # Deprecated alias (kept for one cycle).
 verify-release-keys: release-verify-keys ## Deprecated: use release-verify-keys
@@ -543,6 +520,9 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@echo "Running API stability checks..."
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
+
+pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, lint, tests, licenses, multi-platform build)
+	@echo "✅ pr-final gate passed"
 
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
 

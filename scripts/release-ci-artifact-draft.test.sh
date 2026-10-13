@@ -53,10 +53,33 @@ case "$1 $2" in
     done
     case "$path" in
     */attempts/*) body="${FIXTURE_ATTEMPT:-}" ;;
-    *) body="{\"run_attempt\":${FIXTURE_LATEST:-1}}" ;;
+    */runs/*/artifacts)
+        # Listing calls are counted so a test can change the answer between the
+        # before- and after-download snapshots (a re-run landing mid-download).
+        n="$(($(cat "$FIXTURE_DIR/listings" 2> /dev/null || echo 0) + 1))"
+        printf '%s\n' "$n" > "$FIXTURE_DIR/listings"
+        id="${FIXTURE_ARTIFACT_ID:-501}"
+        [[ "$n" -ge 2 && -n "${FIXTURE_ARTIFACT_ID_AFTER:-}" ]] && id="$FIXTURE_ARTIFACT_ID_AFTER"
+        digest="${FIXTURE_DIGEST:-sha256:$(shasum -a 256 "$FIXTURE_DIR/artifact.zip" 2> /dev/null | awk '{print $1}')}"
+        body="$(jq -n --argjson id "$id" --arg d "$digest" --arg c "${FIXTURE_ARTIFACT_SHA:-$FIXTURE_COMMIT}" \
+            '{artifacts: [{id: $id, name: "release-artifacts-v1.2.3", expired: false, digest: $d,
+              workflow_run: {id: 11, head_sha: $c}}]}')"
+        ;;
+    */artifacts/*/zip)
+        [[ "$path" == */artifacts/"${FIXTURE_ARTIFACT_ID:-501}"/zip ]] || exit 1
+        cat "$FIXTURE_DIR/artifact.zip"
+        exit 0
+        ;;
+    *)
+        m="$(($(cat "$FIXTURE_DIR/runs" 2> /dev/null || echo 0) + 1))"
+        printf '%s\n' "$m" > "$FIXTURE_DIR/runs"
+        latest="${FIXTURE_LATEST:-1}"
+        [[ "$m" -ge 2 && -n "${FIXTURE_LATEST_AFTER:-}" ]] && latest="$FIXTURE_LATEST_AFTER"
+        body="{\"run_attempt\":$latest}"
+        ;;
     esac
     [[ -n "$body" ]] || exit 1
-    jq -c "$jq_filter" <<< "$body"
+    if [[ -n "$jq_filter" ]]; then jq -c "$jq_filter" <<< "$body"; else printf '%s\n' "$body"; fi
     ;;
 "run download")
     dir=""
@@ -75,7 +98,11 @@ case "$1 $2" in
 esac
 SH
 chmod +x "$scratch/bin/gh"
-export PATH="$scratch/bin:$PATH" FIXTURE_LOG="$scratch/gh.log"
+export PATH="$scratch/bin:$PATH" FIXTURE_LOG="$scratch/gh.log" FIXTURE_DIR="$scratch/fx" FIXTURE_COMMIT="$commit"
+mkdir -p "$FIXTURE_DIR"
+# The CI artifact: a zip holding one release binary.
+python3 -I -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.writestr("gonimbus-linux-amd64","pkg\n"); z.close()' "$FIXTURE_DIR/artifact.zip"
+reset_listings() { rm -f "$FIXTURE_DIR/listings" "$FIXTURE_DIR/runs"; }
 
 fail() {
     local reason="$1"
@@ -123,12 +150,37 @@ FIXTURE_ATTEMPT="$good" FIXTURE_LATEST=3 fail 'has a later attempt' \
 mkdir -p "$scratch/full"
 printf 'stale\n' > "$scratch/full/stale"
 FIXTURE_ATTEMPT="$good" fail 'is not empty' ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/full"
-# Downloads only the named artifact from the named, verified attempt.
+# Downloads exactly the one artifact recorded from the named, verified attempt,
+# checks its bytes against the recorded digest, and records both in the anchor.
+digest="sha256:$(shasum -a 256 "$FIXTURE_DIR/artifact.zip" | awk '{print $1}')"
 : > "$FIXTURE_LOG"
+reset_listings
 (cd "$repo" && FIXTURE_ATTEMPT="$good" ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/d2") > /dev/null
-grep -q '^run download 11 --repo 3leaps/gonimbus --name release-artifacts-v1.2.3 ' "$FIXTURE_LOG"
-[[ "$(cat "$scratch/d2.anchor")" == "$(printf 'tag=v1.2.3\nobject=%s\ncommit=%s\nrun=11\nattempt=2' "$object" "$commit")" ]]
+grep -q '^api repos/3leaps/gonimbus/actions/artifacts/501/zip' "$FIXTURE_LOG"
+if grep -q '^run download' "$FIXTURE_LOG"; then echo 'error: used gh run download' >&2; exit 1; fi
+[[ "$(cat "$scratch/d2.anchor")" == "$(printf 'tag=v1.2.3\nobject=%s\ncommit=%s\nrun=11\nattempt=2\nartifact=501\ndigest=%s' "$object" "$commit" "$digest")" ]]
 [[ -f "$scratch/d2/gonimbus-linux-amd64" ]]
+# A re-run landing during the download changes the artifact: refuse, and leave
+# no anchor behind.
+reset_listings
+FIXTURE_ATTEMPT="$good" FIXTURE_ARTIFACT_ID_AFTER=777 fail 'changed during download' \
+    ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/race"
+[[ ! -e "$scratch/race.anchor" ]]
+# A later attempt appearing during the download is caught by the after-snapshot.
+reset_listings
+FIXTURE_ATTEMPT="$good" FIXTURE_LATEST_AFTER=3 fail 'has a later attempt' \
+    ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/rerun"
+[[ ! -e "$scratch/rerun.anchor" ]]
+# Downloaded bytes that do not match the recorded digest refuse.
+reset_listings
+FIXTURE_ATTEMPT="$good" FIXTURE_DIGEST="sha256:$(printf '%064d' 0)" fail 'do not match its recorded digest' \
+    ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/badbytes"
+[[ ! -e "$scratch/badbytes.anchor" ]]
+# An artifact built from another commit refuses.
+reset_listings
+FIXTURE_ATTEMPT="$good" FIXTURE_ARTIFACT_SHA="$(printf '%040d' 0)" fail 'does not hold exactly one unexpired' \
+    ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/othersha"
+[[ ! -e "$scratch/othersha.anchor" ]]
 
 # Draft. Packages are staged against the anchor that fetch recorded.
 stage() {

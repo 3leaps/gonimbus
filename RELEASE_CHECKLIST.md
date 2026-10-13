@@ -104,10 +104,15 @@ The tag workflow is read-only. It verifies the signed tag, builds, and uploads
 `release-artifacts-v<version>` as a workflow artifact. It does not create the
 GitHub Release. A green tag workflow is not release authorization.
 
-- [ ] Download the CI artifacts for the verified tag and record the anchor:
+- [ ] Download the CI artifacts for the verified tag and record the anchor.
+      Name the exact Release workflow run and its successful, latest attempt
+      (`gh run list --workflow release.yml`); staging binds to that run's single
+      `release-artifacts-v<version>` artifact by id and digest and refuses if a
+      re-run appears during the download:
 
   ```bash
   export GONIMBUS_RELEASE_TAG=v<version>
+  export RELEASE_RUN_ID=<run id> RELEASE_RUN_ATTEMPT=<attempt>
   make release-clean
   make release-download
   make release-verify-checksums

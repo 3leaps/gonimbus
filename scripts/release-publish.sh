@@ -81,24 +81,47 @@ for bits in 256 512; do
     fi || die 'local packages do not match the manifests'
 done
 
-# 4. Signatures verify against the committed pins, not the staged keys alone.
-pins="$root/keys/expected-fingerprints.txt"
-pin_gpg="$(awk '$1=="gpg" {print $2}' "$pins")"
-pin_minisign="$(awk '$1=="minisign" {print $2}' "$pins")"
-[[ "$pin_gpg" =~ ^[0-9A-F]{40}$ && "$pin_minisign" =~ ^[0-9a-f]{64}$ ]] || die 'committed pins are malformed'
-staged_minisign="$(sed -n 2p "$src/${binary}-minisign.pub" | base64 -d | shasum -a 256 | awk '{print $1}')"
-[[ "$staged_minisign" == "$pin_minisign" ]] || die 'staged minisign key does not match the committed pin'
+# 4. Signatures verify against the pins committed in the anchored tag commit,
+# read as inert blobs; the working tree is never consulted, so a later edit or
+# key rotation on main cannot change who is trusted for this release.
 gpg_home="$(mktemp -d)"
 fresh="$(mktemp -d)"
-trap 'rm -rf "$gpg_home" "$fresh"' EXIT
+pinned="$(mktemp -d)"
+trap 'gpgconf --homedir "$gpg_home" --kill all > /dev/null 2>&1 || true; rm -rf "$gpg_home" "$fresh" "$pinned"' EXIT
 chmod 700 "$gpg_home"
-gpg --homedir "$gpg_home" --batch --quiet --import "$root/docs/security/release-signing-keys.asc" 2> /dev/null
+tagged_blob() {
+    local path="$1" out="$2" mode
+    mode="$(git -C "$root" ls-tree "$anchor_commit" -- "$path" | awk '{print $1}')"
+    [[ "$mode" == 100644 || "$mode" == 100755 ]] || die "committed $path required in the tagged commit"
+    git -C "$root" cat-file blob "$anchor_commit:$path" > "$out"
+    [[ -s "$out" ]] || die "committed $path is empty in the tagged commit"
+}
+tagged_blob keys/expected-fingerprints.txt "$pinned/anchors"
+tagged_blob docs/security/release-signing-keys.asc "$pinned/pgp.asc"
+tagged_blob "docs/security/${binary}-minisign.pub" "$pinned/minisign.pub"
+pin_gpg="$(awk '$1=="gpg" {print $2}' "$pinned/anchors")"
+pin_minisign="$(awk '$1=="minisign" {print $2}' "$pinned/anchors")"
+[[ "$pin_gpg" =~ ^[0-9A-F]{40}$ && "$pin_minisign" =~ ^[0-9a-f]{64}$ ]] || die 'committed pins are malformed'
+committed_minisign="$(sed -n 2p "$pinned/minisign.pub" | base64 -d | shasum -a 256 | awk '{print $1}')"
+[[ "$committed_minisign" == "$pin_minisign" ]] || die 'committed minisign key does not match the committed anchor'
+cmp -s "$pinned/minisign.pub" "$src/${binary}-minisign.pub" ||
+    die 'staged minisign key is not the key committed in the tagged commit'
+gpg --homedir "$gpg_home" --batch --quiet --import "$pinned/pgp.asc" 2> /dev/null || die 'committed PGP key failed to import'
+listing="$(gpg --homedir "$gpg_home" --batch --with-colons --with-subkey-fingerprint --list-keys)"
+[[ "$(awk -F: '$1=="pub" {n++} END {print n+0}' <<< "$listing")" == 1 ]] || die 'committed PGP key must hold exactly one primary'
+[[ "$(awk -F: '$1=="fpr" {print $10; exit}' <<< "$listing")" == "$pin_gpg" ]] || die 'committed PGP key is not the anchored primary'
+pin_subkey="$(awk -F: '$1=="sub" {s=1; cap=$12; next} s && $1=="fpr" {if (cap ~ /s/) print $10; s=0}' <<< "$listing")"
+[[ "$pin_subkey" =~ ^[0-9A-F]{40}$ ]] || die 'committed PGP key must hold exactly one signing subkey'
 for manifest in SHA256SUMS SHA512SUMS; do
-    minisign -Vq -p "$src/${binary}-minisign.pub" -m "$src/$manifest" -x "$src/$manifest.minisig" ||
+    minisign -Vq -p "$pinned/minisign.pub" -m "$src/$manifest" -x "$src/$manifest.minisig" ||
         die "minisign verification failed for $manifest"
     gpg --homedir "$gpg_home" --batch --status-fd 1 --verify "$src/$manifest.asc" "$src/$manifest" 2> /dev/null |
-        awk -v pin="$pin_gpg" '$2=="VALIDSIG" && $NF==pin {found=1} END {exit !found}' ||
-        die "PGP signature on $manifest is not from the pinned primary"
+        awk -v primary="$pin_gpg" -v subkey="$pin_subkey" '
+          $2=="VALIDSIG" {valid++; signer=$3; signer_primary=$NF}
+          $2=="GOODSIG" {good++}
+          $2 ~ /^(EXPKEYSIG|EXPSIG|REVKEYSIG|KEYREVOKED|BADSIG|ERRSIG)$/ {bad++}
+          END { exit !(valid==1 && good==1 && !bad && signer==subkey && signer_primary==primary) }' ||
+        die "PGP signature on $manifest is not a good signature by the pinned signing subkey"
 done
 
 # 5. The draft on GitHub is byte-identical to the verified local set.
