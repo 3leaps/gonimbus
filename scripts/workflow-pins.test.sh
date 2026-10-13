@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
-# Every workflow action is pinned by full commit SHA with a version comment, no
-# action pin is on the Node 20 deny-list, container and service images are
-# digest-pinned, every workflow is contents: read, and hosted runners use an
-# explicit image instead of a moving label.
+# Every workflow is contents: read at workflow and job level, every action is
+# pinned by full commit SHA with a version comment, no action pin is on the
+# Node 20 deny-list, container and service images are digest-pinned, and hosted
+# runners use an explicit image instead of a moving label. Policy is checked on
+# the resolved YAML; version comments are read from the source text.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
-python3 - "$root"/.github/workflows/*.yml << 'PY'
+shopt -s nullglob
+if [[ $# -gt 0 ]]; then
+    files=("$@")
+else
+    files=("$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml)
+fi
+[[ ${#files[@]} -gt 0 ]] || {
+    echo 'error: no workflow files found' >&2
+    exit 1
+}
+status=0
+for path in "${files[@]}"; do
+    resolved="$(mktemp)"
+    "$root/scripts/workflow-yaml.sh" "$path" > "$resolved" || {
+        rm -f "$resolved"
+        status=1
+        continue
+    }
+    python3 -I - "$path" "$resolved" << 'PY' || status=1
+import json
 import re
 import sys
 
@@ -18,34 +38,80 @@ NODE20 = {
 # Larger-runner labels name a runner group, not an image; there is no explicit
 # image label to pin them to.
 LARGER_RUNNERS = {'windows-latest-arm64-s'}
+
+path = sys.argv[1]
+name = path.rsplit('/', 1)[-1]
+doc = json.load(open(sys.argv[2], encoding='utf-8'))
+text = open(path, encoding='utf-8').read()
 errors = []
-for path in sys.argv[1:]:
-    name = path.rsplit('/', 1)[-1]
-    text = open(path, encoding='utf-8').read()
-    if not re.search(r'^permissions:\s*\n\s+contents:\s*read\s*$', text, re.MULTILINE):
-        errors.append(f'{name}: workflow-level permissions must be contents: read')
-    if re.search(r'^\s*[a-z-]+:\s*write\b', text, re.MULTILINE) or 'write-all' in text:
-        errors.append(f'{name}: write permission granted')
-    for number, line in enumerate(text.splitlines(), 1):
-        uses = re.match(r'^\s*(?:-\s+)?uses:\s*(\S+)(.*)$', line)
-        if uses:
-            ref, rest = uses.groups()
-            if ref.startswith('./'):
-                continue
-            if not re.fullmatch(r'[\w.-]+/[\w./-]+@[0-9a-f]{40}', ref):
-                errors.append(f'{name}:{number}: action not pinned by full SHA: {ref}')
-            elif not re.search(r'#\s*v\d', rest):
-                errors.append(f'{name}:{number}: pinned action lacks a version comment: {ref}')
-            if ref in NODE20:
-                errors.append(f'{name}:{number}: action pin targets Node 20: {ref}')
-        image = re.match(r'^\s*image:\s*(\S+)', line)
-        if image and not re.search(r'@sha256:[0-9a-f]{64}$', image.group(1)):
-            errors.append(f'{name}:{number}: image not digest-pinned: {image.group(1)}')
-        label = re.match(r'^\s*(?:-\s+)?(?:runs-on|runner):\s*(\S+)', line)
-        if label and label.group(1).endswith('-latest') or (
-                label and '-latest-' in label.group(1) and label.group(1) not in LARGER_RUNNERS):
-            errors.append(f'{name}:{number}: moving runner label: {label.group(1)}')
+
+
+def read_only(perms, where, required):
+    if perms is None:
+        if required:
+            errors.append(f'{name}: {where} permissions must be set to contents: read')
+    elif perms != {'contents': 'read'}:
+        errors.append(f'{name}: {where} permissions must be exactly contents: read, got {json.dumps(perms)}')
+
+
+def labels(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    if isinstance(value, dict):
+        return labels(value.get('labels'))
+    return []
+
+
+def image_ref(value):
+    return value.get('image') if isinstance(value, dict) else value
+
+
+def check_runner(label, where):
+    if label.startswith('${{'):
+        return
+    if (label.endswith('-latest') or '-latest-' in label) and label not in LARGER_RUNNERS:
+        errors.append(f'{name}: {where}: moving runner label: {label}')
+
+
+def check_image(ref, where):
+    if ref and not re.search(r'@sha256:[0-9a-f]{64}$', str(ref)):
+        errors.append(f'{name}: {where}: image not digest-pinned: {ref}')
+
+
+read_only(doc.get('permissions'), 'workflow', True)
+for job_name, job in (doc.get('jobs') or {}).items():
+    where = f'job {job_name}'
+    read_only(job.get('permissions'), where, False)
+    for label in labels(job.get('runs-on')):
+        check_runner(label, where)
+    for row in ((job.get('strategy') or {}).get('matrix') or {}).get('include') or []:
+        if isinstance(row, dict):
+            for label in labels(row.get('runner')):
+                check_runner(label, f'{where} matrix')
+    check_image(image_ref(job.get('container')), where)
+    for svc_name, svc in (job.get('services') or {}).items():
+        check_image(image_ref(svc), f'{where} service {svc_name}')
+    uses_list = [job.get('uses')] + [s.get('uses') for s in job.get('steps') or []]
+    for ref in uses_list:
+        if not ref or str(ref).startswith('./'):
+            continue
+        ref = str(ref)
+        if ref.startswith('docker://'):
+            check_image(ref[len('docker://'):], where)
+            continue
+        if not re.fullmatch(r'[\w.-]+/[\w./-]+@[0-9a-f]{40}', ref):
+            errors.append(f'{name}: {where}: action not pinned by full SHA: {ref}')
+            continue
+        if ref in NODE20:
+            errors.append(f'{name}: {where}: action pin targets Node 20: {ref}')
+        if not re.search(re.escape(ref) + r'\s+#\s*v\d', text):
+            errors.append(f'{name}: {where}: pinned action lacks a version comment: {ref}')
 if errors:
     raise SystemExit('error: ' + '\n'.join(errors))
 PY
+    rm -f "$resolved"
+done
+[[ "$status" == 0 ]] || exit 1
 echo '[ok] workflows are read-only, SHA- and digest-pinned, off Node 20, on explicit runners'
