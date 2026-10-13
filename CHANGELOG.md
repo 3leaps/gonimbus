@@ -53,6 +53,11 @@ changes.
   pin container images by digest, and use explicit runner images. The public
   release identity (tagger, OpenPGP export, minisign public key, fingerprint
   anchors) is committed under `config/release/`, `docs/security/` and `keys/`.
+- Release publication is a maintainer ceremony: signed tag creation and push,
+  download of the CI workflow artifact for the verified tag, draft release
+  from the curated `docs/releases` notes, minisign and PGP manifest signing
+  (both required), and promotion only after the draft is byte-verified
+  against the local signed set. Remote tag lookups use the GitHub API.
 - Update `golang.org/x/net` to v0.60.0 (GO-2026-6603, GO-2026-6610,
   GO-2026-6611, GO-2026-6612, GO-2026-6617) under a time-bounded cooling
   exception recorded in SDR-002, and `go.opentelemetry.io/otel/sdk` to v1.45.0
