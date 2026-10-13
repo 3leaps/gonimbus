@@ -224,6 +224,32 @@ stage
 printf 'tag=v1.2.3\nobject=%040d\ncommit=%s\n' 1 "$unpinned_commit" > "$d.anchor"
 refuse 'committed keys/expected-fingerprints.txt required in the tagged commit'
 
+# The PGP key asset published beside the signatures must be the committed key:
+# signatures stay valid, only the exported key is swapped or damaged.
+gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' \
+    --quick-generate-key 'Unrelated <unrelated@example.invalid>' ed25519 sign 1d > /dev/null 2>&1
+stage
+gpg --homedir "$home" --batch --armor --export unrelated@example.invalid > "$d/gonimbus-release-signing-key.asc"
+cp "$d/gonimbus-release-signing-key.asc" "$scratch/draft/"
+refuse 'staged PGP key asset is not the committed primary with its pinned signing subkey'
+stage
+printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nnot a key\n-----END PGP PUBLIC KEY BLOCK-----\n' > "$d/gonimbus-release-signing-key.asc"
+cp "$d/gonimbus-release-signing-key.asc" "$scratch/draft/"
+refuse 'staged PGP key asset is not a readable OpenPGP public key'
+stage
+gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --armor --export-secret-keys "$primary" \
+    > "$d/gonimbus-release-signing-key.asc"
+cp "$d/gonimbus-release-signing-key.asc" "$scratch/draft/"
+refuse 'staged PGP key asset contains secret key material'
+# The committed key with its signing subkey, freshly re-exported (bytes may
+# differ from the committed blob), is accepted.
+stage
+gpg --homedir "$home" --batch --armor --export "$primary" > "$d/gonimbus-release-signing-key.asc"
+cp "$d/gonimbus-release-signing-key.asc" "$scratch/draft/"
+: > "$FIXTURE_LOG"
+(cd "$repo" && ./scripts/release-publish.sh v1.2.3 "$d") > /dev/null
+[[ "$(grep -c '^release edit v1.2.3 .*--draft=false' "$FIXTURE_LOG")" == 1 ]]
+
 # Every gate holds: promotion happens exactly once, after the byte comparison.
 stage
 : > "$FIXTURE_LOG"

@@ -112,6 +112,35 @@ listing="$(gpg --homedir "$gpg_home" --batch --with-colons --with-subkey-fingerp
 [[ "$(awk -F: '$1=="fpr" {print $10; exit}' <<< "$listing")" == "$pin_gpg" ]] || die 'committed PGP key is not the anchored primary'
 pin_subkey="$(awk -F: '$1=="sub" {s=1; cap=$12; next} s && $1=="fpr" {if (cap ~ /s/) print $10; s=0}' <<< "$listing")"
 [[ "$pin_subkey" =~ ^[0-9A-F]{40}$ ]] || die 'committed PGP key must hold exactly one signing subkey'
+# The PGP key published beside the signatures must be that same key, public
+# only, or consumers cannot verify the published signatures. A fresh export can
+# differ in bytes from the committed blob, so compare the key material instead.
+staged_home="$(mktemp -d)"
+chmod 700 "$staged_home"
+staged_key="$src/${binary}-release-signing-key.asc"
+check_staged_key() {
+    local listing
+    gpg --homedir "$staged_home" --batch --list-packets "$staged_key" > "$staged_home/packets" 2> /dev/null ||
+        return 1
+    ! grep -qE ':secret (key|sub key) packet:' "$staged_home/packets" || return 2
+    gpg --homedir "$staged_home" --batch --quiet --import "$staged_key" 2> /dev/null || return 1
+    listing="$(gpg --homedir "$staged_home" --batch --with-colons --with-subkey-fingerprint --list-keys)"
+    [[ "$(awk -F: '$1=="sec" {n++} END {print n+0}' <<< "$listing")" == 0 ]] || return 2
+    [[ "$(awk -F: '$1=="pub" {n++} END {print n+0}' <<< "$listing")" == 1 ]] || return 3
+    [[ "$(awk -F: '$1=="fpr" {print $10; exit}' <<< "$listing")" == "$pin_gpg" ]] || return 3
+    [[ "$(awk -F: '$1=="sub" {s=1; cap=$12; next} s && $1=="fpr" {if (cap ~ /s/) print $10; s=0}' <<< "$listing")" == "$pin_subkey" ]] ||
+        return 3
+}
+staged_rc=0
+check_staged_key || staged_rc=$?
+gpgconf --homedir "$staged_home" --kill all > /dev/null 2>&1 || true
+rm -rf "$staged_home"
+case "$staged_rc" in
+    0) ;;
+    2) die 'staged PGP key asset contains secret key material' ;;
+    3) die 'staged PGP key asset is not the committed primary with its pinned signing subkey' ;;
+    *) die 'staged PGP key asset is not a readable OpenPGP public key' ;;
+esac
 for manifest in SHA256SUMS SHA512SUMS; do
     minisign -Vq -p "$pinned/minisign.pub" -m "$src/$manifest" -x "$src/$manifest.minisig" ||
         die "minisign verification failed for $manifest"
