@@ -484,8 +484,14 @@ release-workflow-check: ## Check workflow pins and the read-only release workflo
 	@./scripts/workflow-pins.test.sh
 	@./scripts/release-workflow-permissions.test.sh
 
-release-anchors-check: ## Check the committed public pin against the fingerprint anchors (needs gpg)
+release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, decernor)
 	@./scripts/validate-release-anchors.sh
+	@"$${GONIMBUS_DECERNOR_BIN:-decernor}" fingerprint verify \
+		--anchors keys/expected-fingerprints.txt \
+		--anchors-ndjson keys/expected-fingerprints.ndjson \
+		--gpg docs/security/release-signing-keys.asc \
+		--minisign docs/security/gonimbus-minisign.pub > /dev/null
+	@echo "[ok] decernor: gpg and minisign public keys match txt and ndjson anchors"
 
 release-verify-tag: ## Verify GONIMBUS_RELEASE_TAG against the public pin committed in the tagged commit
 	@./scripts/verify-pinned-tag.sh

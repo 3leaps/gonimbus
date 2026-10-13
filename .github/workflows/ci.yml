@@ -155,6 +155,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Install checksum-pinned Decernor
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/decernor.XXXXXX")"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            'https://github.com/3leaps/decernor/releases/download/v0.1.8/decernor_0.1.8_linux_amd64.tar.gz' \
+            --output "$tool_dir/decernor_0.1.8_linux_amd64.tar.gz"
+          (cd "$tool_dir" && sha256sum --check "$GITHUB_WORKSPACE/config/release/decernor-ci-sha256.txt")
+          tar -xzf "$tool_dir/decernor_0.1.8_linux_amd64.tar.gz" -C "$tool_dir" decernor
+          echo "GONIMBUS_DECERNOR_BIN=$tool_dir/decernor" >> "$GITHUB_ENV"
       - name: Check committed release pin and anchors
         run: |
           set -euo pipefail

@@ -39,9 +39,14 @@ fi
 if [[ "$(git cat-file -t "$remote_object" 2> /dev/null || true)" == tag ]]; then
     git update-ref "refs/tags/$tag" "$remote_object"
 else
+    # The header travels in the environment, not argv, and its encoded form is
+    # masked because the runner only masks the raw token.
     auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-    git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-        fetch --quiet --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
+    [[ -n "${GITHUB_ACTIONS:-}" ]] && echo "::add-mask::$auth"
+    GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' \
+        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+        git fetch --quiet --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
 fi
 [[ "$(git rev-parse "refs/tags/$tag")" == "$remote_object" &&
     "$(git cat-file -t "refs/tags/$tag")" == tag &&
