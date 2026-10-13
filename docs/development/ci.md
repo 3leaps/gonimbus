@@ -114,7 +114,7 @@ Two equivalent fixes:
            shell: bash
    ```
 
-2. **Per-step `shell: bash`** (what `release.yml` uses):
+2. **Per-step `shell: bash`** (an alternative to the job-level default):
 
    ```yaml
    - name: Lint

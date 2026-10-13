@@ -5,76 +5,109 @@ on:
   push:
     tags:
       - "v*"
+defaults:
+  run:
+    shell: bash
 permissions:
-  contents: write
+  contents: read
 jobs:
-  release:
+  # Early warning, not an authorization gate: this workflow is defined by the
+  # tagged commit and is read-only. It holds no signing material and no write
+  # token, and never creates a release. The maintainer verifies the tag,
+  # signs the manifests, and creates the draft release locally from these
+  # artifacts.
+  verify-signature:
+    name: Verify pinned tag signature
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.9@sha256:412a315241a59fc0313f4e79f182f7f373a04f194174c61b439cf8ba26174d54
-      options: --user 1001
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.verify.outputs.commit }}
+      tag_object: ${{ steps.verify.outputs.tag_object }}
+    steps:
+      - name: Checkout exact signed tag and committed pin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify committed pin and GitHub signature
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GONIMBUS_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./scripts/release-restore-tag-ref.sh
+          GONIMBUS_REQUIRE_TAG=1 ./scripts/release-guard-tag-version.sh
+          ./scripts/verify-pinned-tag.sh
+          EXPECTED_OBJECT="$(git rev-parse "refs/tags/$GONIMBUS_RELEASE_TAG")"
+          tag_json="$(gh api "repos/3leaps/gonimbus/git/tags/$EXPECTED_OBJECT")"
+          jq -e --arg tag "$GONIMBUS_RELEASE_TAG" --arg commit "$(git rev-parse HEAD)" \
+            '.tag == $tag and .object.type == "commit" and .object.sha == $commit and
+             .verification.verified == true and .verification.reason == "valid"' \
+            <<<"$tag_json" >/dev/null
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          printf 'tag_object=%s\n' "$EXPECTED_OBJECT" >>"$GITHUB_OUTPUT"
+  # Builds the verified commit and uploads the artifacts as a workflow
+  # artifact. Release artifacts ship CGO-free and need only Go, make and
+  # coreutils, so this job runs on the plain hosted image rather than a tool
+  # container.
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify-signature
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     env:
-      FULMEN_WORKSPACE_ROOT: ${{ github.workspace }}
-      # GOPATH points to a workspace-relative path because goneat-tools-runner
-      # v0.3+ runs as non-root (UID 1001) and /opt/gopath/bin is not writable
-      # by that user. actions/setup-go@v5 expects $GOPATH/bin to be writable.
-      GOPATH: ${{ github.workspace }}/../_go
-      # Release artifacts ship CGO-free. The goneat-tools-runner-glibc image
-      # sets CGO_ENABLED=1 image-wide, which cascades into the GOOS=darwin
-      # cross-compile in make release-build — that target inherits CGO_ENABLED=1,
-      # tries to invoke clang (cgo's default for darwin target), and fails
-      # because clang is not installed (and cannot be installed under the
-      # non-root user). Pin CGO_ENABLED=0 at the job level so all release
-      # cross-compiles default to the pure-Go path (modernc.org/sqlite for the
-      # index store). Consumers who need libsql build from source with
-      # CGO_ENABLED=1 (or, post-GON-023, with -tags gonimbus_libsql).
       CGO_ENABLED: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Prepare Go directories
-        # Pre-create the writable workspace-relative GOPATH so actions/setup-go
-        # does not fail with EACCES under the non-root runner user.
-        run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26.9"
-      - name: Validate VERSION matches tag
-        shell: bash
+          cache: false
+      # The verified annotated tag object, not just its commit, must still be
+      # the remote tag. A same-commit replacement tag fails here.
+      - name: Build only the verified tag object and commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_COMMIT: ${{ needs.verify-signature.outputs.commit }}
+          GONIMBUS_EXPECTED_TAG_OBJECT: ${{ needs.verify-signature.outputs.tag_object }}
+          GONIMBUS_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ -n "$VERIFIED_COMMIT" ] && [ "$(git rev-parse HEAD)" = "$VERIFIED_COMMIT" ] || {
+            echo "::error::checkout differs from the signature-verified commit"
+            exit 1
+          }
+          ./scripts/release-restore-tag-ref.sh
+      - name: Validate VERSION and app identity match tag
         run: |
           set -euo pipefail
           GONIMBUS_RELEASE_TAG="${GITHUB_REF_NAME}" make release-guard-signing-tag
       - name: Verify toolchain
-        shell: bash
         run: |
           set -euo pipefail
-          goneat --version
-          sfetch --version
           go version
           go mod download
-      - name: Lint
-        shell: bash
-        run: |
-          set -euo pipefail
-          make lint
       - name: Test
-        shell: bash
         run: |
           set -euo pipefail
-          make test
+          go test ./...
       - name: Build release artifacts
-        shell: bash
         run: |
           set -euo pipefail
           make release-build
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload release artifacts as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          generate_release_notes: true
-          files: |
-            dist/release/*
+          name: release-artifacts-${{ github.ref_name }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30

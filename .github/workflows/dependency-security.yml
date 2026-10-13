@@ -12,7 +12,7 @@ permissions:
   contents: read
 jobs:
   dependency-security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.9@sha256:412a315241a59fc0313f4e79f182f7f373a04f194174c61b439cf8ba26174d54
       options: --user 1001
@@ -24,14 +24,14 @@ jobs:
       GOPATH: ${{ github.workspace }}/../_go
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Prepare Go directories
         run: mkdir -p "$GOPATH/bin" "$GOPATH/pkg"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26.9"
       - name: Verify dependency security gate
