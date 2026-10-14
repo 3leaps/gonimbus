@@ -12,7 +12,7 @@ When you import `github.com/fulmenhq/gofulmen`, you automatically gain access to
 
 - gofulmen `v0.1.21` or newer in your `go.mod`
 - Crucible `v0.2.21` assets (bundled transitively with the gofulmen release)
-- Go 1.25+ (matches the current toolchain)
+- Go 1.26+ (matches the current toolchain)
 
 ## Quick Start
 
