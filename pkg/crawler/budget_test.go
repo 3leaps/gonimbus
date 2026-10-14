@@ -196,6 +196,42 @@ func TestSharedBudgetBoundsAggregateRequestRate(t *testing.T) {
 	assert.Equal(t, 20, starts, "every prefix must still be listed exactly once")
 }
 
+// TestRequestRateReservationIsOrderedWithClockRead pauses one caller between
+// reading the clock and reserving. No other caller may reserve in that gap: one
+// that did would advance the limiter past the paused caller's time, and the
+// paused caller's stale reservation would then move the limiter's clock
+// backwards so the next caller is credited the same interval twice.
+func TestRequestRateReservationIsOrderedWithClockRead(t *testing.T) {
+	lease := NewRequestBudget(2, 1000).lease()
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var hookCalls atomic.Int32
+	afterBudgetClockRead = func() {
+		if hookCalls.Add(1) == 1 {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { afterBudgetClockRead = nil })
+
+	first := make(chan error, 1)
+	go func() { first <- lease.waitForRequest(context.Background()) }()
+	<-paused
+
+	second := make(chan error, 1)
+	go func() { second <- lease.waitForRequest(context.Background()) }()
+	select {
+	case <-second:
+		t.Fatal("a second caller reserved while the first was between its clock read and its reservation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.Equal(t, int32(1), hookCalls.Load(), "the second caller read the clock before the first reserved")
+
+	close(resume)
+	require.NoError(t, <-first)
+	require.NoError(t, <-second)
+}
+
 // TestLeaseReservesOnePermitPerCrawler proves each crawler admitted within the
 // ceiling gets a dedicated permit, which is what keeps a crawler from being
 // starved by peers holding permits for whole paginated listings.
