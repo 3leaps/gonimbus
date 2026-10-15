@@ -78,10 +78,6 @@ cooling:
       reason: "FulmenHQ packages are pre-vetted (gofulmen, etc.)"
       approved_by: "@3leapsdave"
       approved_date: "2025-01-01"
-    # Temporary: security release inside the cooling window (SDR-002)
-    - pattern: "golang.org/x/net"
-      until: "2026-10-16"
-      reason: "v0.60.0 fixes reachable HTTP/2 advisories; see docs/security/decisions/SDR-002-xnet-cooling-exception.md"
 # ============================================================================
 # VULNERABILITY POLICY
 # ============================================================================
