@@ -232,6 +232,50 @@ func TestRequestRateReservationIsOrderedWithClockRead(t *testing.T) {
 	require.NoError(t, <-second)
 }
 
+// TestRequestRateRefusesUnreachableDeadlineWithoutDelayingOthers holds the
+// deadline admission Limiter.Wait provides. A caller whose deadline falls before
+// its turn must be refused at once and leave its token unreserved; otherwise a
+// later caller that could have met its own deadline queues behind a reservation
+// nobody will use.
+func TestRequestRateRefusesUnreachableDeadlineWithoutDelayingOthers(t *testing.T) {
+	lease := NewRequestBudget(2, 1).lease()
+	require.NoError(t, lease.waitForRequest(context.Background())) // spend the burst token
+
+	short, cancelShort := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelShort()
+	start := time.Now()
+	err := lease.waitForRequest(short)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "would exceed context deadline")
+	require.Less(t, time.Since(start), 50*time.Millisecond, "an unreachable deadline must be refused without waiting")
+
+	feasible, cancelFeasible := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancelFeasible()
+	require.NoError(t, lease.waitForRequest(feasible),
+		"a caller able to meet its deadline must not queue behind a refused reservation")
+	require.Less(t, time.Since(start), 1300*time.Millisecond)
+}
+
+// TestRequestRateCancellationReturnsReservation cancels a caller that was
+// admitted with a reachable deadline while it waits, and requires the next
+// caller to get the token back rather than wait a further interval.
+func TestRequestRateCancellationReturnsReservation(t *testing.T) {
+	lease := NewRequestBudget(2, 2).lease()
+	require.NoError(t, lease.waitForRequest(context.Background())) // spend the burst token
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- lease.waitForRequest(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+
+	start := time.Now()
+	require.NoError(t, lease.waitForRequest(context.Background()))
+	require.Less(t, time.Since(start), 700*time.Millisecond,
+		"the cancelled reservation must be returned, not leave the next caller a full extra interval")
+}
+
 // TestLeaseReservesOnePermitPerCrawler proves each crawler admitted within the
 // ceiling gets a dedicated permit, which is what keeps a crawler from being
 // starved by peers holding permits for whole paginated listings.

@@ -194,11 +194,20 @@ func (l *budgetLease) waitForRequest(ctx context.Context) error {
 		afterBudgetClockRead()
 	}
 	r := b.limiter.ReserveN(now, 1)
-	b.reserveMu.Unlock()
 	if !r.OK() {
+		b.reserveMu.Unlock()
 		return fmt.Errorf("request rate limiter cannot admit a request")
 	}
 	delay := r.DelayFrom(now)
+	// Refuse a start the deadline cannot reach, as Limiter.Wait does. The
+	// rollback happens before the lock is released, so no other caller has
+	// reserved behind this one and the token is restored in full.
+	if deadline, ok := ctx.Deadline(); ok && now.Add(delay).After(deadline) {
+		r.CancelAt(now)
+		b.reserveMu.Unlock()
+		return fmt.Errorf("request rate limiter: wait of %s would exceed context deadline", delay)
+	}
+	b.reserveMu.Unlock()
 	if delay <= 0 {
 		return nil
 	}
