@@ -24,7 +24,7 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ### Prerequisites
 
-- Go 1.25+ ([install](https://go.dev/doc/install))
+- Go 1.26+ ([install](https://go.dev/doc/install)); the module selects toolchain go1.26.9
 - golangci-lint ([install](https://golangci-lint.run/welcome/install/))
 
 ### Install
@@ -35,6 +35,8 @@ gonimbus version
 ```
 
 `go install`-built binaries report the correct version via `runtime/debug.ReadBuildInfo` + an embedded `VERSION` file (no `-ldflags` injection required).
+
+Prebuilt binaries for darwin-arm64, linux-amd64, linux-arm64, windows-amd64 and windows-arm64 are attached to each [GitHub release](https://github.com/3leaps/gonimbus/releases), with SHA256SUMS and SHA512SUMS manifests signed with minisign and GPG. See [docs/security/README.md](docs/security/README.md) to verify the signed tag and release assets.
 
 ### Run
 
@@ -294,7 +296,8 @@ make build         # Build binary
 make test          # Run unit tests
 make test-cloud    # Run cloud integration tests (requires moto)
 make lint          # Run linting
-make check-all     # Lint + test
+make check-all     # Format, lint, test, API stability, release provenance checks
+make pr-final      # Non-mutating gate run by release preflight
 ```
 
 ### Cloud Integration Tests

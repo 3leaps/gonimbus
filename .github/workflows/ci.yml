@@ -146,8 +146,10 @@ jobs:
         run: |
           set -euo pipefail
           GOOS=linux GOARCH=arm64 go build ./...
-  # The committed release pin and anchors are checked with gpg, which the
-  # tool container does not ship; the hosted image does.
+  # The committed release pin and anchors, and the signed-tag ceremony
+  # regression tests, need gpg and minisign, which the tool container does
+  # not ship; the hosted image does. The tests use throwaway keys only and
+  # need no secrets.
   release-anchors:
     runs-on: ubuntu-24.04
     steps:
@@ -155,6 +157,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install checksum-pinned Decernor
         run: |
           set -euo pipefail
@@ -169,6 +172,24 @@ jobs:
         run: |
           set -euo pipefail
           make release-anchors-check
+      - name: Install minisign and checksum-pinned yq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q minisign
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/yq.XXXXXX")"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            'https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64' \
+            --output "$tool_dir/yq_linux_amd64"
+          (cd "$tool_dir" && sha256sum --check "$GITHUB_WORKSPACE/config/release/yq-ci-sha256.txt")
+          install -m 0755 "$tool_dir/yq_linux_amd64" "$tool_dir/yq"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+      - name: Signed-tag ceremony regression tests
+        run: |
+          set -euo pipefail
+          git config --global user.name 'CI Fixture'
+          git config --global user.email 'ci-fixture@example.invalid'
+          make release-tag-tests
   # Native Windows coverage for handle-relative job registry mutation, SQLite
   # snapshot binding, and leased GC quarantine/recovery. These cannot be
   # certified by cross-compilation because share masks, access masks,

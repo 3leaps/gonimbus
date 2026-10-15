@@ -83,69 +83,51 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 
 ## Release Execution
 
+### Tagging (maintainer machine)
+
+The tag is signed by `3 Leaps Infosec Team <infosec@3leaps.net>` with the
+pinned signing subkey (`config/release/tagger-identity.txt`,
+`docs/security/release-signing-keys.asc`). Set in the shell, never in the repo:
+`GONIMBUS_RELEASE_TAG`, `GONIMBUS_TAG_MESSAGE_DIR` (outside the repository),
+`GONIMBUS_TAGGER_NAME`, `GONIMBUS_TAGGER_EMAIL`,
+`GONIMBUS_GPG_SIGNING_FINGERPRINT` (primary), `GONIMBUS_PGP_KEY_ID`
+(`<subkey>!`), and `GONIMBUS_GPG_HOMEDIR`.
+
+- [ ] Pre-tag gate on the merged main commit: `make release-preflight`
+- [ ] Prepare and review the external tag message: `make release-prepare-tag-message`
+- [ ] Create and verify the local signed tag: `make release-tag`
+- [ ] Publish and verify the tag (ruleset, remote object, GitHub `valid`): `make release-push-tag`
+
 ### Release Artifacts & Signing
 
-Follow the release distribution handoff:
+The tag workflow is read-only. It verifies the signed tag, builds, and uploads
+`release-artifacts-v<version>` as a workflow artifact. It does not create the
+GitHub Release. A green tag workflow is not release authorization.
 
-1. **devlead** tags and pushes the release after clearance, then verifies CI.
-2. **maintainer** runs the signing and upload ceremony on the MFA-gated host.
-3. **devlead** publishes Homebrew and Scoop updates after uploaded assets are verified.
-
-The signing ceremony follows the Fulmen "manifest-only" provenance pattern:
-
-- Generate SHA256 + SHA512 manifests
-- Sign manifests with minisign (primary) and optionally PGP
-- Ship trust anchors (public keys) with the release
-
-- [ ] The tag workflow is read-only: it verifies the signed tag, builds, and
-      uploads the artifacts as a workflow artifact. It does not create the
-      GitHub Release. Create the draft release from those artifacts before
-      `make release-download`.
-- [ ] Download CI-built artifacts and generate manifests:
+- [ ] Download the CI artifacts for the verified tag and record the anchor.
+      Name the exact Release workflow run and its successful, latest attempt
+      (`gh run list --workflow release.yml`); staging binds to that run's single
+      `release-artifacts-v<version>` artifact by id and digest and refuses if a
+      re-run appears during the download:
 
   ```bash
   export GONIMBUS_RELEASE_TAG=v<version>
-
+  export RELEASE_RUN_ID=<run id> RELEASE_RUN_ATTEMPT=<attempt>
   make release-clean
   make release-download
-  make release-checksums
   make release-verify-checksums
   ```
 
-- [ ] Sign manifests (minisign required; PGP optional):
-
-  ```bash
-  export GONIMBUS_RELEASE_TAG=v<version>
-  export GONIMBUS_MINISIGN_KEY=/path/to/gonimbus.key
-  export GONIMBUS_MINISIGN_PUB=/path/to/gonimbus.pub
-  export GONIMBUS_PGP_KEY_ID="security@fulmenhq.dev"   # optional
-  export GONIMBUS_GPG_HOMEDIR=/path/to/gnupg-fulmenhq # required if PGP_KEY_ID set
-
-  make release-sign
-  ```
-
-- [ ] Export public keys: `make release-export-keys`
-- [ ] Verify exported keys are public-only: `make release-verify-keys`
+- [ ] Create the draft release from the verified local artifacts (body is
+      `docs/releases/v<version>.md` from the tagged commit): `make release-create-draft`
+- [ ] Sign the manifests (minisign and PGP both required; also set
+      `GONIMBUS_MINISIGN_KEY` and `GONIMBUS_MINISIGN_PUB`): `make release-sign`
+- [ ] Export and check public keys: `make release-export-keys release-verify-keys`
 - [ ] Verify signatures: `make release-verify-signatures`
-- [ ] Copy release notes: `make release-notes RELEASE_TAG=v<version>`
-- [ ] Upload provenance assets: `make release-upload`
+- [ ] Stage notes: `make release-notes`
+- [ ] Upload provenance assets to the draft: `make release-upload`
 - [ ] Preserve the package-manager URL and SHA256 block printed by `make release-upload`
-
-### Tagging
-
-- [ ] Confirm tag/version match: `GONIMBUS_RELEASE_TAG=v<version> make release-guard-signing-tag`
-- [ ] Create the signed annotated tag as `3 Leaps Infosec Team <infosec@3leaps.net>`
-      with the pinned signing subkey (`config/release/tagger-identity.txt`,
-      `docs/security/release-signing-keys.asc`)
-- [ ] Verify it against the committed pin: `GONIMBUS_RELEASE_TAG=v<version> ./scripts/verify-pinned-tag.sh`
-- [ ] Tag message includes brief release summary
-
-### Publishing
-
-- [ ] Push commits: `git push origin main`
-- [ ] Push tag: `git push origin v<version>`
-- [ ] Confirm the tag workflow verified the tag and uploaded `release-artifacts-v<version>`
-- [ ] Create the draft GitHub Release from those artifacts with `docs/releases/v<version>.md` as the body
+- [ ] Promote the draft after byte-verifying it against the local signed set: `make release-publish`
 
 ### Distribution
 

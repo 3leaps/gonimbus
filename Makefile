@@ -4,7 +4,8 @@
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
-.PHONY: release-provenance-check release-workflow-check release-anchors-check release-verify-tag
+.PHONY: release-provenance-check release-workflow-check release-anchors-check pr-final
+.PHONY: release-create-draft release-export-pin release-guard-tag-name release-insert-anchors release-preflight release-prepare-tag-message release-publish release-push-tag release-tag release-tag-tests release-validate-pin release-verify-published-tag release-verify-remote-tag
 
 # Binary and version information
 BINARY_NAME := gonimbus
@@ -170,7 +171,9 @@ release-prepare:  ## Prepare for release (tests, version bump)
 #     GONIMBUS_GPG_HOMEDIR  - isolated gpg homedir (required if PGP_KEY_ID set)
 # ─────────────────────────────────────────────────────────────────────────────
 
-RELEASE_TAG ?= $(if $(GONIMBUS_RELEASE_TAG),$(GONIMBUS_RELEASE_TAG),v$(shell cat VERSION 2>/dev/null || echo "0.0.0"))
+# Never default RELEASE_TAG to v$(VERSION): a version bump on main must not
+# redirect a ceremony to a different tag.
+RELEASE_TAG ?= $(GONIMBUS_RELEASE_TAG)
 DIST_RELEASE ?= dist/release
 
 sync-app-version: ## Sync .fulmen/app.yaml + internal/buildinfo/VERSION from VERSION
@@ -194,8 +197,10 @@ sync-embedded-identity: ## Sync embedded identity mirror from .fulmen/app.yaml
 verify-embedded-identity: ## Verify embedded identity mirror is in sync
 	@./scripts/verify-embedded-identity.sh
 
-release-clean: ## Clean dist/release staging
-	@echo "🧹 Cleaning $(DIST_RELEASE)..."; rm -rf "$(DIST_RELEASE)"; mkdir -p "$(DIST_RELEASE)"; echo "✅ Cleaned"
+release-clean: ## Reset dist/release staging to avoid stale artifacts
+	@rm -rf "$(DIST_RELEASE)" "$(DIST_RELEASE).anchor"
+	@mkdir -p "$(DIST_RELEASE)"
+	@echo "✅ Cleaned $(DIST_RELEASE)"
 
 release-build: sync-embedded-identity release-clean ## Build release artifacts into dist/release
 	@echo "→ Building release artifacts for $(BINARY_NAME) v$(VERSION)..."
@@ -208,95 +213,129 @@ release-build: sync-embedded-identity release-clean ## Build release artifacts i
 	@$(MAKE) release-checksums
 	@echo "✅ Release build complete"
 
-# release-checksums generates checksum manifests inside dist/release.
+# Flow: signed tag -> read-only CI builds artifacts as a workflow artifact ->
+# operator re-verifies the tag, downloads the artifacts, checksums, creates the
+# DRAFT (release-create-draft), signs, verifies, uploads provenance ->
+# release-publish promotes draft -> public.
+
+release-preflight: ## Pre-tag gate: clean synced main, notes, pins, dates
+	@./scripts/release-preflight.sh
+
+# Post-tag operations bind to the published, verified tag rather than to the
+# checked-out VERSION, so a version bump on main cannot strand a release.
+release-guard-tag-name: ## Guard: RELEASE_TAG set and canonical vX.Y.Z (no VERSION check)
+	@if [ -z "$(RELEASE_TAG)" ]; then \
+		echo "❌ RELEASE_TAG not set. Set GONIMBUS_RELEASE_TAG in your shell, or pass RELEASE_TAG=vX.Y.Z." >&2; \
+		exit 1; \
+	fi
+	@printf '%s\n' "$(RELEASE_TAG)" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$' || { \
+		echo "❌ RELEASE_TAG must be canonical vX.Y.Z" >&2; exit 1; }
+
+release-guard-tag-version: ## Guard: RELEASE_TAG canonical, matches VERSION and app identity
+	@if [ -z "$(RELEASE_TAG)" ]; then \
+		echo "❌ RELEASE_TAG not set. Set GONIMBUS_RELEASE_TAG in your shell, or pass RELEASE_TAG=v$(VERSION)." >&2; \
+		exit 1; \
+	fi
+	@env -u RELEASE_TAG GONIMBUS_RELEASE_TAG="$(RELEASE_TAG)" ./scripts/release-guard-tag-version.sh
+	@APP_VERSION="$$(awk -F': ' '/^[[:space:]]*version:/ {print $$2; exit}' .fulmen/app.yaml)"; \
+	if [ "$$APP_VERSION" != "$(VERSION)" ]; then \
+		echo "❌ App version mismatch: $$APP_VERSION != $(VERSION) (VERSION file)" >&2; \
+		exit 1; \
+	fi
+
+release-guard-signing-tag: ## Guard: GONIMBUS_RELEASE_TAG matches VERSION and app identity
+	@if [ -z "$(GONIMBUS_RELEASE_TAG)" ]; then echo "❌ GONIMBUS_RELEASE_TAG required (example: v$(VERSION))" >&2; exit 1; fi
+	@$(MAKE) --no-print-directory release-guard-tag-version RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)"
+
+# Signed version tag (maintainer machine only; see RELEASE_CHECKLIST.md). Uses
+# GONIMBUS_RELEASE_TAG, GONIMBUS_TAG_MESSAGE_DIR, GONIMBUS_TAGGER_NAME,
+# GONIMBUS_TAGGER_EMAIL, GONIMBUS_GPG_SIGNING_FINGERPRINT,
+# GONIMBUS_PGP_KEY_ID (<subkey>!), GONIMBUS_GPG_HOMEDIR.
+
+release-prepare-tag-message: ## Maintainer-only: prepare and review the external per-cut tag message
+	@./scripts/release-tag-operator.sh prepare-message
+
+release-tag: ## Maintainer-only: create and verify a local signed version tag (no push)
+	@./scripts/release-tag-operator.sh local-tag
+
+release-push-tag: ## Maintainer-only: publish and verify the signed version tag
+	@./scripts/release-tag-operator.sh remote-push
+
+release-verify-tag: ## Verify the local tag using only the committed public pin
+	@./scripts/release-verify-tag.sh
+
+release-verify-published-tag: release-guard-tag-name ## Verify the published tag object and signature against its committed pin
+	@GONIMBUS_RELEASE_TAG="$(RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
+
+release-verify-remote-tag: ## Compare local and remote tag objects and GitHub verification
+	@./scripts/release-verify-remote-tag.sh
+
+release-export-pin: ## Maintainer-only: export the approved public key when no pin exists
+	@./scripts/release-export-pin.sh
+
+release-validate-pin: ## Maintainer-only: read-only validation of the existing public pin
+	@./scripts/release-validate-pin.sh
+
+release-insert-anchors: release-validate-pin ## Maintainer-only: validate pin, then generate absent public anchors
+	@./scripts/release-insert-anchors.sh
+
+release-tag-tests: ## Signed-tag tooling tests (throwaway keys only; needs gpg, git, python3, jq, yq, minisign, make)
+	@./scripts/release-guard-tag-version.test.sh
+	@./scripts/release-restore-tag-ref.test.sh
+	@./scripts/release-tag-controls.test.sh
+	@./scripts/release-tag-operator.test.sh
+	@./scripts/release-prepare-tag-message.test.sh
+	@./scripts/verify-pinned-tag.test.sh
+	@./scripts/release-verify-published-tag.test.sh
+	@./scripts/release-workflow-permissions.test.sh
+	@./scripts/workflow-pins.test.sh
+	@./scripts/release-ci-artifact-draft.test.sh
+	@./scripts/release-preflight.test.sh
+	@./scripts/release-verify-signatures.test.sh
+	@./scripts/release-publish.test.sh
+	@./scripts/release-pin-precursors.test.sh
+	@./scripts/sign-release-manifests.test.sh
+	@echo "✅ Signed-tag tooling tests passed"
+
 release-checksums: ## Generate SHA256SUMS and SHA512SUMS in dist/release
-	@echo "→ Generating checksum manifests in $(DIST_RELEASE)..."
 	@./scripts/generate-checksums.sh "$(DIST_RELEASE)" "$(BINARY_NAME)"
 
 # Deprecated alias (kept for one cycle).
 checksums: release-checksums ## Deprecated: use release-checksums
 	@:
 
-release-guard-tag-version: ## Guard: ensure RELEASE_TAG matches VERSION + app identity
-	@TAG="$(RELEASE_TAG)"; \
-	if [ -z "$$TAG" ]; then \
-		echo "❌ RELEASE_TAG required (example: v$(VERSION))" >&2; \
-		exit 1; \
-	fi; \
-	EXPECTED="v$(VERSION)"; \
-	if [ "$$TAG" != "$$EXPECTED" ]; then \
-		echo "❌ RELEASE_TAG mismatch: $$TAG != $$EXPECTED (from VERSION)" >&2; \
-		exit 1; \
-	fi; \
-	APP_VERSION="$$(awk -F': ' '/^[[:space:]]*version:/ {print $$2; exit}' .fulmen/app.yaml)"; \
-	if [ -z "$$APP_VERSION" ]; then \
-		echo "❌ Unable to read app version from .fulmen/app.yaml" >&2; \
-		exit 1; \
-	fi; \
-	if [ "$$APP_VERSION" != "$(VERSION)" ]; then \
-		echo "❌ App version mismatch: $$APP_VERSION != $(VERSION) (VERSION file)" >&2; \
-		exit 1; \
-	fi; \
-	echo "✅ RELEASE_TAG matches VERSION ($$TAG) and app identity ($$APP_VERSION)"
+release-verify-checksums: ## Verify SHA256SUMS / SHA512SUMS match actual artifacts
+	@./scripts/verify-checksums.sh "$(DIST_RELEASE)"
 
-release-guard-signing-tag: ## Guard: ensure GONIMBUS_RELEASE_TAG matches VERSION before signing
-	@if [ -z "$(GONIMBUS_RELEASE_TAG)" ]; then echo "❌ GONIMBUS_RELEASE_TAG required (example: v$(VERSION))" >&2; exit 1; fi
-	@$(MAKE) release-guard-tag-version RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)"
+release-download: release-guard-tag-name release-verify-published-tag ## Download CI-built artifacts for the verified tag (workflow artifact)
+	@./scripts/release-fetch-ci-artifacts.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-download: release-guard-tag-version ## Download GitHub release assets (RELEASE_TAG=vX.Y.Z)
-	@./scripts/release-download.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
+release-create-draft: release-guard-tag-name release-verify-published-tag release-verify-checksums ## Create the draft GitHub release from verified local artifacts (maintainer only)
+	@./scripts/release-create-draft.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-sign: release-guard-signing-tag ## Sign checksum manifests (minisign required; PGP optional)
+release-sign: release-guard-tag-name release-verify-published-tag ## Sign checksum manifests with minisign and PGP (both required by publish)
 	@./scripts/sign-release-manifests.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-export-keys: ## Export public signing keys into dist/release
 	@./scripts/export-release-keys.sh "$(DIST_RELEASE)"
 
-release-verify-keys: ## Verify exported public keys are public-only
-	@if [ -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then ./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/gonimbus-minisign.pub"; else echo "ℹ️  No minisign public key found (skipping)"; fi
-	@if [ -f "$(DIST_RELEASE)/gonimbus-release-signing-key.asc" ]; then ./scripts/verify-public-key.sh "$(DIST_RELEASE)/gonimbus-release-signing-key.asc"; else echo "ℹ️  No PGP public key found (skipping)"; fi
+release-verify-keys: ## Verify both exported public keys are present and public-only
+	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub; run make release-export-keys" >&2; exit 1; }
+	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc; run make release-export-keys" >&2; exit 1; }
+	@./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub"
+	@./scripts/verify-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc"
 
-release-verify-signatures: ## Verify signatures on checksum manifests
-	@echo "🔍 Verifying signatures in $(DIST_RELEASE)..."
-	@has_any=false; \
-	if [ -f "$(DIST_RELEASE)/SHA256SUMS.minisig" ]; then \
-		if [ ! -f "$(DIST_RELEASE)/gonimbus-minisign.pub" ]; then \
-			echo "❌ minisign public key not found; run 'make release-export-keys' first"; exit 1; \
-		fi; \
-		echo "🔐 Verifying minisign signatures..."; \
-		cd "$(DIST_RELEASE)" && minisign -V -p gonimbus-minisign.pub -m SHA256SUMS; \
-		if [ -f SHA512SUMS.minisig ]; then minisign -V -p gonimbus-minisign.pub -m SHA512SUMS; fi; \
-		echo "✅ Minisign signatures verified"; \
-		has_any=true; \
-	fi; \
-	if [ -f "$(DIST_RELEASE)/SHA256SUMS.asc" ]; then \
-		echo "🔐 Verifying PGP signatures..."; \
-		GPG_HOME="$${GONIMBUS_GPG_HOMEDIR:-}"; \
-		if [ -n "$$GPG_HOME" ]; then \
-			cd "$(DIST_RELEASE)" && gpg --homedir "$$GPG_HOME" --verify SHA256SUMS.asc SHA256SUMS; \
-			if [ -f SHA512SUMS.asc ]; then gpg --homedir "$$GPG_HOME" --verify SHA512SUMS.asc SHA512SUMS; fi; \
-		else \
-			cd "$(DIST_RELEASE)" && gpg --verify SHA256SUMS.asc SHA256SUMS; \
-			if [ -f SHA512SUMS.asc ]; then gpg --verify SHA512SUMS.asc SHA512SUMS; fi; \
-		fi; \
-		echo "✅ PGP signatures verified"; \
-		has_any=true; \
-	fi; \
-	if [ "$$has_any" = false ]; then \
-		echo "❌ No signatures found to verify"; exit 1; \
-	fi
+release-verify-signatures: ## Verify all four manifest signatures and both public keys (fail closed)
+	@./scripts/release-verify-signatures.sh "$(DIST_RELEASE)"
 
 # Deprecated alias (kept for one cycle).
 verify-release-keys: release-verify-keys ## Deprecated: use release-verify-keys
 	@:
 
-release-notes: ## Copy docs/releases/vX.Y.Z.md into dist/release
+release-notes: release-guard-tag-version ## Stage docs/releases/<tag>.md into dist/release
 	@notes_src="docs/releases/$(RELEASE_TAG).md"; notes_dst="$(DIST_RELEASE)/release-notes-$(RELEASE_TAG).md"; \
 	if [ ! -f "$$notes_src" ]; then echo "❌ Missing $$notes_src"; exit 1; fi; \
 	cp "$$notes_src" "$$notes_dst"; echo "✅ Copied $$notes_src → $$notes_dst"
-
-release-verify-checksums: ## Verify SHA256SUMS and SHA512SUMS against artifacts
-	@./scripts/verify-checksums.sh "$(DIST_RELEASE)"
 
 # Deprecated alias (kept for one cycle).
 verify-checksums: release-verify-checksums ## Deprecated: use release-verify-checksums
@@ -305,11 +344,15 @@ verify-checksums: release-verify-checksums ## Deprecated: use release-verify-che
 release-upload: release-upload-provenance ## Upload provenance assets to GitHub (RELEASE_TAG=vX.Y.Z)
 	@:
 
-release-upload-provenance: release-verify-checksums release-verify-keys ## Upload manifests, signatures, keys, notes
+release-upload-provenance: release-guard-tag-name release-verify-published-tag release-verify-checksums release-verify-keys release-verify-signatures ## Upload manifests + sigs + keys + notes (no binaries)
 	@./scripts/release-upload-provenance.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-upload-all: release-verify-checksums release-verify-keys ## Upload binaries + provenance (manual-only)
+release-upload-all: release-guard-tag-name release-verify-published-tag release-verify-checksums release-verify-keys release-verify-signatures ## Upload binaries + provenance (manual override; release-create-draft already attaches binaries)
 	@./scripts/release-upload.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
+
+release-publish: release-guard-tag-name ## Promote the draft to published after byte-verifying it against the local signed set
+	@./scripts/release-publish.sh "$(RELEASE_TAG)" "$(DIST_RELEASE)"
+	@echo "   View: https://github.com/3leaps/$(BINARY_NAME)/releases/tag/$(RELEASE_TAG)"
 
 build: sync-embedded-identity ## Build binary for current platform
 	@echo "→ Building $(BINARY_NAME) v$(VERSION)..."
@@ -478,6 +521,9 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
+pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, lint, tests, licenses, multi-platform build)
+	@echo "✅ pr-final gate passed"
+
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
 
 release-workflow-check: ## Check workflow pins and the read-only release workflow
@@ -492,9 +538,6 @@ release-anchors-check: ## Check the committed public keys against both fingerpri
 		--gpg docs/security/release-signing-keys.asc \
 		--minisign docs/security/gonimbus-minisign.pub > /dev/null
 	@echo "[ok] decernor: gpg and minisign public keys match txt and ndjson anchors"
-
-release-verify-tag: ## Verify GONIMBUS_RELEASE_TAG against the public pin committed in the tagged commit
-	@./scripts/verify-pinned-tag.sh
 
 check-all: fmt verify-embedded-identity api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
 	@echo "✅ All quality checks passed"
