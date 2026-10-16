@@ -4,8 +4,6 @@ package procidentity
 
 import (
 	"fmt"
-	"os"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -91,15 +89,4 @@ func (t *pidfdTarget) close() error {
 	err := unix.Close(t.fd)
 	t.fd = -1
 	return err
-}
-
-func isAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }

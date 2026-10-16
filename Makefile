@@ -1,6 +1,6 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo test-libsql build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
-.PHONY: sync-embedded-identity verify-embedded-identity validate-roles
+.PHONY: sync-embedded-identity verify-embedded-identity validate-roles lint-cross-os
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
@@ -505,6 +505,16 @@ lint:  ## Run lint checks
 	@echo "Running goneat assess (lint)..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories lint
 	@echo "✅ Lint checks passed"
 
+# Build-tagged code is linted only for the host GOOS by default, so findings on
+# other platforms (dead platform-only code, always-failing stubs) go unseen.
+LINT_GOOS ?= linux darwin windows
+lint-cross-os:  ## Run golangci-lint for every supported GOOS
+	@set -e; for goos in $(LINT_GOOS); do \
+		echo "Running golangci-lint (GOOS=$$goos)..."; \
+		GOOS=$$goos golangci-lint run ./...; \
+	done
+	@echo "✅ Cross-OS lint passed"
+
 fmt:  ## Format code with goneat
 	@echo "Formatting with goneat..."; $(GONEAT_RESOLVE); $$GONEAT format
 	@$(MAKE) sync-embedded-identity
@@ -521,7 +531,7 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, lint, tests, licenses, multi-platform build)
+pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, lint, tests, licenses, multi-platform build)
 	@echo "✅ pr-final gate passed"
 
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors

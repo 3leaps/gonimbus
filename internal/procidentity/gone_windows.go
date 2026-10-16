@@ -41,7 +41,3 @@ func classify(expected Identity) Liveness {
 	}
 	return LiveMismatched
 }
-
-func instanceGone(expected Identity) bool {
-	return classify(expected) == Gone
-}

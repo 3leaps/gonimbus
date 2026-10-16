@@ -207,7 +207,7 @@ func captureCanonicalSQLiteArtifactBinding(path string) (canonicalSQLiteArtifact
 	if err != nil {
 		return canonicalSQLiteArtifactBinding{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var opened windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &opened); err != nil {
 		return canonicalSQLiteArtifactBinding{}, err
@@ -316,7 +316,7 @@ func attestCanonicalSQLiteWindowsNamedFile(path string, opened windows.ByHandleF
 	if err != nil {
 		return fmt.Errorf("open canonical SQLite named binding: %w", err)
 	}
-	defer named.Close()
+	defer func() { _ = named.Close() }()
 	var namedInfo windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(named.Fd()), &namedInfo); err != nil {
 		return fmt.Errorf("inspect canonical SQLite named handle: %w", err)
