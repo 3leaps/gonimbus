@@ -117,6 +117,10 @@ jobs:
         run: |
           set -euo pipefail
           make lint
+      - name: Lint every supported GOOS
+        run: |
+          set -euo pipefail
+          make lint-cross-os
       - name: Test
         run: |
           set -euo pipefail

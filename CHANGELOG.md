@@ -45,6 +45,9 @@ changes.
   `modernc.org/libc` v1.77.1, parquet-go v0.32.0, and routine updates.
 - CI container jobs use the digest-pinned goneat-tools-runner-glibc v0.5.10
   image (goneat v0.6.4); the local `GONEAT_VERSION` pin is v0.6.4.
+- `make lint-cross-os` runs golangci-lint for linux, darwin and windows, and
+  CI runs it. Removes platform-only dead code it found, including the unused
+  Linux non-pidfd signalling fallback.
 
 ### Security
 
