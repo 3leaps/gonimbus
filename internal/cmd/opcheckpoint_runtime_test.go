@@ -154,21 +154,7 @@ func TestStopResumeLeaseHeartbeatReturnsLeaseLoss(t *testing.T) {
 	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), operationIndexBuild, lease, time.Millisecond, time.Hour)
 	require.NoError(t, err)
 
-	writeLeaseForRuntimeTest(t, filepath.Join(store.RootDir(), operationIndexBuild, runID, "resume.lease.json"), opcheckpoint.Lease{
-		RunID:     runID,
-		HolderID:  "holder-b",
-		ClaimedAt: time.Now().UTC(),
-		ExpiresAt: time.Now().Add(time.Hour).UTC(),
-	})
-
-	require.Eventually(t, func() bool {
-		select {
-		case <-heartbeat.Context().Done():
-			return true
-		default:
-			return false
-		}
-	}, time.Second, time.Millisecond)
+	takeOverLeaseForRuntimeTest(t, store, runID, heartbeat)
 	require.ErrorIs(t, stopResumeLeaseHeartbeat(heartbeat), opcheckpoint.ErrLeaseHeld)
 }
 
@@ -186,16 +172,7 @@ func TestLostResumeLeaseSkipsFailedResumableIndexCheckpointWrite(t *testing.T) {
 	heartbeat, err := store.StartLeaseHeartbeat(context.Background(), operationIndexBuild, lease, time.Millisecond, time.Hour)
 	require.NoError(t, err)
 
-	writeLeaseForRuntimeTest(t, filepath.Join(store.RootDir(), operationIndexBuild, run.RunID, "resume.lease.json"), opcheckpoint.Lease{
-		RunID:     run.RunID,
-		HolderID:  "holder-b",
-		ClaimedAt: time.Now().UTC(),
-		ExpiresAt: time.Now().Add(time.Hour).UTC(),
-	})
-
-	require.Eventually(t, func() bool {
-		return heartbeat.Context().Err() != nil
-	}, time.Second, time.Millisecond)
+	takeOverLeaseForRuntimeTest(t, store, run.RunID, heartbeat)
 
 	err = stopResumeLeaseHeartbeatBeforeFailedResumableCheckpoint(heartbeat)
 	require.ErrorIs(t, err, opcheckpoint.ErrLeaseHeld)
@@ -244,9 +221,35 @@ func newRuntimeTestOperationStore(t *testing.T) *opcheckpoint.Store {
 	return store
 }
 
+// takeOverLeaseForRuntimeTest installs a competing holder's lease and waits for
+// the heartbeat to observe the loss. The lease is written outside the store's
+// reclaim lock, so a renewal that read holder-a just before can overwrite it;
+// holder-b is re-asserted until observed, as a real competing lease would persist.
+func takeOverLeaseForRuntimeTest(t *testing.T, store *opcheckpoint.Store, runID string, heartbeat *opcheckpoint.LeaseHeartbeat) {
+	t.Helper()
+	takeover := opcheckpoint.Lease{
+		RunID:     runID,
+		HolderID:  "holder-b",
+		ClaimedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	}
+	path := filepath.Join(store.RootDir(), operationIndexBuild, runID, "resume.lease.json")
+	require.Eventually(t, func() bool {
+		if heartbeat.Context().Err() != nil {
+			return true
+		}
+		writeLeaseForRuntimeTest(t, path, takeover)
+		return false
+	}, 5*time.Second, time.Millisecond)
+}
+
 func writeLeaseForRuntimeTest(t *testing.T, path string, lease opcheckpoint.Lease) {
 	t.Helper()
 	data, err := json.Marshal(lease)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
+	// Replace atomically, as the store does: a running heartbeat must never read
+	// a truncated lease file and fail with a parse error instead of a takeover.
+	tmp := path + ".test-tmp"
+	require.NoError(t, os.WriteFile(tmp, data, 0o600))
+	require.NoError(t, os.Rename(tmp, path))
 }

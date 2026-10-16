@@ -464,8 +464,9 @@ func waitHelperCompletion(t *testing.T, store *Store, rec *JobRecord) {
 			// settle window for filesystem visibility, then fail with context
 			// instead of waiting the full timeout on a stuck queued record.
 			if time.Since(deadSince) > 250*time.Millisecond && (err != nil || lastState != JobStateSuccess) {
+				stderr, _ := os.ReadFile(rec.StderrPath)
 				require.Failf(t, "helper exited without success",
-					"job_id=%s state=%q get_err=%v pid=%d", rec.JobID, lastState, lastErr, pid)
+					"job_id=%s state=%q get_err=%v pid=%d stderr=%q", rec.JobID, lastState, lastErr, pid, stderr)
 			}
 		} else {
 			sawDead = false

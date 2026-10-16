@@ -9,7 +9,9 @@ import (
 
 // isTransientRegistryIOError reports I/O failures that are often temporary under
 // concurrent open handles (especially Windows atomic job.json replace while a
-// reader holds the file with share-delete semantics).
+// reader holds the file with share-delete semantics). Handle-relative Windows
+// operations report NTSTATUS rather than Win32 errors, so those are mapped to
+// their Win32 equivalent first.
 func isTransientRegistryIOError(err error) bool {
 	if err == nil {
 		return false
@@ -19,7 +21,10 @@ func isTransientRegistryIOError(err error) bool {
 		err = pathErr.Err
 	}
 	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if mapped, ok := platformErrno(err); ok {
+		errno = mapped
+	}
+	if errno != 0 || errors.As(err, &errno) {
 		switch errno {
 		case 5, 32, 33: // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
 			return true

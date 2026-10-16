@@ -2,7 +2,9 @@ package crawler
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -33,6 +35,12 @@ type RequestBudget struct {
 	// across every Crawler sharing this budget cannot exceed it.
 	permits chan struct{}
 	limiter *rate.Limiter
+	// reserveMu serializes reading the clock with reserving against limiter.
+	// rate.Limiter.Wait reads the clock before taking its own lock, so a caller
+	// preempted in between can reserve with a stale time after a newer one. That
+	// moves the limiter's clock backwards and the next caller is credited the
+	// same interval twice, letting a shared budget exceed its rate ceiling.
+	reserveMu sync.Mutex
 }
 
 // NewRequestBudget returns a budget carrying a run-global listing-concurrency
@@ -173,8 +181,50 @@ func (l *budgetLease) retire() {
 // waitForRequest blocks until the run-global request-rate ceiling allows one
 // request to start. It returns immediately when the budget is unlimited.
 func (l *budgetLease) waitForRequest(ctx context.Context) error {
-	if l.budget.limiter == nil {
+	b := l.budget
+	if b.limiter == nil {
 		return nil
 	}
-	return l.budget.limiter.Wait(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.reserveMu.Lock()
+	now := time.Now()
+	if afterBudgetClockRead != nil {
+		afterBudgetClockRead()
+	}
+	r := b.limiter.ReserveN(now, 1)
+	if !r.OK() {
+		b.reserveMu.Unlock()
+		return fmt.Errorf("request rate limiter cannot admit a request")
+	}
+	delay := r.DelayFrom(now)
+	// Refuse a start the deadline cannot reach, as Limiter.Wait does. The
+	// rollback happens before the lock is released, so no other caller has
+	// reserved behind this one and the token is restored in full.
+	if deadline, ok := ctx.Deadline(); ok && now.Add(delay).After(deadline) {
+		r.CancelAt(now)
+		b.reserveMu.Unlock()
+		return fmt.Errorf("request rate limiter: wait of %s would exceed context deadline", delay)
+	}
+	b.reserveMu.Unlock()
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		// Return the unused reservation so other callers may proceed sooner.
+		b.reserveMu.Lock()
+		r.CancelAt(time.Now())
+		b.reserveMu.Unlock()
+		return ctx.Err()
+	}
 }
+
+// afterBudgetClockRead is a test-only seam between reading the clock and
+// reserving against the limiter. Production keeps it nil.
+var afterBudgetClockRead func()

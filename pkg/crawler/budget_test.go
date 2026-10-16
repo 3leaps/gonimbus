@@ -196,6 +196,86 @@ func TestSharedBudgetBoundsAggregateRequestRate(t *testing.T) {
 	assert.Equal(t, 20, starts, "every prefix must still be listed exactly once")
 }
 
+// TestRequestRateReservationIsOrderedWithClockRead pauses one caller between
+// reading the clock and reserving. No other caller may reserve in that gap: one
+// that did would advance the limiter past the paused caller's time, and the
+// paused caller's stale reservation would then move the limiter's clock
+// backwards so the next caller is credited the same interval twice.
+func TestRequestRateReservationIsOrderedWithClockRead(t *testing.T) {
+	lease := NewRequestBudget(2, 1000).lease()
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var hookCalls atomic.Int32
+	afterBudgetClockRead = func() {
+		if hookCalls.Add(1) == 1 {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { afterBudgetClockRead = nil })
+
+	first := make(chan error, 1)
+	go func() { first <- lease.waitForRequest(context.Background()) }()
+	<-paused
+
+	second := make(chan error, 1)
+	go func() { second <- lease.waitForRequest(context.Background()) }()
+	select {
+	case <-second:
+		t.Fatal("a second caller reserved while the first was between its clock read and its reservation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.Equal(t, int32(1), hookCalls.Load(), "the second caller read the clock before the first reserved")
+
+	close(resume)
+	require.NoError(t, <-first)
+	require.NoError(t, <-second)
+}
+
+// TestRequestRateRefusesUnreachableDeadlineWithoutDelayingOthers holds the
+// deadline admission Limiter.Wait provides. A caller whose deadline falls before
+// its turn must be refused at once and leave its token unreserved; otherwise a
+// later caller that could have met its own deadline queues behind a reservation
+// nobody will use.
+func TestRequestRateRefusesUnreachableDeadlineWithoutDelayingOthers(t *testing.T) {
+	lease := NewRequestBudget(2, 1).lease()
+	require.NoError(t, lease.waitForRequest(context.Background())) // spend the burst token
+
+	short, cancelShort := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelShort()
+	start := time.Now()
+	err := lease.waitForRequest(short)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "would exceed context deadline")
+	require.Less(t, time.Since(start), 50*time.Millisecond, "an unreachable deadline must be refused without waiting")
+
+	feasible, cancelFeasible := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancelFeasible()
+	require.NoError(t, lease.waitForRequest(feasible),
+		"a caller able to meet its deadline must not queue behind a refused reservation")
+	require.Less(t, time.Since(start), 1300*time.Millisecond)
+}
+
+// TestRequestRateCancellationReturnsReservation cancels a caller that was
+// admitted with a reachable deadline while it waits, and requires the next
+// caller to get the token back rather than wait a further interval.
+func TestRequestRateCancellationReturnsReservation(t *testing.T) {
+	lease := NewRequestBudget(2, 2).lease()
+	require.NoError(t, lease.waitForRequest(context.Background())) // spend the burst token
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- lease.waitForRequest(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+
+	start := time.Now()
+	require.NoError(t, lease.waitForRequest(context.Background()))
+	require.Less(t, time.Since(start), 700*time.Millisecond,
+		"the cancelled reservation must be returned, not leave the next caller a full extra interval")
+}
+
 // TestLeaseReservesOnePermitPerCrawler proves each crawler admitted within the
 // ceiling gets a dedicated permit, which is what keeps a crawler from being
 // starved by peers holding permits for whole paginated listings.

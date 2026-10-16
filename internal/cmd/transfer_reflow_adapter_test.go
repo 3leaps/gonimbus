@@ -1288,13 +1288,11 @@ func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSav
 
 	records2 := requireReflowRecords(t, stdout2.String())
 	terminal2 := map[string]int{}
-	failedResume := 0
 	for _, rec := range records2 {
 		if rec.Status == "in_progress" {
 			continue
 		}
 		if rec.Status == "failed" {
-			failedResume++
 			t.Fatalf("resume must not fail objects (status=failed reason=%q key=%q)", rec.Reason, rec.SourceKey)
 		}
 		switch {
@@ -1306,7 +1304,6 @@ func runTransferReflowCancelMidPoolResumeRealStore(t *testing.T, elideRawExecSav
 			t.Fatalf("unexpected resume terminal status=%q reason=%q key=%q", rec.Status, rec.Reason, rec.SourceKey)
 		}
 	}
-	require.Zero(t, failedResume, "resume failed count must be 0")
 	require.Len(t, terminal2, objectCount, "every object reaches a convergent terminal on resume")
 	for key, n := range terminal2 {
 		require.Equal(t, 1, n, "exactly one terminal for %s on resume", key)
