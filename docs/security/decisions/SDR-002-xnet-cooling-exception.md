@@ -1,7 +1,7 @@
 # SDR-002: Temporary cooling exception for golang.org/x/net v0.60.0
 
 **Date:** 2026-10-12
-**Status:** Accepted (expires 2026-10-16)
+**Status:** Closed (exception removed 2026-10-15)
 **Author:** @3leapsdave
 **Reviewer:** secrev
 
@@ -41,8 +41,10 @@ goneat assess --categories dependencies --check --fail-on high
 
 ## Action Items
 
-- [ ] Delete the `golang.org/x/net` cooling exception after 2026-10-15T17:22Z
-      (goneat `until` expires at the start of 2026-10-16)
+- [x] Delete the `golang.org/x/net` cooling exception after 2026-10-15T17:22Z
+      (goneat `until` expires at the start of 2026-10-16). Removed 2026-10-15
+      after v0.60.0 cleared the seven-day window; no later x/net release
+      superseded it under the exception.
 
 ## References
 

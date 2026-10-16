@@ -43,6 +43,8 @@ changes.
 - Refresh dependencies: AWS SDK v2 (S3 v1.114.0), Cloud Storage v1.69.0,
   `google.golang.org/api` v0.300.0, `modernc.org/sqlite` v1.60.1 with
   `modernc.org/libc` v1.77.1, parquet-go v0.32.0, and routine updates.
+- CI container jobs use the digest-pinned goneat-tools-runner-glibc v0.5.10
+  image (goneat v0.6.4); the local `GONEAT_VERSION` pin is v0.6.4.
 
 ### Security
 
