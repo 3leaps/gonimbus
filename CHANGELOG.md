@@ -55,8 +55,10 @@ changes.
   token now fails the listing with `provider.ErrIncompleteListing` instead of
   ending it early. The S3 provider refuses a truncated page with no next token
   or a token that does not advance, and scope and shard prefix discovery
-  refuse a missing or repeated token. A crawl or discovered scope plan can no
-  longer present a partial listing as complete.
+  refuse a missing or repeated token. The crawler also refuses a truncated
+  page without a token and a token that repeats within one prefix's listing,
+  for any provider, so an index build fails before sealing instead of
+  attesting a partial listing or looping on a token cycle.
 - The durable and `both` refusal for non-default `build.match.includes` names
   the alternatives: `index migrate-match-scope` for prefix-shaped includes,
   `build.scope` for a wildcard in a middle path segment, and `--format sqlite`
