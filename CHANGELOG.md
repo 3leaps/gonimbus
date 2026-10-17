@@ -49,6 +49,31 @@ changes.
   CI runs it. Removes platform-only dead code it found, including the unused
   Linux non-pidfd signalling fallback.
 
+### Fixed
+
+- A listing page that reports more results without a usable continuation
+  token now fails the listing with `provider.ErrIncompleteListing` instead of
+  ending it early. The S3 provider refuses a truncated page with no next token
+  or a token that does not advance, and scope and shard prefix discovery
+  refuse a missing or repeated token. A crawl or discovered scope plan can no
+  longer present a partial listing as complete.
+- The durable and `both` refusal for non-default `build.match.includes` names
+  the alternatives: `index migrate-match-scope` for prefix-shaped includes,
+  `build.scope` for a wildcard in a middle path segment, and `--format sqlite`
+  otherwise.
+
+### Known limits (stated, not claimed)
+
+- Durable builds accept only the default match include. A wildcard in a middle
+  path segment followed by a date-shaped tail can be expressed as a
+  `date_partitions` scope; see the durable index guide. Other non-prefix
+  patterns, excludes and filters require `--format sqlite`.
+- A discovered scope plan is compiled at build time and not compared with the
+  parent run. If discovery stops returning a partition, rows under it are
+  retained, not tombstoned, but they stay active without a fresh observation
+  and the published coverage no longer lists their prefix. The receipt does
+  not yet record the compiled plan.
+
 ### Security
 
 - The tag-triggered release workflow is read-only. It verifies the signed tag
