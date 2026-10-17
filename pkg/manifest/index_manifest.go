@@ -130,7 +130,7 @@ type IndexScopeConfig struct {
 	Discover *IndexScopeDiscoverConfig `json:"discover,omitempty" yaml:"discover,omitempty"`
 	Date     *IndexScopeDateConfig     `json:"date,omitempty" yaml:"date,omitempty"`
 
-	// segments (reserved)
+	// segments (reserved; proposed design in docs/architecture/adr/ADR-0009)
 	Constraints []IndexScopeSegmentConstraint `json:"constraints,omitempty" yaml:"constraints,omitempty"`
 	DepthMode   string                        `json:"depth_mode,omitempty" yaml:"depth_mode,omitempty"`
 }
