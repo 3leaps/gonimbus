@@ -259,3 +259,37 @@ func TestDiscover_ContextCancellation(t *testing.T) {
 	// Either way, the function should not panic
 	_ = out
 }
+
+type pagedLister struct {
+	pages []*provider.ListCommonPrefixesResult
+	calls int
+}
+
+func (p *pagedLister) ListCommonPrefixes(_ context.Context, _ provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	if p.calls >= len(p.pages) {
+		return nil, errors.New("unexpected extra page request")
+	}
+	page := p.pages[p.calls]
+	p.calls++
+	return page, nil
+}
+
+func TestListAllPrefixesRefusesIncompletePagination(t *testing.T) {
+	got, err := listAllPrefixes(context.Background(), &pagedLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true, ContinuationToken: "t1"},
+		{Prefixes: []string{"r/b/"}},
+	}}, "r/", "/")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"r/a/", "r/b/"}, got)
+
+	_, err = listAllPrefixes(context.Background(), &pagedLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true},
+	}}, "r/", "/")
+	require.ErrorIs(t, err, provider.ErrIncompleteListing, "truncated without token")
+
+	_, err = listAllPrefixes(context.Background(), &pagedLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true, ContinuationToken: "t1"},
+		{Prefixes: []string{"r/b/"}, IsTruncated: true, ContinuationToken: "t1"},
+	}}, "r/", "/")
+	require.ErrorIs(t, err, provider.ErrIncompleteListing, "token cycle")
+}
