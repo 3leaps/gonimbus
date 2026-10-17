@@ -1520,3 +1520,22 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildAfterIdentityGuard = nil
 	}
 }
+
+func TestValidateIndexBuildDurableFullBaseMatchNamesIncludeRemedies(t *testing.T) {
+	for _, includes := range [][]string{
+		{"tables/orders/**"},
+		{"dim=*/year=2026/month=09/**"},
+		{"**/*.parquet"},
+	} {
+		m := &manifest.IndexManifest{Build: &manifest.IndexBuildConfig{Match: &manifest.IndexMatchConfig{Includes: includes}}}
+		err := validateIndexBuildDurableFullBaseMatch(m, "--format durable")
+		require.ErrorContains(t, err, `--format durable supports only default build.match.includes "**" in this slice`, includes)
+		require.ErrorContains(t, err, "gonimbus index migrate-match-scope", includes)
+		require.ErrorContains(t, err, "date_partitions with discover glob_allow", includes)
+		require.ErrorContains(t, err, "--format sqlite", includes)
+	}
+	for _, includes := range [][]string{nil, {"**"}} {
+		m := &manifest.IndexManifest{Build: &manifest.IndexBuildConfig{Match: &manifest.IndexMatchConfig{Includes: includes}}}
+		require.NoError(t, validateIndexBuildDurableFullBaseMatch(m, "--format durable"), includes)
+	}
+}

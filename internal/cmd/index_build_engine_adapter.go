@@ -347,10 +347,17 @@ func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName 
 		return fmt.Errorf("%s does not support build.match.include_hidden=true in this slice", flagName)
 	}
 	if !isDefaultIndexBuildIncludes(matchCfg.Includes) {
-		return fmt.Errorf("%s supports only default build.match.includes %q in this slice", flagName, manifest.DefaultIndexIncludes)
+		return fmt.Errorf("%s supports only default build.match.includes %q in this slice; %s", flagName, manifest.DefaultIndexIncludes, durableIncludeRemedies)
 	}
 	return nil
 }
+
+// durableIncludeRemedies names the operator paths around the faithful-coverage
+// include gate. Each is an explicit step; none relaxes the gate.
+const durableIncludeRemedies = "for prefix-shaped includes run `gonimbus index migrate-match-scope`; " +
+	"for a wildcard in a middle path segment express the listing as build.scope " +
+	"(prefix_list, or date_partitions with discover glob_allow); " +
+	"otherwise use --format sqlite"
 
 func isDefaultIndexBuildIncludes(includes []string) bool {
 	if len(includes) == 0 {
