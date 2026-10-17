@@ -49,15 +49,19 @@ snapshot() {
         die "could not read run $run_id"
     [[ "$latest" == "$run_attempt" ]] ||
         die "run $run_id has a later attempt ($latest); artifacts belong to the latest attempt, name it"
-    listing="$(gh api "repos/3leaps/gonimbus/actions/runs/$run_id/artifacts")" ||
+    listing="$(gh api "repos/3leaps/gonimbus/actions/runs/$run_id/artifacts?per_page=100")" ||
         die "could not list artifacts for run $run_id"
+    # The listing is paginated; judge "exactly one" only over a complete page.
+    jq -e '(.total_count | type) == "number" and .total_count == (.artifacts | length)' <<< "$listing" > /dev/null ||
+        die "artifact listing for run $run_id is incomplete (more artifacts than one page)"
     listing="$(jq --arg n "$artifact_name" '[.artifacts[] | select(.name == $n and .expired == false)]' <<< "$listing")"
     jq -e --arg c "$commit" --argjson r "$run_id" \
         'length == 1 and (.[0].workflow_run.id == $r) and (.[0].workflow_run.head_sha == $c)' <<< "$listing" > /dev/null ||
         die "run $run_id does not hold exactly one unexpired $artifact_name for $commit"
     jq -r '.[0] | "\(.id) \(.digest // "")"' <<< "$listing"
 }
-read -r artifact_id artifact_digest <<< "$(snapshot)"
+before="$(snapshot)" || exit 1
+read -r artifact_id artifact_digest <<< "$before"
 [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]] || die 'artifact id is malformed'
 [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "artifact $artifact_id has no sha256 digest"
 work="$(mktemp -d)"
@@ -66,19 +70,43 @@ gh api "repos/3leaps/gonimbus/actions/artifacts/$artifact_id/zip" > "$work/artif
     die "could not download artifact $artifact_id"
 actual="sha256:$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$work/artifact.zip")"
 [[ "$actual" == "$artifact_digest" ]] || die "artifact $artifact_id bytes do not match its recorded digest"
-read -r after_id after_digest <<< "$(snapshot)"
+after="$(snapshot)" || exit 1
+read -r after_id after_digest <<< "$after"
 [[ "$after_id" == "$artifact_id" && "$after_digest" == "$artifact_digest" ]] ||
     die "run $run_id changed during download (artifact $artifact_id -> $after_id); restage"
-python3 -I - "$work/artifact.zip" "$dest" << 'PY'
-import pathlib, sys, zipfile
-dest = pathlib.Path(sys.argv[2])
+# Extract into private scratch first and move into dest only after every entry
+# passes, so a refusal leaves dest empty. Exclusive creates refuse duplicate and
+# case-folded names on case-insensitive filesystems.
+mkdir "$work/extract"
+python3 -I - "$work/artifact.zip" "$work/extract" << 'PY'
+import os, re, stat, sys, zipfile
+out = sys.argv[2]
+name_ok = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
+seen = set()
 with zipfile.ZipFile(sys.argv[1]) as z:
-    for info in z.infolist():
+    entries = z.infolist()
+    if not entries:
+        raise SystemExit('error: artifact is empty')
+    for info in entries:
         name = info.filename
-        if info.is_dir() or '/' in name or '\\' in name or name.startswith('.') or name in ('', '..'):
+        kind = stat.S_IFMT(info.external_attr >> 16)
+        if not name_ok.match(name) or info.is_dir():
             raise SystemExit(f'error: unexpected entry in artifact: {name!r}')
-        (dest / name).write_bytes(z.read(info))
+        if kind not in (0, stat.S_IFREG):
+            raise SystemExit(f'error: artifact entry is not a regular file: {name!r}')
+        if name in seen:
+            raise SystemExit(f'error: duplicate entry in artifact: {name!r}')
+        seen.add(name)
+        try:
+            with open(os.path.join(out, name), 'xb') as f:
+                f.write(z.read(info))
+        except FileExistsError:
+            raise SystemExit(f'error: artifact entry collides with another entry: {name!r}')
 PY
+for f in "$work/extract"/*; do
+    [[ ! -e "$dest/${f##*/}" ]] || die "$dest gained ${f##*/} during download; restage"
+    mv "$f" "$dest/" || die "could not move ${f##*/} into $dest"
+done
 # The anchor lives outside the staged directory so it is never uploaded.
 printf 'tag=%s\nobject=%s\ncommit=%s\nrun=%s\nattempt=%s\nartifact=%s\ndigest=%s\n' \
     "$tag" "$object" "$commit" "$run_id" "$run_attempt" "$artifact_id" "$artifact_digest" > "$dest.anchor"

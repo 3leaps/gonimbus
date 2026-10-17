@@ -30,7 +30,7 @@ chmod +x "$repo/scripts/release-verify-published-tag.sh"
 # Throwaway signing keys and the committed pins they correspond to.
 home="$scratch/gpg"
 gpg --homedir "$home" --batch --quiet --pinentry-mode loopback --passphrase '' \
-    --quick-generate-key 'Synthetic signing <signing@example.invalid>' ed25519 cert 1d > /dev/null 2>&1
+    --quick-generate-key 'Synthetic signing <signing@example.invalid>' ed25519 cert,sign 1d > /dev/null 2>&1
 primary="$(gpg --homedir "$home" --batch --with-colons --fingerprint --list-keys | awk -F: '$1=="fpr" {print $10;exit}')"
 gpg --homedir "$home" --batch --quiet --pinentry-mode loopback --passphrase '' --quick-add-key "$primary" ed25519 sign 1d > /dev/null 2>&1
 subkey="$(gpg --homedir "$home" --batch --with-colons --with-subkey-fingerprint --list-keys | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
@@ -155,6 +155,12 @@ gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --local-u
     --armor --detach-sign --yes --output "$d/SHA512SUMS.asc" "$d/SHA512SUMS" 2> /dev/null
 cp "$d/SHA512SUMS.asc" "$scratch/draft/"
 refuse 'not a good signature by the pinned signing subkey'
+# A signature made by the anchored primary itself, not its signing subkey.
+stage
+gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --local-user "$primary!" \
+    --armor --detach-sign --yes --output "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2> /dev/null
+cp "$d/SHA256SUMS.asc" "$scratch/draft/"
+refuse 'not a good signature by the pinned signing subkey'
 stage
 printf 'swapped on the server\n' > "$scratch/draft/gonimbus-darwin-arm64"
 refuse 'draft asset differs from the verified local file'
@@ -162,7 +168,7 @@ refuse 'draft asset differs from the verified local file'
 # Trust comes from the pins in the anchored tag commit, never the working tree.
 # A second key set B stands in for an attacker's or a later rotation's keys.
 gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' \
-    --quick-generate-key 'Rotated signing <rotated@example.invalid>' ed25519 cert 1d > /dev/null 2>&1
+    --quick-generate-key 'Rotated signing <rotated@example.invalid>' ed25519 cert,sign 1d > /dev/null 2>&1
 rot_primary="$(gpg --homedir "$home" --batch --with-colons --fingerprint --list-keys rotated@example.invalid | awk -F: '$1=="fpr" {print $10;exit}')"
 gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --quick-add-key "$rot_primary" ed25519 sign 1d > /dev/null 2>&1
 rot_subkey="$(gpg --homedir "$home" --batch --with-colons --with-subkey-fingerprint --list-keys rotated@example.invalid | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"

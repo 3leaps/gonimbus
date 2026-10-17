@@ -53,7 +53,7 @@ case "$1 $2" in
     done
     case "$path" in
     */attempts/*) body="${FIXTURE_ATTEMPT:-}" ;;
-    */runs/*/artifacts)
+    */runs/*/artifacts\?per_page=100)
         # Listing calls are counted so a test can change the answer between the
         # before- and after-download snapshots (a re-run landing mid-download).
         n="$(($(cat "$FIXTURE_DIR/listings" 2> /dev/null || echo 0) + 1))"
@@ -62,7 +62,8 @@ case "$1 $2" in
         [[ "$n" -ge 2 && -n "${FIXTURE_ARTIFACT_ID_AFTER:-}" ]] && id="$FIXTURE_ARTIFACT_ID_AFTER"
         digest="${FIXTURE_DIGEST:-sha256:$(shasum -a 256 "$FIXTURE_DIR/artifact.zip" 2> /dev/null | awk '{print $1}')}"
         body="$(jq -n --argjson id "$id" --arg d "$digest" --arg c "${FIXTURE_ARTIFACT_SHA:-$FIXTURE_COMMIT}" \
-            '{artifacts: [{id: $id, name: "release-artifacts-v1.2.3", expired: false, digest: $d,
+            --argjson total "$([[ "$n" -ge 2 && -n "${FIXTURE_TOTAL_COUNT_AFTER:-}" ]] && echo "$FIXTURE_TOTAL_COUNT_AFTER" || echo "${FIXTURE_TOTAL_COUNT:-1}")" \
+            '{total_count: $total, artifacts: [{id: $id, name: "release-artifacts-v1.2.3", expired: false, digest: $d,
               workflow_run: {id: 11, head_sha: $c}}]}')"
         ;;
     */artifacts/*/zip)
@@ -181,6 +182,54 @@ reset_listings
 FIXTURE_ATTEMPT="$good" FIXTURE_ARTIFACT_SHA="$(printf '%040d' 0)" fail 'does not hold exactly one unexpired' \
     ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/othersha"
 [[ ! -e "$scratch/othersha.anchor" ]]
+# A listing whose total_count exceeds the returned page refuses: "exactly
+# one" is only judged over a complete listing.
+reset_listings
+FIXTURE_ATTEMPT="$good" FIXTURE_TOTAL_COUNT=31 fail 'artifact listing for run 11 is incomplete' \
+    ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/paged"
+[[ ! -e "$scratch/paged.anchor" ]]
+# A snapshot failure surfaces its own error, not a later id/digest check.
+for when in first after; do
+    reset_listings
+    if [[ "$when" == first ]]; then
+        FIXTURE_ATTEMPT="$good" FIXTURE_TOTAL_COUNT=2 fail 'is incomplete' \
+            ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/snap-$when"
+    else
+        FIXTURE_ATTEMPT="$good" FIXTURE_TOTAL_COUNT_AFTER=2 fail 'is incomplete' \
+            ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/snap-$when"
+    fi
+    if grep -q -e 'artifact id is malformed' -e 'changed during download' "$scratch/out"; then
+        echo "error: $when snapshot failure was swallowed" >&2
+        exit 1
+    fi
+    [[ ! -e "$scratch/snap-$when.anchor" ]]
+done
+# Zip layout controls: each refuses, leaves dest empty, and writes no anchor.
+good_zip="$scratch/good.zip"
+cp "$FIXTURE_DIR/artifact.zip" "$good_zip"
+zip_case() { # reason python-zip-builder
+    local reason="$1" builder="$2" out="$scratch/z$RANDOM"
+    python3 -I -c "import stat,sys,zipfile
+z=zipfile.ZipFile(sys.argv[1],'w')
+$builder
+z.close()" "$FIXTURE_DIR/artifact.zip"
+    reset_listings
+    FIXTURE_ATTEMPT="$good" fail "$reason" ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$out"
+    [[ -z "$(find "$out" -mindepth 1 2> /dev/null)" ]] || {
+        echo "error: partial files left in dest after: $reason" >&2
+        ls -la "$out" >&2
+        exit 1
+    }
+    [[ ! -e "$out.anchor" ]]
+}
+zip_case 'artifact is empty' 'pass'
+zip_case 'duplicate entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("gonimbus-linux-amd64","b\n")'
+zip_case 'collides with another entry' 'z.writestr("SHA256SUMS","a\n"); z.writestr("sha256sums","b\n")' 
+zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("../evil","b\n")'
+zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr(".hidden","b\n")'
+zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("sub/file","b\n")'
+zip_case 'not a regular file' 'i=zipfile.ZipInfo("gonimbus-linux-amd64"); i.external_attr=(stat.S_IFLNK|0o777)<<16; z.writestr(i,"/etc/passwd")'
+cp "$good_zip" "$FIXTURE_DIR/artifact.zip"
 
 # Draft. Packages are staged against the anchor that fetch recorded.
 stage() {

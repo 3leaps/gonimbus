@@ -28,16 +28,34 @@ for want in SHA256SUMS SHA512SUMS SHA256SUMS.minisig SHA512SUMS.minisig \
     [[ -f "$dir/$want" && ! -L "$dir/$want" && -s "$dir/$want" ]] || die "missing release file: $want"
 done
 
+# The staged minisign key must be exactly a comment line plus a key line, and
+# the key line must hash to the minisign anchor. Verification then uses a key
+# file rebuilt from that line, never the staged file as given.
+pin_minisign="$(awk '$1=="minisign" {print $2}' "$root/keys/expected-fingerprints.txt")"
+[[ "$pin_minisign" =~ ^[0-9a-f]{64}$ ]] || die 'minisign anchor missing from keys/expected-fingerprints.txt'
+minisign_comment="$(sed -n 1p "$minisign_pub")"
+minisign_key="$(sed -n 2p "$minisign_pub")"
+[[ "$minisign_comment" == "untrusted comment: "* && "$minisign_key" =~ ^[A-Za-z0-9+/]+=*$ ]] ||
+    die 'staged minisign key is malformed'
+cmp -s "$minisign_pub" <(printf '%s\n%s\n' "$minisign_comment" "$minisign_key") ||
+    die 'staged minisign key must be exactly a comment line and a key line'
+staged_minisign="$(printf '%s' "$minisign_key" | base64 -d | shasum -a 256 | awk '{print $1}')"
+[[ "$staged_minisign" == "$pin_minisign" ]] || die 'staged minisign key does not match the minisign anchor'
+scratch_keys="$(mktemp -d)"
+keyring=""
+trap 'rm -rf "$scratch_keys"' EXIT
+minisign_rebuilt="$scratch_keys/minisign.pub"
+printf '%s\n%s\n' "$minisign_comment" "$minisign_key" > "$minisign_rebuilt"
 for manifest in SHA256SUMS SHA512SUMS; do
-    minisign -V -q -p "$minisign_pub" -m "$dir/$manifest" -x "$dir/$manifest.minisig" ||
+    minisign -V -q -p "$minisign_rebuilt" -m "$dir/$manifest" -x "$dir/$manifest.minisig" ||
         die "minisign verification failed for $manifest"
 done
-echo "[ok] minisign signatures verified (SHA256SUMS, SHA512SUMS)"
+echo "[ok] minisign signatures verified by the anchored key (SHA256SUMS, SHA512SUMS)"
 
 primary="$(awk '$1=="gpg" {print $2}' "$root/keys/expected-fingerprints.txt")"
 [[ "$primary" =~ ^[0-9A-F]{40}$ ]] || die 'primary anchor missing from keys/expected-fingerprints.txt'
 keyring="$(mktemp -d)"
-trap 'gpgconf --homedir "$keyring" --kill all > /dev/null 2>&1 || true; rm -rf "$keyring"' EXIT
+trap 'gpgconf --homedir "$keyring" --kill all > /dev/null 2>&1 || true; rm -rf "$keyring" "$scratch_keys"' EXIT
 chmod 700 "$keyring"
 GNUPGHOME="$keyring" gpg --batch --quiet --import "$pgp_pub" || die 'exported PGP public key failed to import'
 listing="$(GNUPGHOME="$keyring" gpg --batch --with-colons --with-subkey-fingerprint --list-keys)"

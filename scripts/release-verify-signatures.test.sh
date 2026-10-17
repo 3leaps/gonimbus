@@ -18,31 +18,42 @@ cleanup() {
 trap cleanup EXIT
 unset RELEASE_TAG
 
-# A key with one signing subkey, exported public-only.
+# A key with one signing subkey, exported public-only. The primary can also
+# sign, like the real release key, so a primary-made signature is testable.
 new_key() {
     local home="$scratch/gpg-$1"
     mkdir -m 700 "$home"
     gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' \
-        --quick-generate-key "Synthetic $1 <$1@example.invalid>" ed25519 cert 1d > /dev/null 2>&1
+        --quick-generate-key "Synthetic $1 <$1@example.invalid>" ed25519 cert,sign 1d > /dev/null 2>&1
     local fpr
     fpr="$(gpg --homedir "$home" --batch --with-colons --fingerprint --list-keys | awk -F: '$1=="fpr" {print $10;exit}')"
     gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --quick-add-key "$fpr" ed25519 sign 1d > /dev/null 2>&1
     printf '%s\n' "$fpr"
 }
+subkey_of() {
+    gpg --homedir "$scratch/gpg-$1" --batch --with-colons --with-subkey-fingerprint --list-keys |
+        awk -F: '$1=="sub" {s=1; next} s && $1=="fpr" {print $10; exit}'
+}
 primary="$(new_key good)"
 other="$(new_key other)"
+good_sub="$(subkey_of good)"
+other_sub="$(subkey_of other)"
 
 # The repository copy supplies the script and the primary anchor only.
 repo="$scratch/repo"
 mkdir -p "$repo/scripts" "$repo/keys"
 cp "$root/scripts/release-verify-signatures.sh" "$repo/scripts/"
-printf 'gpg %s\nminisign %064d\n' "$primary" 0 > "$repo/keys/expected-fingerprints.txt"
-
 minisign -G -W -p "$scratch/minisign.pub" -s "$scratch/minisign.key" > /dev/null
 minisign -G -W -p "$scratch/other-minisign.pub" -s "$scratch/other-minisign.key" > /dev/null
+minisign_pin="$(sed -n 2p "$scratch/minisign.pub" | base64 -d | shasum -a 256 | awk '{print $1}')"
+printf 'gpg %s\nminisign %s\n' "$primary" "$minisign_pin" > "$repo/keys/expected-fingerprints.txt"
 
 stage() {
     local dir="$1" pgp_home="${2:-$scratch/gpg-good}" msk="${3:-$scratch/minisign.key}"
+    local signer="${4:-}" mpub="${5:-$scratch/minisign.pub}"
+    if [[ -z "$signer" ]]; then
+        if [[ "$pgp_home" == "$scratch/gpg-other" ]]; then signer="$other_sub!"; else signer="$good_sub!"; fi
+    fi
     rm -rf "$dir"
     mkdir -p "$dir"
     printf 'binary\n' > "$dir/gonimbus-linux-amd64"
@@ -50,20 +61,20 @@ stage() {
     for m in SHA256SUMS SHA512SUMS; do
         minisign -S -s "$msk" -m "$dir/$m" -x "$dir/$m.minisig" > /dev/null < /dev/null
         gpg --homedir "$pgp_home" --batch --yes --pinentry-mode loopback --passphrase '' \
-            --armor --detach-sign --output "$dir/$m.asc" "$dir/$m" > /dev/null 2>&1
+            --local-user "$signer" --armor --detach-sign --output "$dir/$m.asc" "$dir/$m" > /dev/null 2>&1
     done
-    cp "$scratch/minisign.pub" "$dir/gonimbus-minisign.pub"
+    cp "$mpub" "$dir/gonimbus-minisign.pub"
     gpg --homedir "$scratch/gpg-good" --batch --armor --export "$primary" > "$dir/gonimbus-release-signing-key.asc"
 }
 verify() { (cd "$repo" && ./scripts/release-verify-signatures.sh "$@"); }
 refuse() {
-    local reason="$1" dir="$2"
+    local reason="$1" dir="$2" expect="${3:-error:}"
     if verify "$dir" > "$scratch/out" 2>&1; then
         echo "error: accepted: $reason" >&2
         exit 1
     fi
-    grep -q 'error:' "$scratch/out" || {
-        echo "error: no named refusal for: $reason" >&2
+    grep -qF -- "$expect" "$scratch/out" || {
+        echo "error: no named refusal for: $reason (want: $expect)" >&2
         cat "$scratch/out" >&2
         exit 1
     }
@@ -103,6 +114,29 @@ refuse 'PGP key export swapped to the signing key' "$d"
 # minisign signatures by a different key refuse.
 stage "$d" "$scratch/gpg-good" "$scratch/other-minisign.key"
 refuse 'minisign signed by a different key' "$d"
+# A set re-signed by another minisign key with that key staged beside it
+# refuses: the staged key must hash to the anchor.
+stage "$d" "$scratch/gpg-good" "$scratch/other-minisign.key" '' "$scratch/other-minisign.pub"
+refuse 'minisign key swapped to the signing key' "$d" 'does not match the minisign anchor'
+# A staged minisign key with trailing junk, a missing final newline, or an
+# extra line refuses even though its key line is the anchored one.
+for shape in junk nonl extra; do
+    stage "$d"
+    case "$shape" in
+    junk) printf 'junk' >> "$d/gonimbus-minisign.pub" ;;
+    nonl) printf '%s\n%s' "$(sed -n 1p "$scratch/minisign.pub")" "$(sed -n 2p "$scratch/minisign.pub")" > "$d/gonimbus-minisign.pub" ;;
+    extra) printf 'extra\n' >> "$d/gonimbus-minisign.pub" ;;
+    esac
+    refuse "minisign key file shape: $shape" "$d" 'exactly a comment line and a key line'
+done
+# A first line that is not an untrusted comment refuses.
+stage "$d"
+printf 'not a comment\n%s\n' "$(sed -n 2p "$scratch/minisign.pub")" > "$d/gonimbus-minisign.pub"
+refuse 'minisign key without a comment line' "$d" 'staged minisign key is malformed'
+# A PGP signature made by the anchored primary itself, not its signing subkey,
+# refuses.
+stage "$d" "$scratch/gpg-good" "$scratch/minisign.key" "$primary!"
+refuse 'PGP signed by the primary, not the pinned subkey' "$d" 'is not a good signature by the pinned subkey'
 
 # The Make target fails closed and resolves paths the same way, relative or absolute.
 mk="$scratch/mk"
