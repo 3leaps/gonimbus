@@ -13,6 +13,7 @@ package crawler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -411,6 +412,10 @@ func (c *Crawler) runListers(ctx context.Context, prefixes []string, out chan<- 
 // listPrefix lists all objects with the given prefix and sends them to the channel.
 func (c *Crawler) listPrefix(ctx context.Context, prefix string, out chan<- objectItem) error {
 	var continuationToken string
+	// Tokens seen during this prefix's listing. A truncated page must advance
+	// to a token not yet seen; a missing or recurring token would otherwise end
+	// the listing early (and be attested complete) or loop without end.
+	seenTokens := map[string]struct{}{}
 
 	for {
 		// Check for cancellation
@@ -464,9 +469,16 @@ func (c *Crawler) listPrefix(ctx context.Context, prefix string, out chan<- obje
 		}
 
 		// Check for more pages
-		if !result.IsTruncated || result.ContinuationToken == "" {
+		if !result.IsTruncated {
 			break
 		}
+		if result.ContinuationToken == "" {
+			return fmt.Errorf("list %q: %w: truncated page has no continuation token", prefix, provider.ErrIncompleteListing)
+		}
+		if _, repeated := seenTokens[result.ContinuationToken]; repeated {
+			return fmt.Errorf("list %q: %w: continuation token repeated", prefix, provider.ErrIncompleteListing)
+		}
+		seenTokens[result.ContinuationToken] = struct{}{}
 		continuationToken = result.ContinuationToken
 	}
 
