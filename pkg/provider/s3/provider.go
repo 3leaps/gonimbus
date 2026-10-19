@@ -175,6 +175,9 @@ func (p *Provider) List(ctx context.Context, opts provider.ListOptions) (*provid
 	if err != nil {
 		return nil, p.wrapError("List", "", err)
 	}
+	if err := p.checkListContinuation("List", opts.ContinuationToken, output); err != nil {
+		return nil, err
+	}
 
 	objects := make([]provider.ObjectSummary, 0, len(output.Contents))
 	for _, obj := range output.Contents {
@@ -219,6 +222,9 @@ func (p *Provider) ListWithDelimiter(ctx context.Context, opts provider.ListWith
 	out, err := p.client.ListObjectsV2(ctx, input)
 	if err != nil {
 		return nil, p.wrapError("ListWithDelimiter", "", err)
+	}
+	if err := p.checkListContinuation("ListWithDelimiter", opts.ContinuationToken, out); err != nil {
+		return nil, err
 	}
 
 	objects := make([]provider.ObjectSummary, 0, len(out.Contents))
@@ -268,6 +274,9 @@ func (p *Provider) ListCommonPrefixes(ctx context.Context, opts provider.ListCom
 	out, err := p.client.ListObjectsV2(ctx, input)
 	if err != nil {
 		return nil, p.wrapError("ListCommonPrefixes", "", err)
+	}
+	if err := p.checkListContinuation("ListCommonPrefixes", opts.ContinuationToken, out); err != nil {
+		return nil, err
 	}
 
 	prefixes := make([]string, 0, len(out.CommonPrefixes))
@@ -655,6 +664,32 @@ func (p *Provider) guardWrite(op, key string) error {
 		Bucket:   p.bucket,
 		Key:      key,
 		Err:      errors.Join(provider.ErrAccessDenied, provider.ErrAnonymousReadOnly),
+	}
+}
+
+// checkListContinuation refuses a ListObjectsV2 page that reports truncation
+// without a usable next token. Callers stop paging when the token is empty, so
+// passing such a page through would end the listing early and present a
+// partial result as complete.
+func (p *Provider) checkListContinuation(op, requestToken string, out *s3.ListObjectsV2Output) error {
+	if !aws.ToBool(out.IsTruncated) {
+		return nil
+	}
+	next := aws.ToString(out.NextContinuationToken)
+	var detail error
+	switch next {
+	case "":
+		detail = errors.New("truncated page has no continuation token")
+	case requestToken:
+		detail = errors.New("continuation token did not advance")
+	default:
+		return nil
+	}
+	return &provider.ProviderError{
+		Op:       op,
+		Provider: provider.ProviderS3,
+		Bucket:   p.bucket,
+		Err:      errors.Join(provider.ErrIncompleteListing, detail),
 	}
 }
 

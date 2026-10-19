@@ -45,6 +45,12 @@ var (
 	// ErrPreconditionFailed, which means the provider supports the predicate but
 	// the predicate evaluated false.
 	ErrUnsupportedPrecondition = errors.New("unsupported write precondition")
+
+	// ErrIncompleteListing indicates a listing page reported more results but
+	// gave no way to fetch them (truncated without a continuation token, or a
+	// token that repeats). Callers must treat the listing as failed, never as
+	// complete: a crawl plan that stops here would attest unobserved keys.
+	ErrIncompleteListing = errors.New("incomplete listing")
 )
 
 // ProviderError wraps provider-specific errors with context.

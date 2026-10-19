@@ -135,15 +135,25 @@ func expandLevel(ctx context.Context, lister provider.PrefixLister, prefixes []s
 func listAllPrefixes(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string) ([]string, error) {
 	var token string
 	var out []string
+	seen := map[string]struct{}{}
 	for {
 		res, err := lister.ListCommonPrefixes(ctx, provider.ListCommonPrefixesOptions{Prefix: prefix, Delimiter: delimiter, ContinuationToken: token})
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, res.Prefixes...)
-		if !res.IsTruncated || res.ContinuationToken == "" {
+		if !res.IsTruncated {
 			return out, nil
 		}
+		// A truncated page must advance to a fresh token; anything else would
+		// end discovery early and drop partitions from the plan unannounced.
+		if res.ContinuationToken == "" {
+			return nil, fmt.Errorf("list prefixes under %q: %w: truncated page has no continuation token", prefix, provider.ErrIncompleteListing)
+		}
+		if _, repeated := seen[res.ContinuationToken]; repeated {
+			return nil, fmt.Errorf("list prefixes under %q: %w: continuation token repeated", prefix, provider.ErrIncompleteListing)
+		}
+		seen[res.ContinuationToken] = struct{}{}
 		token = res.ContinuationToken
 	}
 }

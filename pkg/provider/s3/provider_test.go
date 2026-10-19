@@ -1446,3 +1446,70 @@ func BenchmarkCleanETag(b *testing.B) {
 		cleanETag(etag)
 	}
 }
+
+func newTruncatedListServer(t *testing.T, nextToken string) *httptest.Server {
+	t.Helper()
+	tokenXML := ""
+	if nextToken != "" {
+		tokenXML = "<NextContinuationToken>" + nextToken + "</NextContinuationToken>"
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test-bucket</Name><IsTruncated>true</IsTruncated>` + tokenXML + `<CommonPrefixes><Prefix>p/a/</Prefix></CommonPrefixes><Contents><Key>p/k</Key><Size>1</Size></Contents></ListBucketResult>`))
+	}))
+}
+
+func newTestListProvider(t *testing.T, endpoint string) *Provider {
+	t.Helper()
+	p, err := New(context.Background(), Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        endpoint,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKIATEST0000000001",
+		SecretAccessKey: "test-secret",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
+func TestListRefusesTruncatedPageWithoutUsableToken(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name         string
+		serverToken  string
+		requestToken string
+	}{
+		{name: "no continuation token", serverToken: ""},
+		{name: "no continuation token on a later page", serverToken: "", requestToken: "prev"},
+		{name: "token did not advance", serverToken: "same", requestToken: "same"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTruncatedListServer(t, tc.serverToken)
+			defer server.Close()
+			p := newTestListProvider(t, server.URL)
+
+			_, err := p.List(ctx, provider.ListOptions{Prefix: "p/", ContinuationToken: tc.requestToken})
+			require.ErrorIs(t, err, provider.ErrIncompleteListing)
+			assert.False(t, provider.IsProviderUnavailable(err), "must not be downgraded to a partial-run error")
+
+			_, err = p.ListWithDelimiter(ctx, provider.ListWithDelimiterOptions{Prefix: "p/", Delimiter: "/", ContinuationToken: tc.requestToken})
+			require.ErrorIs(t, err, provider.ErrIncompleteListing)
+
+			_, err = p.ListCommonPrefixes(ctx, provider.ListCommonPrefixesOptions{Prefix: "p/", Delimiter: "/", ContinuationToken: tc.requestToken})
+			require.ErrorIs(t, err, provider.ErrIncompleteListing)
+		})
+	}
+}
+
+func TestListAcceptsTruncatedPageWithAdvancingToken(t *testing.T) {
+	server := newTruncatedListServer(t, "next")
+	defer server.Close()
+	p := newTestListProvider(t, server.URL)
+
+	res, err := p.List(context.Background(), provider.ListOptions{Prefix: "p/", ContinuationToken: "prev"})
+	require.NoError(t, err)
+	assert.True(t, res.IsTruncated)
+	assert.Equal(t, "next", res.ContinuationToken)
+}

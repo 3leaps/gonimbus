@@ -116,3 +116,79 @@ func TestCompileDatePartitionsRequiresLister(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "requires provider prefix listing")
 }
+
+type pagedPrefixLister struct {
+	pages []*provider.ListCommonPrefixesResult
+	calls int
+}
+
+func (p *pagedPrefixLister) ListCommonPrefixes(ctx context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	if p.calls >= len(p.pages) {
+		return nil, errors.New("unexpected extra page request")
+	}
+	page := p.pages[p.calls]
+	p.calls++
+	return page, nil
+}
+
+type failingAfterLister struct {
+	first *provider.ListCommonPrefixesResult
+	err   error
+	calls int
+}
+
+func (f *failingAfterLister) ListCommonPrefixes(ctx context.Context, opts provider.ListCommonPrefixesOptions) (*provider.ListCommonPrefixesResult, error) {
+	f.calls++
+	if f.calls == 1 {
+		return f.first, nil
+	}
+	return nil, f.err
+}
+
+func TestListAllPrefixesPagination(t *testing.T) {
+	got, err := listAllPrefixes(context.Background(), &pagedPrefixLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true, ContinuationToken: "t1"},
+		{Prefixes: []string{"r/b/"}},
+	}}, "r/", "/")
+	require.NoError(t, err)
+	require.Equal(t, []string{"r/a/", "r/b/"}, got)
+
+	_, err = listAllPrefixes(context.Background(), &pagedPrefixLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true},
+	}}, "r/", "/")
+	require.ErrorIs(t, err, provider.ErrIncompleteListing, "truncated without token")
+
+	_, err = listAllPrefixes(context.Background(), &pagedPrefixLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"r/a/"}, IsTruncated: true, ContinuationToken: "t1"},
+		{Prefixes: []string{"r/b/"}, IsTruncated: true, ContinuationToken: "t2"},
+		{Prefixes: []string{"r/c/"}, IsTruncated: true, ContinuationToken: "t1"},
+	}}, "r/", "/")
+	require.ErrorIs(t, err, provider.ErrIncompleteListing, "token cycle")
+
+	pageErr := errors.New("page failed")
+	_, err = listAllPrefixes(context.Background(), &failingAfterLister{
+		first: &provider.ListCommonPrefixesResult{Prefixes: []string{"r/a/"}, IsTruncated: true, ContinuationToken: "t1"},
+		err:   pageErr,
+	}, "r/", "/")
+	require.ErrorIs(t, err, pageErr, "failed later page")
+}
+
+func TestCompileDatePartitionsRefusesTruncatedDiscovery(t *testing.T) {
+	cfg := &manifest.IndexScopeConfig{
+		Type: "date_partitions",
+		Discover: &manifest.IndexScopeDiscoverConfig{Segments: []manifest.IndexScopeDiscoverSegment{
+			{Index: 0, GlobAllow: []string{"dim=*"}},
+		}},
+		Date: &manifest.IndexScopeDateConfig{
+			SegmentIndex: 1,
+			Format:       "year=2006/month=01",
+			Range:        &manifest.IndexScopeDateRange{After: "2026-09-01", Before: "2026-10-01"},
+		},
+	}
+	lister := &pagedPrefixLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"org/dim=a/"}, IsTruncated: true},
+	}}
+	plan, err := Compile(context.Background(), cfg, "org/", lister)
+	require.ErrorIs(t, err, provider.ErrIncompleteListing)
+	require.Nil(t, plan)
+}

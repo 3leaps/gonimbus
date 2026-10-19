@@ -355,11 +355,47 @@ lineage**. Operator sequence:
 Migration never rewrites identity on the old set, never adopts old DB/segments
 under a new scope hash, and never synthesizes parent linkage.
 
+### Wildcard in a middle path segment
+
+An include such as `region=*/year=2026/month=09/**` is not prefix-shaped, so
+the migration refuses it. When the wildcard covers one path segment and the
+rest of the path is a date, express the listing as a `date_partitions` scope.
+The scope discovers the wildcard segment with one delimiter listing at build
+time and lists only the matching month prefixes:
+
+```yaml
+build:
+  scope:
+    type: date_partitions
+    discover:
+      segments:
+        - index: 0
+          glob_allow: ["region=*"]
+    date:
+      segment_index: 1
+      format: "year=2006/month=01" # Go layout; renders year=2026/month=09
+      range:
+        after: "2026-09-01" # inclusive
+        before: "2026-10-01" # exclusive
+  match:
+    includes: ["**"]
+```
+
+Each day in the range renders to the same month prefix, and the compiler
+deduplicates them. New `region=` values are picked up on the next build without
+editing the manifest. This is a new index-set identity; use the parallel
+cutover above when replacing an existing set.
+
+The compiled plan is not yet compared with the parent run. If discovery stops
+returning a partition, rows under it are retained rather than tombstoned, but
+they stay active without a fresh observation and the published coverage no
+longer lists their prefix.
+
 ### Still open (non-prefix match controls)
 
 Excludes, suffix/non-prefix globs, metadata filters, and non-default
 `include_hidden` are **not** converted by this migration. They remain rejected
-on durable builds.
+on durable builds. Use `--format sqlite` for these.
 
 ## Temporal durable compare
 
