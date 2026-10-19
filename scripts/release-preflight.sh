@@ -34,7 +34,11 @@ install_section="$(awk '/^## /{in_install = ($0 == "## Install")} in_install' "d
 [[ -n "$install_section" ]] || die "docs/releases/$tag.md has no '## Install' section"
 for want in 'brew install 3leaps/tap/gonimbus' 'scoop install gonimbus' \
     "go install github.com/3leaps/gonimbus/cmd/gonimbus@$tag"; do
-    grep -qF -- "$want" <<< "$install_section" ||
+    # Whole command: it must end at whitespace, a comment or end of line, so
+    # @v1.2.3 does not accept @v1.2.30 or @v1.2.3-rc.1. The tag matched
+    # vX.Y.Z above, so escaping dots is the only regex quoting needed.
+    pattern="(^|[[:space:]])${want//./\\.}([[:space:]]|#|\$)"
+    grep -qE -- "$pattern" <<< "$install_section" ||
         die "docs/releases/$tag.md Install section is missing: $want"
 done
 ok "docs/releases/$tag.md has install instructions for $tag"

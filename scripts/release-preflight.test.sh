@@ -123,10 +123,29 @@ notes_case() { # reason notes-content
 good="$(good_notes)"
 notes_case "has no '## Install' section" "${good//## Install/## Installation}"
 notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.2}"
+# The exact tag is a whole token: a longer version or a prerelease suffix
+# that begins with the tag does not satisfy it.
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.30}"
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.3-rc.1}"
+notes_case "missing: scoop install gonimbus" "${good//scoop install gonimbus/scoop install gonimbus-extra}"
+# A prefixed command and a tag whose dots are other characters do not count.
+notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/xbrew install}"
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1x2x3}"
 notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/brew reinstall}"
 notes_case 'missing: scoop install gonimbus' "${good//scoop install gonimbus/scoop install other}"
 # Install commands outside the Install section do not count.
 notes_case "has no '## Install' section" "$(printf '# v1.2.3\n\nbrew install 3leaps/tap/gonimbus\nscoop install gonimbus\ngo install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3\n')"
+# Accepted: the exact tag followed by a comment, or by trailing whitespace.
+for variant in '@v1.2.3  # pinned' '@v1.2.3 '; do
+    printf '%s' "${good//@v1.2.3/$variant}" > "$repo/docs/releases/v1.2.3.md"
+    git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam "notes: accept $variant"
+    git -C "$repo" push -q origin main
+    run env FIXTURE_PR_FINAL=pass || {
+        cat "$scratch/out" >&2
+        echo "error: preflight refused valid install line: $variant" >&2
+        exit 1
+    }
+done
 # Restore valid notes: preflight passes again.
 good_notes > "$repo/docs/releases/v1.2.3.md"
 git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: restore'
