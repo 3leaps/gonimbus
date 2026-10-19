@@ -39,6 +39,10 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
         release body and recent-release landing page
   - [ ] `docs/releases/v<version>.md` exists and carries the complete release
         narrative derived from the current release notes
+  - [ ] `docs/releases/v<version>.md` follows `docs/releases/TEMPLATE.md`,
+        including Release provenance and an Install section for this tag. It
+        is the GitHub release body; `make release-preflight` refuses notes
+        without install instructions for the tag.
   - [ ] The three surfaces agree on headline features, dates, upgrade guidance,
         and user-visible compatibility notes
 

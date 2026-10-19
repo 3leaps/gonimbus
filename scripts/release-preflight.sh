@@ -28,6 +28,16 @@ grep -qE "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md || die "C
 grep -qE "^## \[$version\] - " RELEASE_NOTES.md || die "RELEASE_NOTES.md has no [$version] heading"
 [[ -s "docs/releases/$tag.md" ]] || die "per-version notes docs/releases/$tag.md are missing"
 ok "changelog, release notes and docs/releases/$tag.md cover $version"
+# The per-version notes become the release body, so they must tell a reader how
+# to install this exact version (see docs/releases/TEMPLATE.md).
+install_section="$(awk '/^## /{in_install = ($0 == "## Install")} in_install' "docs/releases/$tag.md")"
+[[ -n "$install_section" ]] || die "docs/releases/$tag.md has no '## Install' section"
+for want in 'brew install 3leaps/tap/gonimbus' 'scoop install gonimbus' \
+    "go install github.com/3leaps/gonimbus/cmd/gonimbus@$tag"; do
+    grep -qF -- "$want" <<< "$install_section" ||
+        die "docs/releases/$tag.md Install section is missing: $want"
+done
+ok "docs/releases/$tag.md has install instructions for $tag"
 
 ./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
 ok 'workflow actions are pinned and off Node 20'
