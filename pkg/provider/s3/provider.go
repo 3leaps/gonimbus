@@ -677,10 +677,10 @@ func (p *Provider) checkListContinuation(op, requestToken string, out *s3.ListOb
 	}
 	next := aws.ToString(out.NextContinuationToken)
 	var detail error
-	switch {
-	case next == "":
+	switch next {
+	case "":
 		detail = errors.New("truncated page has no continuation token")
-	case next == requestToken:
+	case requestToken:
 		detail = errors.New("continuation token did not advance")
 	default:
 		return nil
