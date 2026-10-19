@@ -124,6 +124,9 @@ for f in "$work/extract"/*; do
         die "$dest gained ${f##*/} during download; restage"
     fi
     if ! mv "$f" "$dest/"; then
+        # The name was absent just above, so anything there now is a partial
+        # copy left by this failed move (a cross-filesystem mv copies first).
+        moved+=("${f##*/}")
         unstage
         die "could not move ${f##*/} into $dest"
     fi

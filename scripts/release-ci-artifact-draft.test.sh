@@ -232,23 +232,39 @@ zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"
 zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr(".hidden","b\n")'
 zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("sub/file","b\n")'
 zip_case 'not a regular file' 'i=zipfile.ZipInfo("gonimbus-linux-amd64"); i.external_attr=(stat.S_IFLNK|0o777)<<16; z.writestr(i,"/etc/passwd")'
-# A move that fails after earlier entries moved leaves dest empty: a stub mv
-# fails on the second entry.
+# A move that fails after earlier entries moved leaves dest empty. Two stub
+# shapes for the second entry: fail before writing, and write a partial copy
+# then fail (a cross-filesystem mv copies before it unlinks, so running out of
+# space mid-copy leaves a partial destination file).
 python3 -I -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.writestr("a-first","1\n"); z.writestr("b-second","2\n"); z.close()' "$FIXTURE_DIR/artifact.zip"
-cat > "$scratch/bin/mv" << 'SH'
+for shape in before-write after-partial-write; do
+    if [[ "$shape" == before-write ]]; then
+        cat > "$scratch/bin/mv" << 'SH'
 #!/usr/bin/env bash
 case "$1" in */b-second) exit 1 ;; esac
 exec /bin/mv "$@"
 SH
-chmod +x "$scratch/bin/mv"
-reset_listings
-FIXTURE_ATTEMPT="$good" fail 'could not move b-second' ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/mvfail"
-[[ -z "$(find "$scratch/mvfail" -mindepth 1 2> /dev/null)" ]] || {
-    echo 'error: partial files left in dest after a failed move' >&2
-    ls -la "$scratch/mvfail" >&2
+    else
+        cat > "$scratch/bin/mv" << 'SH'
+#!/usr/bin/env bash
+case "$1" in */b-second)
+    head -c 1 "$1" > "${@: -1}/${1##*/}"
     exit 1
-}
-[[ ! -e "$scratch/mvfail.anchor" ]]
+    ;;
+esac
+exec /bin/mv "$@"
+SH
+    fi
+    chmod +x "$scratch/bin/mv"
+    reset_listings
+    FIXTURE_ATTEMPT="$good" fail 'could not move b-second' ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/mvfail-$shape"
+    [[ -z "$(find "$scratch/mvfail-$shape" -mindepth 1 2> /dev/null)" ]] || {
+        echo "error: partial files left in dest after a failed move ($shape)" >&2
+        ls -la "$scratch/mvfail-$shape" >&2
+        exit 1
+    }
+    [[ ! -e "$scratch/mvfail-$shape.anchor" ]]
+done
 rm "$scratch/bin/mv"
 cp "$good_zip" "$FIXTURE_DIR/artifact.zip"
 
