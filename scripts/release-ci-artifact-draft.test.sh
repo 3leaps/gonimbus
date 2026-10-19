@@ -224,11 +224,32 @@ z.close()" "$FIXTURE_DIR/artifact.zip"
 }
 zip_case 'artifact is empty' 'pass'
 zip_case 'duplicate entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("gonimbus-linux-amd64","b\n")'
-zip_case 'collides with another entry' 'z.writestr("SHA256SUMS","a\n"); z.writestr("sha256sums","b\n")' 
+# Case-fold collisions refuse in the validator on every filesystem, not via
+# a case-insensitive volume: the message names both spellings.
+zip_case "collides with another entry: 'sha256sums' vs 'SHA256SUMS'" 'z.writestr("SHA256SUMS","a\n"); z.writestr("sha256sums","b\n")'
+zip_case "collides with another entry: 'Gonimbus-Linux-Amd64' vs 'gonimbus-linux-amd64'" 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("Gonimbus-Linux-Amd64","b\n")'
 zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("../evil","b\n")'
 zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr(".hidden","b\n")'
 zip_case 'unexpected entry in artifact' 'z.writestr("gonimbus-linux-amd64","a\n"); z.writestr("sub/file","b\n")'
 zip_case 'not a regular file' 'i=zipfile.ZipInfo("gonimbus-linux-amd64"); i.external_attr=(stat.S_IFLNK|0o777)<<16; z.writestr(i,"/etc/passwd")'
+# A move that fails after earlier entries moved leaves dest empty: a stub mv
+# fails on the second entry.
+python3 -I -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.writestr("a-first","1\n"); z.writestr("b-second","2\n"); z.close()' "$FIXTURE_DIR/artifact.zip"
+cat > "$scratch/bin/mv" << 'SH'
+#!/usr/bin/env bash
+case "$1" in */b-second) exit 1 ;; esac
+exec /bin/mv "$@"
+SH
+chmod +x "$scratch/bin/mv"
+reset_listings
+FIXTURE_ATTEMPT="$good" fail 'could not move b-second' ./scripts/release-fetch-ci-artifacts.sh v1.2.3 "$scratch/mvfail"
+[[ -z "$(find "$scratch/mvfail" -mindepth 1 2> /dev/null)" ]] || {
+    echo 'error: partial files left in dest after a failed move' >&2
+    ls -la "$scratch/mvfail" >&2
+    exit 1
+}
+[[ ! -e "$scratch/mvfail.anchor" ]]
+rm "$scratch/bin/mv"
 cp "$good_zip" "$FIXTURE_DIR/artifact.zip"
 
 # Draft. Packages are staged against the anchor that fetch recorded.

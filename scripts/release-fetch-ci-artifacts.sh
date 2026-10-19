@@ -82,7 +82,7 @@ python3 -I - "$work/artifact.zip" "$work/extract" << 'PY'
 import os, re, stat, sys, zipfile
 out = sys.argv[2]
 name_ok = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
-seen = set()
+seen = {}
 with zipfile.ZipFile(sys.argv[1]) as z:
     entries = z.infolist()
     if not entries:
@@ -94,18 +94,40 @@ with zipfile.ZipFile(sys.argv[1]) as z:
             raise SystemExit(f'error: unexpected entry in artifact: {name!r}')
         if kind not in (0, stat.S_IFREG):
             raise SystemExit(f'error: artifact entry is not a regular file: {name!r}')
-        if name in seen:
-            raise SystemExit(f'error: duplicate entry in artifact: {name!r}')
-        seen.add(name)
+        # Names are ASCII-only, so lower() is an exact case fold. Refusing on
+        # the folded name makes collisions independent of the filesystem.
+        folded = name.lower()
+        if folded in seen:
+            if seen[folded] == name:
+                raise SystemExit(f'error: duplicate entry in artifact: {name!r}')
+            raise SystemExit(f'error: artifact entry collides with another entry: {name!r} vs {seen[folded]!r}')
+        seen[folded] = name
+    # Every entry is validated before any byte is written.
+    for info in entries:
+        name = info.filename
         try:
             with open(os.path.join(out, name), 'xb') as f:
                 f.write(z.read(info))
         except FileExistsError:
             raise SystemExit(f'error: artifact entry collides with another entry: {name!r}')
 PY
+# dest was verified empty at start. If any move fails, remove what this run
+# moved so a refusal never leaves a partial staged set.
+moved=()
+unstage() {
+    local m
+    for m in "${moved[@]}"; do rm -f "$dest/$m"; done
+}
 for f in "$work/extract"/*; do
-    [[ ! -e "$dest/${f##*/}" ]] || die "$dest gained ${f##*/} during download; restage"
-    mv "$f" "$dest/" || die "could not move ${f##*/} into $dest"
+    if [[ -e "$dest/${f##*/}" ]]; then
+        unstage
+        die "$dest gained ${f##*/} during download; restage"
+    fi
+    if ! mv "$f" "$dest/"; then
+        unstage
+        die "could not move ${f##*/} into $dest"
+    fi
+    moved+=("${f##*/}")
 done
 # The anchor lives outside the staged directory so it is never uploaded.
 printf 'tag=%s\nobject=%s\ncommit=%s\nrun=%s\nattempt=%s\nartifact=%s\ndigest=%s\n' \
