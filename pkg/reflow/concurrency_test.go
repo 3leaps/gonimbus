@@ -63,6 +63,46 @@ func TestConcurrencyLimiterTimeAvgActiveDeterministic(t *testing.T) {
 	require.Equal(t, 2, stats.ConcurrencyMaxActive)
 }
 
+func TestConcurrencyLimiterOverlappingDomainsExceedEffectiveCeiling(t *testing.T) {
+	limiter := NewConcurrencyLimiter(ConcurrencyConfig{
+		RequestedCeiling:           1,
+		EffectiveCeiling:           1,
+		AdaptiveEnabled:            false,
+		DestDomainMultiplier:       2,
+		DestDomainCeilingEffective: 2,
+	})
+	base := time.Unix(3000, 0)
+	step := 0
+	steps := []time.Duration{0, 0, 0, 2 * time.Second, 2 * time.Second, 2 * time.Second, 2 * time.Second}
+	limiter.clock = func() time.Time {
+		d := steps[step]
+		step++
+		return base.Add(d)
+	}
+	limiter.startedAt = base
+	limiter.lastTransition = base
+
+	releaseSource, err := limiter.AcquireSource(context.Background()) // t=0s: active 0->1
+	require.NoError(t, err)
+	releaseDestA, err := limiter.AcquireDest(context.Background()) // t=0s: active 1->2
+	require.NoError(t, err)
+	releaseDestB, err := limiter.AcquireDest(context.Background()) // t=0s: active 2->3
+	require.NoError(t, err)
+	releaseDestB()  // t=2s: active 3->2
+	releaseDestA()  // t=2s: active 2->1
+	releaseSource() // t=2s: active 1->0
+
+	// Each domain stays within its own ceiling while the summed occupancy,
+	// peak and average alike, legitimately exceeds the effective ceiling.
+	stats := limiter.Snapshot() // t=2s
+	require.Equal(t, 1, stats.ConcurrencyCeilingEffective)
+	require.Equal(t, 1, stats.ConcurrencyMaxActiveSource)
+	require.Equal(t, 2, stats.ConcurrencyMaxActiveDest)
+	require.Equal(t, 3, stats.ConcurrencyMaxActive)
+	require.Equal(t, 3.0, stats.ConcurrencyTimeAvgActive)
+	requireDomainOccupancyWithinCeilings(t, stats)
+}
+
 func TestConcurrencyLimiterOccupancyWindowExcludesSetup(t *testing.T) {
 	limiter := NewConcurrencyLimiter(ConcurrencyConfig{
 		RequestedCeiling: 4,
@@ -439,7 +479,8 @@ func contextWithTimeout(t *testing.T, d time.Duration) (context.Context, context
 // limiter's domain contract. Source and probe are each capped at the effective
 // ceiling and dest at its own recorded ceiling; ConcurrencyMaxActive is the
 // peak of their sum, so it is bounded by the per-domain peaks, not by any one
-// domain's ceiling.
+// domain's ceiling. ConcurrencyTimeAvgActive averages that same sum, so it is
+// bounded by ConcurrencyMaxActive.
 func requireDomainOccupancyWithinCeilings(t *testing.T, stats ConcurrencyStats, msgAndArgs ...interface{}) {
 	t.Helper()
 	require.LessOrEqual(t, stats.ConcurrencyMaxActiveSource, stats.ConcurrencyCeilingEffective, msgAndArgs...)
@@ -448,4 +489,5 @@ func requireDomainOccupancyWithinCeilings(t *testing.T, stats ConcurrencyStats, 
 	require.LessOrEqual(t, stats.ConcurrencyMaxActiveDest, stats.DestDomainCeilingEffective, msgAndArgs...)
 	require.LessOrEqual(t, stats.ConcurrencyMaxActive,
 		stats.ConcurrencyMaxActiveSource+stats.ConcurrencyMaxActiveDest+stats.ConcurrencyMaxActiveProbe, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyTimeAvgActive, float64(stats.ConcurrencyMaxActive), msgAndArgs...)
 }

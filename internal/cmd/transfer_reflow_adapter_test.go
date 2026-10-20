@@ -656,7 +656,9 @@ func assertBarrierArmBehavior(t *testing.T, arm reflowDualPathArm, objectCount, 
 	}
 
 	// Summary carries the same execution path, and the concurrency relations
-	// hold: observed max-active <= resolved effective <= requested.
+	// hold: each domain's observed peak is within its own ceiling, resolved
+	// effective <= requested, and occupancy (which sums all domains) averages
+	// no higher than its own peak.
 	sum := requireRecord(t, arm.stdout, reflowpkg.SummaryRecordType, "")
 	require.Contains(t, string(sum.Data), fmt.Sprintf(`"execution_path":%q`, expectedPath))
 	var sumFields struct {
@@ -669,8 +671,6 @@ func assertBarrierArmBehavior(t *testing.T, arm reflowDualPathArm, objectCount, 
 	require.LessOrEqual(t, sumFields.Effective, sumFields.Requested)
 	require.Greater(t, sumFields.TimeAvgActive, 0.0,
 		"a run that moved objects must report positive time-averaged occupancy")
-	require.LessOrEqual(t, sumFields.TimeAvgActive, float64(sumFields.Effective),
-		"time-averaged occupancy can never exceed the effective ceiling")
 
 	// Sterility: no URI/key material in stderr diagnostics.
 	require.NotContains(t, arm.stderr, "s3://source-bucket")
@@ -1733,6 +1733,7 @@ func requireSummaryDomainOccupancyWithinCeilings(t *testing.T, data json.RawMess
 	require.LessOrEqual(t, stats.ConcurrencyMaxActiveDest, stats.DestDomainCeilingEffective, msgAndArgs...)
 	require.LessOrEqual(t, stats.ConcurrencyMaxActive,
 		stats.ConcurrencyMaxActiveSource+stats.ConcurrencyMaxActiveDest+stats.ConcurrencyMaxActiveProbe, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyTimeAvgActive, float64(stats.ConcurrencyMaxActive), msgAndArgs...)
 }
 
 // dropVolatileConcurrencyObservations removes run-to-run-variable limiter
