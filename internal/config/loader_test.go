@@ -2,8 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,24 +17,69 @@ import (
 	"github.com/fulmenhq/gofulmen/schema"
 )
 
-func findRepoRootForTest(t *testing.T) string {
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
+const testModulePath = "github.com/3leaps/gonimbus"
 
-	dir := cwd
+// testRepoRoot is the module root, resolved once in TestMain from the package
+// directory. It is independent of $HOME so tests pass from any checkout
+// location; the production walk and its home boundary are unchanged.
+var testRepoRoot string
+
+func TestMain(m *testing.M) {
+	root, err := moduleRootFrom(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config tests: %v\n", err)
+		os.Exit(2)
+	}
+	testRepoRoot = root
+	resolveProjectRoot = func() (string, error) { return testRepoRoot, nil }
+	os.Exit(m.Run())
+}
+
+// moduleRootFrom walks up from start to the nearest go.mod and requires it to
+// declare this module, so a stray or nested go.mod fails instead of silently
+// supplying the wrong config and schema roots.
+func moduleRootFrom(start string) (string, error) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", fmt.Errorf("resolve start directory: %w", err)
+	}
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil {
+			if goModModulePath(data) != testModulePath {
+				return "", fmt.Errorf("nearest go.mod at %s is not module %s", dir, testModulePath)
+			}
+			return dir, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("read go.mod in %s: %w", dir, err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			break
+			return "", fmt.Errorf("no go.mod found above %s", start)
 		}
 		dir = parent
 	}
+}
 
-	t.Fatalf("could not locate repo root containing go.mod from %s", cwd)
+// goModModulePath returns the module path declared in go.mod content.
+func goModModulePath(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "module" {
+			return strings.Trim(fields[1], `"`)
+		}
+	}
 	return ""
+}
+
+// useRealProjectRootFinder restores the production root finder for tests that
+// exercise its boundary behavior.
+func useRealProjectRootFinder(t *testing.T) {
+	t.Helper()
+	prev := resolveProjectRoot
+	resolveProjectRoot = findProjectRoot
+	t.Cleanup(func() { resolveProjectRoot = prev })
 }
 
 func TestLoad(t *testing.T) {
@@ -40,7 +89,8 @@ func TestLoad(t *testing.T) {
 	// When $HOME is not an ancestor of the repo, pathfinder's default home boundary
 	// can prevent repo root discovery unless a CI boundary hint is applied.
 	t.Run("CIBoundaryHint", func(t *testing.T) {
-		repoRoot := findRepoRootForTest(t)
+		useRealProjectRootFinder(t)
+		repoRoot := testRepoRoot
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CI", "true")
 		t.Setenv("FULMEN_WORKSPACE_ROOT", repoRoot)
@@ -409,7 +459,7 @@ func TestEnvSpecsPrefixHandling(t *testing.T) {
 // the advertised key validates with SI/IEC/raw-byte values, wrong types and
 // malformed shapes are rejected, and unknown keys remain rejected.
 func TestConfigSchemaMemoryBudgetContract(t *testing.T) {
-	root := findRepoRootForTest(t)
+	root := testRepoRoot
 	catalog := schema.NewCatalog(filepath.Join(root, "schemas"))
 	validator, err := catalog.ValidatorByID("gonimbus/v1.0.0/config")
 	require.NoError(t, err)
@@ -437,4 +487,31 @@ func TestConfigSchemaMemoryBudgetContract(t *testing.T) {
 		require.NoError(t, err, doc)
 		require.NotEmpty(t, diags, "expected %s to be rejected", doc)
 	}
+}
+
+func TestModuleRootFromFailsFast(t *testing.T) {
+	t.Run("FindsThisModule", func(t *testing.T) {
+		root, err := moduleRootFrom(".")
+		require.NoError(t, err)
+		assert.FileExists(t, filepath.Join(root, "go.mod"))
+		assert.DirExists(t, filepath.Join(root, "config"))
+	})
+
+	t.Run("RejectsForeignModule", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/other\n\ngo 1.26\n"), 0o600))
+		nested := filepath.Join(dir, "a", "b")
+		require.NoError(t, os.MkdirAll(nested, 0o755))
+
+		_, err := moduleRootFrom(nested)
+		require.ErrorContains(t, err, "is not module "+testModulePath)
+	})
+
+	t.Run("RejectsMissingGoMod", func(t *testing.T) {
+		if _, err := os.Stat("/go.mod"); err == nil {
+			t.Skip("filesystem root has a go.mod")
+		}
+		_, err := moduleRootFrom(t.TempDir())
+		require.Error(t, err)
+	})
 }
