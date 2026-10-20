@@ -135,14 +135,37 @@ notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/bre
 notes_case 'missing: scoop install gonimbus' "${good//scoop install gonimbus/scoop install other}"
 # Install commands outside the Install section do not count.
 notes_case "has no '## Install' section" "$(printf '# v1.2.3\n\nbrew install 3leaps/tap/gonimbus\nscoop install gonimbus\ngo install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3\n')"
-# Relative links do not resolve on the release page; each form refuses.
-for link in '../security/README.md' './x.md' '/docs/x.md' 'CHANGELOG.md' 'docs/x'; do
-    notes_case 'has a relative link (use a tag-scoped URL)' "$good
-See [guide]($link).
+# Relative links do not resolve on the release page. Every destination must be
+# an https URL or an in-page anchor; each relative form refuses.
+link_case() { # reason markdown-line
+    notes_case "$1" "$good
+$2
 "
+}
+for line in '[g](../security/README.md)' '[g](./x.md)' '[g](/docs/x.md)' '[g](CHANGELOG.md)' \
+    '[g](docs/x)' '[g](guide.html)' '[g](guide)' '[g](http://example.invalid/x)' \
+    '[g]( ../spaced.md)' '[g](<../angle.md>)' '[g](../titled.md "Title")' \
+    '<a href="../html.md">g</a>' '<img src="logo.png">'; do
+    link_case 'has a relative link (use a tag-scoped URL)' "See $line."
 done
-# Absolute links and in-page anchors are accepted.
-printf '%s\nSee [guide](https://github.com/3leaps/gonimbus/blob/v1.2.3/docs/security/README.md) and [below](#install).\n' "$good" > "$repo/docs/releases/v1.2.3.md"
+# A reference definition starts its own line.
+link_case 'has a relative link (use a tag-scoped URL)' '[ref]: ../reference.md'
+link_case 'still has the vX.Y.Z placeholder' 'See [g](https://github.com/3leaps/gonimbus/blob/vX.Y.Z/CHANGELOG.md).'
+link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/v1.2.2/CHANGELOG.md).'
+link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/main/CHANGELOG.md).'
+# Accepted: tag-scoped repository links, other https links, in-page anchors,
+# and relative-looking text inside fenced code.
+cat > "$repo/docs/releases/v1.2.3.md" << MD
+$good
+See [guide](https://github.com/3leaps/gonimbus/blob/v1.2.3/docs/security/README.md),
+[spec](https://example.invalid/spec) and [below](#install).
+
+[ref]: https://github.com/3leaps/gonimbus/blob/v1.2.3/CHANGELOG.md
+
+\`\`\`text
+see [not a link](../ignored.md)
+\`\`\`
+MD
 git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: absolute links'
 git -C "$repo" push -q origin main
 run env FIXTURE_PR_FINAL=pass || {
@@ -150,7 +173,7 @@ run env FIXTURE_PR_FINAL=pass || {
     echo 'error: preflight refused absolute links' >&2
     exit 1
 }
-grep -q '^\[ok\] docs/releases/v1.2.3.md links are absolute' "$scratch/out"
+grep -q '^\[ok\] docs/releases/v1.2.3.md links are absolute and name v1.2.3' "$scratch/out"
 # Accepted: the exact tag followed by a comment, or by trailing whitespace.
 for variant in '@v1.2.3  # pinned' '@v1.2.3 '; do
     printf '%s' "${good//@v1.2.3/$variant}" > "$repo/docs/releases/v1.2.3.md"

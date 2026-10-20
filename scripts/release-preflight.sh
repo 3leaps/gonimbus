@@ -42,11 +42,38 @@ for want in 'brew install 3leaps/tap/gonimbus' 'scoop install gonimbus' \
         die "docs/releases/$tag.md Install section is missing: $want"
 done
 ok "docs/releases/$tag.md has install instructions for $tag"
-# Relative links resolve in the repository but not on the release page.
-relative_link="$(grep -nE '\]\((\.|/|[A-Za-z0-9_-]+(/|\.md))' "docs/releases/$tag.md" | head -1 || true)"
-[[ -z "$relative_link" ]] ||
-    die "docs/releases/$tag.md has a relative link (use a tag-scoped URL): $relative_link"
-ok "docs/releases/$tag.md links are absolute"
+# Relative links resolve in the repository but not on the release page. Every
+# link destination outside fenced code must be an https URL or an in-page
+# anchor, and links to this repository's files must name this tag.
+python3 -I - "docs/releases/$tag.md" "$tag" << 'PY' || exit 1
+import re, sys
+path, tag = sys.argv[1], sys.argv[2]
+repo_blob = 'https://github.com/3leaps/gonimbus/blob/'
+patterns = [
+    re.compile(r'\]\(\s*<([^>]*)>'),                  # [text](<dest>)
+    re.compile(r'\]\(\s*([^\s)<]+)'),                 # [text](dest "title")
+    re.compile(r'^\s{0,3}\[[^\]]+\]:\s*<?([^\s>]+)'),  # [ref]: dest
+    re.compile(r'\b(?:href|src)\s*=\s*["\']([^"\']*)'),  # HTML attributes
+]
+fenced = False
+for number, line in enumerate(open(path, encoding='utf-8'), 1):
+    if re.match(r'\s{0,3}(```|~~~)', line):
+        fenced = not fenced
+        continue
+    if fenced:
+        continue
+    for pattern in patterns:
+        for dest in pattern.findall(line):
+            if dest.startswith('#'):
+                continue
+            if not dest.startswith('https://'):
+                raise SystemExit(f'[!!] {path}:{number} has a relative link (use a tag-scoped URL): {dest}')
+            if 'vX.Y.Z' in dest:
+                raise SystemExit(f'[!!] {path}:{number} still has the vX.Y.Z placeholder: {dest}')
+            if dest.startswith(repo_blob) and not dest.startswith(repo_blob + tag + '/'):
+                raise SystemExit(f'[!!] {path}:{number} links a repository file at another ref (use {tag}): {dest}')
+PY
+ok "docs/releases/$tag.md links are absolute and name $tag"
 
 ./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
 ok 'workflow actions are pinned and off Node 20'
