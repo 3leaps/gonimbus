@@ -55,12 +55,20 @@ patterns = [
     re.compile(r'^\s{0,3}\[[^\]]+\]:\s*<?([^\s>]+)'),  # [ref]: dest
     re.compile(r'\b(?:href|src)\s*=\s*["\']([^"\']*)'),  # HTML attributes
 ]
-fenced = False
+# CommonMark fences: a block closes only on the same character, at least as
+# long as its opener, with nothing after it but whitespace.
+fence_open = re.compile(r' {0,3}(`{3,}|~{3,})(.*)$')
+fence = None
 for number, line in enumerate(open(path, encoding='utf-8'), 1):
-    if re.match(r'\s{0,3}(```|~~~)', line):
-        fenced = not fenced
+    line = line.rstrip('\n')
+    if fence is not None:
+        closing = re.fullmatch(r' {0,3}(' + re.escape(fence[0]) + r'{' + str(len(fence)) + r',})\s*', line)
+        if closing:
+            fence = None
         continue
-    if fenced:
+    opening = fence_open.match(line)
+    if opening and not (opening.group(1)[0] == '`' and '`' in opening.group(2)):
+        fence = opening.group(1)
         continue
     for pattern in patterns:
         for dest in pattern.findall(line):

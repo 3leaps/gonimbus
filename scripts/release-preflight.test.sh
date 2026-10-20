@@ -153,6 +153,24 @@ link_case 'has a relative link (use a tag-scoped URL)' '[ref]: ../reference.md'
 link_case 'still has the vX.Y.Z placeholder' 'See [g](https://github.com/3leaps/gonimbus/blob/vX.Y.Z/CHANGELOG.md).'
 link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/v1.2.2/CHANGELOG.md).'
 link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/main/CHANGELOG.md).'
+# Fence tracking: a fence closes only on its own character and at least its
+# length, so these blocks still end where Markdown ends them, and a relative
+# link after each one is refused.
+fence_case() { # block-lines...
+    local block
+    block="$(printf '%s\n' "$@")"
+    link_case 'has a relative link (use a tag-scoped URL)' "$block
+See [guide](../outside.md)."
+}
+fence_case '```text' '~~~' '```'
+fence_case '~~~' '```' '~~~'
+fence_case '````' '```' '````'
+fence_case '```' 'inner' '``` trailing' '```'
+# An info string with a backtick does not open a backtick fence.
+bt='`'
+link_case 'has a relative link (use a tag-scoped URL)' "$bt$bt${bt}a${bt}b
+See [guide](../not-fenced.md)."
+
 # Accepted: tag-scoped repository links, other https links, in-page anchors,
 # and relative-looking text inside fenced code.
 cat > "$repo/docs/releases/v1.2.3.md" << MD
@@ -165,6 +183,15 @@ See [guide](https://github.com/3leaps/gonimbus/blob/v1.2.3/docs/security/README.
 \`\`\`text
 see [not a link](../ignored.md)
 \`\`\`
+
+\`\`\`\`
+\`\`\`
+see [also not a link](../ignored-too.md)
+\`\`\`\`\`
+
+~~~
+see [tilde fenced](../ignored-tilde.md)
+~~~
 MD
 git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: absolute links'
 git -C "$repo" push -q origin main
