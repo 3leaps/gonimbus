@@ -2,7 +2,8 @@
 
 This file is the GitHub release body. `make release-create-draft` uploads it
 verbatim from the tagged commit, so write it for someone installing the
-release.
+release. Relative links do not resolve on a release page: link repository
+files with tag-scoped URLs, `https://github.com/3leaps/gonimbus/blob/vX.Y.Z/<path>`.
 
 ## Summary
 
@@ -21,10 +22,12 @@ no Stable API changes.
 
 ## Release provenance
 
-- Release tags are GPG-signed and verify against
-  [`docs/security/release-signing-keys.asc`](../security/release-signing-keys.asc)
-  (fingerprints in [`keys/expected-fingerprints.txt`](../../keys/expected-fingerprints.txt)).
-  Verify with `git tag -v vX.Y.Z` after importing that key.
+- Before importing a downloaded public key, establish the expected GPG signing
+  key and minisign public-key fingerprint through an independently trusted
+  maintainer channel. Follow the complete
+  [release-verification guide](https://github.com/3leaps/gonimbus/blob/vX.Y.Z/docs/security/README.md).
+- Release tags are GPG-signed. After validating the public material against
+  the committed anchors, verify with `git tag -v vX.Y.Z`.
 - Checksum manifests are signed with minisign and PGP; the published assets are
   byte-identical to the signed set.
 
@@ -44,4 +47,4 @@ scoop install gonimbus
 
 - ...
 
-See [CHANGELOG.md](../../CHANGELOG.md) for the full list.
+See [CHANGELOG.md](https://github.com/3leaps/gonimbus/blob/vX.Y.Z/CHANGELOG.md) for the full list.

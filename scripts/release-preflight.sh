@@ -42,6 +42,11 @@ for want in 'brew install 3leaps/tap/gonimbus' 'scoop install gonimbus' \
         die "docs/releases/$tag.md Install section is missing: $want"
 done
 ok "docs/releases/$tag.md has install instructions for $tag"
+# Relative links resolve in the repository but not on the release page.
+relative_link="$(grep -nE '\]\((\.|/|[A-Za-z0-9_-]+(/|\.md))' "docs/releases/$tag.md" | head -1 || true)"
+[[ -z "$relative_link" ]] ||
+    die "docs/releases/$tag.md has a relative link (use a tag-scoped URL): $relative_link"
+ok "docs/releases/$tag.md links are absolute"
 
 ./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
 ok 'workflow actions are pinned and off Node 20'

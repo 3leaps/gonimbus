@@ -135,6 +135,22 @@ notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/bre
 notes_case 'missing: scoop install gonimbus' "${good//scoop install gonimbus/scoop install other}"
 # Install commands outside the Install section do not count.
 notes_case "has no '## Install' section" "$(printf '# v1.2.3\n\nbrew install 3leaps/tap/gonimbus\nscoop install gonimbus\ngo install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3\n')"
+# Relative links do not resolve on the release page; each form refuses.
+for link in '../security/README.md' './x.md' '/docs/x.md' 'CHANGELOG.md' 'docs/x'; do
+    notes_case 'has a relative link (use a tag-scoped URL)' "$good
+See [guide]($link).
+"
+done
+# Absolute links and in-page anchors are accepted.
+printf '%s\nSee [guide](https://github.com/3leaps/gonimbus/blob/v1.2.3/docs/security/README.md) and [below](#install).\n' "$good" > "$repo/docs/releases/v1.2.3.md"
+git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: absolute links'
+git -C "$repo" push -q origin main
+run env FIXTURE_PR_FINAL=pass || {
+    cat "$scratch/out" >&2
+    echo 'error: preflight refused absolute links' >&2
+    exit 1
+}
+grep -q '^\[ok\] docs/releases/v1.2.3.md links are absolute' "$scratch/out"
 # Accepted: the exact tag followed by a comment, or by trailing whitespace.
 for variant in '@v1.2.3  # pinned' '@v1.2.3 '; do
     printf '%s' "${good//@v1.2.3/$variant}" > "$repo/docs/releases/v1.2.3.md"
