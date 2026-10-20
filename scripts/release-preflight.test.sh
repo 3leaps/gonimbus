@@ -16,7 +16,27 @@ cp "$root/.github/workflows/"*.yml "$repo/.github/workflows/"
 printf '1.2.3\n' > "$repo/VERSION"
 printf '# Changelog\n\n## [1.2.3] - 2026-10-13\n' > "$repo/CHANGELOG.md"
 printf '# Release notes\n\n## [1.2.3] - 2026-10-13\n' > "$repo/RELEASE_NOTES.md"
-printf '# v1.2.3\n\nNotes.\n' > "$repo/docs/releases/v1.2.3.md"
+good_notes() {
+    cat << 'MD'
+# v1.2.3
+
+Notes.
+
+## Install
+
+```bash
+brew install 3leaps/tap/gonimbus
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3
+```
+
+```powershell
+scoop install gonimbus
+```
+
+## Verification
+MD
+}
+good_notes > "$repo/docs/releases/v1.2.3.md"
 git init -q -b main "$repo"
 git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid add -A
 git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
@@ -78,5 +98,129 @@ fi
 grep -q 'working tree is not clean' "$scratch/out"
 [[ ! -s "$FIXTURE_LOG" ]]
 rm "$repo/untracked"
+
+# The per-version notes are the release body: they must carry install
+# instructions for this exact tag, inside the Install section.
+notes_case() { # reason notes-content
+    local reason="$1"
+    printf '%s' "$2" > "$repo/docs/releases/v1.2.3.md"
+    git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam "notes: $reason"
+    git -C "$repo" push -q origin main
+    if run env FIXTURE_PR_FINAL=pass; then
+        echo "error: preflight passed with notes: $reason" >&2
+        exit 1
+    fi
+    grep -qF -- "$reason" "$scratch/out" || {
+        echo "error: missing named refusal: $reason" >&2
+        cat "$scratch/out" >&2
+        exit 1
+    }
+    [[ "$(grep -c '^make' "$FIXTURE_LOG")" == 0 ]] || {
+        echo 'error: later gates ran after a notes refusal' >&2
+        exit 1
+    }
+}
+good="$(good_notes)"
+notes_case "has no '## Install' section" "${good//## Install/## Installation}"
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.2}"
+# The exact tag is a whole token: a longer version or a prerelease suffix
+# that begins with the tag does not satisfy it.
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.30}"
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1.2.3-rc.1}"
+notes_case "missing: scoop install gonimbus" "${good//scoop install gonimbus/scoop install gonimbus-extra}"
+# A prefixed command and a tag whose dots are other characters do not count.
+notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/xbrew install}"
+notes_case "missing: go install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3" "${good//@v1.2.3/@v1x2x3}"
+notes_case 'missing: brew install 3leaps/tap/gonimbus' "${good//brew install/brew reinstall}"
+notes_case 'missing: scoop install gonimbus' "${good//scoop install gonimbus/scoop install other}"
+# Install commands outside the Install section do not count.
+notes_case "has no '## Install' section" "$(printf '# v1.2.3\n\nbrew install 3leaps/tap/gonimbus\nscoop install gonimbus\ngo install github.com/3leaps/gonimbus/cmd/gonimbus@v1.2.3\n')"
+# Relative links do not resolve on the release page. Every destination must be
+# an https URL or an in-page anchor; each relative form refuses.
+link_case() { # reason markdown-line
+    notes_case "$1" "$good
+$2
+"
+}
+for line in '[g](../security/README.md)' '[g](./x.md)' '[g](/docs/x.md)' '[g](CHANGELOG.md)' \
+    '[g](docs/x)' '[g](guide.html)' '[g](guide)' '[g](http://example.invalid/x)' \
+    '[g]( ../spaced.md)' '[g](<../angle.md>)' '[g](../titled.md "Title")' \
+    '<a href="../html.md">g</a>' '<img src="logo.png">'; do
+    link_case 'has a relative link (use a tag-scoped URL)' "See $line."
+done
+# A reference definition starts its own line.
+link_case 'has a relative link (use a tag-scoped URL)' '[ref]: ../reference.md'
+link_case 'still has the vX.Y.Z placeholder' 'See [g](https://github.com/3leaps/gonimbus/blob/vX.Y.Z/CHANGELOG.md).'
+link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/v1.2.2/CHANGELOG.md).'
+link_case 'links a repository file at another ref (use v1.2.3)' 'See [g](https://github.com/3leaps/gonimbus/blob/main/CHANGELOG.md).'
+# Fence tracking: a fence closes only on its own character and at least its
+# length, so these blocks still end where Markdown ends them, and a relative
+# link after each one is refused.
+fence_case() { # block-lines...
+    local block
+    block="$(printf '%s\n' "$@")"
+    link_case 'has a relative link (use a tag-scoped URL)' "$block
+See [guide](../outside.md)."
+}
+fence_case '```text' '~~~' '```'
+fence_case '~~~' '```' '~~~'
+fence_case '````' '```' '````'
+fence_case '```' 'inner' '``` trailing' '```'
+# An info string with a backtick does not open a backtick fence.
+bt='`'
+link_case 'has a relative link (use a tag-scoped URL)' "$bt$bt${bt}a${bt}b
+See [guide](../not-fenced.md)."
+
+# Accepted: tag-scoped repository links, other https links, in-page anchors,
+# and relative-looking text inside fenced code.
+cat > "$repo/docs/releases/v1.2.3.md" << MD
+$good
+See [guide](https://github.com/3leaps/gonimbus/blob/v1.2.3/docs/security/README.md),
+[spec](https://example.invalid/spec) and [below](#install).
+
+[ref]: https://github.com/3leaps/gonimbus/blob/v1.2.3/CHANGELOG.md
+
+\`\`\`text
+see [not a link](../ignored.md)
+\`\`\`
+
+\`\`\`\`
+\`\`\`
+see [also not a link](../ignored-too.md)
+\`\`\`\`\`
+
+~~~
+see [tilde fenced](../ignored-tilde.md)
+~~~
+MD
+git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: absolute links'
+git -C "$repo" push -q origin main
+run env FIXTURE_PR_FINAL=pass || {
+    cat "$scratch/out" >&2
+    echo 'error: preflight refused absolute links' >&2
+    exit 1
+}
+grep -q '^\[ok\] docs/releases/v1.2.3.md links are absolute and name v1.2.3' "$scratch/out"
+# Accepted: the exact tag followed by a comment, or by trailing whitespace.
+for variant in '@v1.2.3  # pinned' '@v1.2.3 '; do
+    printf '%s' "${good//@v1.2.3/$variant}" > "$repo/docs/releases/v1.2.3.md"
+    git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam "notes: accept $variant"
+    git -C "$repo" push -q origin main
+    run env FIXTURE_PR_FINAL=pass || {
+        cat "$scratch/out" >&2
+        echo "error: preflight refused valid install line: $variant" >&2
+        exit 1
+    }
+done
+# Restore valid notes: preflight passes again.
+good_notes > "$repo/docs/releases/v1.2.3.md"
+git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qam 'notes: restore'
+git -C "$repo" push -q origin main
+run env FIXTURE_PR_FINAL=pass || {
+    cat "$scratch/out" >&2
+    echo 'error: preflight failed with valid notes' >&2
+    exit 1
+}
+grep -q '^\[ok\] docs/releases/v1.2.3.md has install instructions for v1.2.3' "$scratch/out"
 
 echo '[ok] preflight reaches its final gate and fails closed when it fails'

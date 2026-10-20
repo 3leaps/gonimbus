@@ -28,6 +28,60 @@ grep -qE "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md || die "C
 grep -qE "^## \[$version\] - " RELEASE_NOTES.md || die "RELEASE_NOTES.md has no [$version] heading"
 [[ -s "docs/releases/$tag.md" ]] || die "per-version notes docs/releases/$tag.md are missing"
 ok "changelog, release notes and docs/releases/$tag.md cover $version"
+# The per-version notes become the release body, so they must tell a reader how
+# to install this exact version (see docs/releases/TEMPLATE.md).
+install_section="$(awk '/^## /{in_install = ($0 == "## Install")} in_install' "docs/releases/$tag.md")"
+[[ -n "$install_section" ]] || die "docs/releases/$tag.md has no '## Install' section"
+for want in 'brew install 3leaps/tap/gonimbus' 'scoop install gonimbus' \
+    "go install github.com/3leaps/gonimbus/cmd/gonimbus@$tag"; do
+    # Whole command: it must end at whitespace, a comment or end of line, so
+    # @v1.2.3 does not accept @v1.2.30 or @v1.2.3-rc.1. The tag matched
+    # vX.Y.Z above, so escaping dots is the only regex quoting needed.
+    pattern="(^|[[:space:]])${want//./\\.}([[:space:]]|#|\$)"
+    grep -qE -- "$pattern" <<< "$install_section" ||
+        die "docs/releases/$tag.md Install section is missing: $want"
+done
+ok "docs/releases/$tag.md has install instructions for $tag"
+# Relative links resolve in the repository but not on the release page. Every
+# link destination outside fenced code must be an https URL or an in-page
+# anchor, and links to this repository's files must name this tag.
+python3 -I - "docs/releases/$tag.md" "$tag" << 'PY' || exit 1
+import re, sys
+path, tag = sys.argv[1], sys.argv[2]
+repo_blob = 'https://github.com/3leaps/gonimbus/blob/'
+patterns = [
+    re.compile(r'\]\(\s*<([^>]*)>'),                  # [text](<dest>)
+    re.compile(r'\]\(\s*([^\s)<]+)'),                 # [text](dest "title")
+    re.compile(r'^\s{0,3}\[[^\]]+\]:\s*<?([^\s>]+)'),  # [ref]: dest
+    re.compile(r'\b(?:href|src)\s*=\s*["\']([^"\']*)'),  # HTML attributes
+]
+# CommonMark fences: a block closes only on the same character, at least as
+# long as its opener, with nothing after it but whitespace.
+fence_open = re.compile(r' {0,3}(`{3,}|~{3,})(.*)$')
+fence = None
+for number, line in enumerate(open(path, encoding='utf-8'), 1):
+    line = line.rstrip('\n')
+    if fence is not None:
+        closing = re.fullmatch(r' {0,3}(' + re.escape(fence[0]) + r'{' + str(len(fence)) + r',})\s*', line)
+        if closing:
+            fence = None
+        continue
+    opening = fence_open.match(line)
+    if opening and not (opening.group(1)[0] == '`' and '`' in opening.group(2)):
+        fence = opening.group(1)
+        continue
+    for pattern in patterns:
+        for dest in pattern.findall(line):
+            if dest.startswith('#'):
+                continue
+            if not dest.startswith('https://'):
+                raise SystemExit(f'[!!] {path}:{number} has a relative link (use a tag-scoped URL): {dest}')
+            if 'vX.Y.Z' in dest:
+                raise SystemExit(f'[!!] {path}:{number} still has the vX.Y.Z placeholder: {dest}')
+            if dest.startswith(repo_blob) and not dest.startswith(repo_blob + tag + '/'):
+                raise SystemExit(f'[!!] {path}:{number} links a repository file at another ref (use {tag}): {dest}')
+PY
+ok "docs/releases/$tag.md links are absolute and name $tag"
 
 ./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
 ok 'workflow actions are pinned and off Node 20'

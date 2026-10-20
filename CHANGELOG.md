@@ -48,6 +48,10 @@ changes.
 - `make lint-cross-os` runs golangci-lint for linux, darwin and windows, and
   CI runs it. Removes platform-only dead code it found, including the unused
   Linux non-pidfd signalling fallback.
+- The release notes template carries Release provenance and Install sections,
+  because the per-version notes are the GitHub release body. Release preflight
+  refuses notes whose Install section lacks the Homebrew, Scoop and
+  `go install` commands for the release tag.
 
 ### Fixed
 
