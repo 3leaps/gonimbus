@@ -269,7 +269,8 @@ func TestEvidence_DualFailHBChildHelper(t *testing.T) {
 		t.Fatalf("child acquire lease: %v", err)
 	}
 	// Keep lease held until process death (no Release) so parent sees Held.
-	_ = lease
+	// The park loop below keeps the handle reachable; otherwise a GC can
+	// finalize its file and drop the lock while the child is still alive.
 
 	if err := os.WriteFile(readyPath, []byte(fmt.Sprintf("pid=%d goos=%s\n", pid, runtime.GOOS)), 0o600); err != nil {
 		t.Fatal(err)
@@ -302,6 +303,7 @@ func TestEvidence_DualFailHBChildHelper(t *testing.T) {
 	// Park while holding lease so parent can plan/recover against live child.
 	for {
 		time.Sleep(time.Hour)
+		runtime.KeepAlive(lease)
 	}
 }
 
