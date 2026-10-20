@@ -8,8 +8,8 @@ This file contains release notes for up to the three most recent releases in rev
 
 **Write receipts, probe outcomes, and listing integrity**
 
-v0.4.4 makes copy and probe pipelines report what actually happened, and makes
-index builds refuse a listing that ended early.
+v0.4.4 makes copy and probe pipelines report what each write acknowledged and
+how each probe ended, and makes index builds refuse a listing that ended early.
 
 - **Terminal write receipts.** Terminal reflow records can carry the
   destination's acknowledgement of each write: payload SHA-256, ETag, revision,
@@ -19,11 +19,11 @@ index builds refuse a listing that ended early.
   `gonimbus.content.probe.summary.v1` record. A completed run with object data
   errors exits **60**, previously **32**; provider failures remain 32.
 - **Listing integrity.** A page that reports more results without a usable
-  continuation token fails the listing, so an index build never seals a
-  partial inventory as complete.
-- **Durable include refusals** name the alternative (`index
-migrate-match-scope`, `build.scope`, or `--format sqlite`), with a worked
-  `date_partitions` example for a wildcard in a middle path segment.
+  continuation token fails the listing, so an index build fails before
+  sealing instead of attesting a partial listing.
+- **Durable include refusals** name the alternative
+  (`index migrate-match-scope`, `build.scope`, or `--format sqlite`), with a
+  worked `date_partitions` example for a wildcard in a middle path segment.
 - **Release provenance.** A read-only tag workflow builds the release; a
   signed maintainer ceremony publishes it.
 

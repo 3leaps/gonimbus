@@ -17,16 +17,16 @@ changes.
 
 ## [0.4.4] - 2026-10-20
 
-**Prove what each copy wrote, and refuse a listing that ended early.**
+**Record what each copy wrote, and refuse a listing that ended early.**
 
 Terminal reflow records can now carry what the destination acknowledged for
 each write, and `content probe` ends with a summary record and a distinct exit
 code for completed runs with object data errors. An index build refuses a
 listing page that claims more results without a usable continuation token,
-so a partial listing is never sealed as complete. Durable builds name the
-alternatives when they refuse a non-default include, and the known limits of
-discovered scope plans are stated. Releases are now built by a read-only
-workflow and published through a signed maintainer ceremony.
+and fails before sealing instead of attesting a partial listing. Durable
+builds name the alternatives when they refuse a non-default include, and the
+known limits of discovered scope plans are stated. Releases are now built by a
+read-only workflow and published through a signed maintainer ceremony.
 
 **Upgrade note:** completed probe runs with object data errors exit **60**,
 previously **32**. Scripts that match 32 for that case must change.
