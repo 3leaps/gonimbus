@@ -66,7 +66,7 @@ func findProjectRoot() (string, error) {
 			if !filepath.IsAbs(boundary) {
 				continue
 			}
-			st, err := os.Stat(boundary)
+			st, err := os.Stat(boundary) // #nosec G703 -- metadata-only stat of an absolute, cleaned CI workspace path used as a search ceiling; it must contain cwd and is never opened or written
 			if err != nil || !st.IsDir() {
 				continue
 			}
