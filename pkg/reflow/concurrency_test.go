@@ -434,3 +434,18 @@ func contextWithTimeout(t *testing.T, d time.Duration) (context.Context, context
 	t.Helper()
 	return context.WithTimeout(context.Background(), d)
 }
+
+// requireDomainOccupancyWithinCeilings checks observed occupancy against the
+// limiter's domain contract. Source and probe are each capped at the effective
+// ceiling and dest at its own recorded ceiling; ConcurrencyMaxActive is the
+// peak of their sum, so it is bounded by the per-domain peaks, not by any one
+// domain's ceiling.
+func requireDomainOccupancyWithinCeilings(t *testing.T, stats ConcurrencyStats, msgAndArgs ...interface{}) {
+	t.Helper()
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveSource, stats.ConcurrencyCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveProbe, stats.ConcurrencyCeilingEffective, msgAndArgs...)
+	require.Positive(t, stats.DestDomainCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveDest, stats.DestDomainCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActive,
+		stats.ConcurrencyMaxActiveSource+stats.ConcurrencyMaxActiveDest+stats.ConcurrencyMaxActiveProbe, msgAndArgs...)
+}
