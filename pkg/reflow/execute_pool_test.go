@@ -777,8 +777,8 @@ func TestRunnerZeroConcurrencyConfigResolves(t *testing.T) {
 	require.GreaterOrEqual(t, run.ConcurrencyCeilingEffective, 1)
 	require.LessOrEqual(t, run.ConcurrencyCeilingEffective, run.ConcurrencyCeilingRequested)
 	require.NotEmpty(t, run.ConcurrencyCeilingReason)
-	require.LessOrEqual(t, summary.ConcurrencyMaxActive, summary.ConcurrencyCeilingEffective,
-		"observed max-active must not exceed the reported effective ceiling")
+	requireDomainOccupancyWithinCeilings(t, summary.ConcurrencyStats,
+		"observed domain occupancy must not exceed the reported ceilings")
 
 	// A partial config (requested only) resolves through the same arithmetic.
 	cfg2 := copyConfig(dst, &serializedGuardSink{})
@@ -908,7 +908,7 @@ func TestRunnerFixedPartialConfigExecutesReportedCeiling(t *testing.T) {
 	require.GreaterOrEqual(t, src.maxInFlight.Load(), int64(barrierFloor),
 		"fixed partial config must execute at its reported ceiling, not serially")
 	require.Equal(t, int64(objects), summary.Statuses["complete"])
-	require.LessOrEqual(t, summary.ConcurrencyMaxActive, summary.ConcurrencyCeilingEffective)
+	requireDomainOccupancyWithinCeilings(t, summary.ConcurrencyStats)
 	require.Equal(t, 8, summary.ConcurrencyCeilingEffective)
 	require.Equal(t, 8, summary.ConcurrencyInitial, "normalized fixed config reports the initial it executes")
 }

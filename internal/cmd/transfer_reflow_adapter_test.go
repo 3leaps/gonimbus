@@ -656,22 +656,21 @@ func assertBarrierArmBehavior(t *testing.T, arm reflowDualPathArm, objectCount, 
 	}
 
 	// Summary carries the same execution path, and the concurrency relations
-	// hold: observed max-active <= resolved effective <= requested.
+	// hold: each domain's observed peak is within its own ceiling, resolved
+	// effective <= requested, and occupancy (which sums all domains) averages
+	// no higher than its own peak.
 	sum := requireRecord(t, arm.stdout, reflowpkg.SummaryRecordType, "")
 	require.Contains(t, string(sum.Data), fmt.Sprintf(`"execution_path":%q`, expectedPath))
 	var sumFields struct {
-		MaxActive     int     `json:"concurrency_max_active"`
 		Effective     int     `json:"concurrency_ceiling_effective"`
 		Requested     int     `json:"concurrency_ceiling_requested"`
 		TimeAvgActive float64 `json:"concurrency_time_avg_active"`
 	}
 	require.NoError(t, json.Unmarshal(sum.Data, &sumFields))
-	require.LessOrEqual(t, sumFields.MaxActive, sumFields.Effective)
+	requireSummaryDomainOccupancyWithinCeilings(t, sum.Data)
 	require.LessOrEqual(t, sumFields.Effective, sumFields.Requested)
 	require.Greater(t, sumFields.TimeAvgActive, 0.0,
 		"a run that moved objects must report positive time-averaged occupancy")
-	require.LessOrEqual(t, sumFields.TimeAvgActive, float64(sumFields.Effective),
-		"time-averaged occupancy can never exceed the effective ceiling")
 
 	// Sterility: no URI/key material in stderr diagnostics.
 	require.NotContains(t, arm.stderr, "s3://source-bucket")
@@ -959,12 +958,7 @@ func TestTransferReflowDualPathSkipHeavyParity(t *testing.T) {
 		requireReflowStatusReasonCount(t, records, "complete", "", 0)
 
 		sum := requireRecord(t, arm.arm.stdout, reflowpkg.SummaryRecordType, "")
-		var sumFields struct {
-			MaxActive int `json:"concurrency_max_active"`
-			Effective int `json:"concurrency_ceiling_effective"`
-		}
-		require.NoError(t, json.Unmarshal(sum.Data, &sumFields))
-		require.LessOrEqual(t, sumFields.MaxActive, sumFields.Effective, arm.name)
+		requireSummaryDomainOccupancyWithinCeilings(t, sum.Data, arm.name)
 
 		// Skip-path fan-out lower bound: collision resolution must overlap on
 		// the operation skips actually execute (destination Head), bounded
@@ -1722,6 +1716,24 @@ func TestTransferReflowCommand_EngineSingleSourceProviderConstruction(t *testing
 		require.True(t, dst.hasObject(fmt.Sprintf("data/source/obj-%02d.xml", i)))
 	}
 	require.False(t, dst.hasObject("data/x/y.xml"), "divergent-root record must not land")
+}
+
+// requireSummaryDomainOccupancyWithinCeilings checks a summary record's
+// occupancy against the limiter's domain contract. Source and probe are each
+// capped at the effective ceiling and dest at its own recorded ceiling;
+// concurrency_max_active is the peak of their sum, so it is bounded by the
+// per-domain peaks, not by any one domain's ceiling.
+func requireSummaryDomainOccupancyWithinCeilings(t *testing.T, data json.RawMessage, msgAndArgs ...interface{}) {
+	t.Helper()
+	var stats reflowpkg.ConcurrencyStats
+	require.NoError(t, json.Unmarshal(data, &stats))
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveSource, stats.ConcurrencyCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveProbe, stats.ConcurrencyCeilingEffective, msgAndArgs...)
+	require.Positive(t, stats.DestDomainCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActiveDest, stats.DestDomainCeilingEffective, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyMaxActive,
+		stats.ConcurrencyMaxActiveSource+stats.ConcurrencyMaxActiveDest+stats.ConcurrencyMaxActiveProbe, msgAndArgs...)
+	require.LessOrEqual(t, stats.ConcurrencyTimeAvgActive, float64(stats.ConcurrencyMaxActive), msgAndArgs...)
 }
 
 // dropVolatileConcurrencyObservations removes run-to-run-variable limiter
