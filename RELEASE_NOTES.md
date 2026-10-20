@@ -4,7 +4,45 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
-## v0.4.3 (2026-09-11)
+## [0.4.4] - 2026-10-20
+
+**Write receipts, probe outcomes, and listing integrity**
+
+v0.4.4 makes copy and probe pipelines report what actually happened, and makes
+index builds refuse a listing that ended early.
+
+- **Terminal write receipts.** Terminal reflow records can carry the
+  destination's acknowledgement of each write: payload SHA-256, ETag, revision,
+  and known source last-modified. These are transfer receipts, not independent
+  read-back verification.
+- **Probe summary and exit codes.** `content probe` ends with one
+  `gonimbus.content.probe.summary.v1` record. A completed run with object data
+  errors exits **60**, previously **32**; provider failures remain 32.
+- **Listing integrity.** A page that reports more results without a usable
+  continuation token fails the listing, so an index build never seals a
+  partial inventory as complete.
+- **Durable include refusals** name the alternative (`index
+migrate-match-scope`, `build.scope`, or `--format sqlite`), with a worked
+  `date_partitions` example for a wildcard in a middle path segment.
+- **Release provenance.** A read-only tag workflow builds the release; a
+  signed maintainer ceremony publishes it.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.4
+```
+
+Scripts that match exit code 32 for a completed probe with object data errors
+must handle 60. Upgrade probe producers and reflow consumers together, or filter
+the summary record for an older consumer.
+
+See [docs/releases/v0.4.4.md](docs/releases/v0.4.4.md) for the complete
+release notes.
+
+---
+
+## [0.4.3] - 2026-09-11
 
 **Reuse a finished durable inventory**
 
@@ -71,7 +109,7 @@ release notes.
 
 ---
 
-## v0.4.2 (2026-08-13)
+## [0.4.2] - 2026-08-13
 
 **Library Reflow Data Plane + Independent Source/Dest Admission**
 
@@ -137,76 +175,4 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.2
 
 No format or schema break; existing durable and SQLite artifacts are read as-is.
 See [docs/releases/v0.4.2.md](docs/releases/v0.4.2.md) for the complete release
-notes.
-
----
-
-## v0.4.1 (2026-07-18)
-
-**SQLite Independence + Streaming Durable Publication**
-
-v0.4.0 made the durable index the default build format. v0.4.1 completes the
-operator story: a durable-only default build no longer needs an `index.db` for
-everyday local work, and `index build` publishes durable snapshots through a
-streaming path that never materializes the full row set in memory.
-
-SQLite remains a first-class compatibility path (`--format sqlite` /
-`--format both`) for `query --since-run`, `stats --prefixes`, and full
-`--resume-run` recovery.
-
-### SQLite-independent local surfaces
-
-`query`, `list`, `stats`, `doctor`, and `enrich-with-head` now read the durable
-substrate natively (no `index.db`, no ephemeral SQLite bridge). A machine-stable
-`index build --json` receipt (`gonimbus.index.build_result.v1`) and a pinned
-durable query (`--index-set` + `--run-id`) let automation hand off the exact
-committed snapshot without list heuristics.
-
-```bash
-# Default durable build — now queryable and diagnosable natively
-gonimbus index build --job index.yaml
-
-# Machine-stable receipt for handoff
-gonimbus index build --job index.yaml --json
-
-# Query the durable snapshot directly (streaming verified JSONL)
-gonimbus index query --index-set idx_... --prefix data/
-
-# Dry-run whole-set reclamation plan
-gonimbus index gc --dry-run --keep-last 3 --json
-```
-
-### Also in this cut
-
-- **Streaming durable publication** with operator-tunable capacity budgets
-  (`--spill-workspace-max` / `--spill-record-max` / `--spill-root`; 16 GiB
-  workspace / 16 MiB record defaults; flag > env > config > default). Invalid
-  budgets refuse before any side effect; exhaustion refuses fail-closed with no
-  `latest` advance. Segment packing stays 500k rows/segment (engine lever, not a
-  setting). Operator guide:
-  [durable-index capacity budgets](docs/user-guide/durable-index.md#streaming-capacity-budgets-operator-tunable).
-- **Managed background builds** (`index build --background`) with dedup, leases,
-  recovery, and terminal receipts.
-- **Whole-set GC** — `index gc --dry-run` (`--max-age` / `--keep-last` /
-  `--json`), leased execution, canonical SQLite authority.
-- **`index migrate-match-scope`** — fail-closed migration of prefix-shaped
-  `match.includes` to explicit `build.scope`.
-- **`transfer reflow` stdin `--parallel` restored** (a v0.3.5–v0.4.0
-  regression).
-
-### Boundary framing
-
-Durable-v2 remains a full-fidelity **internal render** for trusted operators and
-pipelines — not a reduced-trust, de-identified, or third-party publication
-format. Content digests are **content-integrity / tamper-evidence** checksums,
-not statements of author authenticity or provenance.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.1
-```
-
-No format or schema break; existing durable and SQLite artifacts are read as-is.
-See [docs/releases/v0.4.1.md](docs/releases/v0.4.1.md) for the complete release
 notes.

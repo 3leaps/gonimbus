@@ -15,6 +15,25 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-20
+
+**Prove what each copy wrote, and refuse a listing that ended early.**
+
+Terminal reflow records can now carry what the destination acknowledged for
+each write, and `content probe` ends with a summary record and a distinct exit
+code for completed runs with object data errors. An index build refuses a
+listing page that claims more results without a usable continuation token,
+so a partial listing is never sealed as complete. Durable builds name the
+alternatives when they refuse a non-default include, and the known limits of
+discovered scope plans are stated. Releases are now built by a read-only
+workflow and published through a signed maintainer ceremony.
+
+**Upgrade note:** completed probe runs with object data errors exit **60**,
+previously **32**. Scripts that match 32 for that case must change.
+
+See [`docs/releases/v0.4.4.md`](docs/releases/v0.4.4.md) for the narrative
+walkthrough.
+
 ### Added
 
 - Terminal reflow v1 records optionally carry acknowledged-write SHA-256,
@@ -67,6 +86,12 @@ changes.
   the alternatives: `index migrate-match-scope` for prefix-shaped includes,
   `build.scope` for a wildcard in a middle path segment, and `--format sqlite`
   otherwise.
+- A crawler or index build sharing one request budget no longer admits
+  requests above the configured `rate_limit` when many workers wait at once.
+  A wait that cannot start before the caller's deadline is refused and its
+  reservation returned.
+- The job registry retries Windows sharing and lock violations reported as
+  NTSTATUS codes, as it already did for the equivalent Win32 errors.
 
 ### Known limits (stated, not claimed)
 
@@ -95,12 +120,15 @@ changes.
   (both required), and promotion only after the draft is byte-verified
   against the local signed set. Remote tag lookups use the GitHub API.
 - Update `golang.org/x/net` to v0.60.0 (GO-2026-6603, GO-2026-6610,
-  GO-2026-6611, GO-2026-6612, GO-2026-6617) under a time-bounded cooling
-  exception recorded in SDR-002, and `go.opentelemetry.io/otel/sdk` to v1.45.0
-  (GO-2026-6505).
+  GO-2026-6611, GO-2026-6612, GO-2026-6617) and `go.opentelemetry.io/otel/sdk`
+  to v1.45.0 (GO-2026-6505). The temporary dependency-cooling exception for
+  x/net (SDR-002) expired before this release and has been removed; the
+  dependency gate passes without it.
 
 ### Library API
 
+- Add the `provider.ErrIncompleteListing` sentinel for a listing page that
+  reports more results without a usable continuation token.
 - Add optional `provider.ResultPutter` and `MetadataAwareResultPutter`
   capabilities, with S3 result-bearing unconditional PUT methods. Existing
   error-only interfaces remain callable; providers without the new capabilities
@@ -1880,7 +1908,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/3leaps/gonimbus/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/3leaps/gonimbus/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/3leaps/gonimbus/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/3leaps/gonimbus/compare/v0.4.0...v0.4.1

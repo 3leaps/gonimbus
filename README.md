@@ -148,6 +148,11 @@ current objects added or changed after a known run; see
 Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
+Terminal reflow records can carry what the destination acknowledged for each
+write, and `content probe` ends with a summary record and exits 60 for a
+completed run with object data errors; see
+[Terminal write receipts](docs/user-guide/reflow.md#terminal-write-receipts) and
+[Probe termination and process result](docs/user-guide/streaming.md#probe-termination-and-process-result).
 **Durable is the default index format** (`index build` publishes durable-v2
 segments + manifest unless you pass `--format sqlite` or `--format both`).
 A finished durable run can be taken into current hub custody and queried as
@@ -163,6 +168,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.4.4 release notes](docs/releases/v0.4.4.md),
 [v0.4.3 release notes](docs/releases/v0.4.3.md),
 [v0.4.2 release notes](docs/releases/v0.4.2.md),
 [v0.4.1 release notes](docs/releases/v0.4.1.md), and
