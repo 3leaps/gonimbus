@@ -29,6 +29,10 @@ var (
 	appIdentity *appidentity.Identity
 )
 
+// resolveProjectRoot locates the project root for Load. Tests replace it so
+// config loading does not depend on where the checkout lives.
+var resolveProjectRoot = findProjectRoot
+
 // findProjectRoot walks up from the current working directory to find the project root.
 // It looks for project markers like go.mod or .git directory.
 // This ensures config paths work correctly regardless of where the process is run from.
@@ -62,7 +66,7 @@ func findProjectRoot() (string, error) {
 			if !filepath.IsAbs(boundary) {
 				continue
 			}
-			st, err := os.Stat(boundary)
+			st, err := os.Stat(boundary) // #nosec G703 -- metadata-only stat of an absolute, cleaned CI workspace path used as a search ceiling; it must contain cwd and is never opened or written
 			if err != nil || !st.IsDir() {
 				continue
 			}
@@ -117,7 +121,7 @@ func Load(ctx context.Context, runtimeOverrides ...map[string]any) (*Config, err
 
 	// Find project root for absolute paths
 	// This ensures config loading works from any working directory (including tests)
-	projectRoot, err := findProjectRoot()
+	projectRoot, err := resolveProjectRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to find project root: %w", err)
 	}
