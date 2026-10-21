@@ -68,6 +68,7 @@ Terminal `gonimbus.reflow.v1` records optionally include:
 
   Compare `dest_etag` only with an ETag from the same provider for the same
   object. Use `dest_sha256` for content.
+
 - `dest_version_id`: the write-response opaque revision string (S3 version or
   GCS generation). Unknown, S3 null-version, and file revisions are omitted.
 - `source_last_modified`: a known input/listing or admitted source-read
