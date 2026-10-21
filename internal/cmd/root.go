@@ -86,6 +86,21 @@ var rootCmd = &cobra.Command{
 	Use:   filepath.Base(os.Args[0]),
 	Short: rootHelpShort,
 	Long:  rootHelpLong,
+	// Usage is for invocation errors only. Cobra has parsed flags and checked
+	// arguments before this hook, but checks required flags and flag groups
+	// after it, so check those here first. Anything a command returns after
+	// that is a runtime outcome with its own exit code, and the usage block
+	// would only add noise to stderr.
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return err
+		}
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			return err
+		}
+		cmd.SilenceUsage = true
+		return nil
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
