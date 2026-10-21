@@ -57,7 +57,17 @@ Terminal `gonimbus.reflow.v1` records optionally include:
   including the empty-object digest. Retries and multipart replay are not
   counted twice. This is a transfer receipt, not independent read-back proof.
 - `dest_etag`: the write-response ETag, not a payload SHA-256 or the prior
-  `collision.dest_etag_observed` value.
+  `collision.dest_etag_observed` value. Its meaning depends on the destination
+  provider:
+  - S3: the object's ETag with surrounding quotes removed. For multipart uploads
+    it is not an MD5 of the content.
+  - GCS: the object's ETag as GCS returns it, an opaque version token.
+  - `file://`: a metadata version token, the hex SHA-256 of the file's size,
+    modification time and mode. It is 64 hex characters but is not a content
+    digest and never equals `dest_sha256`.
+
+  Compare `dest_etag` only with an ETag from the same provider for the same
+  object. Use `dest_sha256` for content.
 - `dest_version_id`: the write-response opaque revision string (S3 version or
   GCS generation). Unknown, S3 null-version, and file revisions are omitted.
 - `source_last_modified`: a known input/listing or admitted source-read
