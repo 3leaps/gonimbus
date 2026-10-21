@@ -44,7 +44,7 @@ targets=(release-guard-tag-name release-guard-tag-version release-guard-signing-
 
 run_make() {
     (cd "$fixture" && env -u RELEASE_TAG -u GONIMBUS_RELEASE_TAG -u MAKEFLAGS \
-        "$@")
+        -u GNUMAKEFLAGS -u MFLAGS -u GIT_DIR -u GIT_WORK_TREE "$@")
 }
 
 # expect_refused <label> <pattern> <command...>: non-zero exit, stderr names
