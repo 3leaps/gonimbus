@@ -62,6 +62,34 @@ identity, committed counts, durable `manifest_sha256`). Progress stays on
 stderr. Dry-run prints the computed `index_set_id` and `scope_hash` without
 creating artifacts.
 
+The receipt is a standalone document, not a stream record. `type`,
+`schema_version` and `status` are top-level fields beside the receipt data; there
+is no `{type, data}` envelope as in JSONL record families such as
+`gonimbus.reflow.v1`. A consumer that handles every record as `{type, data}`
+should read `index build --json` output by its top-level `type`. The command
+writes one line; formatted, a durable success looks like this:
+
+```json
+{
+  "type": "gonimbus.index.build_result.v1",
+  "schema_version": "1.0.0",
+  "status": "success",
+  "requested_format": "durable",
+  "formats_committed": ["durable-v2"],
+  "index_set_id": "...",
+  "run_id": "...",
+  "scope_hash": "...",
+  "rows": 1200,
+  "active_rows": 1180,
+  "tombstones": 20,
+  "segments": 3,
+  "objects_observed": 1200,
+  "manifest_sha256": "..."
+}
+```
+
+Accept the receipt as authoritative only when `status` is `success`.
+
 For durable query of a specific snapshot, pass `--index-set` with `--run-id`
 to pin the receipt's run (bypasses `latest.json`). `transfer reflow` does not
 yet validate a snapshot-source receipt; exact export/query selection is the
