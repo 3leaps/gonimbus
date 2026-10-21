@@ -24,7 +24,7 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ### Prerequisites
 
-- Go 1.26+ ([install](https://go.dev/doc/install)); the module selects toolchain go1.26.9
+- Go 1.26+ ([install](https://go.dev/doc/install)); the module selects toolchain go1.26.10
 - golangci-lint ([install](https://golangci-lint.run/welcome/install/))
 
 ### Install

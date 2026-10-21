@@ -78,7 +78,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
       - name: Verify runner + Go toolchain
         run: |
           set -euo pipefail
@@ -107,7 +107,7 @@ jobs:
         # goneat-tools-runner does not ship golangci-lint yet.
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
-          version: v2.11.2
+          version: v2.14.0
           args: --help
       - name: Verify golangci-lint
         run: |
@@ -220,7 +220,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
       - name: Verify native runner architecture
         shell: pwsh
         run: |
@@ -300,7 +300,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
       - name: Build binary
         run: |
           set -euo pipefail
