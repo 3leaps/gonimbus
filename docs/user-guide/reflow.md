@@ -64,7 +64,8 @@ Terminal `gonimbus.reflow.v1` records optionally include:
   - GCS: the object's ETag as GCS returns it, an opaque version token.
   - `file://`: a metadata version token, the hex SHA-256 of the file's size,
     modification time and mode. It is 64 hex characters but is not a content
-    digest and never equals `dest_sha256`.
+    digest: do not interpret it as, or compare it with, `dest_sha256`. Two
+    matching tokens do not prove matching content.
 
   Compare `dest_etag` only with an ETag from the same provider for the same
   object. Use `dest_sha256` for content.
