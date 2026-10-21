@@ -20,11 +20,12 @@ func executeRootCapture(t *testing.T, args ...string) (string, error) {
 	rootCmd.SetErr(&out)
 	rootCmd.SetOut(&out)
 	rootCmd.SetContext(context.Background())
+	restore := snapshotSilenceUsage(rootCmd)
 	t.Cleanup(func() {
 		rootCmd.SetArgs(nil)
 		rootCmd.SetErr(nil)
 		rootCmd.SetOut(nil)
-		resetSilenceUsage(rootCmd)
+		restore()
 		// Flag values persist on the package-level command tree.
 		contentProbeConfigPath = ""
 		require.NoError(t, contentProbeCmd.Flags().Set("config", ""))
@@ -34,11 +35,23 @@ func executeRootCapture(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// resetSilenceUsage clears the flag on every command so cases stay independent.
-func resetSilenceUsage(c *cobra.Command) {
-	c.SilenceUsage = false
-	for _, sub := range c.Commands() {
-		resetSilenceUsage(sub)
+// snapshotSilenceUsage records SilenceUsage across the command tree and returns
+// a function that puts every value back, so cases stay independent without
+// clearing commands that set it at construction.
+func snapshotSilenceUsage(root *cobra.Command) func() {
+	saved := map[*cobra.Command]bool{}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		saved[c] = c.SilenceUsage
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+	return func() {
+		for c, v := range saved {
+			c.SilenceUsage = v
+		}
 	}
 }
 

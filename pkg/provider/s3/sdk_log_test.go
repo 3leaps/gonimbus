@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,6 +55,16 @@ func TestProviderRangedGetLeavesStderrEmpty(t *testing.T) {
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
+			// Ambient AWS settings must not hide the log line: when_required
+			// skips validation before the SDK would log, so pin when_supported
+			// and keep the developer's shared config and profile out.
+			empty := t.TempDir()
+			t.Setenv("AWS_CONFIG_FILE", filepath.Join(empty, "config"))
+			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(empty, "credentials"))
+			t.Setenv("AWS_PROFILE", "")
+			t.Setenv("AWS_ENDPOINT_URL", "")
+			t.Setenv("AWS_ENDPOINT_URL_S3", "")
+			t.Setenv("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_supported")
 			if cfg.Endpoint == "" {
 				t.Setenv("AWS_ENDPOINT_URL_S3", server.URL)
 			}
