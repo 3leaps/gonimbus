@@ -1336,7 +1336,7 @@ func TestApplyS3ClientOptions_NativeAWS(t *testing.T) {
 
 	assert.False(t, opts.UsePathStyle)
 	assert.Nil(t, opts.BaseEndpoint)
-	assert.False(t, opts.DisableLogOutputChecksumValidationSkipped)
+	assert.True(t, opts.DisableLogOutputChecksumValidationSkipped)
 }
 
 func TestDefaultMaxKeys(t *testing.T) {

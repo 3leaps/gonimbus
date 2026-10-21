@@ -87,10 +87,12 @@ func applyS3ClientOptions(o *s3.Options, cfg Config) {
 
 	if cfg.Endpoint != "" {
 		o.BaseEndpoint = aws.String(cfg.Endpoint)
-		// S3-compatible providers can omit response checksums for supported
-		// operations; the SDK warning is expected noise for those endpoints.
-		o.DisableLogOutputChecksumValidationSkipped = true
 	}
+
+	// Ranged GETs (on AWS too) and S3-compatible providers return no response
+	// checksum the SDK can validate. gonimbus hashes payloads itself, so the
+	// SDK's "not validating" log line is noise on stderr for every endpoint.
+	o.DisableLogOutputChecksumValidationSkipped = true
 }
 
 // loadAWSConfig builds the AWS configuration with appropriate credentials.
