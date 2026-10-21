@@ -87,6 +87,24 @@ for target in "${targets[@]}"; do
         GONIMBUS_RELEASE_TAG=v1.2.2 make -s "$target"
 done
 
+# Under make -j, read-only local checks may run beside the VERSION guard, but the
+# published-tag check (it rewrites the local tag ref) and the ceremony scripts
+# must not start.
+for target in release-download release-create-draft release-sign \
+    release-upload-provenance release-upload-all release-publish; do
+    : > "$side_effects"
+    if run_make GONIMBUS_RELEASE_TAG=v1.2.2 make -s -j8 "$target" > /dev/null 2>&1; then
+        echo "expected failure (stale tag, -j8): $target" >&2
+        exit 1
+    fi
+    if grep -Ev '^(verify-checksums|release-verify-signatures|verify-minisign-public-key|verify-public-key) ' \
+        "$side_effects" | grep -q .; then
+        echo "tag fetch or ceremony script ran beside a failed guard (-j8): $target" >&2
+        cat "$side_effects" >&2
+        exit 1
+    fi
+done
+
 # The format guard reports success; the matching tag reaches the stubs.
 out="$(run_make GONIMBUS_RELEASE_TAG=v1.2.3 make -s release-guard-tag-name)"
 grep -q '^\[ok\] release tag name v1.2.3 is canonical$' <<< "$out" || {

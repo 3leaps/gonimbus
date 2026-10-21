@@ -272,8 +272,13 @@ release-push-tag: ## Maintainer-only: publish and verify the signed version tag
 release-verify-tag: ## Verify the local tag using only the committed public pin
 	@./scripts/release-verify-tag.sh
 
+# Ceremony targets run the published-tag check as their first recipe line, not
+# as a prerequisite, so it starts only after the VERSION guard passes, even
+# under make -j. The check fetches the remote tag into the local ref.
+VERIFY_PUBLISHED_TAG = GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
+
 release-verify-published-tag: release-guard-tag-name ## Verify the published tag object and signature against its committed pin
-	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
+	@$(VERIFY_PUBLISHED_TAG)
 
 release-verify-remote-tag: ## Compare local and remote tag objects and GitHub verification
 	@./scripts/release-verify-remote-tag.sh
@@ -316,13 +321,16 @@ checksums: release-checksums ## Deprecated: use release-checksums
 release-verify-checksums: ## Verify SHA256SUMS / SHA512SUMS match actual artifacts
 	@./scripts/verify-checksums.sh "$(DIST_RELEASE)"
 
-release-download: release-guard-tag-version release-verify-published-tag ## Download CI-built artifacts for the verified tag (workflow artifact)
+release-download: release-guard-tag-version ## Download CI-built artifacts for the verified tag (workflow artifact)
+	@$(VERIFY_PUBLISHED_TAG)
 	@./scripts/release-fetch-ci-artifacts.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-create-draft: release-guard-tag-version release-verify-published-tag release-verify-checksums ## Create the draft GitHub release from verified local artifacts (maintainer only)
+release-create-draft: release-guard-tag-version release-verify-checksums ## Create the draft GitHub release from verified local artifacts (maintainer only)
+	@$(VERIFY_PUBLISHED_TAG)
 	@./scripts/release-create-draft.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-sign: release-guard-tag-version release-verify-published-tag ## Sign checksum manifests with minisign and PGP (both required by publish)
+release-sign: release-guard-tag-version ## Sign checksum manifests with minisign and PGP (both required by publish)
+	@$(VERIFY_PUBLISHED_TAG)
 	@./scripts/sign-release-manifests.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-export-keys: ## Export public signing keys into dist/release
@@ -353,10 +361,12 @@ verify-checksums: release-verify-checksums ## Deprecated: use release-verify-che
 release-upload: release-upload-provenance ## Upload provenance assets to GitHub (GONIMBUS_RELEASE_TAG=vX.Y.Z)
 	@:
 
-release-upload-provenance: release-guard-tag-version release-verify-published-tag release-verify-checksums release-verify-keys release-verify-signatures ## Upload manifests + sigs + keys + notes (no binaries)
+release-upload-provenance: release-guard-tag-version release-verify-checksums release-verify-keys release-verify-signatures ## Upload manifests + sigs + keys + notes (no binaries)
+	@$(VERIFY_PUBLISHED_TAG)
 	@./scripts/release-upload-provenance.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-upload-all: release-guard-tag-version release-verify-published-tag release-verify-checksums release-verify-keys release-verify-signatures ## Upload binaries + provenance (manual override; release-create-draft already attaches binaries)
+release-upload-all: release-guard-tag-version release-verify-checksums release-verify-keys release-verify-signatures ## Upload binaries + provenance (manual override; release-create-draft already attaches binaries)
+	@$(VERIFY_PUBLISHED_TAG)
 	@./scripts/release-upload.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-publish: release-guard-tag-version ## Promote the draft to published after byte-verifying it against the local signed set
