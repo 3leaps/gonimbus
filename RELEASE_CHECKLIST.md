@@ -97,6 +97,12 @@ pinned signing subkey (`config/release/tagger-identity.txt`,
 `GONIMBUS_GPG_SIGNING_FINGERPRINT` (primary), `GONIMBUS_PGP_KEY_ID`
 (`<subkey>!`), and `GONIMBUS_GPG_HOMEDIR`.
 
+The tag comes only from `GONIMBUS_RELEASE_TAG`. Every `release-*` target refuses
+to start while the generic `RELEASE_TAG` is set, even to an empty value, so
+`unset RELEASE_TAG` first. Each target that downloads, drafts, signs, uploads or
+publishes also requires the tag to match `VERSION`; after a version bump on
+`main`, run the remaining steps from a checkout of the tagged commit.
+
 - [ ] Pre-tag gate on the merged main commit: `make release-preflight`
 - [ ] Prepare and review the external tag message: `make release-prepare-tag-message`
 - [ ] Create and verify the local signed tag: `make release-tag`
