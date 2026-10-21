@@ -25,6 +25,12 @@ for stub in release-verify-published-tag release-fetch-ci-artifacts \
         > "$fixture/scripts/$stub.sh"
     chmod +x "$fixture/scripts/$stub.sh"
 done
+# Local verify prerequisites find their inputs, so a refusal in the cases below
+# can only come from the tag guard.
+mkdir -p "$fixture/dist/release"
+: > "$fixture/dist/release/gonimbus-minisign.pub"
+: > "$fixture/dist/release/gonimbus-release-signing-key.asc"
+printf '/dist/\n/side-effects.log\n' > "$fixture/.gitignore"
 git -C "$fixture" init -q -b main
 git -C "$fixture" config user.name "release make test"
 git -C "$fixture" config user.email "noreply@example.invalid"
@@ -93,10 +99,15 @@ done
 for target in release-download release-create-draft release-sign \
     release-upload-provenance release-upload-all release-publish; do
     : > "$side_effects"
-    if run_make GONIMBUS_RELEASE_TAG=v1.2.2 make -s -j8 "$target" > /dev/null 2>&1; then
+    if out="$(run_make GONIMBUS_RELEASE_TAG=v1.2.2 make -s -j8 "$target" 2>&1)"; then
         echo "expected failure (stale tag, -j8): $target" >&2
         exit 1
     fi
+    grep -q 'does not match VERSION' <<< "$out" || {
+        echo "refused for another reason (stale tag, -j8): $target" >&2
+        echo "$out" >&2
+        exit 1
+    }
     if grep -Ev '^(verify-checksums|release-verify-signatures|verify-minisign-public-key|verify-public-key) ' \
         "$side_effects" | grep -q .; then
         echo "tag fetch or ceremony script ran beside a failed guard (-j8): $target" >&2
@@ -105,17 +116,60 @@ for target in release-download release-create-draft release-sign \
     fi
 done
 
-# The format guard reports success; the matching tag reaches the stubs.
+# With the matching tag every ceremony target runs the published-tag check first
+# and then its own script with GONIMBUS_RELEASE_TAG. release-publish.sh verifies
+# the published tag itself.
+check_ceremony() {
+    local target="$1" script="$2" verify="$3" first
+    : > "$side_effects"
+    run_make GONIMBUS_RELEASE_TAG=v1.2.3 make -s "$target" > /dev/null || {
+        echo "matching tag refused: $target" >&2
+        exit 1
+    }
+    grep -qx "$script v1.2.3 dist/release" "$side_effects" || {
+        echo "$target did not call $script with GONIMBUS_RELEASE_TAG" >&2
+        cat "$side_effects" >&2
+        exit 1
+    }
+    if [[ "$verify" == yes ]]; then
+        first="$(grep -Ev '^(verify-checksums|release-verify-signatures|verify-minisign-public-key|verify-public-key) ' \
+            "$side_effects" | head -n 1)"
+        [[ "$first" == "release-verify-published-tag " ]] || {
+            echo "$target did not verify the published tag before $script" >&2
+            cat "$side_effects" >&2
+            exit 1
+        }
+    fi
+}
+check_ceremony release-download release-fetch-ci-artifacts yes
+check_ceremony release-create-draft release-create-draft yes
+check_ceremony release-sign sign-release-manifests yes
+check_ceremony release-upload release-upload-provenance yes
+check_ceremony release-upload-provenance release-upload-provenance yes
+check_ceremony release-upload-all release-upload yes
+check_ceremony release-publish release-publish no
+
+# The published-tag check cannot be replaced from outside: neither an empty or
+# substituted environment value under make -e nor a command-line variable skips it.
+for override in "VERIFY_PUBLISHED_TAG=" "VERIFY_PUBLISHED_TAG=true"; do
+    for mode in env env-e cli; do
+        : > "$side_effects"
+        case "$mode" in
+            env) run_make "$override" GONIMBUS_RELEASE_TAG=v1.2.3 make -s release-sign > /dev/null ;;
+            env-e) run_make "$override" GONIMBUS_RELEASE_TAG=v1.2.3 make -s -e release-sign > /dev/null ;;
+            cli) run_make GONIMBUS_RELEASE_TAG=v1.2.3 make -s release-sign "$override" > /dev/null ;;
+        esac
+        grep -qx 'release-verify-published-tag ' "$side_effects" || {
+            echo "published-tag check skipped ($mode $override)" >&2
+            exit 1
+        }
+    done
+done
+
+# The format guard reports success.
 out="$(run_make GONIMBUS_RELEASE_TAG=v1.2.3 make -s release-guard-tag-name)"
 grep -q '^\[ok\] release tag name v1.2.3 is canonical$' <<< "$out" || {
     echo "release-guard-tag-name printed no [ok] line" >&2
-    exit 1
-}
-: > "$side_effects"
-run_make GONIMBUS_RELEASE_TAG=v1.2.3 make -s release-sign > /dev/null
-grep -qx 'sign-release-manifests v1.2.3 dist/release' "$side_effects" || {
-    echo "release-sign did not pass GONIMBUS_RELEASE_TAG to its script" >&2
-    cat "$side_effects" >&2
     exit 1
 }
 
