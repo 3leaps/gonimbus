@@ -15,6 +15,50 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-21
+
+**Require Go 1.26.10, and keep stderr for real problems.**
+
+The minimum supported Go toolchain is now `go1.26.10`, to ensure secure
+operation. The CLI no longer writes SDK checksum debug lines or usage blocks to
+stderr for runtime outcomes. Release tooling takes the release tag only from
+`GONIMBUS_RELEASE_TAG`.
+
+See [`docs/releases/v0.4.5.md`](docs/releases/v0.4.5.md) for the narrative
+walkthrough.
+
+### Changed
+
+- Build with Go toolchain `go1.26.10`, the minimum supported patch for this
+  line, to ensure secure operation. The module selects it by default, and CI
+  and release workflows pin `actions/setup-go` to `1.26.10`. The module `go`
+  directive stays `1.26.0`; builds below `go1.26.10` are not supported.
+- CI runs golangci-lint v2.14.0.
+- Release `make` targets read the tag only from `GONIMBUS_RELEASE_TAG`. Every
+  `release-*` goal refuses to start while the generic `RELEASE_TAG` is set
+  from any source, including an empty value. Targets that download, draft,
+  sign, upload or publish require the tag to match `VERSION`, and verify the
+  published tag only after that check.
+
+### Fixed
+
+- `content probe` and other commands against AWS S3 no longer print the SDK's
+  "Response has no supported checksum" debug line to stderr. gonimbus verifies
+  payloads with its own hashing; response validation is unchanged.
+- Usage text prints only for invocation errors (unknown flags, invalid values,
+  wrong argument counts, missing required flags). Runtime failures, such as a
+  probe that completes with errors, return their error and exit code without
+  the usage block.
+
+### Documentation
+
+- Reflow terminal receipts describe what `dest_etag` holds for S3, GCS and
+  `file://` destinations. On `file://` it is a size, mtime and mode version
+  token, not a content digest; use `dest_sha256` for content.
+- `index build --json`: the `gonimbus.index.build_result.v1` receipt is a
+  standalone document with top-level `type`, `schema_version` and `status`,
+  not a `{type, data}` stream record.
+
 ## [0.4.4] - 2026-10-20
 
 **Record what each copy wrote, and refuse a listing that ended early.**
@@ -1908,7 +1952,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/3leaps/gonimbus/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/3leaps/gonimbus/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/3leaps/gonimbus/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/3leaps/gonimbus/compare/v0.4.1...v0.4.2

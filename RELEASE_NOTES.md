@@ -4,6 +4,37 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## [0.4.5] - 2026-10-21
+
+**Go 1.26.10 minimum, quieter stderr, single-source release tag**
+
+v0.4.5 raises the minimum Go toolchain, keeps stderr for real problems, and
+tightens how the release tooling selects a tag.
+
+- **Go 1.26.10 minimum.** gonimbus builds with Go toolchain `go1.26.10`, to
+  ensure secure operation.
+- **Quieter stderr.** Commands against AWS S3 no longer print an SDK checksum
+  debug line, and runtime failures no longer append the usage block. Usage
+  still prints for invocation errors.
+- **Release tag from one variable.** Release tooling reads the tag only from
+  `GONIMBUS_RELEASE_TAG` and checks it against `VERSION` before any
+  tag-consuming step.
+- **Docs.** What `dest_etag` holds per destination provider, and the shape of
+  the `index build --json` receipt.
+
+No commands, flags, record schemas or exit codes change.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.5
+```
+
+See [docs/releases/v0.4.5.md](docs/releases/v0.4.5.md) for the complete
+release notes.
+
+---
+
 ## [0.4.4] - 2026-10-20
 
 **Write receipts, probe outcomes, and listing integrity**
@@ -106,73 +137,3 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.3
 
 See [docs/releases/v0.4.3.md](docs/releases/v0.4.3.md) for the complete
 release notes.
-
----
-
-## [0.4.2] - 2026-08-13
-
-**Library Reflow Data Plane + Independent Source/Dest Admission**
-
-v0.4.2 makes the library record-stream engine (`pkg/reflow`) the execution home
-for live copies: concurrent workers, memory admission, collision and durability
-handling, provenance sidecars, S3-compatible positional sources, and budgeted
-partitioned work. The CLI is an adapter. A standing dual-path parity gate holds
-engine and CLI-pool behavior together. Stdin `gonimbus.reflow.input.v1` copies
-with `s3://` sources and an object-store destination dispatch to the engine
-again; file destinations, file-tree sources, GCS positional sources,
-`index.object.v1` stdin, quarantine collision mode, `--preserve-mode`, and
-non-default `--on-source-failure` still report `execution_path: cli-pool`.
-
-Object-store and heterogeneous copies now admit source-read and dest-write
-independently (#191, #192). Dest admission tracks twice adaptive `current`
-(source stays at `current`), hard-clamped to a recorded, pool-realizable dest
-ceiling of twice the effective ceiling (default multiplier 2). Honesty checks
-assert that recorded dest policy. Dest occupancy may exceed `--parallel` up
-to that recorded ceiling; `--parallel` remains the operator request. Memory,
-file-descriptor, IfAbsent, and throttle clamps still bind.
-
-### Operator quick path
-
-```bash
-# Live reflow — engine path for reflow.input.v1 + s3:// source; --parallel is a requested ceiling
-gonimbus transfer reflow --stdin --dest 's3://dest-bucket/prefix/' \
-  --rewrite-from '{key}' --rewrite-to '{key}' --parallel 32
-
-# Optional memory bound for retry buffers + concurrency sizing
-gonimbus transfer reflow --stdin --dest 's3://dest-bucket/prefix/' \
-  --memory-budget 8GiB --parallel 32
-
-# Plan / apply stalled managed-index recovery (recover is confirm-gated)
-gonimbus index jobs plan-stalled job_...
-gonimbus index jobs recover-stalled job_... --confirm
-```
-
-### Also in this cut
-
-- **`--memory-budget` and a memory admission ledger** — lowest detected memory
-  candidate binds; copy buffers reserve before any provider action.
-- **Connection pools follow admitted N** via Stable `ResolveConnectionPool`
-  (not a field-throughput claim).
-- **Parallel durable crawl journal lanes** (#182; multi-entry crawl plans)
-  and index set-authority lease reclaim.
-- **`plan-stalled` / `recover-stalled`** (#185) — recover is `--confirm` gated.
-- **Atomic file IfAbsent publish** (#190) — no visible truncated final after a
-  hard interrupt mid-write. Experimental savepoint elision stays default off.
-
-### Boundary framing
-
-Durable-v2 remains a full-fidelity **internal render** for trusted operators and
-pipelines — not a reduced-trust, de-identified, or third-party publication
-format. Content digests are **content-integrity / tamper-evidence** checksums,
-not statements of author authenticity or provenance. SQLite remains a
-first-class compatibility path (`--format sqlite` / `--format both`).
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.2
-```
-
-No format or schema break; existing durable and SQLite artifacts are read as-is.
-See [docs/releases/v0.4.2.md](docs/releases/v0.4.2.md) for the complete release
-notes.

@@ -24,7 +24,8 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ### Prerequisites
 
-- Go 1.26+ ([install](https://go.dev/doc/install)); the module selects toolchain go1.26.10
+- Go 1.26.10 or newer ([install](https://go.dev/doc/install)), the minimum supported
+  toolchain to ensure secure operation; the module selects toolchain go1.26.10 by default
 - golangci-lint ([install](https://golangci-lint.run/welcome/install/))
 
 ### Install
@@ -168,6 +169,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.4.5 release notes](docs/releases/v0.4.5.md),
 [v0.4.4 release notes](docs/releases/v0.4.4.md),
 [v0.4.3 release notes](docs/releases/v0.4.3.md),
 [v0.4.2 release notes](docs/releases/v0.4.2.md),
