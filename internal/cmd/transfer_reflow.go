@@ -1263,6 +1263,10 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	var inputErr error
 	srcIdentity := ""
 	if reflowStdin {
+		advisoryWarnings := reflowpkg.NewAdvisoryWarningTracker()
+		emitAdvisoryWarning := func(wCtx context.Context, warning reflowpkg.Warning) {
+			_ = w.WriteAny(wCtx, reflowpkg.WarningRecordType, warning)
+		}
 		s := bufio.NewScanner(reflowInput)
 		s.Buffer(make([]byte, 64*1024), 1024*1024)
 		for s.Scan() {
@@ -1270,20 +1274,23 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			if line == "" {
 				continue
 			}
-			srcIdentity, inputErr = enqueueReflowLine(ctx, line, srcIdentity, srcCfg, getInputProviders, tasks)
+			srcIdentity, inputErr = enqueueReflowLineWithWarnings(ctx, line, srcIdentity, srcCfg, getInputProviders, tasks, advisoryWarnings, emitAdvisoryWarning)
 			if inputErr != nil {
 				if recordFatalReflowError(inputErr) {
 					inputErr = nil
 					break
 				}
 				invalidCount.Add(1)
-				_ = emitReflowError(context.Background(), w, "", "invalid input", inputErr, map[string]any{"input": line})
+				_ = emitReflowError(context.Background(), w, "", "invalid input", inputErr, invalidReflowInputDetails(line))
 				inputErr = nil
 				continue
 			}
 		}
 		if err := s.Err(); err != nil {
 			inputErr = err
+		}
+		if warning, ok := advisoryWarnings.CapSummaryWarning(); ok {
+			emitAdvisoryWarning(ctx, warning)
 		}
 	} else {
 		_, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)

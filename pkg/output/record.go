@@ -57,8 +57,33 @@ type Record struct {
 	// Provider identifies the storage provider (e.g., "s3", "gcs").
 	Provider string `json:"provider"`
 
+	// Advisory marks a non-work, non-integrity control/summary envelope that
+	// a consumer without a registered handler for Type may skip with a bounded
+	// warning. Known record types and recognized work/integrity/error families
+	// are always validated or refused regardless of this marker.
+	Advisory bool `json:"advisory,omitempty"`
+
 	// Data contains the type-specific payload as raw JSON.
 	Data json.RawMessage `json:"data"`
+}
+
+// IsAdvisoryProducerRecordType reports whether a producer is permitted to mark
+// envelopes of recordType with Advisory=true.
+//
+// Only non-authoritative control/summary records that carry neither work items,
+// admission/completeness gates, nor upstream error signals may be marked
+// advisory. Work records (gonimbus.reflow.input.*, gonimbus.index.object.*),
+// admission/integrity records (gonimbus.crawl.selection_summary.*,
+// gonimbus.index.query_receipt.*), per-object probe records
+// (gonimbus.content.probe.v1), and error records (gonimbus.error.*) must never
+// be marked advisory.
+func IsAdvisoryProducerRecordType(recordType string) bool {
+	switch recordType {
+	case "gonimbus.content.probe.summary.v1":
+		return true
+	default:
+		return false
+	}
 }
 
 // PrefixRecord is the data payload for prefix summaries.

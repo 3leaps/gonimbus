@@ -297,12 +297,12 @@ func classifyReflowFirstRecord(line string) (firstRecordClass, string) {
 	if !strings.HasPrefix(trimmed, "{") {
 		return firstRecordFallback, ""
 	}
-	var env struct {
-		Type string          `json:"type"`
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+	env := reflowpkg.InspectRecordEnvelope(trimmed)
+	if env.UnmarshalErr != nil {
 		return firstRecordRefuse, reflowRefuseMalformed
+	}
+	if env.AdvisoryMalformed {
+		return firstRecordRefuse, env.FormatFirstRecordUnknownTypeReason(reflowRefuseMalformed, reflowRefuseUnknownType)
 	}
 	switch env.Type {
 	case probe.SummaryRecordType:
@@ -317,14 +317,32 @@ func classifyReflowFirstRecord(line string) (firstRecordClass, string) {
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return firstRecordRefuse, reflowRefuseMalformed
 		}
+		if strings.TrimSpace(data.SourceURI) == "" {
+			return firstRecordRefuse, reflowRefuseMalformed
+		}
 		if strings.HasPrefix(strings.TrimSpace(data.SourceURI), "s3://") {
 			return firstRecordEngineReady, ""
 		}
 		return firstRecordFallback, ""
 	case "gonimbus.index.object.v1":
+		var data struct {
+			BaseURI   string  `json:"base_uri"`
+			Key       string  `json:"key"`
+			RelKey    string  `json:"rel_key"`
+			DeletedAt *string `json:"deleted_at"`
+		}
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return firstRecordRefuse, reflowRefuseMalformed
+		}
+		if data.DeletedAt != nil || strings.TrimSpace(data.BaseURI) == "" || (strings.TrimPrefix(strings.TrimSpace(data.Key), "/") == "" && strings.TrimPrefix(strings.TrimSpace(data.RelKey), "/") == "") {
+			return firstRecordRefuse, reflowRefuseMalformed
+		}
 		return firstRecordFallback, ""
 	default:
-		return firstRecordRefuse, reflowRefuseUnknownType
+		if env.IsSkippableAdvisoryUnknown() {
+			return firstRecordFallback, ""
+		}
+		return firstRecordRefuse, env.FormatFirstRecordUnknownTypeReason(reflowRefuseMalformed, reflowRefuseUnknownType)
 	}
 }
 

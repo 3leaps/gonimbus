@@ -3,6 +3,7 @@ package output
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -78,6 +79,20 @@ func (jw *JSONLWriter) WriteAny(ctx context.Context, recordType string, data any
 	return jw.writeRecord(ctx, recordType, data)
 }
 
+// WriteAdvisoryAny emits a JSONL record with top-level advisory=true for
+// record types classified as advisory producer records by
+// IsAdvisoryProducerRecordType. Attempting to mark a non-advisory record type
+// returns a WriteError and writes nothing.
+func (jw *JSONLWriter) WriteAdvisoryAny(ctx context.Context, recordType string, data any) error {
+	if !IsAdvisoryProducerRecordType(recordType) {
+		return &WriteError{
+			Op:  "validate_advisory_type",
+			Err: fmt.Errorf("record type %q is not an advisory control record", recordType),
+		}
+	}
+	return jw.writeRecordWithOptions(ctx, recordType, data, true)
+}
+
 // WriteObject emits an object record.
 func (jw *JSONLWriter) WriteObject(ctx context.Context, obj *ObjectRecord) error {
 	return jw.writeRecord(ctx, TypeObject, obj)
@@ -133,6 +148,10 @@ func (jw *JSONLWriter) Close() error {
 // atomic line writes. The record is written as a single line of
 // JSON followed by a newline character.
 func (jw *JSONLWriter) writeRecord(ctx context.Context, recordType string, data any) error {
+	return jw.writeRecordWithOptions(ctx, recordType, data, false)
+}
+
+func (jw *JSONLWriter) writeRecordWithOptions(ctx context.Context, recordType string, data any, advisory bool) error {
 	// Check context cancellation before acquiring lock
 	if err := ctx.Err(); err != nil {
 		return err
@@ -163,6 +182,7 @@ func (jw *JSONLWriter) writeRecord(ctx context.Context, recordType string, data 
 		TS:       time.Now().UTC(),
 		JobID:    jw.jobID,
 		Provider: jw.provider,
+		Advisory: advisory,
 		Data:     dataBytes,
 	}
 

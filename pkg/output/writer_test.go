@@ -428,6 +428,45 @@ func TestProgressRecord_OmitEmpty(t *testing.T) {
 	assert.NotContains(t, string(data), "prefix")
 }
 
+func TestJSONLWriter_WriteAdvisoryAnyClassification(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewJSONLWriter(&buf, "job-123", "s3")
+
+	require.True(t, IsAdvisoryProducerRecordType("gonimbus.content.probe.summary.v1"))
+	err := w.WriteAdvisoryAny(context.Background(), "gonimbus.content.probe.summary.v1", map[string]any{"termination": "completed"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &parsed))
+	assert.Equal(t, true, parsed["advisory"])
+	assert.Equal(t, "gonimbus.content.probe.summary.v1", parsed["type"])
+
+	// Work, admission/integrity, non-reflow probe, and error records must never be marked advisory.
+	for _, nonAdvisory := range []string{
+		"gonimbus.reflow.input.v1",
+		"gonimbus.index.object.v1",
+		"gonimbus.content.probe.v1",
+		"gonimbus.crawl.selection_summary.v1",
+		"gonimbus.index.query_receipt.v1",
+		"gonimbus.index.query_receipt.v2",
+		TypeError,
+		TypeObject,
+	} {
+		require.False(t, IsAdvisoryProducerRecordType(nonAdvisory), nonAdvisory)
+		var rejectedBuf bytes.Buffer
+		rw := NewJSONLWriter(&rejectedBuf, "job-123", "s3")
+		err := rw.WriteAdvisoryAny(context.Background(), nonAdvisory, map[string]any{"ok": true})
+		require.Error(t, err, nonAdvisory)
+		assert.Empty(t, rejectedBuf.String(), "rejected advisory write must emit nothing for %s", nonAdvisory)
+	}
+
+	// Ordinary WriteAny omits advisory when false.
+	var normalBuf bytes.Buffer
+	nw := NewJSONLWriter(&normalBuf, "job-123", "s3")
+	require.NoError(t, nw.WriteAny(context.Background(), "gonimbus.reflow.input.v1", map[string]any{"source_uri": "s3://b/k"}))
+	assert.NotContains(t, normalBuf.String(), `"advisory"`)
+}
+
 // Benchmark for write performance
 func BenchmarkJSONLWriter_WriteObject(b *testing.B) {
 	w := NewJSONLWriter(io.Discard, "job-123", "s3")
