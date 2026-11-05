@@ -92,10 +92,11 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 The tag is signed by `3 Leaps Infosec Team <infosec@3leaps.net>` with the
 pinned signing subkey (`config/release/tagger-identity.txt`,
 `docs/security/release-signing-keys.asc`). Set in the shell, never in the repo:
-`GONIMBUS_RELEASE_TAG`, `GONIMBUS_TAG_MESSAGE_DIR` (outside the repository),
-`GONIMBUS_TAGGER_NAME`, `GONIMBUS_TAGGER_EMAIL`,
-`GONIMBUS_GPG_SIGNING_FINGERPRINT` (primary), `GONIMBUS_PGP_KEY_ID`
-(`<subkey>!`), and `GONIMBUS_GPG_HOMEDIR`.
+`GONIMBUS_RELEASE_TAG`, `GONIMBUS_DECERNOR_BIN` (absolute path to `decernor >= 0.1.8`),
+`GONIMBUS_TAG_MESSAGE_DIR` (outside the repository), `GONIMBUS_TAGGER_NAME`,
+`GONIMBUS_TAGGER_EMAIL`, `GONIMBUS_GPG_SIGNING_FINGERPRINT` (primary),
+`GONIMBUS_PGP_KEY_ID` (`<subkey>!`), and `GONIMBUS_GPG_HOMEDIR` (isolated `0700`
+directory outside the repository, never `~/.gnupg`).
 
 The tag comes only from `GONIMBUS_RELEASE_TAG`. Every `release-*` target refuses
 to start while the generic `RELEASE_TAG` is set, even to an empty value, so
@@ -131,13 +132,13 @@ GitHub Release. A green tag workflow is not release authorization.
 - [ ] Create the draft release from the verified local artifacts (body is
       `docs/releases/v<version>.md` from the tagged commit): `make release-create-draft`
 - [ ] Sign the manifests (minisign and PGP both required; also set
-      `GONIMBUS_MINISIGN_KEY` and `GONIMBUS_MINISIGN_PUB`): `make release-sign`
-- [ ] Export and check public keys: `make release-export-keys release-verify-keys`
+      `GONIMBUS_MINISIGN_KEY`): `make release-sign`
+- [ ] Stage and check public keys from the verified tagged commit: `make release-export-keys release-verify-keys`
 - [ ] Verify signatures: `make release-verify-signatures`
 - [ ] Stage notes: `make release-notes`
 - [ ] Upload provenance assets to the draft: `make release-upload`
 - [ ] Preserve the package-manager URL and SHA256 block printed by `make release-upload`
-- [ ] Promote the draft after byte-verifying it against the local signed set: `make release-publish`
+- [ ] Promote the draft after byte-verifying it against the local signed set, then re-download every published asset and assert GitHub immutable release state (`.draft == false` and `.immutable == true`): `make release-publish`
 
 ### Distribution
 

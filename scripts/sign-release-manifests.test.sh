@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Artifact signing and key export accept the exact signing-subkey selector (<fpr>!).
-# Throwaway key in a temporary GNUPGHOME; nothing is written inside the repository.
+# Artifact signing requires both keys, an isolated GNUPGHOME, and the exact
+# signing-subkey selector (<fpr>!). Throwaway key in a temporary GNUPGHOME;
+# nothing is written inside the repository.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=scripts/testdata/sha-helpers.sh
@@ -33,7 +34,8 @@ minisign -G -W -p "$scratch/minisign.pub" -s "$scratch/minisign.key" > /dev/null
 run() {
     env -u GONIMBUS_MINISIGN_PUB CI="${FIXTURE_CI:-}" \
         GONIMBUS_MINISIGN_KEY="${FIXTURE_MINISIGN_KEY-$scratch/minisign.key}" \
-        GONIMBUS_PGP_KEY_ID="${FIXTURE_PGP_KEY_ID-$subkey!}" GONIMBUS_GPG_HOMEDIR="$home" "$@"
+        GONIMBUS_PGP_KEY_ID="${FIXTURE_PGP_KEY_ID-$subkey!}" \
+        GONIMBUS_GPG_HOMEDIR="${FIXTURE_GPG_HOMEDIR-$home}" "$@"
 }
 refused() {
     if run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null 2>&1; then
@@ -44,6 +46,8 @@ refused() {
 FIXTURE_CI=true refused 'in CI'
 FIXTURE_MINISIGN_KEY='' refused 'without a minisign key'
 FIXTURE_PGP_KEY_ID='' refused 'without a PGP key'
+FIXTURE_PGP_KEY_ID="$subkey" refused 'without the exact subkey ! selector'
+FIXTURE_GPG_HOMEDIR="$HOME/.gnupg" refused 'with default ~/.gnupg homedir'
 [[ ! -e "$dist/SHA256SUMS.minisig" && ! -e "$dist/SHA256SUMS.asc" ]] || {
     echo 'error: a refused run must not leave a signature behind' >&2
     exit 1
@@ -63,12 +67,4 @@ for manifest in SHA256SUMS SHA512SUMS; do
         exit 1
     }
 done
-run "$root/scripts/export-release-keys.sh" "$dist" > /dev/null
-exported="$dist/gonimbus-release-signing-key.asc"
-mkdir -m 700 "$scratch/show"
-shown="$(gpg --homedir "$scratch/show" --batch --with-colons --show-keys "$exported" 2> /dev/null)"
-[[ "$(awk -F: '$1=="sec"||$1=="ssb" {n++} END {print n+0}' <<< "$shown")" == 0 ]]
-[[ "$(awk -F: '$1=="fpr" {print $10;exit}' <<< "$shown")" == "$primary" ]]
-grep -q "^fpr:::::::::$subkey:" <<< "$shown"
-"$root/scripts/verify-public-key.sh" "$exported" > /dev/null
 echo '[ok] artifact signing requires both keys and accepts the exact subkey selector'

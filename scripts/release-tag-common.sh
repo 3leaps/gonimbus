@@ -3,6 +3,43 @@
 set -euo pipefail
 
 tag_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/release-decernor.sh
+source "$tag_root/scripts/release-decernor.sh"
+
+tag_discard_verify_home() {
+    if [[ -n "${TAG_VERIFY_GNUPGHOME:-}" ]]; then
+        gpgconf --homedir "$TAG_VERIFY_GNUPGHOME" --kill all > /dev/null 2>&1 || true
+        rm -rf "$TAG_VERIFY_GNUPGHOME"
+        TAG_VERIFY_GNUPGHOME=""
+    fi
+}
+
+# Only verification homes are disposable. The operator owns the signing
+# keyring and its agent/card state; never remove it or stop its agent.
+tag_cleanup_homes() {
+    tag_discard_verify_home
+}
+
+# Expand ~ and collapse . / .. without following symlinks. Relative paths fail.
+tag_canon_path() {
+    python3 -c '
+import os, sys
+raw = sys.argv[1]
+p = os.path.expanduser(raw)
+if not p.startswith("/"):
+    raise SystemExit("relative")
+parts = []
+for part in p.split("/"):
+    if part in ("", "."):
+        continue
+    if part == "..":
+        if parts:
+            parts.pop()
+        continue
+    parts.append(part)
+print("/" + "/".join(parts) if parts else "/")
+' "$1"
+}
 
 # A 404 from the ref API is the only "absent" answer; any other failure stops.
 remote_tag_absent() {
@@ -12,6 +49,7 @@ remote_tag_absent() {
     fi
     [[ "$out" == *"HTTP 404"* ]] || tag_die "could not query the remote tag: $out"
 }
+
 tag_die() {
     echo "error: $*" >&2
     return 1
@@ -120,33 +158,137 @@ tag_selector_shape() {
     }
 }
 
-tag_key_selector() {
-    tag_selector_shape || return 1
-    "$tag_root/scripts/validate-release-anchors.sh" > /dev/null
-    [[ "$(awk '$1=="gpg" {print $2}' "$tag_root/keys/expected-fingerprints.txt")" == "$GONIMBUS_GPG_SIGNING_FINGERPRINT" ]] || {
-        tag_die 'operator fingerprint differs from committed anchor'
+tag_stat_mode() {
+    if stat -c '%a' "$1" > /dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%OLp' "$1"
+    fi
+}
+
+# Fresh isolated keyring for selector verification. Never reuse an existing
+# directory or follow a symlink: mktemp -d, refuse -L, chmod 0700, kill the
+# agent on cleanup.
+tag_fresh_verify_gnupg_home() {
+    local dir mode
+    dir="$(mktemp -d /tmp/gonimbus-tag-gnupg.XXXXXX)" || {
+        tag_die 'cannot create GnuPG home'
         return 1
     }
-    [[ -n "${GONIMBUS_GPG_HOMEDIR:-}" && -d "$GONIMBUS_GPG_HOMEDIR" ]] || {
+    if [[ -L "$dir" || ! -d "$dir" ]]; then
+        rm -rf "$dir"
+        tag_die 'GnuPG home must be a fresh directory, not a symlink'
+        return 1
+    fi
+    chmod 700 "$dir" || {
+        rm -rf "$dir"
+        tag_die 'cannot chmod GnuPG home'
+        return 1
+    }
+    mode="$(tag_stat_mode "$dir")"
+    [[ "$mode" == "700" ]] || {
+        rm -rf "$dir"
+        tag_die 'GnuPG home must be mode 0700'
+        return 1
+    }
+    TAG_VERIFY_GNUPGHOME="$dir"
+}
+
+# Validate the explicitly selected operator keyring. Canonicalize (~, trailing
+# slash, ., ..) before comparing to the default homedir; refuse non-0700
+# (do not chmod). Signing uses this home and its existing agent/card setup.
+tag_bind_operator_gnupg_home() {
+    [[ -n "${GONIMBUS_GPG_HOMEDIR:-}" ]] || {
         tag_die 'external GPG home required'
         return 1
     }
-    local home
-    home="$(cd "$GONIMBUS_GPG_HOMEDIR" && pwd -P)"
-    case "$home" in "$tag_root"/* | "$tag_root")
+    local canon default_home default_env
+    canon="$(tag_canon_path "$GONIMBUS_GPG_HOMEDIR")" || {
+        tag_die 'GPG home must be an absolute path'
+        return 1
+    }
+    [[ "$canon" == /* ]] || {
+        tag_die 'GPG home must be an absolute path'
+        return 1
+    }
+    [[ ! -L "$GONIMBUS_GPG_HOMEDIR" && ! -L "$canon" ]] || {
+        tag_die 'GPG home must not be a symlink'
+        return 1
+    }
+    [[ -d "$canon" ]] || {
+        tag_die 'external GPG home required'
+        return 1
+    }
+    local component="$canon"
+    while [[ "$component" != / ]]; do
+        [[ ! -L "$component" ]] || {
+            tag_die 'GPG home may not contain symlink ancestors'
+            return 1
+        }
+        component="${component%/*}"
+        [[ -n "$component" ]] || component=/
+    done
+    case "$canon" in "$tag_root" | "$tag_root"/*)
         tag_die 'GPG home must be outside repository'
         return 1
         ;;
     esac
-    export GNUPGHOME="$home"
-    local listing primary subkey
-    listing="$(gpg --batch --with-colons --fingerprint --with-subkey-fingerprint --list-keys "${GONIMBUS_PGP_KEY_ID%!}" 2> /dev/null)" || tag_die 'signing subkey unavailable'
-    primary="$(printf '%s\n' "$listing" | awk -F: '$1=="pub" {p=1;next} p && $1=="fpr" {print $10;exit}')"
-    subkey="$(printf '%s\n' "$listing" | awk -F: -v f="${GONIMBUS_PGP_KEY_ID%!}" '$1=="sub" {s=1;cap=$12;next} s && $1=="fpr" {if ($10==f && cap ~ /[sS]/) print $10; s=0}')"
-    [[ "$primary" == "$GONIMBUS_GPG_SIGNING_FINGERPRINT" && "$subkey" == "${GONIMBUS_PGP_KEY_ID%!}" ]] || {
-        tag_die 'signing subkey not on pinned primary'
+    local mode
+    mode="$(tag_stat_mode "$canon")"
+    [[ "$mode" == "700" ]] || {
+        tag_die 'GPG home must be mode 0700'
         return 1
     }
+    default_home="$(tag_canon_path "$HOME/.gnupg")" || default_home=""
+    default_env="$(tag_canon_path "${GNUPGHOME:-$HOME/.gnupg}")" || default_env=""
+    if [[ -n "$default_home" && "$canon" == "$default_home" ]] ||
+        [[ -n "$default_env" && "$canon" == "$default_env" ]]; then
+        tag_die 'GPG home must not be the default homedir'
+        return 1
+    fi
+    GONIMBUS_GPG_HOMEDIR="$canon"
+}
+
+# Use the operator's keyring directly: hardware-backed signing subkeys cannot
+# be exported into a temporary home. Public verification stays isolated.
+tag_prepare_signing_home() {
+    tag_bind_operator_gnupg_home || return 1
+    export GNUPGHOME="$GONIMBUS_GPG_HOMEDIR"
+}
+
+tag_key_selector() {
+    tag_selector_shape || return 1
+    resolve_release_decernor ceremony || {
+        tag_die 'trusted Decernor identity/version check failed'
+        return 1
+    }
+    "$tag_root/scripts/release-verify-committed-anchors.sh" > /dev/null || return 1
+    [[ "$(awk '$1=="gpg" {print $2}' "$tag_root/keys/expected-fingerprints.txt")" == "$GONIMBUS_GPG_SIGNING_FINGERPRINT" ]] || {
+        tag_die 'operator fingerprint differs from committed anchor'
+        return 1
+    }
+    tag_bind_operator_gnupg_home || return 1
+    tag_fresh_verify_gnupg_home || return 1
+    if ! gpg --homedir "$TAG_VERIFY_GNUPGHOME" --batch --quiet --import \
+        "$tag_root/docs/security/release-signing-keys.asc" 2> /dev/null; then
+        tag_discard_verify_home
+        tag_die 'committed public pin failed to import'
+        return 1
+    fi
+    local listing primary subkey
+    if ! listing="$(gpg --homedir "$TAG_VERIFY_GNUPGHOME" --batch --with-colons --fingerprint --with-subkey-fingerprint --list-keys "${GONIMBUS_PGP_KEY_ID%!}" 2> /dev/null)"; then
+        tag_discard_verify_home
+        tag_die 'signing subkey unavailable'
+        return 1
+    fi
+    primary="$(printf '%s\n' "$listing" | awk -F: '$1=="pub" {p=1;next} p && $1=="fpr" {print $10;exit}')"
+    subkey="$(printf '%s\n' "$listing" | awk -F: -v f="${GONIMBUS_PGP_KEY_ID%!}" '$1=="sub" {s=1;cap=$12;next} s && $1=="fpr" {if ($10==f && cap ~ /[sS]/) print $10; s=0}')"
+    if [[ "$primary" != "$GONIMBUS_GPG_SIGNING_FINGERPRINT" || "$subkey" != "${GONIMBUS_PGP_KEY_ID%!}" ]]; then
+        tag_discard_verify_home
+        tag_die 'signing subkey not on pinned primary'
+        return 1
+    fi
+    tag_discard_verify_home
 }
 
 tag_expected_message() {

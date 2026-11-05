@@ -166,15 +166,15 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$(mktemp -d "$RUNNER_TEMP/decernor.XXXXXX")"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            'https://github.com/3leaps/decernor/releases/download/v0.1.8/decernor_0.1.8_linux_amd64.tar.gz' \
-            --output "$tool_dir/decernor_0.1.8_linux_amd64.tar.gz"
-          (cd "$tool_dir" && sha256sum --check "$GITHUB_WORKSPACE/config/release/decernor-ci-sha256.txt")
-          tar -xzf "$tool_dir/decernor_0.1.8_linux_amd64.tar.gz" -C "$tool_dir" decernor
-          echo "GONIMBUS_DECERNOR_BIN=$tool_dir/decernor" >> "$GITHUB_ENV"
+          GONIMBUS_DECERNOR_BIN="$(./scripts/ci-install-decernor.sh "$tool_dir")"
+          case "$GONIMBUS_DECERNOR_BIN" in
+            *$'\n'*) echo "error: Decernor install printed extra stdout" >&2; exit 1 ;;
+          esac
+          echo "GONIMBUS_DECERNOR_BIN=$GONIMBUS_DECERNOR_BIN" >> "$GITHUB_ENV"
       - name: Check committed release pin and anchors
         run: |
           set -euo pipefail
+          test -x "${GONIMBUS_DECERNOR_BIN:?GONIMBUS_DECERNOR_BIN required}"
           make release-anchors-check
       - name: Install minisign and checksum-pinned yq
         run: |

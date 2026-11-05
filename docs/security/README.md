@@ -11,8 +11,11 @@ is not independent authentication.
 The public pins are [`release-signing-keys.asc`](release-signing-keys.asc) and
 [`gonimbus-minisign.pub`](gonimbus-minisign.pub). The tagger identity is
 [`config/release/tagger-identity.txt`](../../config/release/tagger-identity.txt).
-Tag verification reads these from the tagged commit as inert blobs, not from
-the current checkout.
+Tag verification and release staging extract these from the verified tagged
+commit as inert blobs, not from the current checkout or an external public-key
+locator. The published `gonimbus-minisign.pub` and
+`gonimbus-release-signing-key.asc` assets must match the committed files
+byte-for-byte; fingerprint verification remains required.
 
 The text and NDJSON anchors in [`keys/`](../../keys/) use Decernor's
 `openpgp-fingerprint-v1` primary and `minisign-public-blob-sha256-v1` schemes.

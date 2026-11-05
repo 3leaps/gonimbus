@@ -18,9 +18,9 @@ printf 'app:\n  version: 1.2.3\n' > "$fixture/.fulmen/app.yaml"
 printf 'notes\n' > "$fixture/docs/releases/v1.2.3.md"
 side_effects="$fixture/side-effects.log"
 for stub in release-verify-published-tag release-fetch-ci-artifacts \
-    release-create-draft sign-release-manifests release-upload-provenance \
-    release-upload release-publish verify-checksums release-verify-signatures \
-    verify-minisign-public-key verify-public-key; do
+    release-create-draft sign-release-manifests release-stage-tagged-pubkeys \
+    release-upload-provenance release-upload release-publish verify-checksums \
+    release-verify-signatures verify-minisign-public-key verify-public-key; do
     printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\n' "$stub" "$side_effects" \
         > "$fixture/scripts/$stub.sh"
     chmod +x "$fixture/scripts/$stub.sh"
@@ -39,8 +39,8 @@ git -C "$fixture" commit -qm fixture
 
 targets=(release-guard-tag-name release-guard-tag-version release-guard-signing-tag
     release-verify-published-tag release-download release-create-draft
-    release-sign release-notes release-upload release-upload-provenance
-    release-upload-all release-publish)
+    release-sign release-export-keys release-notes release-upload
+    release-upload-provenance release-upload-all release-publish)
 
 run_make() {
     (cd "$fixture" && env -u RELEASE_TAG -u GONIMBUS_RELEASE_TAG -u MAKEFLAGS \
@@ -96,7 +96,7 @@ done
 # Under make -j, read-only local checks may run beside the VERSION guard, but the
 # published-tag check (it rewrites the local tag ref) and the ceremony scripts
 # must not start.
-for target in release-download release-create-draft release-sign \
+for target in release-download release-create-draft release-sign release-export-keys \
     release-upload-provenance release-upload-all release-publish; do
     : > "$side_effects"
     if out="$(run_make GONIMBUS_RELEASE_TAG=v1.2.2 make -s -j8 "$target" 2>&1)"; then
@@ -144,6 +144,7 @@ check_ceremony() {
 check_ceremony release-download release-fetch-ci-artifacts yes
 check_ceremony release-create-draft release-create-draft yes
 check_ceremony release-sign sign-release-manifests yes
+check_ceremony release-export-keys release-stage-tagged-pubkeys yes
 check_ceremony release-upload release-upload-provenance yes
 check_ceremony release-upload-provenance release-upload-provenance yes
 check_ceremony release-upload-all release-upload yes

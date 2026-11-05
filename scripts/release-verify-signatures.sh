@@ -14,6 +14,9 @@ die() {
     exit 1
 }
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-decernor.sh
+source "$root/scripts/release-decernor.sh"
+resolve_release_decernor ceremony || die 'trusted Decernor identity/version check failed'
 dir="${1:-dist/release}"
 [[ "$dir" == /* ]] || dir="$PWD/$dir"
 [[ -d "$dir" && ! -L "$dir" ]] || die "release dir not found: $dir"
@@ -27,10 +30,14 @@ for want in SHA256SUMS SHA512SUMS SHA256SUMS.minisig SHA512SUMS.minisig \
     SHA256SUMS.asc SHA512SUMS.asc "${minisign_pub##*/}" "${pgp_pub##*/}"; do
     [[ -f "$dir/$want" && ! -L "$dir/$want" && -s "$dir/$want" ]] || die "missing release file: $want"
 done
+for anchor_ext in txt ndjson; do
+    [[ -f "$root/keys/expected-fingerprints.$anchor_ext" && ! -L "$root/keys/expected-fingerprints.$anchor_ext" && -s "$root/keys/expected-fingerprints.$anchor_ext" ]] ||
+        die "missing fingerprint anchor: keys/expected-fingerprints.$anchor_ext"
+done
 
 # The staged minisign key must be exactly a comment line plus a key line, and
-# the key line must hash to the minisign anchor. Verification then uses a key
-# file rebuilt from that line, never the staged file as given.
+# both staged public keys must verify against the fingerprint anchors with
+# Decernor (PDR-0008 §2.2, §2.3).
 pin_minisign="$(awk '$1=="minisign" {print $2}' "$root/keys/expected-fingerprints.txt")"
 [[ "$pin_minisign" =~ ^[0-9a-f]{64}$ ]] || die 'minisign anchor missing from keys/expected-fingerprints.txt'
 minisign_comment="$(sed -n 1p "$minisign_pub")"
@@ -39,8 +46,11 @@ minisign_key="$(sed -n 2p "$minisign_pub")"
     die 'staged minisign key is malformed'
 cmp -s "$minisign_pub" <(printf '%s\n%s\n' "$minisign_comment" "$minisign_key") ||
     die 'staged minisign key must be exactly a comment line and a key line'
-staged_minisign="$(printf '%s' "$minisign_key" | base64 -d | shasum -a 256 | awk '{print $1}')"
-[[ "$staged_minisign" == "$pin_minisign" ]] || die 'staged minisign key does not match the minisign anchor'
+"$RELEASE_DECERNOR_BIN" fingerprint verify \
+    --anchors "$root/keys/expected-fingerprints.txt" \
+    --anchors-ndjson "$root/keys/expected-fingerprints.ndjson" \
+    --gpg "$pgp_pub" --minisign "$minisign_pub" > /dev/null ||
+    die 'staged public keys do not match the fingerprint anchors (does not match the minisign anchor or primary anchor)'
 scratch_keys="$(mktemp -d)"
 keyring=""
 trap 'rm -rf "$scratch_keys"' EXIT

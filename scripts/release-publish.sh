@@ -11,8 +11,11 @@
 #   3. both manifests verify against the local packages;
 #   4. both manifests verify under minisign with the key whose blob hash is the
 #      committed pin in keys/expected-fingerprints.txt, and under PGP with the
-#      committed public key at the pinned primary;
-#   5. every draft asset, downloaded fresh, is byte-identical to the local file.
+#      committed public key at the pinned primary, with all four trust files
+#      read from the anchored tag commit and verified by Decernor;
+#   5. every draft asset, downloaded fresh, is byte-identical to the local file;
+#   6. post-promotion, every published asset is re-downloaded and byte-verified,
+#      and the GitHub REST API confirms .draft == false and .immutable == true.
 set -euo pipefail
 die() {
     echo "error: $*" >&2
@@ -22,8 +25,11 @@ tag="${1:-}"
 src="${2:-dist/release}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'usage: release-publish.sh vX.Y.Z [source_dir]'
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-decernor.sh
+source "$root/scripts/release-decernor.sh"
+resolve_release_decernor ceremony || die 'trusted Decernor identity/version check failed'
 repo="${GONIMBUS_RELEASE_REPO:-3leaps/gonimbus}"
-for tool in gh jq minisign gpg cmp git; do
+for tool in gh jq minisign gpg gpgconf cmp git; do
     command -v "$tool" > /dev/null 2>&1 || die "$tool not found in PATH"
 done
 [[ -d "$src" && ! -L "$src" ]] || die "source dir not found: $src"
@@ -97,15 +103,20 @@ tagged_blob() {
     [[ -s "$out" ]] || die "committed $path is empty in the tagged commit"
 }
 tagged_blob keys/expected-fingerprints.txt "$pinned/anchors"
+tagged_blob keys/expected-fingerprints.ndjson "$pinned/anchors.ndjson"
 tagged_blob docs/security/release-signing-keys.asc "$pinned/pgp.asc"
 tagged_blob "docs/security/${binary}-minisign.pub" "$pinned/minisign.pub"
 pin_gpg="$(awk '$1=="gpg" {print $2}' "$pinned/anchors")"
 pin_minisign="$(awk '$1=="minisign" {print $2}' "$pinned/anchors")"
 [[ "$pin_gpg" =~ ^[0-9A-F]{40}$ && "$pin_minisign" =~ ^[0-9a-f]{64}$ ]] || die 'committed pins are malformed'
-committed_minisign="$(sed -n 2p "$pinned/minisign.pub" | base64 -d | shasum -a 256 | awk '{print $1}')"
-[[ "$committed_minisign" == "$pin_minisign" ]] || die 'committed minisign key does not match the committed anchor'
+"$RELEASE_DECERNOR_BIN" fingerprint verify \
+    --anchors "$pinned/anchors" \
+    --anchors-ndjson "$pinned/anchors.ndjson" \
+    --gpg "$pinned/pgp.asc" --minisign "$pinned/minisign.pub" > /dev/null ||
+    die 'tagged public exports do not match the fingerprint anchors'
+# The staged minisign public key must be the tagged commit blob, byte-exact.
 cmp -s "$pinned/minisign.pub" "$src/${binary}-minisign.pub" ||
-    die 'staged minisign key is not the key committed in the tagged commit'
+    die 'staged minisign key is not the key committed in the tagged commit (not byte-identical to the tagged commit)'
 gpg --homedir "$gpg_home" --batch --quiet --import "$pinned/pgp.asc" 2> /dev/null || die 'committed PGP key failed to import'
 listing="$(gpg --homedir "$gpg_home" --batch --with-colons --with-subkey-fingerprint --list-keys)"
 [[ "$(awk -F: '$1=="pub" {n++} END {print n+0}' <<< "$listing")" == 1 ]] || die 'committed PGP key must hold exactly one primary'
@@ -159,8 +170,29 @@ for want in "${expected[@]}"; do
     cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
 done
 
-# Residual: GitHub has no atomic compare-and-publish, so a writer with release
-# access could still swap an asset in the seconds between the comparison above
-# and this call. Re-download and verify after publishing if that matters.
+# 6. Narrow the TOCTOU window (PDR-0010 §2.3, §2.4): re-read draft state and
+# re-download/compare immediately before promotion, then re-download and
+# byte-compare after promotion and assert GitHub immutability.
+pre_promote="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
+[[ "$(jq -r '.isDraft' <<< "$pre_promote")" == true ]] ||
+    die "$tag is not a draft immediately before promote"
+diff <(jq -r '.assets[].name' <<< "$pre_promote" | sort) <(printf '%s\n' "${expected[@]}" | sort) > /dev/null ||
+    die 'draft assets differ from the expected set immediately before promote'
+rm -rf "$fresh"
+mkdir -p "$fresh"
+gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not re-download the draft assets'
+for want in "${expected[@]}"; do
+    cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
+done
 gh release edit "$tag" --repo "$repo" --draft=false > /dev/null
+rm -rf "$fresh"
+mkdir -p "$fresh"
+gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the published assets'
+for want in "${expected[@]}"; do
+    cmp -s "$fresh/$want" "$src/$want" || die "published asset differs from the verified local file: $want (accepted residual race realized)"
+done
+release_meta="$(gh api "repos/$repo/releases/tags/$tag")" ||
+    die "could not read published release metadata for $tag"
+jq -e '.draft == false and .immutable == true' <<< "$release_meta" > /dev/null ||
+    die "published release $tag is not immutable on GitHub"
 echo "[ok] $tag published from ${#expected[@]} byte-verified asset(s)"

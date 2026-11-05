@@ -5,6 +5,12 @@
 # the repository. Also runs the Make target with relative and absolute paths.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+bin="${GONIMBUS_DECERNOR_BIN:-$(command -v decernor || true)}"
+[[ -n "$bin" && -x "$bin" && "$bin" == /* && ! -L "$bin" ]] || {
+    echo 'error: GONIMBUS_DECERNOR_BIN required (CI installs Decernor from config/release/decernor-ci-sha256.txt)' >&2
+    exit 1
+}
+export GONIMBUS_DECERNOR_BIN="$bin"
 # shellcheck source=scripts/testdata/sha-helpers.sh
 source "$root/scripts/testdata/sha-helpers.sh"
 scratch="$(cd "$(mktemp -d)" && pwd -P)"
@@ -39,14 +45,30 @@ other="$(new_key other)"
 good_sub="$(subkey_of good)"
 other_sub="$(subkey_of other)"
 
-# The repository copy supplies the script and the primary anchor only.
+# The repository copy supplies the script and the fingerprint anchors only.
 repo="$scratch/repo"
 mkdir -p "$repo/scripts" "$repo/keys"
-cp "$root/scripts/release-verify-signatures.sh" "$repo/scripts/"
+cp "$root/scripts/release-verify-signatures.sh" "$root/scripts/release-decernor.sh" "$repo/scripts/"
 minisign -G -W -p "$scratch/minisign.pub" -s "$scratch/minisign.key" > /dev/null
 minisign -G -W -p "$scratch/other-minisign.pub" -s "$scratch/other-minisign.key" > /dev/null
-minisign_pin="$(sed -n 2p "$scratch/minisign.pub" | base64 -d | shasum -a 256 | awk '{print $1}')"
-printf 'gpg %s\nminisign %s\n' "$primary" "$minisign_pin" > "$repo/keys/expected-fingerprints.txt"
+gpg --homedir "$scratch/gpg-good" --batch --armor --export "$primary" > "$scratch/good.asc"
+"$bin" fingerprint "$scratch/good.asc" --class public --kind gpg \
+    --format ndjson --path-mode none --gpg-role primary > "$scratch/gpg.ndjson"
+"$bin" fingerprint "$scratch/minisign.pub" --class public --kind minisign \
+    --format ndjson --path-mode none > "$scratch/minisign.ndjson"
+python3 - "$scratch" "$repo/keys" << 'PY'
+import json
+import pathlib
+import sys
+base = pathlib.Path(sys.argv[1])
+keys = pathlib.Path(sys.argv[2])
+g = [json.loads(line) for line in (base / 'gpg.ndjson').read_text().splitlines() if line]
+m = [json.loads(line) for line in (base / 'minisign.ndjson').read_text().splitlines() if line and json.loads(line).get('fingerprint_scheme') == 'minisign-public-blob-sha256-v1']
+if len(g) != 1 or len(m) != 1:
+    raise SystemExit('error: expected one GPG primary and one minisign fingerprint')
+(keys / 'expected-fingerprints.ndjson').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in (g[0], m[0])))
+(keys / 'expected-fingerprints.txt').write_text('gpg ' + g[0]['fingerprint'] + '\nminisign ' + m[0]['fingerprint'] + '\n')
+PY
 
 stage() {
     local dir="$1" pgp_home="${2:-$scratch/gpg-good}" msk="${3:-$scratch/minisign.key}"
@@ -123,9 +145,9 @@ refuse 'minisign key swapped to the signing key' "$d" 'does not match the minisi
 for shape in junk nonl extra; do
     stage "$d"
     case "$shape" in
-    junk) printf 'junk' >> "$d/gonimbus-minisign.pub" ;;
-    nonl) printf '%s\n%s' "$(sed -n 1p "$scratch/minisign.pub")" "$(sed -n 2p "$scratch/minisign.pub")" > "$d/gonimbus-minisign.pub" ;;
-    extra) printf 'extra\n' >> "$d/gonimbus-minisign.pub" ;;
+        junk) printf 'junk' >> "$d/gonimbus-minisign.pub" ;;
+        nonl) printf '%s\n%s' "$(sed -n 1p "$scratch/minisign.pub")" "$(sed -n 2p "$scratch/minisign.pub")" > "$d/gonimbus-minisign.pub" ;;
+        extra) printf 'extra\n' >> "$d/gonimbus-minisign.pub" ;;
     esac
     refuse "minisign key file shape: $shape" "$d" 'exactly a comment line and a key line'
 done
@@ -141,8 +163,8 @@ refuse 'PGP signed by the primary, not the pinned subkey' "$d" 'is not a good si
 # The Make target fails closed and resolves paths the same way, relative or absolute.
 mk="$scratch/mk"
 mkdir -p "$mk/scripts" "$mk/keys"
-cp "$repo/scripts/release-verify-signatures.sh" "$mk/scripts/"
-cp "$repo/keys/expected-fingerprints.txt" "$mk/keys/"
+cp "$repo/scripts/release-verify-signatures.sh" "$repo/scripts/release-decernor.sh" "$mk/scripts/"
+cp "$repo/keys/expected-fingerprints.txt" "$repo/keys/expected-fingerprints.ndjson" "$mk/keys/"
 sed -n '/^release-verify-signatures:/,/^$/p' "$root/Makefile" > "$mk/Makefile"
 printf 'DIST_RELEASE ?= dist/release\n' >> "$mk/Makefile"
 stage "$mk/dist/release"

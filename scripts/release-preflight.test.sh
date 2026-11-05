@@ -9,8 +9,23 @@ trap 'rm -rf "$scratch"' EXIT
 unset RELEASE_TAG GONIMBUS_RELEASE_TAG
 
 repo="$scratch/repo"
-mkdir -p "$repo/scripts" "$repo/docs/releases" "$scratch/bin"
-cp "$root/scripts/release-preflight.sh" "$root/scripts/workflow-pins.test.sh" "$root/scripts/workflow-yaml.sh" "$repo/scripts/"
+mkdir -p "$repo/scripts" "$repo/docs/releases" "$repo/docs/security" "$repo/keys" "$scratch/bin"
+cp "$root/scripts/release-preflight.sh" "$root/scripts/workflow-pins.test.sh" "$root/scripts/workflow-yaml.sh" \
+    "$root/scripts/release-verify-committed-anchors.sh" "$root/scripts/release-decernor.sh" \
+    "$root/scripts/validate-release-anchors.sh" "$repo/scripts/"
+cp "$root/docs/security/release-signing-keys.asc" "$root/docs/security/gonimbus-minisign.pub" "$repo/docs/security/"
+cp "$root/keys/expected-fingerprints.txt" "$root/keys/expected-fingerprints.ndjson" "$repo/keys/"
+if [[ -z "${GONIMBUS_DECERNOR_BIN:-}" ]]; then
+    if [[ "${CI:-}" == "true" ]]; then
+        echo 'error: GONIMBUS_DECERNOR_BIN required in CI (install from config/release/decernor-ci-sha256.txt)' >&2
+        exit 1
+    fi
+    GONIMBUS_DECERNOR_BIN="$(command -v decernor)" || {
+        echo 'error: GONIMBUS_DECERNOR_BIN required (CI installs Decernor from config/release/decernor-ci-sha256.txt)' >&2
+        exit 1
+    }
+    export GONIMBUS_DECERNOR_BIN
+fi
 mkdir -p "$repo/.github/workflows"
 cp "$root/.github/workflows/"*.yml "$repo/.github/workflows/"
 printf '1.2.3\n' > "$repo/VERSION"
@@ -88,6 +103,17 @@ if grep -q 'preflight passed' "$scratch/out"; then
     echo 'error: preflight claimed success after a failed final gate' >&2
     exit 1
 fi
+
+# Unset or relative GONIMBUS_DECERNOR_BIN fails closed before later gates.
+if run env -u GONIMBUS_DECERNOR_BIN FIXTURE_PR_FINAL=pass; then
+    echo 'error: preflight passed without GONIMBUS_DECERNOR_BIN' >&2
+    exit 1
+fi
+grep -q 'committed release anchors check failed' "$scratch/out"
+[[ "$(grep -c '^make' "$FIXTURE_LOG")" == 0 ]] || {
+    echo 'error: pr-final ran after committed anchors failure' >&2
+    exit 1
+}
 
 # A dirty tree stops before any later gate runs.
 printf 'x\n' > "$repo/untracked"

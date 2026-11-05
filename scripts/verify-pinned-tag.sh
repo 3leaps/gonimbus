@@ -35,9 +35,21 @@ committed() {
 }
 pin="$keyring/release-signing-keys.asc"
 anchors="$keyring/expected-fingerprints.txt"
+minisign_pin="$keyring/gonimbus-minisign.pub"
+anchors_ndjson="$keyring/expected-fingerprints.ndjson"
 committed docs/security/release-signing-keys.asc "$pin"
 committed keys/expected-fingerprints.txt "$anchors"
+committed keys/expected-fingerprints.ndjson "$anchors_ndjson"
+committed docs/security/gonimbus-minisign.pub "$minisign_pin"
 committed config/release/tagger-identity.txt "$keyring/tagger-identity.txt"
+# PDR-0008: Decernor is the designated checker. The listing script is secondary.
+# shellcheck source=scripts/release-decernor.sh
+source "$(dirname "$0")/release-decernor.sh"
+resolve_release_decernor ceremony || die 'trusted Decernor identity/version check failed'
+"$RELEASE_DECERNOR_BIN" fingerprint verify \
+    --anchors "$anchors" \
+    --anchors-ndjson "$anchors_ndjson" \
+    --gpg "$pin" --minisign "$minisign_pin" > /dev/null || die 'Decernor rejected committed pin and anchors'
 "$(dirname "$0")/validate-release-anchors.sh" "$anchors" "$pin" > /dev/null || die 'committed pin and anchors disagree'
 tagger="$(git cat-file tag "$object" | sed -n 's/^tagger \(.*\) [0-9][0-9]* [+-][0-9][0-9][0-9][0-9]$/\1/p' | head -1)"
 [[ "$tagger" == "$(cat "$keyring/tagger-identity.txt")" ]] || die 'infosec tagger required'
@@ -56,7 +68,7 @@ signing_subkeys="$(GNUPGHOME="$keyring/home" gpg --batch --with-colons --with-su
     die 'pin must hold exactly one signing subkey'
 permitted="$signing_subkeys"
 [[ "$permitted" =~ ^[0-9A-F]{40}$ && "$permitted" != "$primary" ]] || die 'pinned signing subkey malformed'
-GNUPGHOME="$keyring/home" git -c gpg.program=gpg verify-tag --raw "$object" > "$keyring/status" 2>&1 || {
+GNUPGHOME="$keyring/home" git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg verify-tag --raw "$object" > "$keyring/status" 2>&1 || {
     awk '$1=="[GNUPG:]" {print "signature status:", $2}' "$keyring/status" >&2
     die 'tag signature invalid under pin'
 }
@@ -68,7 +80,7 @@ awk -v primary="$primary" -v permitted="$permitted" -v selector="${GONIMBUS_PGP_
   $1=="[GNUPG:]" && $2 ~ /^(EXPKEYSIG|EXPSIG|REVKEYSIG|KEYREVOKED|BADSIG|ERRSIG)$/ {bad++}
   END {
     if (bad || good!=1 || valid!=1 || signer_primary!=primary || subkey==primary || subkey!=permitted) exit 1
-    if (selector!="" && (selector !~ /^[0-9A-F]{40}!$/ || subkey "!" != selector)) exit 1
+    if (selector!="" && (length(selector)!=41 || selector !~ /^[0-9A-F]+!$/ || subkey "!" != selector)) exit 1
   }
 ' "$keyring/status" || die 'signing subkey, expiry or revocation check failed'
 echo '[ok] signed tag verified against the public pin committed in the tagged commit'

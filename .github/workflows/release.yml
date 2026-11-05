@@ -31,6 +31,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install pinned Decernor
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/decernor.XXXXXX")"
+          GONIMBUS_DECERNOR_BIN="$(./scripts/ci-install-decernor.sh "$tool_dir")"
+          case "$GONIMBUS_DECERNOR_BIN" in
+            *$'\n'*) echo "error: Decernor install printed extra stdout" >&2; exit 1 ;;
+          esac
+          echo "GONIMBUS_DECERNOR_BIN=$GONIMBUS_DECERNOR_BIN" >>"$GITHUB_ENV"
       - name: Verify committed pin and GitHub signature
         id: verify
         env:
@@ -38,9 +47,11 @@ jobs:
           GONIMBUS_RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          test -x "${GONIMBUS_DECERNOR_BIN:?GONIMBUS_DECERNOR_BIN required}"
           ./scripts/release-restore-tag-ref.sh
           GONIMBUS_REQUIRE_TAG=1 ./scripts/release-guard-tag-version.sh
           ./scripts/verify-pinned-tag.sh
+          ./scripts/release-verify-committed-anchors.sh
           EXPECTED_OBJECT="$(git rev-parse "refs/tags/$GONIMBUS_RELEASE_TAG")"
           tag_json="$(gh api "repos/3leaps/gonimbus/git/tags/$EXPECTED_OBJECT")"
           jq -e --arg tag "$GONIMBUS_RELEASE_TAG" --arg commit "$(git rev-parse HEAD)" \

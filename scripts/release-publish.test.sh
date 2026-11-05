@@ -20,7 +20,20 @@ done
 repo="$scratch/repo"
 mkdir -p "$repo/scripts" "$repo/keys" "$repo/docs/security" "$scratch/bin" "$scratch/gpg"
 chmod 700 "$scratch/gpg"
-cp "$root/scripts/release-publish.sh" "$repo/scripts/"
+cp "$root/scripts/release-publish.sh" "$root/scripts/release-decernor.sh" "$repo/scripts/"
+cat > "$scratch/bin/decernor" << 'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'version ' | 'version') echo 'decernor 0.1.8' ;;
+  'version -e')
+    printf 'Version:         0.1.8\nCommit:          fake\nBuild Date:      fake\nGo Version:      fake\nGofulmen:        fake\nCrucible:        fake\n'
+    ;;
+  'fingerprint verify') exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$scratch/bin/decernor"
+export GONIMBUS_DECERNOR_BIN="$scratch/bin/decernor"
 cat > "$repo/scripts/release-verify-published-tag.sh" << 'SH'
 #!/usr/bin/env bash
 [[ "${FIXTURE_TAG_REPLACED:-0}" == 0 ]] || { echo 'error: tag replaced' >&2; exit 1; }
@@ -39,13 +52,16 @@ minisign -G -W -p "$scratch/minisign.pub" -s "$scratch/minisign.key" > /dev/null
 cp "$scratch/minisign.pub" "$repo/docs/security/gonimbus-minisign.pub"
 pin_minisign="$(sed -n 2p "$scratch/minisign.pub" | base64 -d | sha_sum 256 | awk '{print $1}')"
 printf 'gpg %s\nminisign %s\n' "$primary" "$pin_minisign" > "$repo/keys/expected-fingerprints.txt"
+printf '{"kind":"gpg"}\n{"kind":"minisign"}\n' > "$repo/keys/expected-fingerprints.ndjson"
 
 mkdir -p "$repo/docs/releases"
 printf '# notes\n' > "$repo/docs/releases/v1.2.3.md"
 git -C "$repo" init -q -b main
+git -C "$repo" config commit.gpgsign false
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid add docs/releases/v1.2.3.md \
-    keys/expected-fingerprints.txt docs/security/release-signing-keys.asc docs/security/gonimbus-minisign.pub
-git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm fixture
+    keys/expected-fingerprints.txt keys/expected-fingerprints.ndjson \
+    docs/security/release-signing-keys.asc docs/security/gonimbus-minisign.pub
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm fixture
 tagged_commit="$(git -C "$repo" rev-parse HEAD)"
 
 d="$scratch/dist"
@@ -86,6 +102,9 @@ case "$1 $2" in
     cp "$FIXTURE_DRAFT"/* "$dir/"
     ;;
 "release edit") ;;
+"api repos/"*)
+    jq -n --argjson d "${FIXTURE_POST_DRAFT:-false}" --argjson i "${FIXTURE_IMMUTABLE:-true}" '{draft: $d, immutable: $i}'
+    ;;
 *) exit 1 ;;
 esac
 SH
@@ -174,7 +193,7 @@ gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' --quick-a
 rot_subkey="$(gpg --homedir "$home" --batch --with-colons --with-subkey-fingerprint --list-keys rotated@example.invalid | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
 minisign -G -W -f -p "$scratch/rot.pub" -s "$scratch/rot.key" > /dev/null
 rot_pin="$(sed -n 2p "$scratch/rot.pub" | base64 -d | sha_sum 256 | awk '{print $1}')"
-pins=(keys/expected-fingerprints.txt docs/security/release-signing-keys.asc docs/security/gonimbus-minisign.pub)
+pins=(keys/expected-fingerprints.txt keys/expected-fingerprints.ndjson docs/security/release-signing-keys.asc docs/security/gonimbus-minisign.pub)
 save_pins() { for p in "${pins[@]}"; do cp "$repo/$p" "$scratch/saved-${p//\//_}"; done; }
 restore_pins() { for p in "${pins[@]}"; do cp "$scratch/saved-${p//\//_}" "$repo/$p"; done; }
 write_rotated_pins() {
@@ -256,10 +275,23 @@ cp "$d/gonimbus-release-signing-key.asc" "$scratch/draft/"
 (cd "$repo" && ./scripts/release-publish.sh v1.2.3 "$d") > /dev/null
 [[ "$(grep -c '^release edit v1.2.3 .*--draft=false' "$FIXTURE_LOG")" == 1 ]]
 
+# PDR-0010 §2.4: post-promote immutability check fails closed if .immutable != true.
+stage
+: > "$FIXTURE_LOG"
+if FIXTURE_IMMUTABLE=false bash -c 'cd "$1" && ./scripts/release-publish.sh v1.2.3 "$2"' _ "$repo" "$d" > "$scratch/out" 2>&1; then
+    echo 'error: expected rejection when published release is not immutable' >&2
+    exit 1
+fi
+grep -q 'is not immutable on GitHub' "$scratch/out" || {
+    echo 'error: missing immutability rejection' >&2
+    cat "$scratch/out" >&2
+    exit 1
+}
+
 # Every gate holds: promotion happens exactly once, after the byte comparison.
 stage
 : > "$FIXTURE_LOG"
 (cd "$repo" && ./scripts/release-publish.sh v1.2.3 "$d") > /dev/null
 [[ "$(grep -c '^release edit v1.2.3 .*--draft=false' "$FIXTURE_LOG")" == 1 ]]
 [[ "$(grep -n '' "$FIXTURE_LOG" | grep -E 'release (download|edit)' | head -1)" == *'release download'* ]]
-echo '[ok] publish promotes only a byte-verified, pin-signed draft'
+echo '[ok] publish promotes only a byte-verified, pin-signed draft and asserts immutability'

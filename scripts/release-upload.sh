@@ -59,6 +59,14 @@ if [[ ${#final_assets[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# Read-only draft check first. --clobber on a published release would replace
+# already-public assets.
+is_draft="$(gh release view "${TAG}" --json isDraft --jq .isDraft)"
+if [[ "${is_draft}" != true ]]; then
+    echo "error: release ${TAG} is not a draft; refusing to upload" >&2
+    exit 1
+fi
+
 echo "→ Uploading ${#final_assets[@]} asset(s) to ${TAG} (clobber)"
 gh release upload "${TAG}" "${final_assets[@]}" --clobber
 

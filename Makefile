@@ -165,10 +165,11 @@ release-prepare:  ## Prepare for release (tests, version bump)
 # - Signs manifests only (do not sign each artifact)
 # - Env vars (all GONIMBUS_ prefixed):
 #     GONIMBUS_RELEASE_TAG  - release tag being signed/uploaded, e.g. v0.2.2
+#     GONIMBUS_DECERNOR_BIN - absolute path to decernor >= 0.1.8 (ceremony)
 #     GONIMBUS_MINISIGN_KEY - path to minisign secret key
-#     GONIMBUS_MINISIGN_PUB - path to minisign public key (optional)
-#     GONIMBUS_PGP_KEY_ID   - gpg key for PGP signing (optional)
-#     GONIMBUS_GPG_HOMEDIR  - isolated gpg homedir (required if PGP_KEY_ID set)
+#     GONIMBUS_MINISIGN_PUB - path to minisign public key (one-time pin bootstrap only)
+#     GONIMBUS_PGP_KEY_ID   - gpg subkey selector (<subkey>!) for PGP signing
+#     GONIMBUS_GPG_HOMEDIR  - isolated gpg homedir (0700, outside repo, never ~/.gnupg)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The release tag comes only from GONIMBUS_RELEASE_TAG. It never defaults to
@@ -225,6 +226,7 @@ release-build: sync-embedded-identity release-clean ## Build release artifacts i
 # release-publish promotes draft -> public.
 
 release-preflight: ## Pre-tag gate: clean synced main, notes, pins, dates
+	@./scripts/release-verify-committed-anchors.sh
 	@./scripts/release-preflight.sh
 
 # Post-tag operations also bind to the checked-out VERSION: a stale
@@ -292,7 +294,11 @@ release-validate-pin: ## Maintainer-only: read-only validation of the existing p
 release-insert-anchors: release-validate-pin ## Maintainer-only: validate pin, then generate absent public anchors
 	@./scripts/release-insert-anchors.sh
 
-release-tag-tests: ## Signed-tag tooling tests (throwaway keys only; needs gpg, git, python3, jq, yq, minisign, make)
+release-tag-tests: ## Signed-tag tooling tests (throwaway keys only; needs gpg, git, python3, jq, yq, minisign, make, decernor)
+	@./scripts/release-decernor.test.sh
+	@./scripts/release-verify-committed-anchors.test.sh
+	@./scripts/release-stage-tagged-pubkeys.test.sh
+	@./scripts/ci-install-decernor.test.sh
 	@./scripts/release-guard-tag-version.test.sh
 	@./scripts/release-make-tag-source.test.sh
 	@./scripts/release-restore-tag-ref.test.sh
@@ -333,8 +339,9 @@ release-sign: release-guard-tag-version ## Sign checksum manifests with minisign
 	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
 	@./scripts/sign-release-manifests.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-export-keys: ## Export public signing keys into dist/release
-	@./scripts/export-release-keys.sh "$(DIST_RELEASE)"
+release-export-keys: release-guard-tag-version ## Stage public signing keys from the verified tagged commit into dist/release
+	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
+	@./scripts/release-stage-tagged-pubkeys.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
 release-verify-keys: ## Verify both exported public keys are present and public-only
 	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub; run make release-export-keys" >&2; exit 1; }
@@ -559,14 +566,9 @@ release-workflow-check: ## Check workflow pins and the read-only release workflo
 	@./scripts/workflow-pins.test.sh
 	@./scripts/release-workflow-permissions.test.sh
 
-release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, decernor)
+release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, GONIMBUS_DECERNOR_BIN)
+	@./scripts/release-verify-committed-anchors.sh
 	@./scripts/validate-release-anchors.sh
-	@"$${GONIMBUS_DECERNOR_BIN:-decernor}" fingerprint verify \
-		--anchors keys/expected-fingerprints.txt \
-		--anchors-ndjson keys/expected-fingerprints.ndjson \
-		--gpg docs/security/release-signing-keys.asc \
-		--minisign docs/security/gonimbus-minisign.pub > /dev/null
-	@echo "[ok] decernor: gpg and minisign public keys match txt and ndjson anchors"
 
 check-all: fmt verify-embedded-identity api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
 	@echo "✅ All quality checks passed"

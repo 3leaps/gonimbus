@@ -53,8 +53,18 @@ if [ -n "${PGP_KEY_ID}" ]; then
         echo "error: GONIMBUS_PGP_KEY_ID set but gpg not found in PATH" >&2
         exit 1
     fi
-    if [ -z "${GPG_HOME}" ]; then
-        echo "error: GONIMBUS_GPG_HOMEDIR must be set for PGP signing" >&2
+    if [[ ! "${PGP_KEY_ID}" =~ ^[0-9A-F]{40}!$ ]]; then
+        echo "error: GONIMBUS_PGP_KEY_ID must be the exact uppercase signing subkey fingerprint with !" >&2
+        exit 1
+    fi
+    if [ -z "${GPG_HOME}" ] || [ ! -d "${GPG_HOME}" ]; then
+        echo "error: GONIMBUS_GPG_HOMEDIR must be set to an isolated directory for PGP signing" >&2
+        exit 1
+    fi
+    gpg_home_real="$(cd "${GPG_HOME}" && pwd -P)"
+    default_home="$(cd "${HOME}/.gnupg" 2> /dev/null && pwd -P || true)"
+    if [ -n "${default_home}" ] && [ "${gpg_home_real}" = "${default_home}" ]; then
+        echo "error: GONIMBUS_GPG_HOMEDIR must not be the default homedir" >&2
         exit 1
     fi
     if ! gpg --homedir "${GPG_HOME}" --list-secret-keys "${PGP_KEY_ID}" > /dev/null 2>&1; then

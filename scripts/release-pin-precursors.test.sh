@@ -3,18 +3,35 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 fixture="$(mktemp -d)"
+# Keep Go caches out of HOME so a HOME= fixture cannot land the toolchain
+# under the throwaway directory (rm -rf then fails on root-owned module files).
+export GOPATH="$fixture/gopath" GOCACHE="$fixture/gocache" GOMODCACHE="$fixture/gomodcache"
+mkdir -p "$GOPATH" "$GOCACHE" "$GOMODCACHE"
 cleanup() {
     local home
     for home in "$fixture/home" "$fixture/other-home/.gnupg" "$fixture/repo/in-repo-home"; do
         [[ -d "$home" ]] && gpgconf --homedir "$home" --kill all > /dev/null 2>&1 || true
     done
-    rm -rf "$fixture"
+    rm -rf "$fixture" 2> /dev/null || true
 }
 trap cleanup EXIT
-mkdir -p "$fixture/repo/scripts" "$fixture/repo/docs" "$fixture/home" "$fixture/other-home/.gnupg"
+mkdir -p "$fixture/repo/scripts" "$fixture/repo/docs" "$fixture/repo/schemas" "$fixture/home" "$fixture/other-home/.gnupg"
 chmod 700 "$fixture/home" "$fixture/other-home" "$fixture/other-home/.gnupg"
 cp "$root/Makefile" "$root/VERSION" "$fixture/repo/"
-cp "$root/scripts/"{release-export-pin.sh,release-validate-pin.sh,release-insert-anchors.sh,validate-release-anchors.sh,release-minisign-blob.py} "$fixture/repo/scripts/"
+cp "$root/schemas/fingerprint-record.v0.schema.json" "$fixture/repo/schemas/"
+cp "$root/scripts/"{release-decernor.sh,release-export-pin.sh,release-validate-pin.sh,release-insert-anchors.sh,install-release-anchors.sh,validate-release-anchors.sh} "$fixture/repo/scripts/"
+if [[ -z "${GONIMBUS_DECERNOR_BIN:-}" ]]; then
+    if [[ "${CI:-}" == true ]]; then
+        echo 'error: GONIMBUS_DECERNOR_BIN required in CI (install from config/release/decernor-ci-sha256.txt)' >&2
+        exit 1
+    fi
+    GONIMBUS_DECERNOR_BIN="$(command -v decernor)" || {
+        echo 'error: GONIMBUS_DECERNOR_BIN required (CI installs Decernor from config/release/decernor-ci-sha256.txt)' >&2
+        exit 1
+    }
+fi
+bin="$GONIMBUS_DECERNOR_BIN"
+export GONIMBUS_DECERNOR_BIN="$bin"
 python3 - "$fixture/public.pub" "$fixture/private.pub" "$fixture/other.pub" << 'PY'
 import base64
 import pathlib
@@ -59,6 +76,7 @@ fail() {
 }
 pin="$fixture/repo/docs/security/release-signing-keys.asc"
 anchors="$fixture/repo/keys/expected-fingerprints.txt"
+anchors_ndjson="$fixture/repo/keys/expected-fingerprints.ndjson"
 fail 'public GPG pin' run release-validate-pin
 fail 'public GPG pin' run release-insert-anchors
 fail 'both public exports required' "$fixture/repo/scripts/release-insert-anchors.sh"
@@ -98,8 +116,11 @@ after="$(pin_times "$pin")"
 }
 fail 'public pin already exists' run release-export-pin
 cmp "$pin" "$fixture/pin-copy"
+fail 'trusted Decernor identity' env GONIMBUS_DECERNOR_BIN=decernor make --no-print-directory -s -C "$fixture/repo" release-validate-pin
+fail 'trusted Decernor' env -u GONIMBUS_DECERNOR_BIN DECERNOR_BIN="$bin" make --no-print-directory -s -C "$fixture/repo" release-validate-pin
+fail 'trusted Decernor' env -u GONIMBUS_DECERNOR_BIN DECERNOR_BIN="$bin" make --no-print-directory -s -C "$fixture/repo" release-export-pin
 fail 'private material in minisign' env GONIMBUS_MINISIGN_PUB="$fixture/private.pub" make --no-print-directory -s -C "$fixture/repo" release-validate-pin
-fail 'minisign public export rejected' env GONIMBUS_MINISIGN_PUB="$fixture/private.pub" "$fixture/repo/scripts/release-insert-anchors.sh"
+fail 'private material in minisign' env GONIMBUS_MINISIGN_PUB="$fixture/private.pub" "$fixture/repo/scripts/release-insert-anchors.sh"
 [[ ! -e "$anchors" ]]
 other_digit=A
 [[ "${primary: -1}" == A && "${selector: -2:1}" == A ]] && other_digit=B
@@ -117,10 +138,13 @@ run release-insert-anchors > "$fixture/output"
     echo 'error: generated anchors differ from the documented derivation' >&2
     exit 1
 }
+[[ -s "$anchors_ndjson" ]]
 "$fixture/repo/scripts/validate-release-anchors.sh" > /dev/null
 cp "$anchors" "$fixture/anchors-copy"
+cp "$anchors_ndjson" "$fixture/anchors-ndjson-copy"
 fail 'fingerprint anchors already exist' env GONIMBUS_MINISIGN_PUB="$fixture/other.pub" make --no-print-directory -s -C "$fixture/repo" release-insert-anchors
 cmp "$anchors" "$fixture/anchors-copy"
+cmp "$anchors_ndjson" "$fixture/anchors-ndjson-copy"
 printf 'gpg %s\nminisign %s\n' "$wrong_primary" "$expected_minisign" > "$anchors"
 fail 'primary pin differs' "$fixture/repo/scripts/validate-release-anchors.sh"
 printf 'gpg %s\nminisign %s\n' "$(tr 'A-F' 'a-f' <<< "$primary")" "$expected_minisign" > "$anchors"
@@ -131,7 +155,7 @@ printf 'minisign %s\ngpg %s\n' "$expected_minisign" "$primary" > "$anchors"
 fail 'exactly a gpg line' "$fixture/repo/scripts/validate-release-anchors.sh"
 cp "$fixture/anchors-copy" "$anchors"
 "$fixture/repo/scripts/validate-release-anchors.sh" > /dev/null
-rm "$anchors"
+rm "$anchors" "$anchors_ndjson"
 
 gpg --homedir "$fixture/home" --batch --armor --export-secret-keys "$selector" > "$pin"
 fail 'private material in gpg' run release-validate-pin

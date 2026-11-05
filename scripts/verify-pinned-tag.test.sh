@@ -1,9 +1,66 @@
 #!/usr/bin/env bash
 # Synthetic, short-lived signing fixture; all generated material stays outside git.
+# Trust material is committed: verification reads it from the tagged commit.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+bin="${GONIMBUS_DECERNOR_BIN:-$(command -v decernor || true)}"
+[[ -n "$bin" && -x "$bin" && "$bin" == /* && ! -L "$bin" ]] || {
+    echo 'error: GONIMBUS_DECERNOR_BIN required (CI installs Decernor from config/release/decernor-ci-sha256.txt)' >&2
+    exit 1
+}
+export GONIMBUS_DECERNOR_BIN="$bin"
+# Decernor fingerprint verify must precede the listing check. Reversing them
+# in the script must fail this test even when both would succeed on a fixture.
+if ! python3 - "$root/scripts/verify-pinned-tag.sh" << 'PY'; then
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+
+def decernor_first(s):
+    dec = s.find("fingerprint verify")
+    listing = s.find("validate-release-anchors.sh")
+    return dec >= 0 and listing >= 0 and dec < listing
+
+if not decernor_first(text):
+    raise SystemExit("fingerprint verify must precede validate-release-anchors.sh")
+i, j = text.find("fingerprint verify"), text.find("validate-release-anchors.sh")
+a, b = "fingerprint verify", "validate-release-anchors.sh"
+rev = text[:i] + b + text[i + len(a) : j] + a + text[j + len(b) :]
+if decernor_first(rev):
+    raise SystemExit("order checker does not fail when Decernor/listing are reversed")
+PY
+    echo 'error: verify-pinned-tag.sh must call Decernor before the listing check' >&2
+    exit 1
+fi
+# Exercise the actual status predicate under mawk when installed, otherwise
+# the system awk. This catches interval-regex regressions without a GPG mock.
+python3 - "$root/scripts/verify-pinned-tag.sh" << 'PYAWK'
+from pathlib import Path
+import re, shutil, subprocess, sys
+text = Path(sys.argv[1]).read_text()
+program = re.search(r"awk -v primary=.*? '\n(.*?)\n' \"\$keyring/status\"", text, re.S).group(1)
+primary, subkey = "A" * 40, "B" * 40
+status = f"[GNUPG:] GOODSIG fixture\n[GNUPG:] VALIDSIG {subkey} {primary}\n"
+engines = dict.fromkeys(filter(None, (shutil.which("awk"), shutil.which("mawk"))))
+cases = [("", True), (subkey + "!", True), (subkey, False),
+         (subkey[:-1] + "!", False), (subkey + "B!", False),
+         (subkey.lower() + "!", False), ("G" * 40 + "!", False),
+         (primary + "!", False), ("C" * 40 + "!", False)]
+for engine in engines:
+    def accepts(selector, data=status):
+        return subprocess.run([engine, "-v", "primary=" + primary, "-v",
+            "permitted=" + subkey, "-v", "selector=" + selector, program],
+            input=data, text=True).returncode == 0
+    for selector, expected in cases:
+        if accepts(selector) != expected:
+            raise SystemExit(f"{engine}: unexpected selector result: {selector!r}")
+    for bad in (status + "[GNUPG:] REVKEYSIG fixture\n", status + status,
+                status.replace(subkey, primary), status.replace(subkey, "C" * 40)):
+        if accepts(subkey + "!", bad):
+            raise SystemExit(f"{engine}: signer/status restriction failed")
+    print(f"[ok] {engine}: selector length, alphabet, exact subkey and signature controls")
+PYAWK
 scratch="$(mktemp -d)"
-# Stop every agent started under the scratch homes, then remove them.
 cleanup() {
     local home
     for home in "$scratch/gpg" "$scratch/expired-ring"; do
@@ -21,26 +78,64 @@ gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key "$primary" 
 subkey="$(gpg --batch --with-colons --with-subkey-fingerprint --list-keys "$primary" | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
 fixture="$scratch/repo"
 git init -q -b main "$fixture"
+# Force OpenPGP even when the host git config uses SSH signing.
+git -C "$fixture" config gpg.format openpgp
+git -C "$fixture" config gpg.program gpg
+git -C "$fixture" config commit.gpgsign false
 mkdir -p "$fixture/docs/security" "$fixture/keys" "$fixture/scripts" "$fixture/config/release"
-cp "$root/scripts/verify-pinned-tag.sh" "$root/scripts/validate-release-anchors.sh" "$fixture/scripts/"
+cp "$root/scripts/verify-pinned-tag.sh" "$root/scripts/validate-release-anchors.sh" "$root/scripts/release-decernor.sh" "$fixture/scripts/"
 cp "$root/config/release/tagger-identity.txt" "$fixture/config/release/"
 gpg --batch --armor --export "$primary" > "$fixture/docs/security/release-signing-keys.asc"
-printf 'gpg %s\nminisign %064d\n' "$primary" 0 > "$fixture/keys/expected-fingerprints.txt"
+python3 - "$fixture/docs/security/gonimbus-minisign.pub" << 'PY'
+import base64
+import pathlib
+import sys
+blob = b'Ed' + b'\x01' * 8 + b'\x01' * 32
+pathlib.Path(sys.argv[1]).write_text(
+    'untrusted comment: synthetic public key\n' + base64.b64encode(blob).decode() + '\n'
+)
+PY
+"$bin" fingerprint "$fixture/docs/security/release-signing-keys.asc" --class public --kind gpg \
+    --format ndjson --path-mode none --gpg-role primary > "$scratch/gpg.ndjson"
+"$bin" fingerprint "$fixture/docs/security/gonimbus-minisign.pub" --class public --kind minisign \
+    --format ndjson --path-mode none > "$scratch/minisign.ndjson"
+python3 - "$scratch" "$fixture/keys" << 'PY'
+import json
+import pathlib
+import sys
+base = pathlib.Path(sys.argv[1])
+keys = pathlib.Path(sys.argv[2])
+g = [json.loads(line) for line in (base / 'gpg.ndjson').read_text().splitlines() if line]
+m = [json.loads(line) for line in (base / 'minisign.ndjson').read_text().splitlines() if line and json.loads(line).get('fingerprint_scheme') == 'minisign-public-blob-sha256-v1']
+if len(g) != 1 or len(m) != 1:
+    raise SystemExit('error: expected one GPG primary and one minisign fingerprint')
+(keys / 'expected-fingerprints.ndjson').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in (g[0], m[0])))
+(keys / 'expected-fingerprints.txt').write_text('gpg ' + g[0]['fingerprint'] + '\nminisign ' + m[0]['fingerprint'] + '\n')
+PY
 printf 'fixture\n' > "$fixture/file"
 printf 'Fixture release\n' > "$scratch/message.txt"
 git -C "$fixture" config user.name '3 Leaps Infosec Team'
 git -C "$fixture" config user.email infosec@3leaps.net
-# The trust material is committed: verification reads it from the tagged commit.
 git -C "$fixture" add file docs/security keys config scripts
 git -C "$fixture" commit -qm fixture
 good="$(git -C "$fixture" rev-parse HEAD)"
 export GONIMBUS_RELEASE_TAG=v1.2.3
 export GONIMBUS_TAGGER_NAME='3 Leaps Infosec Team'
 export GONIMBUS_TAGGER_EMAIL=infosec@3leaps.net
+git_sign_tag() {
+    local selector="$1"
+    (
+        cd "$fixture"
+        GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
+            git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg tag -fs -a --cleanup=verbatim \
+            -u "$selector" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
+    ) > /dev/null
+}
 (
     cd "$fixture"
     GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -s -a --cleanup=verbatim -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
+        git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg tag -s -a --cleanup=verbatim \
+        -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
 )
 git -C "$fixture" cat-file tag v1.2.3 | grep -q -- '^-----BEGIN PGP SIGNATURE-----$' || {
     echo 'error: fixture tag not signed' >&2
@@ -54,11 +149,7 @@ verify() { (
     cd "$fixture"
     ./scripts/verify-pinned-tag.sh
 ); }
-retag() { (
-    cd "$fixture"
-    GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -fs -a --cleanup=verbatim -u "$1" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
-) > /dev/null; }
+retag() { git_sign_tag "$1"; }
 # commit_and_expect_fail commits the current working tree as the tagged
 # commit, re-signs the tag there, expects verification to fail, then restores
 # the approved commit and tag.
@@ -113,16 +204,13 @@ printf '# Heading\nFixture release\n' > "$scratch/message.txt"
 (
     cd "$fixture"
     GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -fs -a --cleanup=verbatim -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
+        git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg tag -fs -a --cleanup=verbatim \
+        -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
     tag_verify_object refs/tags/v1.2.3 "$scratch/message.txt"
 )
 verify > /dev/null
 printf 'Fixture release\n' > "$scratch/message.txt"
-(
-    cd "$fixture"
-    GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -fs -a --cleanup=verbatim -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
-)
+git_sign_tag "$subkey!"
 git -C "$fixture" rm -q docs/security/release-signing-keys.asc
 commit_and_expect_fail
 gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
@@ -154,24 +242,16 @@ retag "$second!"
 expect_fail verify
 retag "$subkey!"
 verify > /dev/null
-(
-    cd "$fixture"
-    GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -fs -a --cleanup=verbatim -u "$primary!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
-)
+git_sign_tag "$primary!"
 expect_fail verify
-(
-    cd "$fixture"
-    GIT_COMMITTER_NAME='3 Leaps Infosec Team' GIT_COMMITTER_EMAIL=infosec@3leaps.net \
-        git tag -fs -a --cleanup=verbatim -u "$subkey!" -F "$scratch/message.txt" "$GONIMBUS_RELEASE_TAG"
-)
+git_sign_tag "$subkey!"
 verify > /dev/null
 real_gpg="$(command -v gpg)"
 mkdir -p "$scratch/bin"
 cat > "$scratch/bin/gpg" << 'SH'
 #!/usr/bin/env bash
 if [[ -n "${FIXTURE_FUTURE_TIME:-}" ]]; then
-	exec "$FIXTURE_REAL_GPG" --faked-system-time "$FIXTURE_FUTURE_TIME" "$@"
+    exec "$FIXTURE_REAL_GPG" --faked-system-time "$FIXTURE_FUTURE_TIME" "$@"
 fi
 exec "$FIXTURE_REAL_GPG" "$@"
 SH
@@ -182,7 +262,8 @@ mkdir -m 700 "$scratch/expired-ring"
 GNUPGHOME="$scratch/expired-ring" gpg --batch --quiet --import "$fixture/docs/security/release-signing-keys.asc"
 (
     cd "$fixture"
-    GNUPGHOME="$scratch/expired-ring" git verify-tag --raw v1.2.3 > "$scratch/expired-status" 2>&1
+    GNUPGHOME="$scratch/expired-ring" git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg \
+        verify-tag --raw v1.2.3 > "$scratch/expired-status" 2>&1
 ) || true
 grep -q '^\[GNUPG:\] VALIDSIG ' "$scratch/expired-status"
 grep -q '^\[GNUPG:\] EXPKEYSIG ' "$scratch/expired-status"

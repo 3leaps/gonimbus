@@ -1,69 +1,80 @@
 #!/usr/bin/env bash
-# Maintainer-only: derive the two public anchors from the committed pin and the
-# approved minisign public export. Never overwrites existing anchors.
+# Maintainer-only: derive the two public anchors from approved public exports.
+# Never overwrites existing anchors.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-decernor.sh
+source "$root/scripts/release-decernor.sh"
 cd "$root"
 stop() {
     echo "STOP: $1" >&2
     exit 1
 }
+resolve_release_decernor ceremony || stop 'trusted Decernor identity/version check failed'
 : "${GONIMBUS_MINISIGN_PUB:?public minisign export required}"
 pin=docs/security/release-signing-keys.asc
-anchors=keys/expected-fingerprints.txt
 [[ -f "$pin" && -s "$pin" && ! -L "$pin" &&
     -f "$GONIMBUS_MINISIGN_PUB" && -s "$GONIMBUS_MINISIGN_PUB" && ! -L "$GONIMBUS_MINISIGN_PUB" ]] ||
     stop 'both public exports required'
-[[ ! -e "$anchors" && ! -L "$anchors" ]] ||
-    stop 'fingerprint anchors already exist; remove them in a reviewed change before regenerating'
 [[ ! -L keys && (! -e keys || -d keys) ]] || stop 'keys must be a regular directory, not a symlink'
 
-scratch="$(mktemp -d)"
-cleanup() {
-    local home
-    for home in "$scratch"/*.gnupg; do
-        [[ -d "$home" ]] && gpgconf --homedir "$home" --kill all > /dev/null 2>&1 || true
-    done
-    rm -rf "$scratch"
-}
-trap cleanup EXIT
-chmod 700 "$scratch"
-
-# GPG: primary fingerprint from an isolated keyring that holds only the pin.
-# minisign: SHA-256 of the decoded public key blob (release-minisign-blob.py).
-derive() {
-    local out="$1" home="$1.gnupg" shown listing primary minisign
-    mkdir -m 700 "$home"
-    shown="$(gpg --homedir "$home" --batch --with-colons --show-keys "$pin" 2> /dev/null)" ||
-        stop 'pin is not a readable OpenPGP export'
-    if [[ "$(awk -F: '$1=="sec"||$1=="ssb" {n++} END {print n+0}' <<< "$shown")" != 0 ]] ||
-        grep -q 'PRIVATE KEY BLOCK' "$pin"; then
-        stop 'private material in gpg public export'
+require_public_only() {
+    local rc
+    if "$RELEASE_DECERNOR_BIN" fingerprint "$1" --kind "$2" \
+        --class private --fail-on-empty --path-mode none > /dev/null; then
+        stop "private material in $2 public export"
+    else
+        rc=$?
+        [[ "$rc" -eq 3 ]] || stop "$2 private-material check failed"
     fi
-    GNUPGHOME="$home" gpg --batch --quiet --import "$pin" || stop 'pin import failed'
-    listing="$(GNUPGHOME="$home" gpg --batch --with-colons --fingerprint --list-keys)"
-    [[ "$(awk -F: '$1=="pub" {n++} END {print n+0}' <<< "$listing")" == 1 ]] ||
-        stop 'pin must contain exactly one public primary'
-    primary="$(awk -F: '$1=="fpr" {print $10;exit}' <<< "$listing")"
-    [[ "$primary" =~ ^[0-9A-F]{40}$ ]] || stop 'primary fingerprint malformed'
-    minisign="$("$root/scripts/release-minisign-blob.py" "$GONIMBUS_MINISIGN_PUB")" ||
-        stop 'minisign public export rejected'
-    [[ "$minisign" =~ ^[0-9a-f]{64}$ ]] || stop 'minisign fingerprint malformed'
-    printf 'gpg %s\nminisign %s\n' "$primary" "$minisign" > "$out"
 }
-derive "$scratch/first"
-derive "$scratch/second"
-cmp -s "$scratch/first" "$scratch/second" || stop 'anchor derivation is not reproducible'
+require_public_only "$pin" gpg
+require_public_only "$GONIMBUS_MINISIGN_PUB" minisign
 
-mkdir -p keys
-# Noclobber: a concurrently created file is never replaced.
-(
-    set -C
-    cat "$scratch/first" > "$anchors"
-) || stop 'cannot create fingerprint anchors'
-"$root/scripts/validate-release-anchors.sh" > /dev/null || {
-    rm -f "$anchors"
-    stop 'generated anchors failed validation'
-}
-cat "$anchors"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+"$RELEASE_DECERNOR_BIN" fingerprint "$pin" --class public --kind gpg \
+    --format ndjson --path-mode none --gpg-role primary > "$scratch/gpg.ndjson" ||
+    stop 'public GPG primary extraction failed (pin must contain exactly one public primary)'
+"$RELEASE_DECERNOR_BIN" fingerprint "$GONIMBUS_MINISIGN_PUB" --class public --kind minisign \
+    --format ndjson --path-mode none > "$scratch/minisign.ndjson" ||
+    stop 'minisign public export rejected'
+python3 - "$scratch" << 'PY'
+import json
+import pathlib
+import sys
+base = pathlib.Path(sys.argv[1])
+g = [json.loads(line) for line in (base / 'gpg.ndjson').read_text().splitlines() if line]
+m = [json.loads(line) for line in (base / 'minisign.ndjson').read_text().splitlines() if line and json.loads(line).get('fingerprint_scheme') == 'minisign-public-blob-sha256-v1']
+if len(g) != 1 or g[0].get('fingerprint_scheme') != 'openpgp-fingerprint-v1' or g[0].get('key_role') != 'primary':
+    raise SystemExit('STOP: pin must contain exactly one public primary')
+if len(m) != 1:
+    raise SystemExit('STOP: minisign public export rejected')
+(base / 'expected-fingerprints.ndjson').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in (g[0], m[0])))
+(base / 'expected-fingerprints.txt').write_text('gpg ' + g[0]['fingerprint'] + '\nminisign ' + m[0]['fingerprint'] + '\n')
+(base / 'gpg.json').write_text(json.dumps(g[0]) + '\n')
+(base / 'minisign.json').write_text(json.dumps(m[0]) + '\n')
+PY
+for kind in gpg minisign; do
+    "$RELEASE_DECERNOR_BIN" validate --schema "$root/schemas/fingerprint-record.v0.schema.json" \
+        --data "$scratch/$kind.json" > /dev/null
+done
+"$RELEASE_DECERNOR_BIN" fingerprint "$pin" --class public --kind gpg \
+    --format ndjson --path-mode none --gpg-role primary > "$scratch/gpg.verify.ndjson"
+"$RELEASE_DECERNOR_BIN" fingerprint "$GONIMBUS_MINISIGN_PUB" --class public --kind minisign \
+    --format ndjson --path-mode none > "$scratch/minisign.verify.ndjson"
+cmp "$scratch/gpg.ndjson" "$scratch/gpg.verify.ndjson"
+cmp "$scratch/minisign.ndjson" "$scratch/minisign.verify.ndjson"
+"$root/scripts/install-release-anchors.sh" "$scratch" "$root/keys" \
+    "$RELEASE_DECERNOR_BIN" fingerprint verify \
+    --anchors "$root/keys/expected-fingerprints.txt" \
+    --anchors-ndjson "$root/keys/expected-fingerprints.ndjson" \
+    --gpg "$root/docs/security/release-signing-keys.asc" --minisign "$GONIMBUS_MINISIGN_PUB" > /dev/null
+if [[ -x "$root/scripts/validate-release-anchors.sh" ]]; then
+    "$root/scripts/validate-release-anchors.sh" > /dev/null || {
+        rm -f "$root/keys/expected-fingerprints.txt" "$root/keys/expected-fingerprints.ndjson"
+        stop 'generated anchors failed validation'
+    }
+fi
+cat "$root/keys/expected-fingerprints.txt"
 echo '[ok] generated public fingerprint anchors for review'
