@@ -290,15 +290,33 @@ func TestEngineProvenanceSidecarTraversesLimiter(t *testing.T) {
 		"the throttled sidecar PUT is observed by the AIMD limiter")
 }
 
+// notifyOnRecordSink wraps collectSink and invokes onRecord after recording each
+// emitted item event, allowing multi-worker tests to order input admission
+// behind a specific item's terminal event without wall-clock sleeps.
+type notifyOnRecordSink struct {
+	collectSink
+	onRecord func(Record)
+}
+
+func (s *notifyOnRecordSink) OnRecord(ctx context.Context, rec Record) error {
+	if err := s.collectSink.OnRecord(ctx, rec); err != nil {
+		return err
+	}
+	if s.onRecord != nil {
+		s.onRecord(rec)
+	}
+	return nil
+}
+
 // TestEngineProvenanceSidecarLimiterRecovery pins that the sidecar PUT drives both
 // halves of the AIMD loop: one sidecar throttles (a backoff), and the subsequent
 // clean sidecar observations feed the additive-increase recovery — not just the
 // backoff counter.
 func TestEngineProvenanceSidecarLimiterRecovery(t *testing.T) {
 	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
-	// Enough objects that, after the first object's sidecar throttles early (parallel
-	// 4 grabs it in the first batch), the run of clean sidecar/copy observations
-	// exceeds the throttle cooldown plus the additive-increase interval.
+	// Enough objects that, after the first object's sidecar throttles, the
+	// subsequent clean sidecar/copy observations exceed the throttle cooldown
+	// plus the additive-increase interval.
 	const n = 120
 	var lines []string
 	for i := 0; i < n; i++ {
@@ -311,15 +329,37 @@ func TestEngineProvenanceSidecarLimiterRecovery(t *testing.T) {
 	// Only the first object's sidecar throttles; the rest write cleanly, so the
 	// limiter observes a throttle then a run of clean sidecar PUTs.
 	dst.putObjectErrByKey["data/o0.xml.gnb.json"] = provider.ErrThrottled
-	sink := &collectSink{}
+	firstThrottledDone := make(chan struct{})
+	var closeOnce sync.Once
+	sink := &notifyOnRecordSink{
+		onRecord: func(rec Record) {
+			if rec.SourceKey == "o0.xml" && rec.Status == "complete" {
+				closeOnce.Do(func() { close(firstThrottledDone) })
+			}
+		},
+	}
 	cfg := provenanceCopyConfig(dst, sink, siblingProvenancePlan())
 	cfg.Concurrency = ConcurrencyConfig{RequestedCeiling: 8, EffectiveCeiling: 8, CeilingReason: "test", AdaptiveEnabled: true, Floor: 1, Initial: 8}
 	runner, err := NewRunner(cfg)
 	require.NoError(t, err)
 
-	summary, err := runner.Run(context.Background(), RecordStreamSource{
+	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	summary, err := runner.Run(runCtx, RecordStreamSource{
 		Records: strings.NewReader(strings.Join(lines, "\n")),
-		Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+		Resolve: func(ctx context.Context, sourceURI string) (provider.Provider, error) {
+			// Gate o1..o(n-1) behind o0's terminal record so the throttled sidecar PUT
+			// is guaranteed to back the limiter off from EffectiveCeiling before the
+			// remaining workers consume the clean recovery observations.
+			if sourceURI != "s3://source-bucket/o0.xml" {
+				select {
+				case <-firstThrottledDone:
+				case <-ctx.Done():
+					return nil, fmt.Errorf("firstThrottledDone never closed: %w", ctx.Err())
+				}
+			}
+			return src, nil
+		},
 	})
 	require.NoError(t, err, "warn policy tolerates the throttled sidecar")
 
