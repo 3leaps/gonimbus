@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -821,4 +822,449 @@ func hashFileSHA256(path string) (string, error) {
 	}
 	sum := sha256Sum(data)
 	return sum, nil
+}
+
+func TestSegmentMayMatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		minRelKey string
+		maxRelKey string
+		filter    *rowFilter
+		want      bool
+	}{
+		{
+			name:      "nil filter never skips",
+			minRelKey: "c/01",
+			maxRelKey: "c/99",
+			filter:    nil,
+			want:      true,
+		},
+		{
+			name:      "empty prefix never skips",
+			minRelKey: "c/01",
+			maxRelKey: "c/99",
+			filter:    &rowFilter{prefix: ""},
+			want:      true,
+		},
+		{
+			name:      "segment wholly before prefix",
+			minRelKey: "a/01",
+			maxRelKey: "a/99",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      false,
+		},
+		{
+			name:      "segment wholly after prefix",
+			minRelKey: "c/01",
+			maxRelKey: "c/99",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      false,
+		},
+		{
+			name:      "delimiter-adjacent lower bound after prefix ('0' > '/')",
+			minRelKey: "site/dev/2026-01-010/a.xml",
+			maxRelKey: "site/dev/2026-01-010/z.xml",
+			filter:    &rowFilter{prefix: "site/dev/2026-01-01/"},
+			want:      false,
+		},
+		{
+			name:      "delimiter-adjacent upper bound before prefix ('.' < '/')",
+			minRelKey: "site/dev/2026-01-01.a",
+			maxRelKey: "site/dev/2026-01-01.z",
+			filter:    &rowFilter{prefix: "site/dev/2026-01-01/"},
+			want:      false,
+		},
+		{
+			name:      "minRelKey starts with prefix",
+			minRelKey: "b/01",
+			maxRelKey: "c/99",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "maxRelKey starts with prefix",
+			minRelKey: "a/01",
+			maxRelKey: "b/01",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "segment straddles prefix without endpoints starting with prefix",
+			minRelKey: "a/z",
+			maxRelKey: "c/a",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "prefix equals minRelKey",
+			minRelKey: "b/",
+			maxRelKey: "c/a",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "prefix equals maxRelKey",
+			minRelKey: "a/a",
+			maxRelKey: "b/",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "minRelKey is strict prefix of filter prefix",
+			minRelKey: "b/",
+			maxRelKey: "b/z",
+			filter:    &rowFilter{prefix: "b/sub/"},
+			want:      true,
+		},
+		{
+			name:      "high-byte prefix matching segment",
+			minRelKey: "b/\xff/a",
+			maxRelKey: "b/\xff/z",
+			filter:    &rowFilter{prefix: "b/\xff/"},
+			want:      true,
+		},
+		{
+			name:      "high-byte prefix lower-bound skip",
+			minRelKey: "b/\xff0/a",
+			maxRelKey: "b/\xff0/z",
+			filter:    &rowFilter{prefix: "b/\xff/"},
+			want:      false,
+		},
+		{
+			name:      "empty minRelKey and maxRelKey never skip",
+			minRelKey: "",
+			maxRelKey: "",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "empty minRelKey with maxRelKey after prefix never skips via lower bound",
+			minRelKey: "",
+			maxRelKey: "c/99",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "empty maxRelKey with minRelKey before prefix never skips via upper bound",
+			minRelKey: "a/01",
+			maxRelKey: "",
+			filter:    &rowFilter{prefix: "b/"},
+			want:      true,
+		},
+		{
+			name:      "inverted bounds fail-safe never skips",
+			minRelKey: "z/01",
+			maxRelKey: "a/01",
+			filter:    &rowFilter{prefix: "m/"},
+			want:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := indexsubstrate.SegmentDescriptor{
+				MinRelKey: tc.minRelKey,
+				MaxRelKey: tc.maxRelKey,
+			}
+			require.Equal(t, tc.want, segmentMayMatch(desc, tc.filter))
+		})
+	}
+}
+
+func TestSegmentMayMatch_RandomSortedDisjointParity(t *testing.T) {
+	alphabet := []byte{'a', 'b', 'c', '.', '/', '0', '\xff'}
+	var state uint64 = 0x9e3779b97f4a7c15
+	nextRand := func() uint64 {
+		state += 0x9e3779b97f4a7c15
+		z := state
+		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+		return z ^ (z >> 31)
+	}
+	randString := func(minLen, maxLen int) string {
+		n := minLen + int(nextRand()%uint64(maxLen-minLen+1))
+		buf := make([]byte, n)
+		for i := range buf {
+			buf[i] = alphabet[nextRand()%uint64(len(alphabet))]
+		}
+		return string(buf)
+	}
+
+	mod := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	deletedAt := mod.Add(time.Hour)
+
+	for trial := 0; trial < 60; trial++ {
+		keySet := make(map[string]struct{}, 80)
+		for len(keySet) < 64 {
+			keySet[randString(1, 8)] = struct{}{}
+		}
+		keys := make([]string, 0, len(keySet))
+		for k := range keySet {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+
+		rows := make([]indexsubstrate.CurrentObjectRow, len(keys))
+		for i, k := range keys {
+			row := durableRow(k, int64(i+1), "etag", mod)
+			if nextRand()%4 == 0 {
+				row.DeletedAt = &deletedAt
+			}
+			rows[i] = row
+		}
+
+		// Partition sorted rows into disjoint segments of varying sizes (1..7 rows).
+		type segData struct {
+			desc indexsubstrate.SegmentDescriptor
+			rows []indexsubstrate.CurrentObjectRow
+		}
+		var segments []segData
+		for idx := 0; idx < len(rows); {
+			step := 1 + int(nextRand()%7)
+			if idx+step > len(rows) {
+				step = len(rows) - idx
+			}
+			chunk := rows[idx : idx+step]
+			segments = append(segments, segData{
+				desc: indexsubstrate.SegmentDescriptor{
+					MinRelKey: chunk[0].RelKey,
+					MaxRelKey: chunk[len(chunk)-1].RelKey,
+				},
+				rows: chunk,
+			})
+			idx += step
+		}
+
+		for q := 0; q < 40; q++ {
+			var prefix string
+			switch q {
+			case 0:
+				prefix = ""
+			case 1:
+				prefix = keys[int(nextRand()%uint64(len(keys)))]
+			default:
+				prefix = randString(1, 5)
+			}
+			pattern := prefix + "**"
+			if prefix == "" {
+				pattern = "**"
+			}
+
+			for _, includeDeleted := range []bool{false, true} {
+				params := indexstore.QueryParams{
+					Pattern:        pattern,
+					IncludeDeleted: includeDeleted,
+				}
+				filter, err := compileRowFilter(params)
+				require.NoError(t, err)
+
+				var unpruned, pruned []string
+				for _, seg := range segments {
+					for _, row := range seg.rows {
+						res, ok, err := filterCurrentRow(row, filter, params)
+						require.NoError(t, err)
+						if ok {
+							unpruned = append(unpruned, res.RelKey)
+						}
+					}
+					if !segmentMayMatch(seg.desc, filter) {
+						continue
+					}
+					for _, row := range seg.rows {
+						res, ok, err := filterCurrentRow(row, filter, params)
+						require.NoError(t, err)
+						if ok {
+							pruned = append(pruned, res.RelKey)
+						}
+					}
+				}
+				require.Equal(t, unpruned, pruned, "trial=%d q=%d prefix=%q includeDeleted=%v", trial, q, prefix, includeDeleted)
+			}
+		}
+	}
+}
+
+func TestDurableQuery_PrefixPrunesBeforeAndAfterSegments(t *testing.T) {
+	ctx := context.Background()
+	mod := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+	deletedAt := mod.Add(time.Hour)
+
+	env := setupDurableTestEnv(t, nil)
+	runID := "run_multiseg_0001"
+	runDir := filepath.Join(env.segmentRoot, "runs", runID)
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+
+	tombstoneBoundary := durableRow("bravo/2026-01-01/00-deleted.json", 15, "etag-del", mod)
+	tombstoneBoundary.DeletedAt = &deletedAt
+
+	rows := []indexsubstrate.CurrentObjectRow{
+		// Segment 0: wholly before bravo/2026-01-01/
+		durableRow("alpha/01.json", 10, "e1", mod),
+		durableRow("alpha/02.json", 20, "e2", mod),
+		// Segment 1: target prefix bravo/2026-01-01/ (MinRelKey is a tombstone)
+		tombstoneBoundary,
+		durableRow("bravo/2026-01-01/active.json", 30, "e3", mod),
+		// Segment 2: delimiter-adjacent lower bound ('0' > '/') after bravo/2026-01-01/
+		durableRow("bravo/2026-01-010/a.json", 40, "e4", mod),
+		durableRow("charlie/01.json", 50, "e5", mod),
+		// Segment 3: wholly after
+		durableRow("delta/01.json", 60, "e6", mod),
+		durableRow("delta/02.json", 70, "e7", mod),
+	}
+	for i := range rows {
+		rows[i].IndexSetID = env.indexSetID
+		rows[i].FirstSeenRunID = runID
+		rows[i].LastChangedRunID = runID
+		rows[i].LastSeenRunID = runID
+	}
+
+	manifest, err := indexsubstrate.WriteSegmentSet(indexsubstrate.SegmentWriterConfig{
+		Dir:                  runDir,
+		IndexSetID:           env.indexSetID,
+		RunID:                runID,
+		CreatedAt:            mod,
+		RunStartedAt:         &mod,
+		TargetRowsPerSegment: 2,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	}, rows)
+	require.NoError(t, err)
+	require.Len(t, manifest.Segments, 4)
+
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
+	manifestSHA, err := hashFileSHA256(manifestPath)
+	require.NoError(t, err)
+
+	completePath := filepath.Join(runDir, "complete.json")
+	writeJSON(t, completePath, map[string]any{
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  env.indexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         mod.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
+	})
+	writeJSON(t, filepath.Join(env.segmentRoot, "latest.json"), map[string]any{
+		"type":          "gonimbus.index.latest.v1",
+		"index_set_id":  env.indexSetID,
+		"run_id":        runID,
+		"updated_at":    mod.Format(time.RFC3339Nano),
+		"complete_path": completePath,
+	})
+
+	reader, err := ResolveIndexReader(ctx, env.opts, ResolveTarget{IndexSetID: env.indexSetID, RunID: runID})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+
+	// 1. Middle segment query: prunes 1 segment before (upper-bound) and 2 segments after (lower-bound).
+	results, stats, err := reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "bravo/2026-01-01/**",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "bravo/2026-01-01/active.json", results[0].RelKey)
+	require.EqualValues(t, 2, stats.Examined)
+	require.EqualValues(t, 1, stats.Matched)
+	require.Equal(t, 1, stats.SegmentsWalked)
+	require.Equal(t, 1, stats.SegmentsVerified)
+	require.Equal(t, 3, stats.SegmentsManifestPruned)
+
+	// IncludeDeleted on the same prefix still walks segment 1 and returns both the tombstone and active row.
+	resultsWithDeleted, statsWithDeleted, err := reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID:     env.indexSetID,
+		Pattern:        "bravo/2026-01-01/**",
+		IncludeDeleted: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, resultsWithDeleted, 2)
+	require.Equal(t, 1, statsWithDeleted.SegmentsWalked)
+	require.Equal(t, 1, statsWithDeleted.SegmentsVerified)
+	require.Equal(t, 3, statsWithDeleted.SegmentsManifestPruned)
+
+	// 2. First segment query: prunes all 3 trailing segments via lower-bound skip.
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "alpha/**",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.EqualValues(t, 2, stats.Examined)
+	require.Equal(t, 1, stats.SegmentsWalked)
+	require.Equal(t, 1, stats.SegmentsVerified)
+	require.Equal(t, 3, stats.SegmentsManifestPruned)
+
+	// 3. Last segment query: prunes all 3 leading segments via upper-bound skip.
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "delta/**",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.EqualValues(t, 2, stats.Examined)
+	require.Equal(t, 1, stats.SegmentsWalked)
+	require.Equal(t, 1, stats.SegmentsVerified)
+	require.Equal(t, 3, stats.SegmentsManifestPruned)
+
+	// 4. Prefix falling strictly between segments 1 and 2: prunes all 4 segments without opening any file.
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "bravo/2026-01-01/z/**",
+	})
+	require.NoError(t, err)
+	require.Empty(t, results)
+	require.Zero(t, stats.Examined)
+	require.Zero(t, stats.SegmentsWalked)
+	require.Zero(t, stats.SegmentsVerified)
+	require.Equal(t, 4, stats.SegmentsManifestPruned)
+
+	// 5. Unfiltered query and leading-glob query (empty derived prefix): walks and verifies all 4 segments.
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 7)
+	require.EqualValues(t, 8, stats.Examined)
+	require.Equal(t, 4, stats.SegmentsWalked)
+	require.Equal(t, 4, stats.SegmentsVerified)
+	require.Zero(t, stats.SegmentsManifestPruned)
+
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "**/*.json",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 7)
+	require.EqualValues(t, 8, stats.Examined)
+	require.Equal(t, 4, stats.SegmentsWalked)
+	require.Equal(t, 4, stats.SegmentsVerified)
+	require.Zero(t, stats.SegmentsManifestPruned)
+
+	// 6. Corrupt pruned segments (0, 2, 3) on disk: narrow prefix query still succeeds without reading them,
+	// while an unfiltered query fails digest verification.
+	for _, idx := range []int{0, 2, 3} {
+		segPath := filepath.Join(runDir, filepath.FromSlash(manifest.Segments[idx].Path))
+		require.NoError(t, os.WriteFile(segPath, []byte("corrupted-segment-bytes"), 0o600))
+	}
+	results, stats, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+		Pattern:    "bravo/2026-01-01/**",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, 1, stats.SegmentsWalked)
+	require.Equal(t, 1, stats.SegmentsVerified)
+	require.Equal(t, 3, stats.SegmentsManifestPruned)
+
+	_, _, err = reader.QueryObjects(ctx, indexstore.QueryParams{
+		IndexSetID: env.indexSetID,
+	})
+	require.Error(t, err)
 }
