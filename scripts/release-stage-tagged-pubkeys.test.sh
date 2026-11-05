@@ -35,4 +35,22 @@ cmp -s "$scratch/tagged.pub" "$scratch/dest/gonimbus-minisign.pub" || {
     echo 'error: staging followed the dirty working tree' >&2
     exit 1
 }
+# Replacement refs on the pin blob or on the tagged commit must not alter the
+# staged public key bytes.
+pub_blob="$(git -C "$repo" --no-replace-objects rev-parse v1.2.3:docs/security/gonimbus-minisign.pub)"
+replacement_blob="$(printf 'untrusted comment: replaced\nRWTreplacedkeyblobAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n' | git -C "$repo" hash-object -w --stdin)"
+git -C "$repo" replace "$pub_blob" "$replacement_blob"
+(cd "$repo" && ./scripts/release-stage-tagged-pubkeys.sh v1.2.3 "$scratch/dest") > /dev/null
+cmp -s "$scratch/tagged.pub" "$scratch/dest/gonimbus-minisign.pub" || {
+    echo 'error: staging followed a git replace ref' >&2
+    exit 1
+}
+git -C "$repo" replace -d "$pub_blob" > /dev/null
+# Pre-existing symlink in dest must be refused rather than written through.
+ln -sf "$scratch/symlink-target" "$scratch/dest/gonimbus-minisign.pub"
+if (cd "$repo" && ./scripts/release-stage-tagged-pubkeys.sh v1.2.3 "$scratch/dest") > /dev/null 2>&1; then
+    echo 'error: staging wrote through a destination symlink' >&2
+    exit 1
+fi
+rm -f "$scratch/dest/gonimbus-minisign.pub"
 echo '[ok] public keys stage byte-exact from the tagged commit'

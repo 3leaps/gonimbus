@@ -59,6 +59,10 @@ by_role = {r.get('key_role'): r.get('fingerprint') for r in records}
 if by_role != {'primary': primary, 'subkey': selector[:-1]}:
     raise SystemExit('STOP: public pin differs from approved primary or signing subkey')
 PY
+shown="$(gpg --homedir "$verify_tmp" --batch --with-colons --show-keys "$pin" 2> /dev/null)" ||
+    stop 'public GPG pin is not a readable public export'
+[[ "$(awk -F: '$1=="sub" {s=1; cap=$12; next} s && $1=="fpr" {if (cap ~ /[sS]/) print $10; s=0}' <<< "$shown")" == "${GONIMBUS_PGP_KEY_ID%!}" ]] ||
+    stop 'public pin subkey lacks signing capability'
 gpg --homedir "$verify_tmp" --batch --show-keys \
     --fingerprint --with-subkey-fingerprint "$pin" || stop 'isolated public GPG display failed'
 "$RELEASE_DECERNOR_BIN" scan docs/security --fail-on unsafe || stop 'public pin scan failed'

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Signed-tag ceremony invariants. No signing material is stored in this repo.
 set -euo pipefail
+# Read git objects as stored: no caller repository or object-store redirects
+# (GIT_*), and no replacement refs.
+for _git_var in $(compgen -e); do
+    case "$_git_var" in
+        GIT_COMMITTER_NAME | GIT_COMMITTER_EMAIL | GIT_AUTHOR_NAME | GIT_AUTHOR_EMAIL) ;;
+        GIT_*) unset "$_git_var" ;;
+    esac
+done
+unset _git_var
+export GIT_NO_REPLACE_OBJECTS=1
 
 tag_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/release-decernor.sh
@@ -240,7 +250,8 @@ tag_bind_operator_gnupg_home() {
         return 1
     }
     default_home="$(tag_canon_path "$HOME/.gnupg")" || default_home=""
-    default_env="$(tag_canon_path "${GNUPGHOME:-$HOME/.gnupg}")" || default_env=""
+    default_env="$(env -u GNUPGHOME gpgconf --list-dirs homedir 2> /dev/null | head -1)" || default_env=""
+    [[ -n "$default_env" ]] && default_env="$(tag_canon_path "$default_env" 2> /dev/null || printf '%s\n' "$default_env")"
     if [[ -n "$default_home" && "$canon" == "$default_home" ]] ||
         [[ -n "$default_env" && "$canon" == "$default_env" ]]; then
         tag_die 'GPG home must not be the default homedir'

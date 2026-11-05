@@ -12,7 +12,7 @@ for name in expected-fingerprints.txt expected-fingerprints.ndjson; do
 done
 mkdir -p "$dest"
 for name in expected-fingerprints.txt expected-fingerprints.ndjson; do
-    if [[ -e "$dest/$name" || -L "$dest/$name" ]]; then
+    if [[ -e "$dest/$name" || -L "$dest/$name" || -e "$dest/$name.new" || -L "$dest/$name.new" ]]; then
         echo "error: refusing to overwrite existing $dest/$name (fingerprint anchors already exist)" >&2
         exit 1
     fi
@@ -28,14 +28,25 @@ trap 'rollback; exit 130' INT
 trap 'rollback; exit 143' TERM
 trap 'rollback; exit 129' HUP
 for name in expected-fingerprints.txt expected-fingerprints.ndjson; do
-    cp "$staging/$name" "$dest/$name.new"
+    (set -C && cat "$staging/$name" > "$dest/$name.new") || {
+        echo "error: refusing to overwrite existing $dest/$name.new" >&2
+        exit 1
+    }
 done
-mv "$dest/expected-fingerprints.ndjson.new" "$dest/expected-fingerprints.ndjson"
+(set -C && cat "$dest/expected-fingerprints.ndjson.new" > "$dest/expected-fingerprints.ndjson") || {
+    echo "error: refusing to overwrite existing $dest/expected-fingerprints.ndjson" >&2
+    exit 1
+}
+rm -f "$dest/expected-fingerprints.ndjson.new"
 if [[ "${GONIMBUS_TEST_FAIL_ANCHOR_INSTALL:-}" == 1 ]]; then
     echo 'error: interrupted pair installation' >&2
     exit 1
 fi
-mv "$dest/expected-fingerprints.txt.new" "$dest/expected-fingerprints.txt"
+(set -C && cat "$dest/expected-fingerprints.txt.new" > "$dest/expected-fingerprints.txt") || {
+    echo "error: refusing to overwrite existing $dest/expected-fingerprints.txt" >&2
+    exit 1
+}
+rm -f "$dest/expected-fingerprints.txt.new"
 if [[ "$#" -gt 0 ]]; then
     "$@"
 fi

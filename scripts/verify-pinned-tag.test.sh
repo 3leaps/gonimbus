@@ -220,6 +220,50 @@ gpg --batch --armor --export "$extra" >> "$fixture/docs/security/release-signing
 commit_and_expect_fail
 gpg --batch --armor --export "$extra" > "$fixture/docs/security/release-signing-keys.asc"
 commit_and_expect_fail
+# Objects are read as stored (GIT_NO_REPLACE_OBJECTS=1): a replacement ref on a
+# committed pin blob does not break verification of a valid tag, and replacement
+# refs on the pin + anchor blobs (or the commit) cannot authorize an attacker key.
+pin_blob="$(git -C "$fixture" --no-replace-objects rev-parse "$good:docs/security/release-signing-keys.asc")"
+txt_blob="$(git -C "$fixture" --no-replace-objects rev-parse "$good:keys/expected-fingerprints.txt")"
+ndjson_blob="$(git -C "$fixture" --no-replace-objects rev-parse "$good:keys/expected-fingerprints.ndjson")"
+git -C "$fixture" replace "$pin_blob" "$(printf 'not a key\n' | git -C "$fixture" hash-object -w --stdin)"
+verify > /dev/null
+git -C "$fixture" replace -d "$pin_blob" > /dev/null
+gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key "$extra" ed25519 sign 1d > /dev/null 2>&1
+extra_sub="$(gpg --batch --with-colons --with-subkey-fingerprint --list-keys "$extra" | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
+gpg --batch --armor --export "$extra" > "$scratch/extra.asc"
+"$bin" fingerprint "$scratch/extra.asc" --class public --kind gpg \
+    --format ndjson --path-mode none --gpg-role primary > "$scratch/extra-gpg.ndjson"
+python3 - "$scratch" << 'PY'
+import json
+import pathlib
+import sys
+base = pathlib.Path(sys.argv[1])
+g = [json.loads(line) for line in (base / 'extra-gpg.ndjson').read_text().splitlines() if line]
+m = [json.loads(line) for line in (base / 'minisign.ndjson').read_text().splitlines() if line and json.loads(line).get('fingerprint_scheme') == 'minisign-public-blob-sha256-v1']
+(base / 'extra.ndjson').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in (g[0], m[0])))
+(base / 'extra.txt').write_text('gpg ' + g[0]['fingerprint'] + '\nminisign ' + m[0]['fingerprint'] + '\n')
+PY
+retag "$extra_sub!"
+expect_fail verify
+git -C "$fixture" replace "$pin_blob" "$(git -C "$fixture" hash-object -w "$scratch/extra.asc")"
+git -C "$fixture" replace "$txt_blob" "$(git -C "$fixture" hash-object -w "$scratch/extra.txt")"
+git -C "$fixture" replace "$ndjson_blob" "$(git -C "$fixture" hash-object -w "$scratch/extra.ndjson")"
+expect_fail verify
+# Prove the test fails if GIT_NO_REPLACE_OBJECTS=1 is removed.
+sed 's/export GIT_NO_REPLACE_OBJECTS=1/:/g' "$fixture/scripts/verify-pinned-tag.sh" > "$fixture/scripts/unprotected-verify.sh"
+sed 's/export GIT_NO_REPLACE_OBJECTS=1/:/g' "$fixture/scripts/release-decernor.sh" > "$fixture/scripts/release-decernor.sh.tmp"
+mv "$fixture/scripts/release-decernor.sh.tmp" "$fixture/scripts/release-decernor.sh"
+chmod +x "$fixture/scripts/unprotected-verify.sh"
+if ! (cd "$fixture" && ./scripts/unprotected-verify.sh) > /dev/null 2>&1; then
+    echo 'error: replace-ref negative control did not exercise GIT_NO_REPLACE_OBJECTS' >&2
+    exit 1
+fi
+rm -f "$fixture/scripts/unprotected-verify.sh"
+cp "$root/scripts/release-decernor.sh" "$fixture/scripts/release-decernor.sh"
+git -C "$fixture" replace -d "$pin_blob" "$txt_blob" "$ndjson_blob" > /dev/null
+retag "$subkey!"
+verify > /dev/null
 # The pin defines exactly one permitted signing subkey. A non-signing subkey
 # does not count; a second signing subkey in the committed pin is rejected
 # even though CI sets no operator selector.

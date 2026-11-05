@@ -6,7 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=scripts/testdata/sha-helpers.sh
 source "$root/scripts/testdata/sha-helpers.sh"
-scratch="$(mktemp -d)"
+scratch="$(cd "$(mktemp -d)" && pwd -P)"
 cleanup() {
     local home
     for home in "$scratch"/*/; do
@@ -17,6 +17,9 @@ cleanup() {
 trap cleanup EXIT
 home="$scratch/gpg"
 mkdir -m 700 "$home"
+mode755="$scratch/gpg-0755"
+mkdir -m 755 "$mode755"
+ln -s "$home" "$scratch/gpg-symlink"
 gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' \
     --quick-generate-key 'Synthetic signing <signing@example.invalid>' ed25519 cert 1d > /dev/null 2>&1
 primary="$(gpg --homedir "$home" --batch --with-colons --fingerprint --list-keys | awk -F: '$1=="fpr" {print $10;exit}')"
@@ -48,11 +51,14 @@ FIXTURE_MINISIGN_KEY='' refused 'without a minisign key'
 FIXTURE_PGP_KEY_ID='' refused 'without a PGP key'
 FIXTURE_PGP_KEY_ID="$subkey" refused 'without the exact subkey ! selector'
 FIXTURE_GPG_HOMEDIR="$HOME/.gnupg" refused 'with default ~/.gnupg homedir'
+FIXTURE_GPG_HOMEDIR="$root/scripts" refused 'with in-repo homedir'
+FIXTURE_GPG_HOMEDIR="$mode755" refused 'with mode 0755 homedir'
+FIXTURE_GPG_HOMEDIR="$scratch/gpg-symlink" refused 'with symlink homedir'
 [[ ! -e "$dist/SHA256SUMS.minisig" && ! -e "$dist/SHA256SUMS.asc" ]] || {
     echo 'error: a refused run must not leave a signature behind' >&2
     exit 1
 }
-run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null
+GNUPGHOME="$home" run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null
 for manifest in SHA256SUMS SHA512SUMS; do
     minisign -V -q -p "$scratch/minisign.pub" -m "$dist/$manifest" || {
         echo "error: $manifest minisign signature does not verify" >&2

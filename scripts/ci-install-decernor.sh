@@ -28,7 +28,8 @@ mkdir -p "$dest"
     exit 1
 }
 url="https://github.com/3leaps/decernor/releases/download/v${version}/${filename}"
-curl -fsSL "$url" --output "$dest/$filename"
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    "$url" --output "$dest/$filename"
 # sha256sum --check prints "file: OK" to stdout; that extra line makes
 # GITHUB_ENV assignment invalid. Keep stdout as the binary path only.
 if command -v sha256sum > /dev/null 2>&1; then
