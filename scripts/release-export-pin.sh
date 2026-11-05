@@ -3,6 +3,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$root"
+# shellcheck source=scripts/release-decernor.sh
+source "$root/scripts/release-decernor.sh"
 stop() {
     echo "STOP: $1" >&2
     exit 1
@@ -26,6 +28,7 @@ if home == repo or repo in home.parents:
     raise SystemExit('STOP: GPG home must be outside the repository')
 PY
 [[ "$GONIMBUS_PGP_KEY_ID" == *'!' ]] || stop 'signing-subkey selector must end with !'
+resolve_release_decernor ceremony || stop 'trusted Decernor identity/version check failed'
 pin=docs/security/release-signing-keys.asc
 [[ ! -e "$pin" && ! -L "$pin" ]] || stop 'public pin already exists; use make release-validate-pin'
 [[ ! -L docs/security && (! -e docs/security || -d docs/security) ]] ||

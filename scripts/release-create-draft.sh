@@ -12,6 +12,16 @@
 # immediately before the API call. A tag ref can still move between that check
 # and the API call; promotion re-verifies again.
 set -euo pipefail
+# Read git objects as stored: no caller repository or object-store redirects
+# (GIT_*), and no replacement refs.
+for _git_var in $(compgen -e); do
+    case "$_git_var" in
+        GIT_COMMITTER_NAME | GIT_COMMITTER_EMAIL | GIT_AUTHOR_NAME | GIT_AUTHOR_EMAIL) ;;
+        GIT_*) unset "$_git_var" ;;
+    esac
+done
+unset _git_var
+export GIT_NO_REPLACE_OBJECTS=1
 die() {
     echo "error: $*" >&2
     exit 1

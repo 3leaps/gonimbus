@@ -3,6 +3,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$root"
+# shellcheck source=scripts/release-decernor.sh
+source "$root/scripts/release-decernor.sh"
 stop() {
     echo "STOP: $1" >&2
     exit 1
@@ -13,51 +15,55 @@ stop() {
 : "${GONIMBUS_MINISIGN_PUB:?load the approved minisign public export}"
 [[ "$GONIMBUS_PGP_KEY_ID" =~ ^[0-9A-F]{40}!$ && "$GONIMBUS_GPG_SIGNING_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] ||
     stop 'invalid configured primary or signing-subkey fingerprint'
+resolve_release_decernor ceremony || stop 'trusted Decernor identity/version check failed'
 
 pin=docs/security/release-signing-keys.asc
 [[ -f "$pin" && -s "$pin" && ! -L "$pin" ]] || stop 'public GPG pin must be a nonempty regular file, not a symlink'
 [[ -f "$GONIMBUS_MINISIGN_PUB" && -s "$GONIMBUS_MINISIGN_PUB" && ! -L "$GONIMBUS_MINISIGN_PUB" ]] ||
     stop 'minisign public export must be a nonempty regular file, not a symlink'
 
-# Every gpg call below uses a fresh, empty home: no operator keyring is opened.
+require_public_only() {
+    local rc
+    if "$RELEASE_DECERNOR_BIN" fingerprint "$1" --kind "$2" \
+        --class private --fail-on-empty --path-mode none > /dev/null; then
+        stop "private material in $2 public export"
+    else
+        rc=$?
+        [[ "$rc" -eq 3 ]] || stop "$2 private-material check failed"
+    fi
+}
+require_public_only "$pin" gpg
+require_public_only "$GONIMBUS_MINISIGN_PUB" minisign
+grep -q '^untrusted comment:' "$GONIMBUS_MINISIGN_PUB" || stop 'minisign public export lacks its header'
+
 verify_tmp="$(mktemp -d)"
 trap 'gpgconf --homedir "$verify_tmp" --kill all > /dev/null 2>&1 || true; rm -rf "$verify_tmp"' EXIT
 chmod 700 "$verify_tmp"
-# Secret-key markers, armored or as parsed by gpg.
-secret_markers=(-e 'PRIVATE KEY BLOCK' -e 'minisign secret key' -e 'minisign encrypted secret key')
-has_secret_gpg() {
-    local shown
-    shown="$(gpg --homedir "$verify_tmp" --batch --with-colons --show-keys "$1" 2> /dev/null)" || return 1
-    [[ "$(awk -F: '$1=="sec"||$1=="ssb" {n++} END {print n+0}' <<< "$shown")" != 0 ]]
-}
-if grep -q "${secret_markers[@]}" "$pin" || has_secret_gpg "$pin"; then
-    stop 'private material in gpg public export'
-fi
-if grep -qi -e 'secret key' -e 'PRIVATE KEY' "$GONIMBUS_MINISIGN_PUB" ||
-    ! "$root/scripts/release-minisign-blob.py" "$GONIMBUS_MINISIGN_PUB" > /dev/null 2>&1; then
-    stop 'private material in minisign export, or not exactly one minisign public key'
-fi
-grep -q '^untrusted comment:' "$GONIMBUS_MINISIGN_PUB" || stop 'minisign public export lacks its header'
-while IFS= read -r -d '' file; do
-    if grep -q "${secret_markers[@]}" "$file" || has_secret_gpg "$file"; then
-        stop 'public pin scan failed'
-    fi
-done < <(find docs/security -type f -print0)
+"$RELEASE_DECERNOR_BIN" fingerprint "$pin" --kind gpg \
+    --class public --fail-on-empty --path-mode none > "$verify_tmp/gpg.ndjson" ||
+    stop 'public GPG fingerprint extraction failed'
+python3 - "$verify_tmp/gpg.ndjson" "$GONIMBUS_GPG_SIGNING_FINGERPRINT" \
+    "$GONIMBUS_PGP_KEY_ID" << 'PY'
+import json
+import pathlib
+import re
+import sys
 
-shown="$(gpg --homedir "$verify_tmp" --batch --with-colons --show-keys "$pin" 2> /dev/null)" || stop 'public GPG pin is not a readable OpenPGP export'
-# Exactly one primary and one subkey, in that order, with the subkey signing-capable.
-layout="$(awk -F: '
-	$1=="pub" || $1=="sub" {kind=$1; cap=$12; want=1; next}
-	want && $1=="fpr" {print kind, $10, cap; want=0}
-' <<< "$shown")"
-[[ "$(awk '{print $1}' <<< "$layout" | paste -sd, -)" == pub,sub ]] ||
-    stop 'expected exactly one public primary and signing subkey'
-read -r _ pin_primary _ < <(sed -n 1p <<< "$layout")
-read -r _ pin_subkey pin_cap < <(sed -n 2p <<< "$layout")
-[[ "$pin_primary" == "$GONIMBUS_GPG_SIGNING_FINGERPRINT" ]] || stop 'public pin differs from approved primary'
-[[ "$pin_subkey" == "${GONIMBUS_PGP_KEY_ID%!}" && "$pin_cap" == *[sS]* ]] ||
-    stop 'public pin differs from approved signing subkey'
-
+records = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+primary, selector = sys.argv[2:]
+if not re.fullmatch('[0-9A-F]{40}', primary) or not re.fullmatch('[0-9A-F]{40}!', selector):
+    raise SystemExit('STOP: invalid configured primary or signing-subkey fingerprint')
+if len(records) != 2 or any(r.get('kind') != 'gpg' or r.get('class') != 'public' for r in records):
+    raise SystemExit('STOP: expected exactly one public primary and signing subkey')
+by_role = {r.get('key_role'): r.get('fingerprint') for r in records}
+if by_role != {'primary': primary, 'subkey': selector[:-1]}:
+    raise SystemExit('STOP: public pin differs from approved primary or signing subkey')
+PY
+shown="$(gpg --homedir "$verify_tmp" --batch --with-colons --show-keys "$pin" 2> /dev/null)" ||
+    stop 'public GPG pin is not a readable public export'
+[[ "$(awk -F: '$1=="sub" {s=1; cap=$12; next} s && $1=="fpr" {if (cap ~ /[sS]/) print $10; s=0}' <<< "$shown")" == "${GONIMBUS_PGP_KEY_ID%!}" ]] ||
+    stop 'public pin subkey lacks signing capability'
 gpg --homedir "$verify_tmp" --batch --show-keys \
     --fingerprint --with-subkey-fingerprint "$pin" || stop 'isolated public GPG display failed'
+"$RELEASE_DECERNOR_BIN" scan docs/security --fail-on unsafe || stop 'public pin scan failed'
 echo '[ok] Public signing pin validated; inspect displayed expiry and revocation before proceeding'

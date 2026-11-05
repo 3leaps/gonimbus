@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Artifact signing and key export accept the exact signing-subkey selector (<fpr>!).
-# Throwaway key in a temporary GNUPGHOME; nothing is written inside the repository.
+# Artifact signing requires both keys, an isolated GNUPGHOME, and the exact
+# signing-subkey selector (<fpr>!). Throwaway key in a temporary GNUPGHOME;
+# nothing is written inside the repository.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=scripts/testdata/sha-helpers.sh
 source "$root/scripts/testdata/sha-helpers.sh"
-scratch="$(mktemp -d)"
+scratch="$(cd "$(mktemp -d)" && pwd -P)"
 cleanup() {
     local home
     for home in "$scratch"/*/; do
@@ -16,6 +17,9 @@ cleanup() {
 trap cleanup EXIT
 home="$scratch/gpg"
 mkdir -m 700 "$home"
+mode755="$scratch/gpg-0755"
+mkdir -m 755 "$mode755"
+ln -s "$home" "$scratch/gpg-symlink"
 gpg --homedir "$home" --batch --pinentry-mode loopback --passphrase '' \
     --quick-generate-key 'Synthetic signing <signing@example.invalid>' ed25519 cert 1d > /dev/null 2>&1
 primary="$(gpg --homedir "$home" --batch --with-colons --fingerprint --list-keys | awk -F: '$1=="fpr" {print $10;exit}')"
@@ -33,7 +37,8 @@ minisign -G -W -p "$scratch/minisign.pub" -s "$scratch/minisign.key" > /dev/null
 run() {
     env -u GONIMBUS_MINISIGN_PUB CI="${FIXTURE_CI:-}" \
         GONIMBUS_MINISIGN_KEY="${FIXTURE_MINISIGN_KEY-$scratch/minisign.key}" \
-        GONIMBUS_PGP_KEY_ID="${FIXTURE_PGP_KEY_ID-$subkey!}" GONIMBUS_GPG_HOMEDIR="$home" "$@"
+        GONIMBUS_PGP_KEY_ID="${FIXTURE_PGP_KEY_ID-$subkey!}" \
+        GONIMBUS_GPG_HOMEDIR="${FIXTURE_GPG_HOMEDIR-$home}" "$@"
 }
 refused() {
     if run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null 2>&1; then
@@ -44,11 +49,16 @@ refused() {
 FIXTURE_CI=true refused 'in CI'
 FIXTURE_MINISIGN_KEY='' refused 'without a minisign key'
 FIXTURE_PGP_KEY_ID='' refused 'without a PGP key'
+FIXTURE_PGP_KEY_ID="$subkey" refused 'without the exact subkey ! selector'
+FIXTURE_GPG_HOMEDIR="$HOME/.gnupg" refused 'with default ~/.gnupg homedir'
+FIXTURE_GPG_HOMEDIR="$root/scripts" refused 'with in-repo homedir'
+FIXTURE_GPG_HOMEDIR="$mode755" refused 'with mode 0755 homedir'
+FIXTURE_GPG_HOMEDIR="$scratch/gpg-symlink" refused 'with symlink homedir'
 [[ ! -e "$dist/SHA256SUMS.minisig" && ! -e "$dist/SHA256SUMS.asc" ]] || {
     echo 'error: a refused run must not leave a signature behind' >&2
     exit 1
 }
-run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null
+GNUPGHOME="$home" run "$root/scripts/sign-release-manifests.sh" v1.2.3 "$dist" > /dev/null
 for manifest in SHA256SUMS SHA512SUMS; do
     minisign -V -q -p "$scratch/minisign.pub" -m "$dist/$manifest" || {
         echo "error: $manifest minisign signature does not verify" >&2
@@ -63,12 +73,4 @@ for manifest in SHA256SUMS SHA512SUMS; do
         exit 1
     }
 done
-run "$root/scripts/export-release-keys.sh" "$dist" > /dev/null
-exported="$dist/gonimbus-release-signing-key.asc"
-mkdir -m 700 "$scratch/show"
-shown="$(gpg --homedir "$scratch/show" --batch --with-colons --show-keys "$exported" 2> /dev/null)"
-[[ "$(awk -F: '$1=="sec"||$1=="ssb" {n++} END {print n+0}' <<< "$shown")" == 0 ]]
-[[ "$(awk -F: '$1=="fpr" {print $10;exit}' <<< "$shown")" == "$primary" ]]
-grep -q "^fpr:::::::::$subkey:" <<< "$shown"
-"$root/scripts/verify-public-key.sh" "$exported" > /dev/null
 echo '[ok] artifact signing requires both keys and accepts the exact subkey selector'

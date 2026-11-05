@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# shellcheck source=scripts/release-tag-common.sh
+source "$(dirname "$0")/release-tag-common.sh"
 
 # Dual-format release signing: minisign and PGP, both required.
 # Signs checksum manifests only (SHA256SUMS, SHA512SUMS).
@@ -53,10 +55,12 @@ if [ -n "${PGP_KEY_ID}" ]; then
         echo "error: GONIMBUS_PGP_KEY_ID set but gpg not found in PATH" >&2
         exit 1
     fi
-    if [ -z "${GPG_HOME}" ]; then
-        echo "error: GONIMBUS_GPG_HOMEDIR must be set for PGP signing" >&2
+    if [[ ! "${PGP_KEY_ID}" =~ ^[0-9A-F]{40}!$ ]]; then
+        echo "error: GONIMBUS_PGP_KEY_ID must be the exact uppercase signing subkey fingerprint with !" >&2
         exit 1
     fi
+    tag_bind_operator_gnupg_home || exit 1
+    GPG_HOME="${GONIMBUS_GPG_HOMEDIR}"
     if ! gpg --homedir "${GPG_HOME}" --list-secret-keys "${PGP_KEY_ID}" > /dev/null 2>&1; then
         echo "error: secret key ${PGP_KEY_ID} not found in GONIMBUS_GPG_HOMEDIR=${GPG_HOME}" >&2
         exit 1

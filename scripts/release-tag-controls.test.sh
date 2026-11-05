@@ -8,8 +8,46 @@ while IFS= read -r target; do
         exit 1
     }
 done < <(grep -oE 'make [a-z][a-z0-9-]+' "$root/RELEASE_CHECKLIST.md" | awk '{print $2}' | sort -u)
+grep -Eq 'git -c gpg\.format=openpgp' "$root/scripts/release-tag.sh" || {
+    echo 'error: signed tag must force OpenPGP (gpg.format=openpgp)' >&2
+    exit 1
+}
 scratch="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$scratch"' EXIT
+mkdir -p "$scratch/anchor-stage" "$scratch/anchor-dest"
+for ext in txt ndjson; do
+    printf 'new\n' > "$scratch/anchor-stage/expected-fingerprints.$ext"
+    printf 'old\n' > "$scratch/anchor-dest/expected-fingerprints.$ext"
+done
+if "$root/scripts/install-release-anchors.sh" \
+    "$scratch/anchor-stage" "$scratch/anchor-dest" > /dev/null 2>&1; then
+    echo 'error: expected overwrite refusal' >&2
+    exit 1
+fi
+for ext in txt ndjson; do
+    [[ "$(cat "$scratch/anchor-dest/expected-fingerprints.$ext")" == old ]]
+done
+rm -f "$scratch/anchor-dest"/expected-fingerprints.*
+if GONIMBUS_TEST_FAIL_ANCHOR_INSTALL=1 "$root/scripts/install-release-anchors.sh" \
+    "$scratch/anchor-stage" "$scratch/anchor-dest" > /dev/null 2>&1; then
+    echo 'error: expected pair rollback' >&2
+    exit 1
+fi
+for ext in txt ndjson; do
+    [[ ! -e "$scratch/anchor-dest/expected-fingerprints.$ext" ]]
+done
+"$root/scripts/install-release-anchors.sh" "$scratch/anchor-stage" "$scratch/anchor-dest"
+for ext in txt ndjson; do
+    [[ "$(cat "$scratch/anchor-dest/expected-fingerprints.$ext")" == new ]]
+done
+if "$root/scripts/install-release-anchors.sh" \
+    "$scratch/anchor-stage" "$scratch/anchor-dest" > /dev/null 2>&1; then
+    echo 'error: second install overwrote existing anchors' >&2
+    exit 1
+fi
+for ext in txt ndjson; do
+    [[ "$(cat "$scratch/anchor-dest/expected-fingerprints.$ext")" == new ]]
+done
 mkdir -p "$scratch/v1.2.3"
 printf 'Release v1.2.3\n' > "$scratch/v1.2.3/message.txt"
 export GONIMBUS_RELEASE_TAG=v1.2.3
@@ -40,6 +78,12 @@ expect_fail env -u GONIMBUS_TAG_MESSAGE_DIR bash -c 'source "$1"; tag_message_fi
 expect_fail env GONIMBUS_TAG_MESSAGE_DIR="$scratch" bash -c 'source "$1"; tag_message_file' _ "$root/scripts/release-tag-common.sh"
 export GONIMBUS_PGP_KEY_ID=0123456789ABCDEF
 expect_fail tag_selector_shape
+# 40-hex without the trailing '!' must be refused.
+export GONIMBUS_PGP_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
+export GONIMBUS_GPG_SIGNING_FINGERPRINT=0123456789ABCDEF0123456789ABCDEF01234567
+expect_fail tag_selector_shape
+export GONIMBUS_PGP_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567!
+tag_selector_shape
 unset GONIMBUS_PGP_KEY_ID
 expect_fail tag_selector_shape
 git init -q -b main "$scratch/repo"
@@ -59,9 +103,9 @@ cat > "$scratch/bin/gh" << 'SH'
 #!/usr/bin/env bash
 [[ "${GH_TEST_FAIL:-0}" == 0 ]] || exit 1
 if [[ "$*" == *'rulesets?includes_parents=true&per_page=100'* ]]; then
-	cat "$RULESET_LIST"
+    cat "$RULESET_LIST"
 else
-	cat "$RULESET_FIXTURE"
+    cat "$RULESET_FIXTURE"
 fi
 SH
 chmod +x "$scratch/bin/gh"
@@ -128,4 +172,203 @@ printf 'Release v1.2.3\n\n' > "$scratch/extra-blank-lines"
         git tag -fa --cleanup=verbatim v1.2.3 -F "$scratch/extra-blank-lines" > /dev/null
     expect_fail tag_verify_object refs/tags/v1.2.3 "$scratch/expected-message"
 )
-echo '[ok] signed-tag negative controls passed'
+# Throwaway GPG home only: refuse the default homedir (never touch real keys).
+fake_home="$scratch/fake-home"
+mkdir -p "$fake_home/.gnupg"
+chmod 700 "$fake_home/.gnupg"
+export GONIMBUS_GPG_SIGNING_FINGERPRINT=0CACA49B3119B6BC12B2CA11B9B485F294B9FE07
+export GONIMBUS_PGP_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567!
+reject_default_home() {
+    local path="$1"
+    export HOME="$fake_home"
+    export GONIMBUS_GPG_HOMEDIR="$path"
+    set +e
+    out="$(tag_bind_operator_gnupg_home 2>&1)"
+    rc=$?
+    set -e
+    [[ "$rc" -ne 0 ]]
+    [[ "$out" == *'must not be the default homedir'* ]]
+}
+reject_default_home "$fake_home/.gnupg"
+reject_default_home "$fake_home/.gnupg/"
+reject_default_home "$fake_home/./.gnupg"
+mkdir -p "$fake_home/tmp/nested"
+reject_default_home "$fake_home/tmp/nested/../../.gnupg"
+reject_default_home "$fake_home/tmp/../.gnupg"
+(
+    export HOME="$fake_home"
+    export GONIMBUS_GPG_HOMEDIR="$fake_home/.gnupg"
+    expect_fail tag_bind_operator_gnupg_home
+)
+throwaway="$scratch/gnupg-throwaway"
+mkdir -m 700 "$throwaway"
+(
+    export HOME="$fake_home"
+    unset GNUPGHOME
+    export GONIMBUS_GPG_HOMEDIR="$throwaway"
+    tag_bind_operator_gnupg_home
+    # Validation alone does not change the selected GnuPG home.
+    [[ "${GNUPGHOME:-}" != "$throwaway" ]]
+    [[ "$(tag_stat_mode "$throwaway")" == 700 ]]
+)
+# Existing non-0700 operator dirs are refused (do not chmod them into compliance).
+mode755="$scratch/inherited-0755"
+mkdir -m 755 "$mode755"
+(
+    export HOME="$fake_home"
+    export GONIMBUS_GPG_HOMEDIR="$mode755"
+    set +e
+    out="$(tag_bind_operator_gnupg_home 2>&1)"
+    rc=$?
+    set -e
+    [[ "$rc" -ne 0 ]]
+    [[ "$out" == *'mode 0700'* ]]
+    [[ "$(tag_stat_mode "$mode755")" == 755 ]]
+)
+# Relative symlink to an inherited 0755 home must be refused (do not follow).
+ln -s "$mode755" "$scratch/rel-link"
+(
+    export HOME="$fake_home"
+    export GONIMBUS_GPG_HOMEDIR="./rel-link"
+    expect_fail tag_bind_operator_gnupg_home
+)
+ln -s "$mode755" "$scratch/abs-link"
+(
+    export HOME="$fake_home"
+    export GONIMBUS_GPG_HOMEDIR="$scratch/abs-link"
+    expect_fail tag_bind_operator_gnupg_home
+)
+tag_fresh_verify_gnupg_home
+[[ -d "$TAG_VERIFY_GNUPGHOME" && ! -L "$TAG_VERIFY_GNUPGHOME" ]]
+[[ "$(tag_stat_mode "$TAG_VERIFY_GNUPGHOME")" == 700 ]]
+verify_home="$TAG_VERIFY_GNUPGHOME"
+tag_discard_verify_home
+[[ ! -e "$verify_home" ]]
+# An export-refusing signer models non-exportable card-backed key custody.
+# Only disposable software keys are used; no physical card is required.
+real_gpg="$(command -v gpg)"
+real_gpgconf="$(command -v gpgconf)"
+op_home="$scratch/op-sign"
+mkdir -m 700 "$op_home"
+gpg --homedir "$op_home" --batch --pinentry-mode loopback --passphrase '' \
+    --quick-gen-key 'sign@test.invalid' ed25519 cert never > /dev/null 2>&1
+op_primary="$(gpg --homedir "$op_home" --with-colons --fingerprint sign@test.invalid | awk -F: '/^fpr:/ {print $10; exit}')"
+gpg --homedir "$op_home" --batch --pinentry-mode loopback --passphrase '' \
+    --quick-add-key "$op_primary" ed25519 sign never > /dev/null 2>&1
+op_subkey="$(gpg --homedir "$op_home" --with-colons --with-subkey-fingerprint --list-keys "$op_primary" | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
+mkdir "$scratch/no-export-bin"
+cat > "$scratch/no-export-bin/gpg" << 'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        --export-secret-keys | --export-secret-subkeys)
+            printf 'attempted\n' >> "$NO_EXPORT_MARKER"
+            echo 'fixture: secret key is not exportable' >&2
+            exit 90
+            ;;
+    esac
+done
+exec "$REAL_GPG" "$@"
+SH
+cat > "$scratch/no-export-bin/gpgconf" << 'SH'
+#!/usr/bin/env bash
+case " $* " in
+    *" --homedir $OPERATOR_HOME --kill "*)
+        printf 'attempted\n' >> "$OPERATOR_AGENT_MARKER"
+        echo 'fixture: operator agent must stay running' >&2
+        exit 91
+        ;;
+esac
+exec "$REAL_GPGCONF" "$@"
+SH
+chmod +x "$scratch/no-export-bin/gpg" "$scratch/no-export-bin/gpgconf"
+printf 'operator-owned\n' > "$op_home/preserve"
+(
+    export HOME="$fake_home"
+    unset GNUPGHOME
+    export GONIMBUS_GPG_HOMEDIR="$op_home"
+    export GONIMBUS_PGP_KEY_ID="${op_subkey}!"
+    export PATH="$scratch/no-export-bin:$PATH" REAL_GPG="$real_gpg"
+    export NO_EXPORT_MARKER="$scratch/secret-export-attempt"
+    export REAL_GPGCONF="$real_gpgconf" OPERATOR_HOME="$op_home"
+    export OPERATOR_AGENT_MARKER="$scratch/operator-agent-kill-attempt"
+    # Prove this boundary refuses secret export before exercising production.
+    expect_fail gpg --homedir "$op_home" --export-secret-keys "$op_subkey"
+    rm "$NO_EXPORT_MARKER"
+    tag_prepare_signing_home
+    [[ "$GNUPGHOME" == "$op_home" ]]
+    printf 'signing fixture\n' > "$scratch/sign-input"
+    gpg --batch --local-user "$GONIMBUS_PGP_KEY_ID" --detach-sign \
+        --output "$scratch/sign-input.sig" "$scratch/sign-input"
+    gpg --batch --status-fd 1 --verify "$scratch/sign-input.sig" "$scratch/sign-input" \
+        > "$scratch/sign-status" 2> /dev/null
+    grep -q "^\[GNUPG:\] VALIDSIG $op_subkey " "$scratch/sign-status"
+    [[ ! -e "$NO_EXPORT_MARKER" ]]
+    # Cleanup removes only the public verification home, never operator state.
+    tag_fresh_verify_gnupg_home
+    verify_home="$TAG_VERIFY_GNUPGHOME"
+    tag_cleanup_homes
+    [[ ! -e "$verify_home" ]]
+    [[ "$GNUPGHOME" == "$op_home" ]]
+    [[ "$(cat "$op_home/preserve")" == operator-owned ]]
+    [[ ! -e "$OPERATOR_AGENT_MARKER" ]]
+    gpg --batch --list-secret-keys "$op_subkey" > /dev/null 2>&1
+)
+gpgconf --homedir "$op_home" --kill all > /dev/null 2>&1 || true
+if ! python3 - "$root/scripts/release-tag.sh" << 'PY_CHECK'; then
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text()
+lines = text.splitlines()
+def stmt(pat):
+    for i, ln in enumerate(lines):
+        if re.match(pat, ln):
+            return i
+    return -1
+trap = stmt(r"^trap 'tag_cleanup_homes")
+selector = stmt(r"^tag_key_selector$")
+signing = stmt(r"^tag_prepare_signing_home$")
+if trap < 0 or selector < 0 or signing < 0 or not (trap < selector < signing):
+    raise SystemExit(f'order trap={trap} selector={selector} signing={signing}')
+if not any('TERM' in ln and 'tag_cleanup_homes' in ln for ln in lines):
+    raise SystemExit('cleanup trap must include TERM')
+PY_CHECK
+    echo 'error: release-tag.sh must arm cleanup before creating verification homes' >&2
+    exit 1
+fi
+# TERM discards only this run's verification home and preserves the operator.
+term_path="$scratch/term-verify-path"
+rm -f "$term_path"
+bash -s -- "$root/scripts/release-tag-common.sh" "$term_path" << 'TERM_TEST' &
+set -euo pipefail
+source "$1"
+trap tag_cleanup_homes EXIT
+tag_fresh_verify_gnupg_home
+sleep 60 &
+sleeper=$!
+trap 'kill "$sleeper" > /dev/null 2>&1 || true; exit 143' TERM INT
+printf "%s\n" "$TAG_VERIFY_GNUPGHOME" > "$2"
+wait "$sleeper"
+TERM_TEST
+term_child=$!
+for _ in $(seq 1 50); do
+    [[ -s "$term_path" ]] && break
+    sleep 0.1
+done
+[[ -s "$term_path" ]] || {
+    kill "$term_child" > /dev/null 2>&1 || true
+    echo 'error: verification home was not created for TERM test' >&2
+    exit 1
+}
+term_home="$(cat "$term_path")"
+[[ -d "$term_home" ]]
+kill -s TERM "$term_child" > /dev/null 2>&1 || true
+wait "$term_child" > /dev/null 2>&1 || true
+[[ ! -e "$term_home" ]] || {
+    echo 'error: verification home leaked on TERM' >&2
+    rm -rf "$term_home"
+    exit 1
+}
+[[ "$(cat "$op_home/preserve")" == operator-owned ]]
+echo '[ok] signed-tag controls and non-exportable signing path passed'

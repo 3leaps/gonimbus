@@ -83,6 +83,9 @@ for number, line in enumerate(open(path, encoding='utf-8'), 1):
 PY
 ok "docs/releases/$tag.md links are absolute and name $tag"
 
+./scripts/release-verify-committed-anchors.sh > /dev/null ||
+    die 'committed release anchors check failed (run scripts/release-verify-committed-anchors.sh)'
+ok 'committed release anchors and public keys verified'
 ./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
 ok 'workflow actions are pinned and off Node 20'
 goneat assess --categories dates --fail-on high > /dev/null 2>&1 ||
