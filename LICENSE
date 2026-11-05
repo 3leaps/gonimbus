@@ -5,6 +5,7 @@ http://www.apache.org/licenses/
 TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 1. Definitions.
+
    "License" shall mean the terms and conditions for use, reproduction,
    and distribution as defined by Sections 1 through 9 of this document.
 
@@ -130,6 +131,9 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
    any Contribution intentionally submitted for inclusion in the Work
    by You to the Licensor shall be under the terms and conditions of
    this License, without any additional terms or conditions.
+   Notwithstanding the above, nothing herein shall supersede or modify
+   the terms of any separate license agreement you may have executed
+   with Licensor regarding such Contributions.
 
 6. Trademarks. This License does not grant permission to use the trade
    names, trademarks, service marks, or product names of the Licensor,
@@ -171,9 +175,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 END OF TERMS AND CONDITIONS
 
----
-
-Copyright 2025 3 Leaps, LLC
+Copyright 2025-2026 3 Leaps, LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -186,19 +188,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
----
-
-## Trademark Notices
-
-"Gonimbus™" is a trademark of 3 Leaps, LLC, claimed through use in commerce. "3 Leaps®" is a registered trademark of 3 Leaps, LLC, a Florida LLC with offices in South Carolina. "Fulmen™" is a trademark of 3 Leaps, LLC, claimed through use in commerce. "NimbusNest™" is a trademark of 3 Leaps, LLC, claimed through use in commerce.
-
-While code and documentation are open under the Apache License 2.0, usage of these trademarks is reserved for official implementations to prevent confusion and benefit the ecosystem. Use of these marks in derivative works does not imply endorsement by 3 Leaps, LLC.
-
-For questions regarding trademark usage, contact legal@3leaps.net.
-
-This license applies to the code. Documentation may have separate terms.
-
----
-
-For additional governance details and contributor obligations, see the 3 Leaps Open Source Policies at https://github.com/3leaps/oss-policies.
