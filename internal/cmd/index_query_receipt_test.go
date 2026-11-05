@@ -874,6 +874,132 @@ func TestIndexQueryReceiptQuerySpecNormalization(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds the RFC 8785 interoperable range")
 }
 
+func TestIndexQueryReceiptJSONL_MultiSegmentPrefixPrunesBeforeAndAfter(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	env := seedDurableOnlyAppData(t, dataRoot, nil)
+
+	runID := "run_1783087300000000000"
+	runDir := filepath.Join(env.segmentRoot, "runs", runID)
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+
+	startedAt := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	rows := []indexsubstrate.CurrentObjectRow{
+		durableCLIRow("alpha/01.json", 10, "e1", startedAt),
+		durableCLIRow("alpha/02.json", 20, "e2", startedAt),
+		durableCLIRow("bravo/2026-01-01/a.json", 30, "e3", startedAt),
+		durableCLIRow("bravo/2026-01-01/b.json", 40, "e4", startedAt),
+		durableCLIRow("bravo/2026-01-010/a.json", 50, "e5", startedAt),
+		durableCLIRow("charlie/01.json", 60, "e6", startedAt),
+		durableCLIRow("delta/01.json", 70, "e7", startedAt),
+		durableCLIRow("delta/02.json", 80, "e8", startedAt),
+	}
+	for i := range rows {
+		rows[i].IndexSetID = env.indexSetID
+		rows[i].FirstSeenRunID = runID
+		rows[i].LastChangedRunID = runID
+		rows[i].LastSeenRunID = runID
+	}
+
+	manifest, err := indexsubstrate.WriteSegmentSet(indexsubstrate.SegmentWriterConfig{
+		Dir:                  runDir,
+		IndexSetID:           env.indexSetID,
+		RunID:                runID,
+		CreatedAt:            startedAt,
+		RunStartedAt:         &startedAt,
+		TargetRowsPerSegment: 2,
+		Coverage: []indexsubstrate.CoverageAttestation{{
+			Scope:    &indexsubstrate.Scope{Prefix: indexsubstrate.RelativeRootScopePrefix},
+			Basis:    indexsubstrate.CoverageBasisConfirmed,
+			Complete: true,
+		}},
+	}, rows)
+	require.NoError(t, err)
+	require.Len(t, manifest.Segments, 4)
+
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	require.NoError(t, indexsubstrate.WriteInternalManifestFile(manifestPath, manifest))
+	manifestSHA, err := fileSHA256Hex(manifestPath)
+	require.NoError(t, err)
+
+	completePath := filepath.Join(runDir, "complete.json")
+	writeJSONFile(t, completePath, map[string]any{
+		"type":                          indexsubstrate.CompleteMarkerTypeV2,
+		"index_set_id":                  env.indexSetID,
+		"run_id":                        runID,
+		"snapshot_completed_at":         startedAt.Add(time.Minute).Format(time.RFC3339Nano),
+		"snapshot_completion_semantics": indexsubstrate.SnapshotCompletionSemanticsCompleteMarkerCommit,
+		"manifest_path":                 manifestPath,
+		"manifest_sha256":               manifestSHA,
+		"segment_dir":                   runDir,
+		"segments":                      len(manifest.Segments),
+	})
+
+	// 1. receipt-jsonl-v1 narrow prefix query: walks 1 segment, prunes 3 (1 before + 2 after).
+	stdout, stderr, err := executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", runID,
+		"--pattern", "bravo/2026-01-01/**",
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines := nonEmptyLines(stdout)
+	require.Len(t, lines, 3, "stdout=%q stderr=%q", stdout, stderr)
+
+	var receiptV1 indexQueryReceiptRecord
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &receiptV1))
+	require.Equal(t, 4, receiptV1.Segments.Declared)
+	require.Equal(t, 1, receiptV1.Segments.Walked)
+	require.Equal(t, 1, receiptV1.Segments.Verified)
+	require.Equal(t, 3, receiptV1.Segments.ManifestPruned)
+	require.EqualValues(t, 2, receiptV1.Results.Examined)
+	require.EqualValues(t, 2, receiptV1.Results.Matched)
+	require.EqualValues(t, 2, receiptV1.Results.Emitted)
+	validateQueryReceiptAgainstSchema(t, receiptV1)
+
+	// 2. receipt-jsonl-v2 narrow prefix query: same segment counters and valid v2 schema.
+	stdout, stderr, err = executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", runID,
+		"--pattern", "bravo/2026-01-01/**",
+		"--output-format", indexQueryReceiptOutputFormatV2,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines = nonEmptyLines(stdout)
+	require.Len(t, lines, 3, "stdout=%q stderr=%q", stdout, stderr)
+
+	var receiptV2 indexQueryReceiptV2Record
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &receiptV2))
+	require.Equal(t, 4, receiptV2.Segments.Declared)
+	require.Equal(t, 1, receiptV2.Segments.Walked)
+	require.Equal(t, 1, receiptV2.Segments.Verified)
+	require.Equal(t, 3, receiptV2.Segments.ManifestPruned)
+	require.NoError(t, validateIndexQueryReceiptV2(receiptV2))
+	validateQueryReceiptV2AgainstSchema(t, receiptV2)
+
+	// 3. Unfiltered --count receipt query: walks and verifies all 4 segments, prunes 0.
+	stdout, stderr, err = executeIndexQueryCommand(t,
+		"--index-set", env.indexSetID,
+		"--run-id", runID,
+		"--count",
+		"--output-format", indexQueryReceiptOutputFormat,
+	)
+	require.NoError(t, err, "stderr=%q", stderr)
+	lines = nonEmptyLines(stdout)
+	require.Len(t, lines, 1, "stdout=%q stderr=%q", stdout, stderr)
+
+	var countReceipt indexQueryReceiptRecord
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &countReceipt))
+	require.Equal(t, 4, countReceipt.Segments.Declared)
+	require.Equal(t, 4, countReceipt.Segments.Walked)
+	require.Equal(t, 4, countReceipt.Segments.Verified)
+	require.Zero(t, countReceipt.Segments.ManifestPruned)
+	require.EqualValues(t, 8, countReceipt.Results.Examined)
+	require.EqualValues(t, 8, countReceipt.Results.Matched)
+	validateQueryReceiptAgainstSchema(t, countReceipt)
+}
+
 func validateQueryReceiptAgainstSchema(t *testing.T, receipt indexQueryReceiptRecord) {
 	t.Helper()
 	validator := queryReceiptSchemaValidator(t)

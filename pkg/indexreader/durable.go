@@ -679,10 +679,20 @@ func segmentMayMatch(segment indexsubstrate.SegmentDescriptor, filter *rowFilter
 	if filter == nil || filter.prefix == "" {
 		return true
 	}
-	// Safe skip: every key in the segment is lexicographically before the prefix,
-	// so none can start with it. (MinRelKey upper-bound skips are not safe without
-	// a delimiter-aware successor of the prefix.)
+	if segment.MinRelKey != "" && segment.MaxRelKey != "" && segment.MinRelKey > segment.MaxRelKey {
+		return true
+	}
+	// Safe upper-bound skip: every key in the segment is lexicographically
+	// before the prefix, so none can start with it.
 	if segment.MaxRelKey != "" && segment.MaxRelKey < filter.prefix {
+		return false
+	}
+	// Safe lower-bound skip: every key in the segment is >= MinRelKey. When
+	// MinRelKey sorts after the prefix and does not itself start with the
+	// prefix, MinRelKey and prefix diverge at some byte index i < len(prefix)
+	// with MinRelKey[i] > prefix[i], so no key >= MinRelKey can start with prefix.
+	if segment.MinRelKey != "" && segment.MinRelKey > filter.prefix &&
+		!strings.HasPrefix(segment.MinRelKey, filter.prefix) {
 		return false
 	}
 	return true
