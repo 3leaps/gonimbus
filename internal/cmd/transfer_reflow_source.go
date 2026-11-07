@@ -338,14 +338,27 @@ func emitReflowSourceRunRecord(ctx context.Context, w interface {
 }
 
 func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, srcCfg reflowSourceConfig, getProviders func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error), out chan<- reflowTask) (string, error) {
-	// JSONL: index object record.
+	return enqueueReflowLineWithWarnings(ctx, line, srcIdentity, srcCfg, getProviders, out, nil, nil)
+}
+
+func enqueueReflowLineWithWarnings(
+	ctx context.Context,
+	line string,
+	srcIdentity string,
+	srcCfg reflowSourceConfig,
+	getProviders func(srcURI *uri.ObjectURI) (provider.Provider, provider.Provider, error),
+	out chan<- reflowTask,
+	advisoryWarnings *reflowpkg.AdvisoryWarningTracker,
+	emitWarning func(context.Context, reflowpkg.Warning),
+) (string, error) {
+	// JSONL: index object record or reflow input/control record.
 	if strings.HasPrefix(line, "{") {
-		var env struct {
-			Type string          `json:"type"`
-			Data json.RawMessage `json:"data"`
+		env := reflowpkg.InspectRecordEnvelope(line)
+		if env.UnmarshalErr != nil {
+			return srcIdentity, env.UnmarshalErr
 		}
-		if err := json.Unmarshal([]byte(line), &env); err != nil {
-			return srcIdentity, err
+		if env.AdvisoryMalformed {
+			return srcIdentity, env.FormatAdvisoryMalformedError()
 		}
 		switch env.Type {
 		case probe.SummaryRecordType:
@@ -491,7 +504,15 @@ func enqueueReflowLine(ctx context.Context, line string, srcIdentity string, src
 				return srcIdentity, ctx.Err()
 			}
 		default:
-			return srcIdentity, fmt.Errorf("unsupported json record type %q", env.Type)
+			if env.IsSkippableAdvisoryUnknown() {
+				if advisoryWarnings != nil && emitWarning != nil {
+					if warning, ok := advisoryWarnings.Observe(env.SanitizedType); ok {
+						emitWarning(ctx, warning)
+					}
+				}
+				return srcIdentity, nil
+			}
+			return srcIdentity, env.FormatCLIUnknownTypeError()
 		}
 	}
 

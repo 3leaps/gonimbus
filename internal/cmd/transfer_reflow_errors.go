@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/fulmenhq/gofulmen/foundry"
 	"go.uber.org/zap"
@@ -31,6 +32,18 @@ func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err 
 
 func emitReflowInputError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
 	return emitReflowErrorWithCode(ctx, w, output.ErrCodeInvalidInput, key, msg, err, details)
+}
+
+func invalidReflowInputDetails(line string) map[string]any {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "{") {
+		env := reflowpkg.InspectRecordEnvelope(trimmed)
+		if env.UnmarshalErr == nil {
+			return map[string]any{"record_type": env.SanitizedType}
+		}
+		return map[string]any{}
+	}
+	return map[string]any{"input": line}
 }
 
 func emitReflowErrorWithCode(ctx context.Context, w output.Writer, code string, key, msg string, err error, details map[string]any) error {

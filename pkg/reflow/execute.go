@@ -834,6 +834,7 @@ func (r *Runner) drivePlannedRecords(ctx context.Context, layout DestLayout, sta
 func (r *Runner) recordStreamProducer(src RecordStreamSource, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats) recordProducer {
 	return func(ctx context.Context, deps producerDeps) error {
 		sourceIdentity := ""
+		advisoryWarnings := NewAdvisoryWarningTracker()
 		scanner := bufio.NewScanner(src.Records)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -844,7 +845,7 @@ func (r *Runner) recordStreamProducer(src RecordStreamSource, layout DestLayout,
 			if line == "" {
 				continue
 			}
-			task, ok, err := r.planInputLine(ctx, layout, rewrite, stats, &sourceIdentity, line)
+			task, ok, err := r.planInputLine(ctx, layout, rewrite, stats, &sourceIdentity, advisoryWarnings, line)
 			if err != nil {
 				return err
 			}
@@ -894,7 +895,15 @@ func (r *Runner) recordStreamProducer(src RecordStreamSource, layout DestLayout,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return scanner.Err()
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		if warning, ok := advisoryWarnings.CapSummaryWarning(); ok {
+			if err := r.emitWarning(ctx, warning); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 }
 
@@ -1080,11 +1089,23 @@ type plannedRecord struct {
 }
 
 // planInputLine parses, validates, and plans one input line in the reader
-// stage. ok is false when the line was consumed as an INVALID_INPUT event; a
-// non-nil error is an infrastructure (sink) failure that aborts the run.
-func (r *Runner) planInputLine(ctx context.Context, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, sourceIdentity *string, line string) (plannedRecord, bool, error) {
+// stage. ok is false when the line was consumed as an INVALID_INPUT event or a
+// control record; a non-nil error is an infrastructure (sink) failure that
+// aborts the run.
+func (r *Runner) planInputLine(ctx context.Context, layout DestLayout, rewrite *transfer.ReflowRewrite, stats *runStats, sourceIdentity *string, advisoryWarnings *AdvisoryWarningTracker, line string) (plannedRecord, bool, error) {
 	in, err := parseReflowInputLine(line)
 	if errors.Is(err, errProbeSummaryControl) {
+		return plannedRecord{}, false, nil
+	}
+	var skippedAdvisory *advisoryRecordSkippedError
+	if errors.As(err, &skippedAdvisory) {
+		if advisoryWarnings != nil {
+			if warning, ok := advisoryWarnings.Observe(skippedAdvisory.RecordType); ok {
+				if emitErr := r.emitWarning(ctx, warning); emitErr != nil {
+					return plannedRecord{}, false, emitErr
+				}
+			}
+		}
 		return plannedRecord{}, false, nil
 	}
 	if err != nil {

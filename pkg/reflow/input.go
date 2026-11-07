@@ -67,12 +67,12 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 	if !strings.HasPrefix(line, "{") {
 		return parseRawS3ObjectLine(line, "RecordStreamSource raw URI input")
 	}
-	var env struct {
-		Type string          `json:"type"`
-		Data json.RawMessage `json:"data"`
+	env := InspectRecordEnvelope(line)
+	if env.UnmarshalErr != nil {
+		return reflowInput{}, env.UnmarshalErr
 	}
-	if err := json.Unmarshal([]byte(line), &env); err != nil {
-		return reflowInput{}, err
+	if env.AdvisoryMalformed {
+		return reflowInput{}, env.FormatAdvisoryMalformedError()
 	}
 	switch env.Type {
 	case probe.SummaryRecordType:
@@ -85,7 +85,10 @@ func parseReflowInputLine(line string) (reflowInput, error) {
 	case "gonimbus.index.object.v1":
 		return parseIndexObjectInputData(env.Data)
 	default:
-		return reflowInput{}, fmt.Errorf("unsupported record type %q; RecordStreamSource carries %s records", env.Type, ReflowInputRecordType)
+		if env.IsSkippableAdvisoryUnknown() {
+			return reflowInput{}, &advisoryRecordSkippedError{RecordType: env.SanitizedType}
+		}
+		return reflowInput{}, env.FormatEngineUnknownTypeError()
 	}
 }
 

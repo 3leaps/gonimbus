@@ -410,6 +410,54 @@ consumer together, or filter control records for older consumers; third-party
 consumers must dispatch on `type`. Upstream error-record handling remains
 explicit rather than silently treating errors as objects or success.
 
+##### Advisory control-record envelope contract (`v0.4.6+`)
+
+Starting in `v0.4.6`, `content probe` emits `gonimbus.content.probe.summary.v1`
+with `"advisory": true` on the **top-level JSONL envelope** (alongside `type`,
+`ts`, `job_id`, `provider`, and `data` — never inside `data`):
+
+- **Producer classification:** Only non-authoritative control/summary records
+  such as `gonimbus.content.probe.summary.v1` set `"advisory": true`. Work
+  records (`gonimbus.reflow.input.v1`, `gonimbus.index.object.v1`),
+  per-object probe records (`gonimbus.content.probe.v1`), admission and
+  completeness records (`gonimbus.crawl.selection_summary.v1`,
+  `gonimbus.selection.summary.v1`, `gonimbus.index.complete.v1`/`v2`,
+  `gonimbus.index.query_receipt.v1`/`v2`), and error records
+  (`gonimbus.error.v1`, `gonimbus.operation.error.v1`) never set
+  `"advisory": true`.
+- **Consumer dispatch (`classifyReflowFirstRecord`, CLI pool, and engine):**
+  1. Known record types (`gonimbus.content.probe.summary.v1`,
+     `gonimbus.reflow.input.v1`, `gonimbus.index.object.v1`, and raw URI lines)
+     dispatch first and are validated by their existing parsers regardless of
+     `"advisory"`; a malformed known record is never skipped.
+  2. Recognized work, integrity, and error families (including `gonimbus.index.*`,
+     `gonimbus.reflow.*`, `gonimbus.error.*`, `gonimbus.operation.*`,
+     `gonimbus.selection.*`, `gonimbus.crawl.*`, `gonimbus.content.probe.v*`,
+     and `gonimbus.content.head.*`) at an unknown version are refused even when
+     marked `"advisory": true`.
+  3. Unknown record types outside those families are skipped only when top-level
+     `"advisory": true` is present (with exact lowercase envelope key names,
+     no duplicate top-level envelope keys, and a lowercase ASCII record-type
+     token), emitting at most one sanitized `gonimbus.warning.v1` record
+     (`code: "REFLOW_ADVISORY_RECORD_SKIPPED"`, capped at 16 distinct types per
+     run followed by a single `code: "REFLOW_ADVISORY_WARNING_CAP_REACHED"`
+     summary warning when exceeded) without echoing payloads. Unmarked,
+     `"advisory": false`, non-boolean `"advisory"` values, or duplicate/case-variant
+     envelope keys fail closed with an attributable error naming the sanitized
+     record type.
+
+| Producer (`content probe`) | Consumer (`transfer reflow --stdin`) | Behavior                                                                                                                                                                            |
+| -------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v0.4.6+`                  | `v0.4.6+`                            | Validates known `gonimbus.content.probe.summary.v1`; skips future unknown `"advisory": true` control records with one bounded warning per type.                                     |
+| `v0.4.6+`                  | `v0.4.4` / `v0.4.5`                  | Validates known `gonimbus.content.probe.summary.v1` (ignores top-level `"advisory": true`); rejects any record type unknown to `v0.4.4`/`v0.4.5` even if marked `"advisory": true`. |
+| `v0.4.4+`                  | `v0.4.3` or earlier                  | Rejects `gonimbus.content.probe.summary.v1` as an unknown record type at stream end (`INVALID_INPUT`, exit `40`). Upgrade the consumer or apply the `jq` filter below.              |
+
+> **Rejection is not rollback:** `transfer reflow --stdin` streams and copies
+> work records as they arrive. If an older consumer rejects a trailing control
+> record at stream end, objects admitted earlier in the stream have already been
+> copied to the destination; the trailing rejection only turns the final
+> summary and process exit code non-zero.
+
 For Bash automation, capture each stage's result immediately after the pipeline:
 
 ```bash

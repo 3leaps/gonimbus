@@ -60,6 +60,18 @@ func (w *probeTerminalWriter) WriteAny(ctx context.Context, kind string, data an
 	return nil
 }
 
+func (w *probeTerminalWriter) WriteAdvisoryAny(ctx context.Context, kind string, data any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure != nil {
+		return w.failure
+	}
+	if err := w.jsonl.WriteAdvisoryAny(ctx, kind, data); err != nil {
+		return w.latch(err)
+	}
+	return nil
+}
+
 func (w *probeTerminalWriter) WriteError(ctx context.Context, rec *output.ErrorRecord) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -209,7 +221,7 @@ func runContentProbe(cmd *cobra.Command, args []string) error {
 	}
 	counts := w.snapshot()
 	s.Errors, s.ErrorsByCode = counts.Errors, counts.ErrorsByCode
-	if failure := w.WriteAny(context.Background(), probe.SummaryRecordType, s); failure != nil {
+	if failure := w.WriteAdvisoryAny(context.Background(), probe.SummaryRecordType, s); failure != nil {
 		return probeExit(foundry.ExitFailure, "content probe output failed", failure)
 	}
 	return err

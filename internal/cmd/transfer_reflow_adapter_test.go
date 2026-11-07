@@ -158,10 +158,10 @@ func TestClassifyReflowFirstRecord_Dispositions(t *testing.T) {
 	require.Equal(t, reflowRefuseMalformed, reason)
 	class, reason = classifyReflowFirstRecord(`{"type":"gonimbus.reflow.input.v0","data":{"source_uri":"s3://b/a.xml"}}`)
 	require.Equal(t, firstRecordRefuse, class)
-	require.Equal(t, reflowRefuseUnknownType, reason)
+	require.Equal(t, reflowRefuseUnknownType+` "gonimbus.reflow.input.v0"`, reason)
 	class, reason = classifyReflowFirstRecord(`{"type":"something.else","data":{}}`)
 	require.Equal(t, firstRecordRefuse, class)
-	require.Equal(t, reflowRefuseUnknownType, reason)
+	require.Equal(t, reflowRefuseUnknownType+` "something.else"`, reason)
 }
 
 func TestClassifyTransferReflowFirstRecord_EmptyStreamFallsBack(t *testing.T) {
