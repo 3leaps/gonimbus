@@ -111,6 +111,7 @@ func Execute() error {
 
 func init() {
 	cobra.OnInitialize(initConfig)
+	rootCmd.SetFlagErrorFunc(formatLookalikeFlagError)
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $XDG_CONFIG_HOME/gonimbus/config.yaml)")
@@ -120,6 +121,61 @@ func init() {
 	// Bind flags to viper
 	_ = viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
 	_ = viper.BindPFlag("readonly", rootCmd.PersistentFlags().Lookup("readonly"))
+}
+
+// formatLookalikeFlagError appends an actionable hint when a script or operator
+// passes a flag from a look-alike subcommand (such as --profile on index build
+// or --json on a JSONL-by-default command).
+func formatLookalikeFlagError(cmd *cobra.Command, err error) error {
+	if cmd == nil || err == nil {
+		return err
+	}
+	hint := lookalikeFlagHint(cmd, err.Error())
+	if hint == "" {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, hint)
+}
+
+func lookalikeFlagHint(cmd *cobra.Command, msg string) string {
+	isUnknownProfile := msg == "unknown flag: --profile" || strings.HasPrefix(msg, "unknown shorthand flag: 'p' in -")
+	if isUnknownProfile {
+		switch cmd {
+		case indexBuildCmd:
+			return "hint: 'index build' does not accept --profile; set AWS_PROFILE in the environment or connection.profile in the index manifest"
+		case crawlCmd:
+			return "hint: 'crawl' does not accept --profile; set AWS_PROFILE in the environment or connection.profile in the job manifest"
+		case transferReflowCmd:
+			return "hint: 'transfer reflow' uses --src-profile and --dest-profile instead of --profile (or set AWS_PROFILE in the environment)"
+		case indexQueryCmd:
+			return "hint: 'index query' reads local index artifacts and does not accept --profile; use --output-profile when --output targets S3"
+		}
+	}
+	if msg == "unknown flag: --json" {
+		switch cmd {
+		case indexQueryCmd:
+			return "hint: 'index query' output is already JSONL by default; omit --json, or use --output-format receipt-jsonl-v1 for a verified query receipt"
+		case streamGetCmd:
+			return "hint: 'stream get' output is a framed stream by default; there is no --json flag"
+		case crawlCmd, contentHeadCmd, contentProbeCmd, streamHeadCmd, streamPutCmd, transferReflowCmd, inspectPairCmd:
+			return fmt.Sprintf("hint: '%s' output is already JSONL by default; omit --json", subcommandPath(cmd))
+		}
+	}
+	if msg == "unknown flag: --count" && cmd == inspectCmd {
+		return "hint: 'inspect' is a bounded spot-check (--limit, default 100) and does not accept --count; use 'index query --count' over a local index"
+	}
+	return ""
+}
+
+func subcommandPath(cmd *cobra.Command) string {
+	var parts []string
+	for cur := cmd; cur != nil && cur.Parent() != nil; cur = cur.Parent() {
+		parts = append(parts, cur.Name())
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, " ")
 }
 
 // initConfig reads in config file and ENV variables if set.

@@ -32,8 +32,9 @@ When dogfooding against real buckets, consider running with the global safety la
 Files often arrive organized by processing date but need reorganization by business date embedded in content:
 
 ```bash
-# 1. List objects
-gonimbus inspect 's3://bucket/arrivals/' --json > objects.jsonl
+# 1. Spot-check or list up to --limit objects (inspect defaults to --limit 100;
+#    raise --limit or use 'crawl' / 'index query' for full enumeration)
+gonimbus inspect 's3://bucket/arrivals/' --json --limit 1000 > objects.jsonl
 
 # 2. Extract business date from XML content
 jq -r 'select(.key?) | "s3://bucket/" + .key' objects.jsonl | \

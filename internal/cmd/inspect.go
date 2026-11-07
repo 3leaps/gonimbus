@@ -25,13 +25,19 @@ var inspectCmd = &cobra.Command{
 
 Supports object-store URIs with optional glob patterns for filtering.
 
+By default, inspect lists at most 100 matching objects (--limit / -n 100),
+including when --json is set. When the cap is reached, table output prints a
+truncation warning and --json appends a gonimbus.inspect.summary.v1 record with
+"truncated": true. Pass a larger --limit for wider spot-checks, or use 'crawl'
+or 'index build' + 'index query' for full-prefix enumeration.
+
 Examples:
   gonimbus inspect s3://bucket/path/to/object.txt
   gonimbus inspect gs://bucket/path/to/object.txt
   gonimbus inspect s3://bucket/prefix/
   gonimbus inspect s3://bucket/data/**/*.parquet
   gonimbus inspect s3://bucket/prefix/ --limit 10
-  gonimbus inspect s3://bucket/prefix/ --json`,
+  gonimbus inspect s3://bucket/prefix/ --json --limit 1000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runInspect,
 }
@@ -58,8 +64,8 @@ func init() {
 	inspectCmd.Flags().StringVarP(&inspectProfile, "profile", "p", "", "AWS profile")
 	inspectCmd.Flags().StringVar(&inspectEndpoint, "endpoint", "", "Custom S3 endpoint")
 	inspectCmd.Flags().StringVar(&inspectGCPProject, "gcp-project", "", "GCP project hint for GCS")
-	inspectCmd.Flags().IntVarP(&inspectLimit, "limit", "n", 100, "Max objects to list")
-	inspectCmd.Flags().BoolVar(&inspectJSON, "json", false, "Output as JSON")
+	inspectCmd.Flags().IntVarP(&inspectLimit, "limit", "n", 100, "Max objects to list (applies to table and --json output)")
+	inspectCmd.Flags().BoolVar(&inspectJSON, "json", false, "Output as JSONL (capped by --limit; appends gonimbus.inspect.summary.v1 when truncated)")
 
 	// Filter flags
 	inspectCmd.Flags().StringVar(&inspectMinSize, "min-size", "", "Minimum object size (e.g., 1KB, 100MiB)")

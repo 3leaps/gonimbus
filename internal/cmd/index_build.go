@@ -87,6 +87,9 @@ Example:
   gonimbus index build --job index.yaml --json
   gonimbus index build --job index.yaml --storage-provider wasabi --region us-east-1
 
+Credentials: 'index build' does not accept a --profile flag; it reads
+connection.profile from the index manifest or AWS_PROFILE from the environment.
+
 Machine handoff: --json emits a post-commit gonimbus.index.build_result.v1
 receipt on stdout (exact index_set_id + run_id + scope_hash + formats). Do not
 rediscover the just-built set from index list. --json is rejected with

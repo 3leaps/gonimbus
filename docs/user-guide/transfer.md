@@ -407,8 +407,9 @@ extract:
     xpath: //BusinessDate
 EOF
 
-# 2. List and probe objects
-gonimbus inspect 's3://source/prefix/' --json | \
+# 2. Spot-check and probe objects (inspect defaults to --limit 100;
+#    raise --limit or pass the prefix URI directly to 'content probe' for full enumeration)
+gonimbus inspect 's3://source/prefix/' --json --limit 1000 | \
   jq -r 'select(.key?) | "s3://source/" + .key' | \
   gonimbus content probe --stdin --config probe.yaml \
   --rewrite-from 'prefix/{store}/{device}/{folder_date}/{file}' \

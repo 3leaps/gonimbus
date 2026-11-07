@@ -838,8 +838,9 @@ diagnostic context, not as the failure reason itself.
 Both `content head` and `content probe` support bulk processing via stdin:
 
 ```bash
-# List objects, then probe in parallel
-gonimbus inspect 's3://bucket/prefix/' --json --profile prod | \
+# Spot-check up to --limit objects (inspect defaults to --limit 100;
+# raise --limit or pipe from 'index query' / pass the prefix URI to 'content probe' for full enumeration)
+gonimbus inspect 's3://bucket/prefix/' --json --limit 1000 --profile prod | \
   jq -r 'select(.key?) | "s3://bucket/" + .key' | \
   gonimbus content probe --stdin --config probe.yaml --profile prod
 
