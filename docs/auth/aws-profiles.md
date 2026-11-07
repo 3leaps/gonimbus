@@ -109,6 +109,12 @@ output:
 gonimbus crawl --job crawl-manifest.yaml
 ```
 
+Manifest-driven commands (`gonimbus crawl` and `gonimbus index build`) do not
+accept a `--profile` CLI flag; they read `connection.profile` from the manifest
+or `AWS_PROFILE` from the environment. Direct URI commands (`inspect`, `tree`,
+`doctor`, `content head`, `content probe`, `stream *`) accept `--profile` / `-p`,
+and `transfer reflow` uses `--src-profile` and `--dest-profile`.
+
 ## Checking Credentials
 
 Use `gonimbus doctor` to verify your credentials:

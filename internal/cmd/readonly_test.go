@@ -11,6 +11,7 @@ import (
 
 func resetReadOnly(t *testing.T) {
 	t.Helper()
+	t.Cleanup(snapshotSilenceUsage(rootCmd))
 	readOnly = false
 	viper.Set("readonly", false)
 	require.NoError(t, rootCmd.PersistentFlags().Set("readonly", "false"))

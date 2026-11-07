@@ -329,6 +329,10 @@ gonimbus index build --job index-manifest.yaml
 
 Progress is streamed to stdout. Build time scales linearly with object count (~3,000 objects/sec).
 
+`index build` does not accept a `--profile` CLI flag; set `connection.profile` in
+the index manifest or export `AWS_PROFILE` in the environment. Passing `--json`
+emits a post-commit `gonimbus.index.build_result.v1` receipt on stdout.
+
 If a long-running build stops on a resumable fatal interruption such as an
 expired refreshable credential or operator cancellation, Gonimbus preserves the
 partial run as `failed-resumable`, writes a redacted
@@ -426,6 +430,10 @@ gonimbus index query \
 ```
 
 When `--output` is set, stdout is silent and results are written to the destination. Summary output stays on stderr.
+
+`index query` emits `gonimbus.index.object.v1` JSONL records on stdout by
+default (there is no `--json` flag; pass `--output-format receipt-jsonl-v1` when
+automation needs a terminal verified query receipt).
 
 #### Verified query receipt framing
 

@@ -24,9 +24,10 @@ var indexQueryCmd = &cobra.Command{
 	Short: "Query indexed objects by pattern",
 	Long: `Query objects from a local index using glob patterns and filters.
 
-The query searches the objects_current table for objects matching
-the specified patterns and filters. Results are emitted as JSONL
-records to stdout (default) or written to a destination via --output.
+The query searches the local index for objects matching the specified patterns
+and filters. Results are emitted as JSONL records (gonimbus.index.object.v1) to
+stdout by default (there is no --json flag; use --output-format receipt-jsonl-v1
+for a terminal verified query receipt) or written to a destination via --output.
 
 Pattern matching uses doublestar semantics (same as crawl):
   **      matches any path segments

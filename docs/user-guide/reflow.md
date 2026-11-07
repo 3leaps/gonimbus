@@ -657,10 +657,12 @@ After reflow, verify the results:
 # Check destination structure
 gonimbus tree 's3://activity-lake/by-date/' --depth 2
 
-# Count objects
-gonimbus inspect 's3://activity-lake/by-date/' --count
+# Verify destination writes from the reflow audit stream
+gonimbus inspect-pair \
+  --from-reflow reflow-audit.jsonl \
+  --expected-dest-prefix 's3://activity-lake/by-date/'
 
-# Spot-check a specific date
+# Spot-check a specific date (inspect defaults to --limit 100)
 gonimbus inspect 's3://activity-lake/by-date/2025-12-08/' --json | head -5
 ```
 
