@@ -15,6 +15,98 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-08
+
+**Forward-compatible advisory control records, faster durable prefix queries, look-alike flag hints, and release provenance hardening.**
+
+`transfer reflow` now skips unknown future control records that carry a
+top-level `"advisory": true` marker (outside recognized work, integrity, and
+error record families) without incrementing `invalid_inputs`, emitting at most
+one `gonimbus.warning.v1` (`REFLOW_ADVISORY_RECORD_SKIPPED`) per distinct type
+(up to 16 types, with a single `REFLOW_ADVISORY_WARNING_CAP_REACHED` warning
+record if exceeded), and continues without aborting the batch; `content probe`
+stamps `"advisory": true` on `gonimbus.content.probe.summary.v1`. Durable
+`index query --pattern` stops opening and hashing segments after passing a
+literal pattern prefix. The CLI appends actionable hints when
+`--profile`/`-p`, `--json` or `--count` is passed to a look-alike subcommand,
+and release tooling hardens anchor verification and immutable publication.
+
+See [`docs/releases/v0.4.6.md`](docs/releases/v0.4.6.md) for the narrative
+walkthrough.
+
+### Added
+
+- `transfer reflow` skips unrecognized future control records marked with
+  top-level `"advisory": true` (outside recognized work, integrity, and error
+  record families such as `gonimbus.index.*`, `gonimbus.reflow.*`,
+  `gonimbus.error.*`, `gonimbus.operation.*`, `gonimbus.selection.*`,
+  `gonimbus.crawl.*`, `gonimbus.content.probe.v*`, and
+  `gonimbus.content.head.*`) without incrementing `invalid_inputs`, emits at
+  most one `gonimbus.warning.v1` record (`REFLOW_ADVISORY_RECORD_SKIPPED`) per
+  distinct skipped type (capped at 16 distinct types per run, followed by one
+  `REFLOW_ADVISORY_WARNING_CAP_REACHED` warning record when the scan ends if
+  exceeded), and continues processing object work. Known record types
+  (`gonimbus.content.probe.summary.v1`, `gonimbus.reflow.input.v1`, and
+  `gonimbus.index.object.v1`) are dispatched before the advisory fallback
+  regardless of `"advisory"`, and recognized families at an unknown version stay
+  refused when `"advisory": true` is set. `content probe` stamps `"advisory":
+true` on emitted `gonimbus.content.probe.summary.v1` summary records.
+- Unknown `--profile`/`-p`, `--json` and `--count` flags on subcommands with
+  different flag names or output contracts (`index build`, `crawl`,
+  `transfer reflow`, `index query`, `content head`, `content probe`,
+  `stream head`, `stream get`, `stream put`, `inspect-pair` and `inspect`)
+  append a one-line hint before printing the usage block.
+
+### Changed
+
+- Release provenance and publication (`Makefile` `release-*` targets,
+  `scripts/verify-pinned-tag.sh`, `scripts/release-verify-committed-anchors.sh`,
+  and `.github/workflows/release.yml`) now stage tagged
+  `gonimbus-minisign.pub` and `release-signing-keys.asc` as release assets,
+  verify Decernor against `DECERNOR_EXPECTED_SHA256`, run GPG tag and anchor
+  checks inside an isolated temporary `GNUPGHOME` with
+  `GIT_NO_REPLACE_OBJECTS=1`, separate `release-upload` from `release-publish`
+  (verifying GitHub `immutable: true` after publish), and add `make
+release-verify` plus the `release-anchors` CI job.
+- Top-level `LICENSE` is now the verbatim canonical Apache License 2.0 text,
+  with project copyright and attribution in a standalone `NOTICE` file.
+- CI container jobs use digest-pinned `goneat-tools-runner-glibc:v0.5.14`
+  (`goneat v0.6.7`, Go `1.26.10`).
+- Refresh dependencies: `github.com/go-chi/chi/v5` v5.3.2 to v5.4.0,
+  `github.com/go-jose/go-jose/v4` v4.1.4 to v4.1.6, `golang.org/x/net` v0.60.0
+  to v0.62.0, `golang.org/x/crypto` v0.57.0 to
+  `v0.58.1-0.20261009181718-2f1f834330b2` (pinned to the cooled 2026-10-09
+  commit providing the advisory fix while the next tagged release remained
+  inside the 7-day cooling window), `golang.org/x/sys` v0.48.0 to v0.49.0,
+  `golang.org/x/sync` v0.23.0 to v0.24.0, and `golang.org/x/text` v0.42.0 to
+  v0.43.0.
+
+### Fixed
+
+- Durable `index query --pattern <glob>` skips segments whose `MinRelKey` sorts
+  strictly after the pattern's literal prefix (without starting with that
+  prefix), while still reading segments with inverted bounds
+  (`MinRelKey > MaxRelKey`), so narrow prefix queries against multi-segment
+  durable snapshots no longer open or hash trailing segments past the matching
+  key range.
+- `TestEngineProvenanceSidecarLimiterRecovery` gates regular reflow inputs
+  behind the initial throttled sidecar call so multi-worker test runs
+  deterministically exercise limiter recovery.
+
+### Security
+
+- Update `github.com/andybalholm/brotli` from v1.1.1 to v1.2.7 (`GO-2026-6888`)
+  and `github.com/klauspost/compress` from v1.20.1 to v1.20.2 (`GO-2026-6865`).
+
+### Documentation
+
+- Document the `"advisory": true` control-record envelope contract and
+  producer/consumer version-skew table in `docs/user-guide/streaming.md`.
+- Clarify `inspect`'s default 100-object `--limit` cap (`--limit 0` for
+  unlimited listing; `index query --count` for local-index counts) and job
+  manifest / `--src-profile` / `--dest-profile` credential selection across
+  command help and user guides.
+
 ## [0.4.5] - 2026-10-21
 
 **Require Go 1.26.10, and keep stderr for real problems.**
@@ -1952,7 +2044,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/3leaps/gonimbus/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/3leaps/gonimbus/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/3leaps/gonimbus/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/3leaps/gonimbus/compare/v0.4.2...v0.4.3

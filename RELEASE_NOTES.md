@@ -4,6 +4,56 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## [0.4.6] - 2026-11-08
+
+**Advisory control-record marker, faster durable prefix queries, look-alike flag hints, and release provenance hardening**
+
+v0.4.6 adds a forward-compatible `"advisory": true` envelope marker for future
+control records in `transfer reflow` pipelines, prunes trailing segments during
+durable `index query --pattern` prefix scans, appends actionable hints for
+look-alike unknown CLI flags, and tightens release provenance and dependency
+hygiene.
+
+- **Advisory control-record envelope marker.** `transfer reflow` skips
+  unrecognized future control records marked with top-level `"advisory": true`
+  (outside recognized work, integrity, and error record families) without
+  incrementing `invalid_inputs`, emits at most one `gonimbus.warning.v1`
+  (`REFLOW_ADVISORY_RECORD_SKIPPED`) per distinct type (up to 16 types, with a
+  single `REFLOW_ADVISORY_WARNING_CAP_REACHED` warning record if exceeded), and
+  continues without aborting the batch. `content probe` stamps `"advisory":
+true` on `gonimbus.content.probe.summary.v1`.
+- **Durable prefix segment pruning.** `index query --pattern <glob>` stops
+  opening and hashing segments once a segment's `MinRelKey` sorts strictly
+  after the pattern's literal prefix (while still reading segments with
+  inverted bounds).
+- **Look-alike CLI flag hints.** Unknown `--profile`/`-p`, `--json` and
+  `--count` flags on subcommands with different flag names or invocation shapes
+  append a targeted hint before the usage block, and `inspect` documents its
+  default 100-object `--limit` cap.
+- **Release provenance and immutable publication.** Release publication stages
+  tagged public verification keys as release assets, verifies Decernor's
+  SHA-256 before execution, uses an isolated `GNUPGHOME` for tag and anchor
+  verification, and verifies GitHub release immutability on publish.
+- **Security and dependency updates.** Updates `github.com/andybalholm/brotli`
+  to v1.2.7 (`GO-2026-6888`), `github.com/klauspost/compress` to v1.20.2
+  (`GO-2026-6865`), `github.com/go-chi/chi/v5` to v5.4.0,
+  `github.com/go-jose/go-jose/v4` to v4.1.6, `golang.org/x/net` to v0.62.0,
+  `golang.org/x/crypto` to `v0.58.1-0.20261009181718-2f1f834330b2` (cooled
+  2026-10-09 commit), `golang.org/x/sys` to v0.49.0, `golang.org/x/sync` to
+  v0.24.0, and `golang.org/x/text` to v0.43.0, and canonicalizes top-level
+  `LICENSE` and `NOTICE`.
+
+### Upgrade
+
+```bash
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.6
+```
+
+See [docs/releases/v0.4.6.md](docs/releases/v0.4.6.md) for the complete
+release notes.
+
+---
+
 ## [0.4.5] - 2026-10-21
 
 **Go 1.26.10 minimum, quieter stderr, single-source release tag**
@@ -69,71 +119,4 @@ must handle 60. Upgrade probe producers and reflow consumers together, or filter
 the summary record for an older consumer.
 
 See [docs/releases/v0.4.4.md](docs/releases/v0.4.4.md) for the complete
-release notes.
-
----
-
-## [0.4.3] - 2026-09-11
-
-**Reuse a finished durable inventory**
-
-Two operator stories, in this order: reuse a finished durable inventory
-instead of listing a very large bucket again; then prove which inventory
-you used and when that snapshot actually finished.
-
-v0.4.3 takes exact custody of an already-complete durable run and lets you
-query it under current acquire and receipt contracts **without listing the
-live object store**. Recrawl remains available; it is not required.
-Snapshot completion time is when the snapshot finished, distinct from later
-hub commit time.
-
-### Operator quick path
-
-```bash
-gonimbus index hub bridge-durable \
-  --source-hub-read-handle archive-read \
-  --target-hub-publish-handle custody-publish \
-  --index-set idx_<64-lowercase-hex> \
-  --run-id run_<exact-id> \
-  --identity-file /path/to/identity.json \
-  --output-format custody-bridge-receipt-jsonl-v1
-
-gonimbus index acquire \
-  --hub-read-handle archive-read \
-  --index-set idx_<64-lowercase-hex> \
-  --run-id run_<exact-id> \
-  --dest /var/lib/gonimbus/acquired/that-run
-
-gonimbus index query \
-  --snapshot-dir /var/lib/gonimbus/acquired/that-run \
-  --count --output-format receipt-jsonl-v1
-```
-
-### Also in this cut
-
-- **Query receipts** (`receipt-jsonl-v1`) and pinned durable deltas
-  (`--proof-through-run`).
-- **Truthful snapshot completion time.**
-- **`index doctor --snapshot-dir`** inspects that acquired dest, not ambient
-  cache.
-- Directory-form coverage prefixes (one terminal `/`) accepted in bridge
-  **validation only**.
-
-### Hygiene
-
-- grpc v1.83.2; goneat runner `v0.5.6` / contributor `v0.6.0`.
-
-### Boundary framing
-
-Durable-v2 remains a full-fidelity **internal render** — not a reduced-trust
-publication format. Acquire never follows `latest.json`. Do not fall back to
-a live bucket walk when a receipt is missing.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.3
-```
-
-See [docs/releases/v0.4.3.md](docs/releases/v0.4.3.md) for the complete
 release notes.
