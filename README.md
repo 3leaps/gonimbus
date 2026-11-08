@@ -169,6 +169,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.4.6 release notes](docs/releases/v0.4.6.md),
 [v0.4.5 release notes](docs/releases/v0.4.5.md),
 [v0.4.4 release notes](docs/releases/v0.4.4.md),
 [v0.4.3 release notes](docs/releases/v0.4.3.md),
