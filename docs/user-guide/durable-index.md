@@ -531,12 +531,43 @@ same acquired-bundle contract. The consumer does not discover a hub run,
 inspect hub markers, or walk the live source bucket itself.
 
 Gate the Gonimbus binary before granting it storage access, and record
-`gonimbus version --extended` with the run. Pin an exact approved build from
-this contract lineage. The first release with the complete contract is
-`v0.4.3`; later releases must also be explicitly admitted by the consumer. A
-development version string is not sufficient by itself; its commit must match
-the consumer's allowlist. Version admission belongs to the deployment, not to a
-runtime fallback.
+`gonimbus version --json --extended` (or `gonimbus version --extended`) with the
+run. From `v0.4.7`, `gonimbus version --json` and
+`gonimbus version --json --extended` emit a single newline-terminated JSON
+object on stdout with empty stderr and exit `0`, including when invoked under a
+scrubbed environment (`env -i`, with no `HOME` or `XDG_CONFIG_HOME`). Pin an
+exact approved build from this contract lineage. The first release with the
+complete contract is `v0.4.3`; later releases must also be explicitly admitted
+by the consumer. A development version string is not sufficient by itself; its
+commit must match the consumer's allowlist. Version admission belongs to the
+deployment, not to a runtime fallback.
+
+#### Pinned & digest-verified automation installs
+
+Package-manager channels (`3leaps/tap/gonimbus` and `3leaps/scoop-bucket`)
+track **latest stable only**, so an unheld `brew upgrade` or `scoop update` on
+a workstation will replace an older digest-pinned binary:
+
+- **Recommended pattern for digest-pinning runners:** Download the exact tagged
+  raw release executable into a runner-private directory (for example via
+  `sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir <runner-bin>` or direct
+  GitHub Release download verified against signed `SHA256SUMS`; see
+  [Release verification](../security/README.md)) rather than relying on a
+  mutable workstation `PATH`. If a workstation package manager is used, hold
+  upgrades explicitly with `brew pin gonimbus` or `scoop hold gonimbus`.
+- **Windows Scoop shim vs raw executable (critical for SHA-256 verifiers):**
+  - On **Homebrew** (macOS/Linux), `$(brew --prefix)/bin/gonimbus` is a symlink
+    to the raw release executable in the Cellar, so hashing the resolved `PATH`
+    target matches `SHA256SUMS` directly.
+  - On **Windows Scoop**, `bucket/gonimbus.json` maps
+    `"bin": [["gonimbus-windows-<arch>.exe", "gonimbus"]]`, so Scoop places its
+    generic `shim.exe` launcher at `~\scoop\shims\gonimbus.exe` on `PATH` while
+    keeping the untouched raw release executable at
+    `~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe` (discoverable
+    via `scoop which gonimbus` or the adjacent `gonimbus.shim` file). Any runner
+    that verifies `SHA256SUMS` on Windows must hash the target of
+    `scoop which gonimbus` (or point its executable path directly at
+    `gonimbus-windows-<arch>.exe`), not `shims\gonimbus.exe`.
 
 After the gate passes, use exact values from a trusted producer receipt or
 handoff. When that handoff includes a delta baseline, also use
@@ -574,6 +605,32 @@ expected set/run identity. A count consumer reads
 `results.logical_results` from that receipt. A find consumer withholds action
 on every object record until the terminal receipt and process exit have
 validated the whole stream.
+
+#### Receipt counter invariants under segment pruning
+
+When validating `gonimbus.index.query_receipt.v1` (or `v2`) counters on
+multi-segment snapshots, downstream consumers must rely on the following
+manifest-pruning invariants (`v0.4.6+`):
+
+- `results.examined` counts rows visited inside **walked** segments only
+  (`results.examined <= declared.rows`); manifest-pruned segments are never
+  opened, hashed, or row-scanned. Consumers must not assert
+  `results.examined == declared.rows` or
+  `segments.walked == segments.declared` on patterned queries.
+- `segments.manifest_pruned` may be non-zero for any `--pattern` query whose
+  pattern begins with a non-empty literal key prefix (both upper-bound
+  `MaxRelKey < prefix` and lower-bound `MinRelKey > prefix` without a prefix
+  match).
+- `segments.verified == segments.walked` holds unconditionally on verified
+  durable queries (every walked segment file descriptor is SHA-256 verified
+  before its rows are yielded, including 0-row segments), and
+  `segments.walked + segments.manifest_pruned == segments.declared` holds
+  whenever `results.truncated == false` (with
+  `segments.walked + segments.manifest_pruned <= segments.declared` when
+  `--limit` stops enumeration early).
+- An unpatterned query (`--pattern` omitted) — or a pattern with no literal
+  leading prefix (for example `**/*.xml`) — never prunes
+  (`segments.manifest_pruned == 0`).
 
 An older binary that rejects `--output-format receipt-jsonl-v1` has failed the
 contract gate. Do not retry without the flag, parse legacy human output,

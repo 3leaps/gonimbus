@@ -216,10 +216,14 @@ func initConfig() {
 			// Fall back to home directory
 			home, err := os.UserHomeDir()
 			if err != nil {
-				ExitWithCode(observability.CLILogger, foundry.ExitFileNotFound, "Could not find home directory", err)
+				if verbose {
+					observability.CLILogger.Warn("Could not find home directory; skipping user config search path", zap.Error(err))
+				}
+				viper.SetConfigName("config")
+			} else {
+				viper.AddConfigPath(home)
+				viper.SetConfigName("." + appIdentity.ConfigName)
 			}
-			viper.AddConfigPath(home)
-			viper.SetConfigName("." + appIdentity.ConfigName)
 		} else {
 			// Use XDG config directory with app identity
 			appConfigDir := configDir + "/" + appIdentity.ConfigName
@@ -248,6 +252,8 @@ func initConfig() {
 		if verbose {
 			observability.CLILogger.Debug("Using config file", zap.String("path", viper.ConfigFileUsed()))
 		}
+	} else if cfgFile != "" {
+		ExitWithCode(observability.CLILogger, foundry.ExitFileNotFound, "Failed to read config file", err)
 	} else {
 		// It's OK if config file doesn't exist, we have defaults
 		if verbose {

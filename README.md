@@ -30,14 +30,41 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ### Install
 
+**Homebrew (macOS Apple Silicon `darwin/arm64`, Linux `amd64` & `arm64`):**
+
+```bash
+brew install 3leaps/tap/gonimbus
+gonimbus version
+```
+
+Use the full `3leaps/tap/gonimbus` formula name (or run `brew tap 3leaps/tap` first); Intel macOS (`darwin/amd64`) is intentionally unpublished.
+
+**Scoop (Windows `amd64` & `arm64`):**
+
+```powershell
+scoop bucket add 3leaps https://github.com/3leaps/scoop-bucket
+scoop install 3leaps/gonimbus
+gonimbus version
+```
+
+**Exact-version / verified binary install (`sfetch` or GitHub Releases):**
+
+```bash
+sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir ~/.local/bin
+```
+
+Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`, `windows-amd64`, and `windows-arm64` are attached to each [GitHub release](https://github.com/3leaps/gonimbus/releases), with `SHA256SUMS` and `SHA512SUMS` manifests signed with minisign and GPG. See [docs/security/README.md](docs/security/README.md) to verify the signed tag and release assets.
+
+**Pinned & digest-verified automation runners:** `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` track the latest stable release. Automation runners that gate execution on an exact release `SHA256SUMS` digest should install the tagged raw release binary into a runner-private directory (via [`sfetch`](https://github.com/3leaps/sfetch) or verified GitHub Release assets) or hold workstation upgrades explicitly (`brew pin gonimbus` / `scoop hold gonimbus`). On Windows Scoop, `~\scoop\shims\gonimbus.exe` on `PATH` is Scoop's generic launcher shim; hash the resolved target of `scoop which gonimbus` (`~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe`) when verifying against `SHA256SUMS`, and use `gonimbus version --json [--extended]` for machine-readable preflight checks. See [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory).
+
+**From source (`go install`, requires Go 1.26.10+):**
+
 ```bash
 go install github.com/3leaps/gonimbus/cmd/gonimbus@latest
 gonimbus version
 ```
 
-`go install`-built binaries report the correct version via `runtime/debug.ReadBuildInfo` + an embedded `VERSION` file (no `-ldflags` injection required).
-
-Prebuilt binaries for darwin-arm64, linux-amd64, linux-arm64, windows-amd64 and windows-arm64 are attached to each [GitHub release](https://github.com/3leaps/gonimbus/releases), with SHA256SUMS and SHA512SUMS manifests signed with minisign and GPG. See [docs/security/README.md](docs/security/README.md) to verify the signed tag and release assets.
+`go install`-built binaries report the module version via `runtime/debug.ReadBuildInfo` + an embedded `VERSION` file (no `-ldflags` injection required), but are compiled locally and will **not** match official release `SHA256SUMS` digests.
 
 ### Run
 
@@ -254,7 +281,7 @@ gonimbus doctor                # Environment/auth checks
 gonimbus envinfo               # Environment summary for support/debugging
 gonimbus health                # Self-health check
 gonimbus serve                 # Run server mode
-gonimbus version               # Version info
+gonimbus version               # Version info (--json [--extended] for machine output)
 
 # Safety latch: hard-disable provider-side mutations
 # gonimbus --readonly <command>
