@@ -11,6 +11,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/match"
+	"github.com/3leaps/gonimbus/pkg/opcheckpoint"
 	"github.com/3leaps/gonimbus/pkg/partition"
 	"github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -1227,6 +1228,10 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			if !meta.LastModified.IsZero() {
 				sourceLastMod = meta.LastModified
 			}
+		case ctx.Err() != nil:
+			return nil
+		case isFatalSourceHeadError(err):
+			return err
 		case mandatorySourceHead:
 			return r.recordObjectError(ctx, stats, in, destURI, destKey, "source metadata read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil)
 		}
@@ -1686,6 +1691,15 @@ func (r *Runner) emitCheckpointWriteWarning(ctx context.Context, code, destKey, 
 		Key:     destKey,
 		Details: details,
 	})
+}
+
+func isFatalSourceHeadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return opcheckpoint.ClassifyFatalError(err, opcheckpoint.ClassifierInput{
+		Interrupted: errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+	}).Resumable
 }
 
 func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, p provider.Provider, key string) (*provider.ObjectMeta, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/internal/reflowprobe"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
 	"github.com/3leaps/gonimbus/pkg/provider/s3"
@@ -540,5 +541,101 @@ func TestTransferReflowSourceHeadMandatoryVsOptional(t *testing.T) {
 		require.Equal(t, "collision.missing_source_last_modified", rec.Reason)
 		require.Equal(t, int64(1), reflowSummaryTallyOf(t, stdout).Errors)
 		require.Equal(t, "old payload", string(dst.mustObject("data/source/file.xml")), "the guard must not mutate the destination")
+	})
+}
+
+type customHeadErrorSourceProvider struct {
+	*reflowMemoryProvider
+	headErr error
+}
+
+func (p customHeadErrorSourceProvider) Head(context.Context, string) (*provider.ObjectMeta, error) {
+	return nil, p.headErr
+}
+
+// TestTransferReflowDualPath_OptionalSourceHeadFatalRefreshParity pins dual-path
+// parity between the engine and the genuinely-routed CLI pool when an optional
+// source HEAD (probed only because source_size_bytes is 0) fails:
+//   - fatal resumable errors (provider.ErrCredentialsRefreshFailed, context.Canceled)
+//     must abort on both routes without falling through to copy or mutating the
+//     destination;
+//   - ordinary non-resumable errors (including provider.ErrThrottled after exhausting
+//     the bounded probe retry budget) retain the optional-HEAD fallback on both
+//     routes and copy the object with the conservative memory cap.
+func TestTransferReflowDualPath_OptionalSourceHeadFatalRefreshParity(t *testing.T) {
+	routes := []struct {
+		name string
+		path string
+		pool bool
+	}{
+		{name: "engine", path: reflowpkg.ExecutionPathEngine, pool: false},
+		{name: "pool", path: reflowpkg.ExecutionPathCLIPool, pool: true},
+	}
+
+	for _, fatalCase := range []struct {
+		name string
+		err  error
+	}{
+		{name: "credentials_refresh_failed", err: provider.ErrCredentialsRefreshFailed},
+		{name: "context_canceled", err: context.Canceled},
+	} {
+		t.Run("fatal_"+fatalCase.name, func(t *testing.T) {
+			for _, route := range routes {
+				t.Run(route.name, func(t *testing.T) {
+					withTransferReflowTestState(t)
+					src := newReflowMemoryProvider()
+					dst := newReflowMemoryProvider()
+					src.putFixture("source/file.xml", "payload", "src-etag", time.Now().UTC())
+					useTransferReflowProviderFactories(t, providerdispatch.Factories{
+						S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+							if cfg.Bucket == "source-bucket" {
+								return customHeadErrorSourceProvider{reflowMemoryProvider: src, headErr: fatalCase.err}, nil
+							}
+							return dst, nil
+						},
+					})
+					args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1", "--on-collision", "fail"}
+					if route.pool {
+						args = append(args, poolRoute...)
+					}
+					stdout, err := runTransferReflowRawStdin(t, reflowInputLine("source/file.xml", "src-etag", 0, "", "")+"\n", args...)
+					require.Equal(t, route.path, executionPathOf(t, stdout))
+					require.Error(t, err, "fatal optional-HEAD error must not fall through to copy")
+					require.False(t, dst.hasObject("data/source/file.xml"), "fatal optional-HEAD error must not write destination")
+				})
+			}
+		})
+	}
+
+	t.Run("throttled_optional_head_exhausts_retries_then_falls_back", func(t *testing.T) {
+		for _, route := range routes {
+			t.Run(route.name, func(t *testing.T) {
+				withTransferReflowTestState(t)
+				src := newReflowMemoryProvider()
+				dst := newReflowMemoryProvider()
+				src.putFixture("source/file.xml", "payload", "src-etag", time.Now().UTC())
+				src.throttleHeadsRemaining = reflowprobe.MaxAttempts
+				useTransferReflowProviderFactories(t, providerdispatch.Factories{
+					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+						if cfg.Bucket == "source-bucket" {
+							return src, nil
+						}
+						return dst, nil
+					},
+				})
+				args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1", "--on-collision", "fail"}
+				if route.pool {
+					args = append(args, poolRoute...)
+				}
+				stdout, err := runTransferReflowRawStdin(t, reflowInputLine("source/file.xml", "src-etag", 0, "", "")+"\n", args...)
+				require.NoError(t, err, stdout)
+				require.Equal(t, route.path, executionPathOf(t, stdout))
+				require.Len(t, src.headCallsSnapshot(), reflowprobe.MaxAttempts)
+				require.Equal(t, "complete", soleTerminalReflowRecord(t, stdout).Status)
+				require.Equal(t, "payload", string(dst.mustObject("data/source/file.xml")))
+				summary := requireReflowSummaryData(t, stdout)
+				require.Equal(t, int64(reflowprobe.MaxAttempts), summary.ConcurrencyThrottleBackoffs)
+			})
+		}
 	})
 }

@@ -14,6 +14,7 @@ type retryLimiter struct {
 	acquires         int
 	observed         []error
 	observedReleased bool
+	onObserve        func(err error, active int)
 }
 
 func (l *retryLimiter) Acquire(context.Context) (func(), error) {
@@ -27,6 +28,9 @@ func (l *retryLimiter) ObserveProviderResult(err error) {
 		l.observedReleased = true
 	}
 	l.observed = append(l.observed, err)
+	if l.onObserve != nil {
+		l.onObserve(err, l.active)
+	}
 }
 
 func TestRunRetriesOnlyThrottledResults(t *testing.T) {
@@ -46,7 +50,25 @@ func TestRunRetriesOnlyThrottledResults(t *testing.T) {
 	require.Equal(t, 2, attempts)
 	require.Equal(t, 2, limiter.acquires)
 	require.Len(t, limiter.observed, 2)
+	require.ErrorIs(t, limiter.observed[0], provider.ErrThrottled)
+	require.NoError(t, limiter.observed[1])
 	require.True(t, limiter.observedReleased, "provider results must be observed after releasing the limiter slot")
+}
+
+func TestRunExhaustsRetryBudgetAndReturnsThrottledError(t *testing.T) {
+	limiter := &retryLimiter{}
+	attempts := 0
+
+	_, err := Run(context.Background(), limiter, func(context.Context) (string, error) {
+		attempts++
+		return "", provider.ErrThrottled
+	})
+
+	require.ErrorIs(t, err, provider.ErrThrottled)
+	require.Equal(t, MaxAttempts, attempts)
+	require.Equal(t, MaxAttempts, limiter.acquires)
+	require.Len(t, limiter.observed, MaxAttempts)
+	require.Zero(t, limiter.active)
 }
 
 func TestRunStopsOnNonThrottle(t *testing.T) {
@@ -63,15 +85,24 @@ func TestRunStopsOnNonThrottle(t *testing.T) {
 }
 
 func TestRunReturnsContextCancellationDuringRetryDelay(t *testing.T) {
-	limiter := &retryLimiter{}
 	ctx, cancel := context.WithCancel(context.Background())
+	releasedBeforeCancel := false
+	limiter := &retryLimiter{
+		onObserve: func(_ error, active int) {
+			releasedBeforeCancel = active == 0
+			cancel()
+		},
+	}
+	attempts := 0
 
 	_, err := Run(ctx, limiter, func(context.Context) (string, error) {
-		cancel()
+		attempts++
 		return "", provider.ErrThrottled
 	})
 
 	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, releasedBeforeCancel, "slot must be released before entering the retry delay")
+	require.Equal(t, 1, attempts)
 	require.Equal(t, 1, limiter.acquires)
 	require.Len(t, limiter.observed, 1)
 }
