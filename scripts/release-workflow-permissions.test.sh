@@ -1,42 +1,48 @@
 #!/usr/bin/env bash
-# The tag-triggered release workflow is defined by the tagged commit, so it must
-# never hold write authority or create a release. Guard both statically, on the
-# resolved YAML (flow mappings, quoted keys, aliases and merges included).
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
-workflow="${1:-$root/.github/workflows/release.yml}"
-resolved="$(mktemp)"
-trap 'rm -f "$resolved"' EXIT
-"$root/scripts/workflow-yaml.sh" "$workflow" > "$resolved"
-python3 -I - "$workflow" "$resolved" << 'PY'
-import json
-import sys
+export PYTHONDONTWRITEBYTECODE=1
 
-doc = json.load(open(sys.argv[2], encoding='utf-8'))
-text = open(sys.argv[1], encoding='utf-8').read()
-errors = []
+if [[ $# -gt 0 ]]; then
+    python3 -B -E "$root/scripts/release-workflow-permissions.py" check "$1"
+    exit 0
+fi
 
+python3 -B -E "$root/scripts/release-workflow-permissions.py" check
+python3 -B -E "$root/scripts/release-workflow-permissions.py" mutations
+python3 -B -E "$root/scripts/release-workflow-pin.py" check
 
-def read_only(perms, where, required):
-    if perms is None:
-        if required:
-            errors.append(f'{where}: permissions must be set to contents: read')
-        return
-    if perms != {'contents': 'read'}:
-        errors.append(f'{where}: permissions must be exactly contents: read, got {json.dumps(perms)}')
+# Verify release-workflow-pin.py verify-commit ignores hostile GIT_* env vars
+# and git replace refs.
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+repo="$scratch/repo"
+mkdir -p "$repo/.github/workflows" "$repo/config/release" "$repo/scripts"
+cp "$root"/.github/workflows/*.yml "$repo/.github/workflows/"
+cp "$root/config/release/release-workflow.sha256" "$repo/config/release/release-workflow.sha256"
+cp "$root/scripts/release-workflow-pin.py" "$repo/scripts/"
+git init -q -b main "$repo"
+git -C "$repo" config user.name Fixture
+git -C "$repo" config user.email fixture@example.invalid
+git -C "$repo" config commit.gpgsign false
+git -C "$repo" add .github/workflows config/release/release-workflow.sha256
+git -C "$repo" commit -qm 'good workflows'
+good_commit="$(git -C "$repo" rev-parse HEAD)"
 
+printf '# tampered\n' >> "$repo/.github/workflows/release.yml"
+git -C "$repo" commit -qam 'tampered workflow'
+bad_commit="$(git -C "$repo" rev-parse HEAD)"
+bad_blob="$(git -C "$repo" --no-replace-objects rev-parse "$bad_commit:.github/workflows/release.yml")"
+good_blob="$(git -C "$repo" --no-replace-objects rev-parse "$good_commit:.github/workflows/release.yml")"
+git -C "$repo" replace "$bad_blob" "$good_blob"
 
-read_only(doc.get('permissions'), 'workflow', True)
-for name, job in (doc.get('jobs') or {}).items():
-    read_only(job.get('permissions'), f'job {name}', False)
-    for step in job.get('steps') or []:
-        uses = str(step.get('uses', ''))
-        if 'action-gh-release' in uses:
-            errors.append(f'job {name}: release-creating action {uses}')
-for banned in ('gh release ', 'releases/', 'GITHUB_TOKEN: ${{ secrets'):
-    if banned in text:
-        errors.append(f'release-creating construct present: {banned!r}')
-if errors:
-    raise SystemExit('error: ' + '; '.join(errors))
-PY
-echo '[ok] release workflow is read-only and never creates a release'
+GIT_DIR="$scratch/nonexistent" GIT_WORK_TREE="$scratch/nonexistent" \
+    python3 -B -E "$repo/scripts/release-workflow-pin.py" verify-commit "$good_commit" > /dev/null
+if GIT_DIR="$scratch/nonexistent" GIT_REPLACE_REF_BASE="refs/replace/" \
+    python3 -B -E "$repo/scripts/release-workflow-pin.py" verify-commit "$bad_commit" 2> /dev/null; then
+    echo 'error: release-workflow-pin.py verify-commit followed a git replace ref' >&2
+    exit 1
+fi
+
+echo '[ok] release workflow permissions, mutation controls, and SHA-256 pin verified'

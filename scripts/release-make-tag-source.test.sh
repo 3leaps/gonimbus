@@ -12,7 +12,7 @@ trap 'rm -rf "$fixture"' EXIT
 
 mkdir -p "$fixture/scripts" "$fixture/.fulmen" "$fixture/docs/releases"
 cp "$root/Makefile" "$fixture/Makefile"
-cp "$root/scripts/release-guard-tag-version.sh" "$fixture/scripts/"
+cp "$root/scripts/release-guard-tag-version.sh" "$root/scripts/release-gh.sh" "$fixture/scripts/"
 printf '1.2.3\n' > "$fixture/VERSION"
 printf 'app:\n  version: 1.2.3\n' > "$fixture/.fulmen/app.yaml"
 printf 'notes\n' > "$fixture/docs/releases/v1.2.3.md"
@@ -30,6 +30,8 @@ done
 mkdir -p "$fixture/dist/release"
 : > "$fixture/dist/release/gonimbus-minisign.pub"
 : > "$fixture/dist/release/gonimbus-release-signing-key.asc"
+: > "$fixture/dist/release/expected-fingerprints.txt"
+: > "$fixture/dist/release/expected-fingerprints.ndjson"
 printf '/dist/\n/side-effects.log\n' > "$fixture/.gitignore"
 git -C "$fixture" init -q -b main
 git -C "$fixture" config user.name "release make test"

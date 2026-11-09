@@ -8,12 +8,13 @@ remote="$(mktemp -d "${TMPDIR:-/tmp}/gonimbus-release-remote.XXXXXX")"
 trap 'rm -rf "$fixture" "$fixture.bin" "$remote"' EXIT
 
 cp "$SCRIPT_DIR/release-guard-tag-version.sh" "$fixture/guard.sh"
+cp "$SCRIPT_DIR/release-gh.sh" "$fixture/release-gh.sh"
 printf '1.2.3\n' > "$fixture/VERSION"
 git init -q -b main "$fixture"
 git init -q --bare -b main "$remote"
 git -C "$fixture" config user.name "release guard test"
 git -C "$fixture" config user.email "noreply@example.invalid"
-git -C "$fixture" add VERSION guard.sh
+git -C "$fixture" add VERSION guard.sh release-gh.sh
 git -C "$fixture" commit -qm "fixture"
 git -C "$fixture" tag -a v1.2.3 -m "fixture"
 git -C "$fixture" remote add origin https://github.com/3leaps/gonimbus.git

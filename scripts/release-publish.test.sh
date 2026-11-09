@@ -20,7 +20,7 @@ done
 repo="$scratch/repo"
 mkdir -p "$repo/scripts" "$repo/keys" "$repo/docs/security" "$scratch/bin" "$scratch/gpg"
 chmod 700 "$scratch/gpg"
-cp "$root/scripts/release-publish.sh" "$root/scripts/release-decernor.sh" "$repo/scripts/"
+cp "$root/scripts/release-publish.sh" "$root/scripts/release-decernor.sh" "$root/scripts/release-gh.sh" "$repo/scripts/"
 cat > "$scratch/bin/decernor" << 'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -79,6 +79,8 @@ stage() {
     done
     cp "$scratch/minisign.pub" "$d/gonimbus-minisign.pub"
     git -C "$repo" cat-file blob "$tagged_commit:docs/security/release-signing-keys.asc" > "$d/gonimbus-release-signing-key.asc"
+    git -C "$repo" cat-file blob "$tagged_commit:keys/expected-fingerprints.txt" > "$d/expected-fingerprints.txt"
+    git -C "$repo" cat-file blob "$tagged_commit:keys/expected-fingerprints.ndjson" > "$d/expected-fingerprints.ndjson"
     cp "$repo/docs/releases/v1.2.3.md" "$d/release-notes-v1.2.3.md"
     printf 'tag=v1.2.3\nobject=%040d\ncommit=%s\n' 1 "$tagged_commit" > "$d.anchor"
     cp "$d"/* "$scratch/draft/"

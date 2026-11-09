@@ -12,6 +12,8 @@ for _git_var in $(compgen -e); do
 done
 unset _git_var
 export GIT_NO_REPLACE_OBJECTS=1
+# shellcheck source=scripts/release-gh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-gh.sh"
 
 main() {
     local root version expected tag require_tag
@@ -86,7 +88,7 @@ main() {
             exit 1
         fi
         local remote_object local_object
-        remote_object="$(gh api "repos/3leaps/gonimbus/git/ref/tags/${tag}" --jq 'select(.object.type == "tag") | .object.sha' 2> /dev/null || true)"
+        remote_object="$(release_gh api "repos/3leaps/gonimbus/git/ref/tags/${tag}" --jq 'select(.object.type == "tag") | .object.sha' 2> /dev/null || true)"
         local_object="$(git rev-parse "refs/tags/${tag}")"
         if [[ -z "$remote_object" || "$remote_object" != "$local_object" ]]; then
             echo "error: remote and local annotated tag objects must match" >&2
@@ -95,7 +97,7 @@ main() {
         local tag_commit head_commit main_commit
         tag_commit="$(git rev-parse "refs/tags/${tag}^{}")"
         head_commit="$(git rev-parse HEAD)"
-        main_commit="$(gh api "repos/3leaps/gonimbus/git/ref/heads/main" --jq '.object.sha' 2> /dev/null || true)"
+        main_commit="$(release_gh api "repos/3leaps/gonimbus/git/ref/heads/main" --jq '.object.sha' 2> /dev/null || true)"
         if [[ "$tag_commit" != "$head_commit" ]]; then
             echo "error: release tag and HEAD must be identical" >&2
             exit 1

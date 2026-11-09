@@ -15,6 +15,8 @@ export GIT_NO_REPLACE_OBJECTS=1
 tag_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/release-decernor.sh
 source "$tag_root/scripts/release-decernor.sh"
+# shellcheck source=scripts/release-gh.sh
+source "$tag_root/scripts/release-gh.sh"
 
 tag_discard_verify_home() {
     if [[ -n "${TAG_VERIFY_GNUPGHOME:-}" ]]; then
@@ -54,7 +56,7 @@ print("/" + "/".join(parts) if parts else "/")
 # A 404 from the ref API is the only "absent" answer; any other failure stops.
 remote_tag_absent() {
     local out
-    if out="$(gh api "repos/3leaps/gonimbus/git/ref/tags/$GONIMBUS_RELEASE_TAG" 2>&1)"; then
+    if out="$(release_gh api "repos/3leaps/gonimbus/git/ref/tags/$GONIMBUS_RELEASE_TAG" 2>&1)"; then
         return 1
     fi
     [[ "$out" == *"HTTP 404"* ]] || tag_die "could not query the remote tag: $out"

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
+# shellcheck source=scripts/release-gh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-gh.sh"
 
 TAG="${1:-}"
-SOURCE_DIR="${2:-dist/release}"
+DIR="${2:-dist/release}"
+REPO="${GONIMBUS_RELEASE_REPO:-3leaps/gonimbus}"
 
 if [[ -z "${TAG}" ]]; then
-    echo "usage: $0 vX.Y.Z [source_dir]" >&2
+    echo "usage: $0 vX.Y.Z [dir]" >&2
     exit 1
 fi
 
@@ -16,110 +19,85 @@ if ! command -v gh > /dev/null 2>&1; then
     exit 1
 fi
 
-if [[ ! -d "${SOURCE_DIR}" ]]; then
-    echo "❌ Source dir not found: ${SOURCE_DIR}" >&2
+if [[ ! -d "${DIR}" ]]; then
+    echo "❌ Directory not found: ${DIR}" >&2
     exit 1
 fi
 
-print_distribution_details() {
+scratch_dir="$(mktemp -d)"
+trap 'rm -rf "${scratch_dir}"' EXIT
+
+verify_manifest_matches_draft() {
     local tag="$1"
-    local source_dir="$2"
-    local sums_file="${source_dir}/SHA256SUMS"
+    local manifest_name="$2"
+    local local_path="$3"
 
-    if [[ ! -f "${sums_file}" ]]; then
-        echo "ℹ️  Distribution details unavailable: ${sums_file} not found"
-        return 0
+    local tmpdir="${scratch_dir}/${manifest_name}"
+    rm -rf "${tmpdir}"
+    mkdir -p "${tmpdir}"
+
+    if ! release_gh release download "${tag}" --repo "${REPO}" --pattern "${manifest_name}" --dir "${tmpdir}" --clobber > /dev/null 2>&1 ||
+        [[ ! -f "${tmpdir}/${manifest_name}" ]]; then
+        echo "❌ Failed to download '${manifest_name}' from release ${tag}" >&2
+        exit 1
     fi
 
-    if ! asset_urls="$(gh release view "${tag}" --json assets --jq '.assets[] | [.name, .url] | @tsv')" || [[ -z "${asset_urls}" ]]; then
-        echo "ℹ️  Distribution details unavailable: could not read uploaded release assets"
-        return 0
+    if ! cmp -s "${tmpdir}/${manifest_name}" "${local_path}"; then
+        echo "❌ Refusing to upload: local ${manifest_name} does not match draft release asset" >&2
+        echo "   Re-run: make release-download (or regenerate manifests carefully)" >&2
+        exit 1
     fi
 
-    asset_url() {
-        local name="$1"
-        awk -F '\t' -v name="${name}" '$1 == name {print $2; found=1; exit} END {exit found ? 0 : 1}' <<< "${asset_urls}"
-    }
-
-    asset_sha256() {
-        local name="$1"
-        awk -v name="${name}" '$2 == name || $2 == "*" name {print $1; found=1; exit} END {exit found ? 0 : 1}' "${sums_file}"
-    }
-
-    print_asset() {
-        local name="$1"
-        local url
-        local sha256
-
-        if ! url="$(asset_url "${name}")"; then
-            echo "# ${name}: uploaded asset URL not found"
-            return 0
-        fi
-        if ! sha256="$(asset_sha256 "${name}")"; then
-            echo "# ${name}: SHA256 not found in SHA256SUMS"
-            return 0
-        fi
-
-        echo "${name}"
-        echo "  url: ${url}"
-        echo "  sha256: ${sha256}"
-    }
-
-    cat << EOF
-
-Package-manager asset details:
-
-Homebrew (3leaps/homebrew-tap Formula/gonimbus.rb):
-EOF
-    print_asset "gonimbus-darwin-arm64"
-    print_asset "gonimbus-linux-amd64"
-    print_asset "gonimbus-linux-arm64"
-
-    cat << EOF
-
-Scoop (3leaps/scoop-bucket bucket/gonimbus.json):
-EOF
-    print_asset "gonimbus-windows-amd64.exe"
-    print_asset "gonimbus-windows-arm64.exe"
+    echo "✅ Verified ${manifest_name} matches draft release asset"
 }
 
-# Upload only provenance outputs (never binaries) to avoid clobbering CI-built assets.
-# Expected inputs:
-# - SHA256SUMS, SHA512SUMS
-# - SHA256SUMS.minisig/.asc, SHA512SUMS.minisig/.asc
-# - *.pub and *release-signing-key.asc
-# - release-notes-*.md
-shopt -s nullglob
+assets=(
+    "${DIR}/SHA256SUMS"
+    "${DIR}/SHA256SUMS.minisig"
+    "${DIR}/SHA256SUMS.asc"
+    "${DIR}/SHA512SUMS"
+    "${DIR}/SHA512SUMS.minisig"
+    "${DIR}/SHA512SUMS.asc"
+    "${DIR}/gonimbus-minisign.pub"
+    "${DIR}/gonimbus-release-signing-key.asc"
+    "${DIR}/expected-fingerprints.txt"
+    "${DIR}/expected-fingerprints.ndjson"
+    "${DIR}/release-notes-${TAG}.md"
+)
 
-assets=()
-assets+=("${SOURCE_DIR}/SHA256SUMS" "${SOURCE_DIR}/SHA512SUMS")
-assets+=("${SOURCE_DIR}/SHA256SUMS."* "${SOURCE_DIR}/SHA512SUMS."*)
-assets+=("${SOURCE_DIR}"/*.pub)
-assets+=("${SOURCE_DIR}"/*release-signing-key.asc)
-assets+=("${SOURCE_DIR}"/release-notes-*.md)
+if [[ ! -f "${DIR}/SHA256SUMS" ]]; then
+    echo "❌ Missing ${DIR}/SHA256SUMS (run 'make release-download' first)" >&2
+    exit 1
+fi
 
-final_assets=()
-for f in "${assets[@]}"; do
-    if [[ -f "$f" ]]; then
-        final_assets+=("$f")
+for required in \
+    "${DIR}/SHA256SUMS.minisig" \
+    "${DIR}/SHA256SUMS.asc" \
+    "${DIR}/SHA512SUMS" \
+    "${DIR}/SHA512SUMS.minisig" \
+    "${DIR}/SHA512SUMS.asc" \
+    "${DIR}/gonimbus-minisign.pub" \
+    "${DIR}/gonimbus-release-signing-key.asc" \
+    "${DIR}/expected-fingerprints.txt" \
+    "${DIR}/expected-fingerprints.ndjson" \
+    "${DIR}/release-notes-${TAG}.md"; do
+    if [[ ! -f "${required}" ]]; then
+        echo "❌ Missing required provenance asset: ${required}" >&2
+        echo "   Ensure you ran: make release-sign && make release-export-keys && make release-notes" >&2
+        exit 1
     fi
 done
 
-if [[ ${#final_assets[@]} -eq 0 ]]; then
-    echo "❌ No provenance assets found to upload from ${SOURCE_DIR}" >&2
+verify_manifest_matches_draft "${TAG}" "SHA256SUMS" "${DIR}/SHA256SUMS"
+verify_manifest_matches_draft "${TAG}" "SHA512SUMS" "${DIR}/SHA512SUMS"
+
+is_draft="$(release_gh release view "${TAG}" --repo "${REPO}" --json isDraft --jq .isDraft)"
+if [[ "${is_draft}" != "true" ]]; then
+    echo "❌ Refusing to upload: release ${TAG} is not a draft (isDraft=${is_draft})" >&2
     exit 1
 fi
 
-# Read-only draft check first. --clobber on a published release would replace
-# already-public provenance.
-is_draft="$(gh release view "${TAG}" --json isDraft --jq .isDraft)"
-if [[ "${is_draft}" != true ]]; then
-    echo "error: release ${TAG} is not a draft; refusing to upload" >&2
-    exit 1
-fi
-
-echo "→ Uploading ${#final_assets[@]} provenance asset(s) to ${TAG} (clobber)"
-gh release upload "${TAG}" "${final_assets[@]}" --clobber
+echo "→ Uploading ${#assets[@]} provenance assets to ${TAG} (clobber enabled)"
+release_gh release upload "${TAG}" --repo "${REPO}" "${assets[@]}" --clobber
 
 echo "✅ Upload complete"
-print_distribution_details "${TAG}" "${SOURCE_DIR}" || true

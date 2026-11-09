@@ -29,12 +29,14 @@ approved="${GONIMBUS_GPG_SIGNING_FINGERPRINT:-}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'canonical GONIMBUS_RELEASE_TAG required'
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$root"
+# shellcheck source=scripts/release-gh.sh
+source "$root/scripts/release-gh.sh"
 case "$(git config --get remote.origin.url)" in
     https://github.com/3leaps/gonimbus | https://github.com/3leaps/gonimbus.git | \
         git@github.com:3leaps/gonimbus | git@github.com:3leaps/gonimbus.git) ;;
     *) die 'origin must be 3leaps/gonimbus on GitHub' ;;
 esac
-ref_json="$(gh api "repos/3leaps/gonimbus/git/ref/tags/$tag")" || die 'remote release tag is absent'
+ref_json="$(release_gh api "repos/3leaps/gonimbus/git/ref/tags/$tag")" || die 'remote release tag is absent'
 [[ "$(jq -r '.object.type // empty' <<< "$ref_json")" == tag ]] || die 'annotated tag required'
 remote_object="$(jq -r '.object.sha // empty' <<< "$ref_json")"
 [[ "$remote_object" =~ ^[0-9a-f]{40}$ ]] || die 'remote tag object is invalid'
@@ -61,7 +63,7 @@ pinned="$(git cat-file blob "$commit:keys/expected-fingerprints.txt" 2> /dev/nul
 [[ "$pinned" == "$approved" ]] || die 'pin in the tagged commit is not the approved primary'
 GONIMBUS_RELEASE_TAG="$tag" "$root/scripts/verify-pinned-tag.sh" --published > /dev/null ||
     die 'published tag signature does not verify against the pin committed in its commit'
-tag_json="$(gh api "repos/3leaps/gonimbus/git/tags/$remote_object")" || die 'GitHub tag object unavailable'
+tag_json="$(release_gh api "repos/3leaps/gonimbus/git/tags/$remote_object")" || die 'GitHub tag object unavailable'
 jq -e --arg tag "$tag" --arg commit "$commit" \
     '.tag == $tag and .object.type == "commit" and .object.sha == $commit and .verification.verified == true and .verification.reason == "valid"' \
     <<< "$tag_json" > /dev/null || die 'GitHub does not report the published tag verified'

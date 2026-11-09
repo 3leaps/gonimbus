@@ -69,6 +69,11 @@ if len(g) != 1 or len(m) != 1:
 (keys / 'expected-fingerprints.ndjson').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in (g[0], m[0])))
 (keys / 'expected-fingerprints.txt').write_text('gpg ' + g[0]['fingerprint'] + '\nminisign ' + m[0]['fingerprint'] + '\n')
 PY
+git -C "$repo" init -q -b main
+git -C "$repo" config commit.gpgsign false
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid add .
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm fixture
+git -C "$repo" tag v1.2.3
 
 stage() {
     local dir="$1" pgp_home="${2:-$scratch/gpg-good}" msk="${3:-$scratch/minisign.key}"
@@ -105,6 +110,16 @@ refuse() {
 d="$scratch/dist"
 stage "$d"
 verify "$d" > /dev/null
+verify --tag v1.2.3 "$d" > /dev/null
+
+# Environment override of fingerprint anchors is refused (PDR-0008 §2.1).
+for var in GONIMBUS_EXPECTED_FINGERPRINTS_TXT GONIMBUS_EXPECTED_FINGERPRINTS_NDJSON; do
+    if (cd "$repo" && env "$var=$repo/keys/expected-fingerprints.txt" ./scripts/release-verify-signatures.sh "$d") > "$scratch/out" 2>&1; then
+        echo "error: accepted environment override $var" >&2
+        exit 1
+    fi
+    grep -q "environment override of fingerprint anchors is not permitted" "$scratch/out"
+done
 
 # Each of the four signatures, missing and tampered, refuses on its own.
 for sig in SHA256SUMS.minisig SHA512SUMS.minisig SHA256SUMS.asc SHA512SUMS.asc; do

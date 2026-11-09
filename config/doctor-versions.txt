@@ -1,0 +1,14 @@
+# Minimum tool versions checked by scripts/doctor.sh.
+# Format: <tool> <min_semver>
+go 1.26.0
+goneat 0.6.7
+decernor 0.1.9
+limensafe 0.2.0
+minisign 0.11.0
+gpg 2.4.0
+gpgv 2.4.0
+gh 2.50.0
+shasum 6.0.0
+python3 3.11.0
+git 2.39.0
+jq 1.6.0

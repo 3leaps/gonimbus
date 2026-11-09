@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Read-only advisory on visible effective tag rules; never authorizes signing.
 set -euo pipefail
+# shellcheck source=scripts/release-gh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-gh.sh"
 
 tag="${1:-}"
 if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -13,7 +15,7 @@ if ! command -v gh > /dev/null 2>&1 || ! command -v jq > /dev/null 2>&1; then
 fi
 
 repository=3leaps/gonimbus
-if ! pages="$(gh api --paginate --slurp "repos/$repository/rulesets?includes_parents=true&per_page=100" 2> /dev/null)"; then
+if ! pages="$(release_gh api --paginate --slurp "repos/$repository/rulesets?includes_parents=true&per_page=100" 2> /dev/null)"; then
     echo 'UNKNOWN: effective tag rules could not be read'
     exit 0
 fi
@@ -25,7 +27,7 @@ ids="$(jq -r '[ .[][] | select(.target == "tag" and .enforcement == "active") | 
 
 uncertain=0
 for id in $ids; do
-    if ! rule="$(gh api "repos/$repository/rulesets/$id" 2> /dev/null)"; then
+    if ! rule="$(release_gh api "repos/$repository/rulesets/$id" 2> /dev/null)"; then
         uncertain=1
         continue
     fi

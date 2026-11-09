@@ -9,10 +9,16 @@ trap 'rm -rf "$scratch"' EXIT
 unset RELEASE_TAG GONIMBUS_RELEASE_TAG
 
 repo="$scratch/repo"
-mkdir -p "$repo/scripts" "$repo/docs/releases" "$repo/docs/security" "$repo/keys" "$scratch/bin"
-cp "$root/scripts/release-preflight.sh" "$root/scripts/workflow-pins.test.sh" "$root/scripts/workflow-yaml.sh" \
+mkdir -p "$repo/scripts" "$repo/config/release" "$repo/docs/releases" "$repo/docs/security" "$repo/keys" "$scratch/bin"
+cp "$root/scripts/release-preflight.sh" "$root/scripts/release-workflow-permissions.test.sh" \
+    "$root/scripts/release-workflow-permissions.py" "$root/scripts/release-workflow-pin.py" \
+    "$root/scripts/release-github-preflight.sh" "$root/scripts/release-gh.sh" \
     "$root/scripts/release-verify-committed-anchors.sh" "$root/scripts/release-decernor.sh" \
-    "$root/scripts/validate-release-anchors.sh" "$repo/scripts/"
+    "$root/scripts/validate-release-anchors.sh" "$root/scripts/committed_tree.py" \
+    "$root/scripts/export-committed-tree.py" "$root/scripts/content-check.py" \
+    "$root/scripts/host-path-check.py" "$root/scripts/surface-canary.py" \
+    "$root/scripts/surface-catalog-path.py" "$root/scripts/surface-scan.sh" "$repo/scripts/"
+cp "$root/config/release/release-workflow.sha256" "$repo/config/release/"
 cp "$root/docs/security/release-signing-keys.asc" "$root/docs/security/gonimbus-minisign.pub" "$repo/docs/security/"
 cp "$root/keys/expected-fingerprints.txt" "$root/keys/expected-fingerprints.ndjson" "$repo/keys/"
 if [[ -z "${GONIMBUS_DECERNOR_BIN:-}" ]]; then
@@ -73,6 +79,25 @@ cat > "$scratch/bin/make" << 'SH'
 printf 'make %s\n' "$*" >> "$FIXTURE_LOG"
 [[ "$*" == *pr-final* ]] || exit 3
 [[ "${FIXTURE_PR_FINAL:-pass}" == pass ]]
+SH
+cat > "$scratch/bin/gh" << 'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${FIXTURE_GH_PREFLIGHT:-pass}" == pass ]] || exit 1
+case "${2:-}" in
+repos/3leaps/gonimbus/rulesets\?per_page=100)
+    printf '[{"id":24954486,"name":"Tag Publish Protection","target":"tag","source_type":"Repository","source":"3leaps/gonimbus","enforcement":"active"}]\n'
+    ;;
+repos/3leaps/gonimbus/rulesets/24954486)
+    printf '{"id":24954486,"name":"Tag Publish Protection","target":"tag","source_type":"Repository","source":"3leaps/gonimbus","enforcement":"active","conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*","refs/tags/spec-v*","refs/tags/go/*/v*"]}},"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"},{"type":"non_fast_forward"}],"bypass_actors":[{"actor_id":null,"actor_type":"OrganizationAdmin","bypass_mode":"always"}]}\n'
+    ;;
+repos/3leaps/gonimbus/immutable-releases)
+    printf '{"enabled":true}\n'
+    ;;
+*)
+    exit 2
+    ;;
+esac
 SH
 chmod +x "$scratch/bin/"*
 export PATH="$scratch/bin:$PATH" FIXTURE_LOG="$scratch/calls.log"
