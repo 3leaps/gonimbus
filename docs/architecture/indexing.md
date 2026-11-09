@@ -4,6 +4,11 @@ This document describes the architectural contracts for building and querying lo
 
 ## Core Concepts
 
+Storage responsibilities and the durable publication path are mapped in
+[Durable Storage Architecture](durable-storage.md). Representation parity is
+specified separately from physical storage choices in
+[DDR-0001](adr/DDR-0001-index-semantics-and-representation-parity.md) (proposed).
+
 ### IndexSet
 
 An **IndexSet** is a stable identity for an indexable dataset.
