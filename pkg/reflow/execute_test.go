@@ -68,8 +68,11 @@ type copyMemoryProvider struct {
 	// modelling a sidecar write failure (sidecars are written via PutObject) while
 	// leaving the conditional main-object land unaffected.
 	putObjectErrByKey      map[string]error
+	headCalls              []string
+	throttleHeadsByKey     map[string]int
 	throttleHeadsRemaining int
 	throttleGetsRemaining  int
+	onHeadThrottle         func(key string, call int)
 	// condCaps overrides the providerType-derived conditional-write capability
 	// declaration when set — used to model an IfAbsent-only S3-shaped adapter.
 	condCaps *provider.ConditionalWriteCapabilities
@@ -85,13 +88,20 @@ type copyMemoryProvider struct {
 
 func newCopyMemoryProvider() *copyMemoryProvider {
 	return &copyMemoryProvider{
-		providerType:      provider.ProviderS3,
-		objects:           map[string][]byte{},
-		meta:              map[string]provider.ObjectMeta{},
-		putErrByKey:       map[string]error{},
-		putObjectErrByKey: map[string]error{},
-		writeCounts:       map[string]int{},
+		providerType:       provider.ProviderS3,
+		objects:            map[string][]byte{},
+		meta:               map[string]provider.ObjectMeta{},
+		putErrByKey:        map[string]error{},
+		putObjectErrByKey:  map[string]error{},
+		throttleHeadsByKey: map[string]int{},
+		writeCounts:        map[string]int{},
 	}
+}
+
+func (p *copyMemoryProvider) headCallsSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.headCalls...)
 }
 
 // writeCount reports how many successful writes landed at key.
@@ -127,14 +137,28 @@ func (p *copyMemoryProvider) List(context.Context, provider.ListOptions) (*provi
 
 func (p *copyMemoryProvider) Head(_ context.Context, key string) (*provider.ObjectMeta, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.throttleHeadsRemaining > 0 {
+	p.headCalls = append(p.headCalls, key)
+	call := len(p.headCalls)
+	throttled := false
+	if p.throttleHeadsByKey[key] > 0 {
+		p.throttleHeadsByKey[key]--
+		throttled = true
+	} else if p.throttleHeadsRemaining > 0 {
 		p.throttleHeadsRemaining--
-		return nil, &provider.ProviderError{Op: "Head", Provider: p.providerType, Key: key, Err: provider.ErrThrottled}
+		throttled = true
 	}
+	onThrottle := p.onHeadThrottle
+	providerType := p.providerType
 	meta, ok := p.meta[key]
+	p.mu.Unlock()
+	if throttled {
+		if onThrottle != nil {
+			onThrottle(key, call)
+		}
+		return nil, &provider.ProviderError{Op: "Head", Provider: providerType, Key: key, Err: provider.ErrThrottled}
+	}
 	if !ok {
-		return nil, &provider.ProviderError{Op: "Head", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
+		return nil, &provider.ProviderError{Op: "Head", Provider: providerType, Key: key, Err: provider.ErrNotFound}
 	}
 	return &meta, nil
 }
@@ -635,6 +659,7 @@ func TestRunnerProbeHeadThrottleRetriesAndCompletes(t *testing.T) {
 	require.Equal(t, int64(2), summary.ConcurrencyThrottleBackoffs)
 	require.Equal(t, int64(1), summary.Statuses["skipped"])
 	require.Equal(t, int64(1), summary.Collisions["duplicate"])
+	require.Len(t, dst.headCallsSnapshot(), 3)
 }
 
 func TestRunnerProbeHeadThrottleExhaustionFailsObject(t *testing.T) {
@@ -655,6 +680,7 @@ func TestRunnerProbeHeadThrottleExhaustionFailsObject(t *testing.T) {
 	require.Len(t, sink.errs, 1)
 	require.Equal(t, ErrCodeThrottled, sink.errs[0].Code)
 	require.Equal(t, int64(reflowprobe.MaxAttempts), summary.ConcurrencyThrottleBackoffs)
+	require.Len(t, dst.headCallsSnapshot(), reflowprobe.MaxAttempts)
 	require.Equal(t, int64(1), summary.Errors)
 	require.Equal(t, int64(1), summary.Statuses["failed"])
 	require.Equal(t, []byte("old payload"), dst.body("data/a/b.xml"), "failed probe must not overwrite the existing object")
@@ -676,6 +702,85 @@ func TestRunnerBodyCompareThrottleRetriesAndFindsDuplicate(t *testing.T) {
 	require.Equal(t, int64(1), summary.ConcurrencyThrottleBackoffs)
 	require.Equal(t, int64(1), summary.Statuses["skipped"])
 	require.Equal(t, int64(1), summary.Collisions["duplicate"])
+}
+
+func TestRunnerBodyCompareThrottleRetriesAndFindsConflict(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "payload-src", "src-etag")
+	dst.putFixture("data/a/b.xml", "payload-dst", "dest-etag")
+	dst.throttleGetsRemaining = 1
+	sink := &collectSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Collision = CollisionPolicy{Mode: CollisionFail}
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":11,"dest_rel_key":"a/b.xml"}}`
+	summary, err := runner.Run(context.Background(), copySource(src, line))
+	var objectErr *ObjectErrorsError
+	require.ErrorAs(t, err, &objectErr)
+	require.Equal(t, int64(1), objectErr.Count)
+
+	require.Equal(t, int64(1), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.Statuses["failed"])
+	require.Equal(t, int64(1), summary.Collisions["conflict"])
+}
+
+func TestRunnerProbeThrottleNoDeadlockAtConcurrencyFloor(t *testing.T) {
+	const objects = 8
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	lines := make([]string, 0, objects)
+	for i := 0; i < objects; i++ {
+		key := fmt.Sprintf("a/file-%d.xml", i)
+		destKey := "data/" + key
+		src.putFixture(key, "new payload", "src-etag")
+		dst.putFixture(destKey, "old payload", "dest-etag")
+		dst.throttleHeadsByKey[destKey] = 1
+		lines = append(lines, fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/%s","source_key":%q,"source_etag":"src-etag","source_size_bytes":11,"dest_rel_key":%q}}`, key, key, key))
+	}
+	sink := &collectSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.Collision = CollisionPolicy{Mode: CollisionOverwrite}
+	cfg.Concurrency = ConcurrencyConfig{
+		RequestedCeiling: 1,
+		EffectiveCeiling: 1,
+		Initial:          1,
+		Floor:            1,
+		AdaptiveEnabled:  true,
+		CeilingReason:    "requested",
+	}
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	summary, err := runner.Run(context.Background(), copySource(src, strings.Join(lines, "\n")))
+	require.NoError(t, err)
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+	require.Equal(t, int64(objects), summary.ConcurrencyThrottleBackoffs)
+	require.Len(t, dst.headCallsSnapshot(), objects*2)
+}
+
+func TestRunnerProbeThrottleContextCancellationDuringRetryDelay(t *testing.T) {
+	src, dst := newCopyMemoryProvider(), newCopyMemoryProvider()
+	src.putFixture("a/b.xml", "new payload", "src-etag")
+	dst.putFixture("data/a/b.xml", "old payload", "dest-etag")
+	dst.throttleHeadsRemaining = reflowprobe.MaxAttempts
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dst.onHeadThrottle = func(_ string, call int) {
+		if call == 1 {
+			cancel()
+		}
+	}
+
+	sink := &collectSink{}
+	runner, err := NewRunner(copyConfig(dst, sink))
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/b.xml","source_key":"a/b.xml","source_etag":"src-etag","source_size_bytes":11,"dest_rel_key":"a/b.xml"}}`
+	_, err = runner.Run(ctx, copySource(src, line))
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, dst.headCallsSnapshot(), 1, "context cancellation during retry delay must abort before exhausting the retry budget")
 }
 
 func (s *collectSink) emitted() bool {

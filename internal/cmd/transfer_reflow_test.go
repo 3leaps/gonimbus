@@ -2864,6 +2864,11 @@ func TestTransferReflowCommand_ProbeThrottleDrivesBackoffWithoutStall(t *testing
 }
 
 func TestTransferReflowCommand_ProbeThrottleExhaustionFailsObjectNonResumable(t *testing.T) {
+	require.Equal(t,
+		opcheckpoint.Classification{Class: opcheckpoint.ErrorClassRuntimeFailure, Resumable: false},
+		opcheckpoint.ClassifyFatalError(provider.ErrThrottled, opcheckpoint.ClassifierInput{}),
+	)
+
 	src := newReflowMemoryProvider()
 	dst := newReflowMemoryProvider()
 	src.putFixture("source/file.xml", "new payload", "src-etag", time.Time{})
@@ -2877,6 +2882,7 @@ func TestTransferReflowCommand_ProbeThrottleExhaustionFailsObjectNonResumable(t 
 	require.Len(t, dst.headCallsSnapshot(), reflowprobe.MaxAttempts)
 
 	summary := requireReflowSummaryData(t, stdout)
+	require.Equal(t, int64(reflowprobe.MaxAttempts), summary.ConcurrencyThrottleBackoffs)
 	require.Equal(t, int64(1), summary.Errors)
 	require.Zero(t, summary.Statuses["complete"])
 	errRecord := requireErrorData(t, stdout)
@@ -2896,10 +2902,121 @@ func TestTransferReflowCommand_BodyCompareThrottleRetriesAndFindsDuplicate(t *te
 	require.Equal(t, "same payload", string(dst.mustObject("source/file.xml")))
 
 	summary := requireReflowSummaryData(t, stdout)
-	require.Positive(t, summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.ConcurrencyThrottleBackoffs)
 	skipped := requireReflowData(t, stdout, "skipped")
 	require.Equal(t, "collision.duplicate", skipped.Reason)
 	requireCollisionEqual(t, skipped, collisionDuplicate, decisionIfAbsentHead, "dest-etag", int64(len("same payload")))
+}
+
+func TestTransferReflowCommand_BodyCompareThrottleRetriesAndFindsConflict(t *testing.T) {
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "payload-src1", "src-etag", time.Time{})
+	dst.putFixture("source/file.xml", "payload-dst1", "dest-etag", time.Time{})
+	dst.throttleGetsRemaining = 1
+
+	stdout, err := runTransferReflowWithProviders(t, src, dst, reflowInputLine("source/file.xml", "src-etag", int64(len("payload-src1")), "", ""), "--on-collision", "fail")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reflow completed with errors")
+	require.Equal(t, "payload-dst1", string(dst.mustObject("source/file.xml")))
+
+	summary := requireReflowSummaryData(t, stdout)
+	require.Equal(t, int64(1), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(1), summary.Collisions["conflict"])
+	failed := requireReflowData(t, stdout, "failed")
+	require.Equal(t, "collision.exists.conflict", failed.Reason)
+	requireCollisionEqual(t, failed, collisionConflict, decisionIfAbsentHead, "dest-etag", int64(len("payload-dst1")))
+}
+
+func TestTransferReflowCommand_ProbeGatingThrottledNoDeadlockAtConcurrencyFloor(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	const objects = 8
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	inputs := make([]string, 0, objects)
+	for i := 0; i < objects; i++ {
+		key := fmt.Sprintf("source/file-%d.xml", i)
+		src.putFixture(key, "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		dst.putFixture(key, "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+		dst.throttleHeadsByKey[key] = 1
+		inputs = append(inputs, reflowInputLine(key, "src-etag", int64(len("new payload")), "", ""))
+	}
+
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3:   func(context.Context, s3.Config) (provider.Provider, error) { return src, nil },
+		File: func(providerfile.Config) (provider.Provider, error) { return dst, nil },
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(strings.Join(inputs, "\n") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "overwrite-if-source-newer",
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("reflow deadlocked at concurrency floor (current==1) during throttled probe retry")
+	}
+
+	summary := requireReflowSummaryData(t, stdout.String())
+	require.Equal(t, int64(objects), summary.ConcurrencyThrottleBackoffs)
+	require.Equal(t, int64(objects), summary.Statuses["complete"])
+	require.Len(t, dst.headCallsSnapshot(), objects*2)
+}
+
+func TestTransferReflowCommand_ProbeThrottleContextCancellationDuringRetryDelay(t *testing.T) {
+	withTransferReflowTestState(t)
+
+	src := newReflowMemoryProvider()
+	dst := newReflowMemoryProvider()
+	src.putFixture("source/file.xml", "new payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+	dst.putFixture("source/file.xml", "old payload", "dest-etag", time.Date(2026, 1, 14, 20, 53, 44, 0, time.UTC))
+	dst.throttleHeadsRemaining = reflowprobe.MaxAttempts
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dst.onHeadThrottle = func(_ string, call int) {
+		if call == 1 {
+			cancel()
+		}
+	}
+
+	useTransferReflowProviderFactories(t, providerdispatch.Factories{
+		S3:   func(context.Context, s3.Config) (provider.Provider, error) { return src, nil },
+		File: func(providerfile.Config) (provider.Provider, error) { return dst, nil },
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(strings.NewReader(reflowInputLine("source/file.xml", "src-etag", int64(len("new payload")), "", "") + "\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"--stdin",
+		"--dest", fileURI(t.TempDir()),
+		"--rewrite-from", "{key}",
+		"--rewrite-to", "{key}",
+		"--parallel", "1",
+		"--on-collision", "overwrite-if-source-newer",
+	})
+
+	err := cmd.ExecuteContext(ctx)
+	require.Error(t, err)
+	require.Len(t, dst.headCallsSnapshot(), 1, "context cancellation during retry delay must abort before exhausting the retry budget")
+	require.Equal(t, "old payload", string(dst.mustObject("source/file.xml")))
 }
 
 func TestTransferReflowCommand_CollisionOverwriteIfSourceNewerReplacesWithIfMatch(t *testing.T) {
@@ -4725,6 +4842,7 @@ type reflowMemoryProvider struct {
 	// throttleGetsRemaining, when > 0, makes the next N GetObject calls return
 	// provider.ErrThrottled before serving normally.
 	throttleGetsRemaining int
+	onHeadThrottle        func(key string, call int)
 	// listPageSize, when > 0, makes List actually enumerate the stored objects in
 	// pages of this size. It is OPT-IN: the zero value keeps List returning an
 	// empty result, which is what every pre-existing caller of this fixture
@@ -4943,17 +5061,25 @@ func (p *reflowMemoryProvider) List(ctx context.Context, opts provider.ListOptio
 
 func (p *reflowMemoryProvider) Head(_ context.Context, key string) (*provider.ObjectMeta, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.headCalls = append(p.headCalls, key)
+	call := len(p.headCalls)
+	throttled := false
 	if p.throttleHeadsByKey[key] > 0 {
 		p.throttleHeadsByKey[key]--
-		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
-	}
-	if p.throttleHeadsRemaining > 0 {
+		throttled = true
+	} else if p.throttleHeadsRemaining > 0 {
 		p.throttleHeadsRemaining--
+		throttled = true
+	}
+	onThrottle := p.onHeadThrottle
+	meta, ok := p.meta[key]
+	p.mu.Unlock()
+	if throttled {
+		if onThrottle != nil {
+			onThrottle(key, call)
+		}
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrThrottled}
 	}
-	meta, ok := p.meta[key]
 	if !ok {
 		return nil, &provider.ProviderError{Op: "Head", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 	}

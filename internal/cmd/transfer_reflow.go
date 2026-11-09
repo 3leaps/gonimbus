@@ -772,10 +772,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						if !meta.LastModified.IsZero() {
 							task.SourceLastMod = meta.LastModified
 						}
+					} else if recordFatalReflowError(err) {
+						continue
 					} else if metaCfg.NeedsSourceHead() || needsSourceHeadForCollision {
-						if recordFatalReflowError(err) {
-							continue
-						}
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI})
 						continue
