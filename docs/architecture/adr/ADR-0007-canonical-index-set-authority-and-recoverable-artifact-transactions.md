@@ -1,8 +1,15 @@
 # ADR-0007: Canonical Index-Set Authority and Recoverable Artifact Transactions
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-13
+**Accepted:** 2026-09-30
 **Decision Makers:** @3leapsdave
+
+Acceptance establishes the canonical-state architecture. It does not certify
+that every operation and platform has discharged every evidence obligation
+below. [Implementation and evidence scope](../canonical-state-conformance.md)
+tracks that separate claim. Storage selection and representation parity are
+separate decisions; this record governs authority across supported substrates.
 
 ## Context
 
@@ -494,6 +501,10 @@ authority and cannot prove the external set/root binding that was absent.
 
 ## Related
 
+- [Canonical-state implementation and evidence scope](../canonical-state-conformance.md)
+- [Storage strata and durable-first bulk state](ADR-0008-storage-strata-and-durable-first-bulk-state.md)
+- [Index semantics and representation parity](DDR-0001-index-semantics-and-representation-parity.md)
+
 - `docs/architecture/adr/ADR-0006-cli-as-adapter-over-library-engines.md` -
   shared library-engine and CLI-adapter behavior
 - `docs/architecture/adr/ADR-0003-index-build-provider-capabilities.md` -
@@ -501,3 +512,10 @@ authority and cannot prove the external set/root binding that was absent.
   canonical-state authority
 - `docs/architecture/indexing.md` - indexing architecture and artifact model
 - `docs/library-consumers.md` - public package boundaries and stability posture
+
+## Revision History
+
+| Date       | Change                                                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-07-13 | Proposed canonical whole-set authority and recoverable artifact transactions.                                                          |
+| 2026-09-30 | Accepted the architecture; separated decision status from implementation and platform evidence. Existing requirements remain in force. |

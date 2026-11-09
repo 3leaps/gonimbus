@@ -11,6 +11,12 @@ Canonical index readers, writers, recovery, and maintenance also follow
 all public-library and CLI paths share stable whole-set authority, exact
 artifact identity binding, and lifetime-complete crash recovery.
 
+For the shipped index storage path, start with the
+[durable storage architecture](architecture/durable-storage.md). It links the
+current implementation contracts and distinguishes them from proposed storage
+extensions. [Canonical-state conformance](architecture/canonical-state-conformance.md)
+separates architecture acceptance from operation/platform verification.
+
 ## High-Level Components
 
 ## Indexing (Crawl-Backed)
