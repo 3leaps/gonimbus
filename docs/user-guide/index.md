@@ -469,7 +469,28 @@ The receipt distinguishes manifest-declared counts from observed query
 counters, and reports declared, walked, digest-verified, and manifest-pruned
 segments separately. `emitted` excludes the receipt. A limited enumeration
 probes one additional matching row to make `truncated` exact without claiming a
-full scan.
+full scan. Under manifest-level segment pruning (`v0.4.6+`), receipt counters
+satisfy four invariants:
+
+- `results.examined` counts rows visited inside **walked** segments only
+  (`results.examined <= declared.rows`); manifest-pruned segments are never
+  opened, hashed, or row-scanned. Downstream consumers must not assert
+  `results.examined == declared.rows` or
+  `segments.walked == segments.declared` on patterned queries.
+- `segments.manifest_pruned` may be non-zero for any `--pattern` query whose
+  pattern begins with a non-empty literal key prefix (skipping segments whose
+  `MaxRelKey < prefix` as well as trailing segments whose `MinRelKey > prefix`
+  without a prefix match).
+- `segments.verified == segments.walked` holds unconditionally on verified
+  durable queries (every walked segment file descriptor is SHA-256 verified
+  before its rows are yielded, including 0-row segments), and
+  `segments.walked + segments.manifest_pruned == segments.declared` holds
+  whenever `results.truncated == false` (with
+  `segments.walked + segments.manifest_pruned <= segments.declared` when
+  `--limit` stops enumeration early).
+- An unpatterned query (`--pattern` omitted) — or a pattern with no literal
+  leading prefix (for example `**/*.xml`) — never prunes
+  (`segments.manifest_pruned == 0`).
 
 `query.query_spec_sha256` binds a closed
 `gonimbus.index.query_spec.v1` value using RFC 8785 JSON Canonicalization Scheme

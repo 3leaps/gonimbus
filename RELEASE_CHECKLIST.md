@@ -142,19 +142,26 @@ GitHub Release. A green tag workflow is not release authorization.
 
 ### Distribution
 
+**Raw-Asset Byte-for-Byte Packaging Invariant:**
+
+1. **Raw-executable release contract:** Official `gonimbus` GitHub Releases publish unwrapped, standalone platform executables (`gonimbus-darwin-arm64`, `gonimbus-linux-amd64`, `gonimbus-linux-arm64`, `gonimbus-windows-amd64.exe`, `gonimbus-windows-arm64.exe`) listed directly in signed `SHA256SUMS` and `SHA512SUMS`.
+2. **Byte-for-byte package-manager equivalence:** `3leaps/homebrew-tap` (`Formula/gonimbus.rb`, and any versioned `Formula/gonimbus@0.<minor>.rb`) and `3leaps/scoop-bucket` (`bucket/gonimbus.json`, and any versioned `bucket/gonimbus-0.<minor>.json`) **must install those exact release assets byte-for-byte** — no source rebuilds, no Homebrew bottles (`bottle do` / Mach-O header rewriting / re-signing), no wrapper scripts (`write_env_script`), and no archive repackaging.
+3. **Consumer-visible change gate:** Replacing raw executable assets with `.tar.gz` / `.zip` archives (or introducing bottles/wrappers that alter installed binary bytes) is a **consumer-visible packaging change** that requires prior brief review and explicit announcement in release notes (`CHANGELOG.md`, `RELEASE_NOTES.md`, `docs/releases/v<version>.md`).
+
 - [ ] Verify `go install github.com/3leaps/gonimbus/cmd/gonimbus@v<version>` works
 - [ ] Update `3leaps/homebrew-tap` `Formula/gonimbus.rb` from the uploaded release asset URLs and SHA256 values:
-  - [ ] macOS ARM64 asset present
-  - [ ] Linux AMD64 asset present
-  - [ ] Linux ARM64 asset present
+  - [ ] macOS ARM64 asset present (raw `gonimbus-darwin-arm64` URL, no archive/bottle/wrapper)
+  - [ ] Linux AMD64 asset present (raw `gonimbus-linux-amd64` URL, no archive/bottle/wrapper)
+  - [ ] Linux ARM64 asset present (raw `gonimbus-linux-arm64` URL, no archive/bottle/wrapper)
   - [ ] Intel macOS omitted unless the upstream release publishes `gonimbus-darwin-amd64`
   - [ ] Formula license matches gonimbus (`Apache-2.0`)
 - [ ] Verify Homebrew install resolves and runs: `brew install 3leaps/tap/gonimbus && gonimbus version`
 - [ ] Update `3leaps/scoop-bucket` `bucket/gonimbus.json` from the uploaded release asset URLs and SHA256 values:
-  - [ ] Windows AMD64 asset present
-  - [ ] Windows ARM64 asset present
+  - [ ] Windows AMD64 asset present (raw `gonimbus-windows-amd64.exe` URL, 2-element `bin` rename pair, no `extract_dir`)
+  - [ ] Windows ARM64 asset present (raw `gonimbus-windows-arm64.exe` URL, 2-element `bin` rename pair, no `extract_dir`)
   - [ ] `checkver` and `autoupdate` follow bucket convention
-- [ ] Verify Scoop install resolves and runs: `scoop install gonimbus && gonimbus version`
+- [ ] Verify Scoop install resolves and runs: `scoop install 3leaps/gonimbus && gonimbus version`
+- [ ] If cutting a new minor line (starting with `v0.5.0`), preserve the terminal patch release of the prior minor line as a pinned minor-series package (`Formula/gonimbus@0.4.rb` with `keg_only :versioned_formula` in `3leaps/homebrew-tap` and `bucket/gonimbus-0.4.json` in `3leaps/scoop-bucket`)
 - [ ] Test CLI commands work correctly
 
 ## Post-Release
@@ -185,6 +192,7 @@ GitHub Release. A green tag workflow is not release authorization.
 
 - [ ] New features documented with examples
 - [ ] Integration tests cover new functionality
+- [ ] **Minor-line retention rule (starting with `v0.5.0`):** Preserve the final patch release of the prior minor line as a pinned minor-series package (`Formula/gonimbus@0.<prior-minor>.rb` with `keg_only :versioned_formula` in `3leaps/homebrew-tap`, and `bucket/gonimbus-0.<prior-minor>.json` in `3leaps/scoop-bucket`) so consumers remaining on the prior minor line across a schema transition can still install its terminal build via package managers
 
 ### For Patch Releases (0.0.x)
 
