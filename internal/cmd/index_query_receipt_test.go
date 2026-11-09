@@ -891,7 +891,7 @@ func TestIndexQueryReceiptJSONL_MultiSegmentPrefixPrunesBeforeAndAfter(t *testin
 		durableCLIRow("bravo/2026-01-01/a.json", 30, "e3", startedAt),
 		durableCLIRow("bravo/2026-01-01/b.json", 40, "e4", startedAt),
 		durableCLIRow("bravo/2026-01-010/a.json", 50, "e5", startedAt),
-		durableCLIRow("charlie/01.json", 60, "e6", startedAt),
+		durableCLIRow("cappa/01.json", 60, "e6", startedAt),
 		durableCLIRow("delta/01.json", 70, "e7", startedAt),
 		durableCLIRow("delta/02.json", 80, "e8", startedAt),
 	}
@@ -1017,7 +1017,7 @@ func TestIndexQueryReceiptSegmentPruningInvariants(t *testing.T) {
 		durableCLIRow("bravo/2026-01-01/a.xml", 30, "e3", startedAt),
 		durableCLIRow("bravo/2026-01-01/b.json", 40, "e4", startedAt),
 		durableCLIRow("bravo/2026-01-010/a.xml", 50, "e5", startedAt),
-		durableCLIRow("charlie/01.json", 60, "e6", startedAt),
+		durableCLIRow("cappa/01.json", 60, "e6", startedAt),
 		durableCLIRow("delta/01.xml", 70, "e7", startedAt),
 		durableCLIRow("delta/02.json", 80, "e8", startedAt),
 	}

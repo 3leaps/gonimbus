@@ -51,10 +51,10 @@ func TestParseOutputDest(t *testing.T) {
 		},
 		{
 			name:     "file nested path",
-			uri:      "file:///home/user/data/output.jsonl",
+			uri:      "file:///srv/data/output.jsonl",
 			provider: string(provider.ProviderFile),
 			key:      "output.jsonl",
-			baseDir:  "/home/user/data",
+			baseDir:  "/srv/data",
 		},
 		{
 			name:    "empty uri",

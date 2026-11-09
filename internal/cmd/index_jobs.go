@@ -18,7 +18,7 @@ var indexJobsCmd = &cobra.Command{
 	Short: "Manage index build jobs",
 	Long: `Manage job records for long-running index builds.
 
-This command group is designed to be agent-friendly:
+This command group is designed to be automation-friendly:
 
 - stable job ids
 - predictable on-disk locations

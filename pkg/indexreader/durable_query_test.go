@@ -1106,7 +1106,7 @@ func TestDurableQuery_PrefixPrunesBeforeAndAfterSegments(t *testing.T) {
 		durableRow("bravo/2026-01-01/active.json", 30, "e3", mod),
 		// Segment 2: delimiter-adjacent lower bound ('0' > '/') after bravo/2026-01-01/
 		durableRow("bravo/2026-01-010/a.json", 40, "e4", mod),
-		durableRow("charlie/01.json", 50, "e5", mod),
+		durableRow("cappa/01.json", 50, "e5", mod),
 		// Segment 3: wholly after
 		durableRow("delta/01.json", 60, "e6", mod),
 		durableRow("delta/02.json", 70, "e7", mod),

@@ -192,6 +192,7 @@ git -C "$repo" switch -q feature
 refused 'GONIMBUS_SURFACE_PR_TEXT is required' ${cat_ok[@]+"${cat_ok[@]}"} GONIMBUS_SURFACE_SCAN_REQUIRED=1
 passes ${cat_ok[@]+"${cat_ok[@]}"} GONIMBUS_SURFACE_SCAN_REQUIRED=1 GONIMBUS_SURFACE_PR_TEXT="$scratch/pr-clean.md"
 passes ${cat_ok[@]+"${cat_ok[@]}"} GONIMBUS_SURFACE_SCAN_REQUIRED=1 GONIMBUS_SURFACE_SCOPE=release
+refused 'GONIMBUS_SURFACE_RELEASE_BASE override is not permitted' ${cat_ok[@]+"${cat_ok[@]}"} GONIMBUS_SURFACE_SCOPE=release GONIMBUS_SURFACE_RELEASE_BASE=HEAD
 refused 'base no-such-ref not found' ${cat_ok[@]+"${cat_ok[@]}"} GONIMBUS_SURFACE_BASE=no-such-ref
 [[ "$(uname -s)" != Darwin || "${case_checked:-0}" == 1 ]] || { echo 'error: the case-alias controls did not run on macOS' >&2; exit 1; }
 echo '[ok] surface-scan: catalog location (path, case incl. numeric names, .., hard link), canary and vocabulary, scanner errors, each surface incl. export-ignore, ignore files, oversize files, symlinks and local edits, skip accounting, required PR text'

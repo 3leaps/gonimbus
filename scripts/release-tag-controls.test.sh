@@ -291,7 +291,7 @@ printf 'operator-owned\n' > "$op_home/preserve"
     export PATH="$scratch/no-export-bin:$PATH" REAL_GPG="$real_gpg"
     export NO_EXPORT_MARKER="$scratch/secret-export-attempt"
     export REAL_GPGCONF="$real_gpgconf" OPERATOR_HOME="$op_home"
-    export OPERATOR_AGENT_MARKER="$scratch/operator-agent-kill-attempt"
+    export OPERATOR_AGENT_MARKER="$scratch/operator-gpg-kill-attempt"
     # Prove this boundary refuses secret export before exercising production.
     expect_fail gpg --homedir "$op_home" --export-secret-keys "$op_subkey"
     rm "$NO_EXPORT_MARKER"

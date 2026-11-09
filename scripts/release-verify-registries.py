@@ -287,6 +287,11 @@ def verify_brew(tag: str, digests: dict[str, str]) -> None:
     allowed_test_lines = {
         'system bin/"gonimbus", "version"',
         'system bin/"gonimbus", "--version"',
+        'assert_match version.to_s, shell_output("#{bin}/gonimbus version")',
+        'assert_match "\\"version\\":\\"#{version}\\"", shell_output("#{bin}/gonimbus version --json").gsub(/\\s+/, "")',
+    }
+    allowed_test_unless_lines = {
+        'assert_equal stable.checksum.hexdigest, Digest::SHA256.file((bin/"gonimbus").realpath).hexdigest',
     }
     allowed_platform_suffix_lines = {
         'return "darwin-arm64" if OS.mac? && Hardware::CPU.arm?': "gonimbus-darwin-arm64",
@@ -428,9 +433,22 @@ def verify_brew(tag: str, digests: dict[str, str]) -> None:
             if stripped == "end":
                 stack.pop()
                 continue
+            if stripped == "unless build.head?":
+                stack.append("test_unless")
+                continue
             if stripped in allowed_test_lines:
                 continue
             die(f"Homebrew formula test do contains disallowed statement: {stripped}")
+
+        if current == "test_unless":
+            if stripped == "end":
+                stack.pop()
+                continue
+            if stripped in allowed_test_unless_lines:
+                continue
+            die(
+                f"Homebrew formula test do unless block contains disallowed statement: {stripped}"
+            )
 
     if not saw_class or stack:
         die("Homebrew formula has unbalanced block structure")

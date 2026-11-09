@@ -141,11 +141,11 @@ func TestParseURI(t *testing.T) {
 		},
 		{
 			name: "file apple absolute path",
-			uri:  "file:///Users/operator/tree",
+			uri:  "file:///Users/example/tree",
 			want: &ObjectURI{
 				Provider: "file",
 				Bucket:   "local",
-				Key:      "/Users/operator/tree",
+				Key:      "/Users/example/tree",
 			},
 		},
 		{
