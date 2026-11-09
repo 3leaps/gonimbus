@@ -15,6 +15,100 @@ changes.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-09
+
+**Machine-readable `version --json`, throttled probe retries, Gen-2 release provenance and registry verification, durable storage architecture ratification, and digest-pinned runner contracts.**
+
+`gonimbus version --json [--extended]` emits single-line machine-readable build
+and module provenance (and succeeds in scrubbed `env -i` environments without
+`HOME`). Standalone provider `HEAD` and body-compare `GET` probes during
+`transfer reflow` retry `provider.ErrThrottled` up to `RetryMax` while releasing
+the adaptive concurrency limiter slot before backoff sleeps and reporting each
+attempt to `ObserveProviderResult`. Release provenance upgrades to Gen-2 with
+pinned signing-subkey verification (`config/release/signing-subkey.txt`),
+workflow SHA-256 pinning (`config/release/release-workflow.sha256`), attached
+`expected-fingerprints.{txt,ndjson}` release assets, clean-room published
+release staging (`make release-stage-published`), post-publication Go proxy /
+Homebrew / Scoop registry verification (`make release-verify-registries`), and
+public-surface hygiene scanning (`make surface-scan`). Durable storage
+architecture docs (`ADR-0007`, `ADR-0008`, `DDR-0001`) and the raw-asset
+packaging and `receipt-jsonl-v1` segment-pruning contracts are ratified and
+documented.
+
+See [`docs/releases/v0.4.7.md`](docs/releases/v0.4.7.md) for the narrative
+walkthrough.
+
+### Added
+
+- `gonimbus version --json` emits a single-line JSON object (`name`, `version`,
+  `commit`, `built_at`, `go`, `platform`), and `gonimbus version --json
+--extended` (`-e`) adds `os`, `arch`, `gofulmen`, `crucible`, and Go
+  `runtime/debug.ReadBuildInfo` provenance (`module_path`, `vcs_revision`,
+  `vcs_time`, `vcs_modified`) when present in the binary. `version` now enforces
+  `cobra.NoArgs`.
+- Gen-2 release provenance and public-surface hygiene tooling (`Makefile` and
+  `scripts/`):
+  - `scripts/release-workflow-pin.py` (`config/release/release-workflow.sha256`)
+    and `scripts/release-workflow-permissions.py` (`check` and `mutations`).
+  - `scripts/release-github-preflight.sh` (`make release-github-preflight`)
+    verifying the remote GitHub `Tag Publish Protection` ruleset and
+    `immutable_releases.enabled == true`.
+  - `scripts/release-post-tag-selector.sh` (`make release-post-tag-selector`)
+    and `scripts/release-record-anchor.sh` (`make release-record-anchor`)
+    binding post-tag ceremony steps to `config/release/signing-subkey.txt` and
+    `GONIMBUS_RELEASE_ANCHOR_FILE`.
+  - `scripts/release-stage-published.sh` (`make release-stage-published`) for
+    clean-room download and full verification of the published immutable GitHub
+    Release (16-asset set including `expected-fingerprints.txt` and
+    `expected-fingerprints.ndjson`).
+  - `scripts/release-verify-registries.py` and
+    `scripts/release-verify-registries.sh` (`make release-verify-registries`)
+    verifying Go module proxy (`proxy.golang.org`, `sum.golang.org`,
+    `pkg.go.dev`), `3leaps/homebrew-tap` `Formula/gonimbus.rb`, and
+    `3leaps/scoop-bucket` `bucket/gonimbus.json` (including raw-asset structural
+    invariants).
+  - `scripts/surface-scan.sh` (`make surface-scan` and `make
+surface-scan-release`), `scripts/content-check.py`,
+    `scripts/host-path-check.py`, `scripts/surface-canary.py`,
+    `scripts/committed_tree.py`, and `scripts/doctor.py`
+    (`config/doctor-versions.txt`).
+
+### Changed
+
+- Release tag, manifest signature, and post-tag verification require the exact
+  OpenPGP signing subkey pinned in `config/release/signing-subkey.txt` and route
+  GitHub CLI calls through `scripts/release-gh.sh` (`GH_HOST=github.com`).
+
+### Fixed
+
+- Standalone provider `HEAD` and body-compare `GET` probe operations in
+  `pkg/reflow` (`Execute`, `ProbeHeadWithRetry`) and CLI reflow (`transfer
+reflow` collision checks and destination inspection) now retry
+  `provider.ErrThrottled` up to `RetryMax` (default 3 retries / 4 total
+  attempts) with exponential backoff (`RetryBaseDelay`, default 200ms, capped at
+  30s), releasing the adaptive concurrency limiter slot before sleeping between
+  attempts and reporting each attempt to `ObserveProviderResult`. Optional
+  pre-transfer source `HEAD` in CLI reflow also routes non-404 errors (such as
+  exhausted `ErrThrottled`) through `RecordFatalError`.
+- CLI startup (`initConfig` in `internal/cmd/root.go`) no longer exits with code
+  51 (`Could not find home directory`) when `--config` is not set and neither
+  `os.UserConfigDir()` nor `os.UserHomeDir()` resolves (for example under
+  `env -i`); explicit `--config <missing-file>` remains fail-closed.
+
+### Documentation
+
+- Ratify `ADR-0007` (`Accepted`, `2026-09-30`), add `ADR-0008` (storage strata
+  and durable-first bulk state) and `DDR-0001` (index semantics and
+  representation parity), and add `docs/architecture/durable-storage.md` and
+  `docs/architecture/canonical-state-conformance.md`.
+- Overhaul `README.md` (`### Install`), `docs/user-guide/durable-index.md`,
+  `docs/user-guide/index.md`, `docs/security/README.md`, and
+  `RELEASE_CHECKLIST.md` to document Homebrew/Scoop/`sfetch` onboarding, the
+  raw-asset byte-for-byte packaging invariant, the Windows Scoop `shims\gonimbus.exe`
+  vs `scoop which gonimbus` SHA-256 verification distinction, the minor-line
+  `gonimbus@0.4` retention rule for `v0.5.0`, the four `receipt-jsonl-v1`
+  segment-pruning accounting invariants, and the Gen-2 release ceremony steps.
+
 ## [0.4.6] - 2026-11-08
 
 **Forward-compatible advisory control records, faster durable prefix queries, look-alike flag hints, and release provenance hardening.**
@@ -2044,7 +2138,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/3leaps/gonimbus/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/3leaps/gonimbus/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/3leaps/gonimbus/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/3leaps/gonimbus/compare/v0.4.3...v0.4.4

@@ -333,6 +333,11 @@ class Gonimbus < Formula
 
   test do
     system bin/"gonimbus", "version"
+    assert_match version.to_s, shell_output("#{bin}/gonimbus version")
+    assert_match "\"version\":\"#{version}\"", shell_output("#{bin}/gonimbus version --json").gsub(/\s+/, "")
+    unless build.head?
+      assert_equal stable.checksum.hexdigest, Digest::SHA256.file((bin/"gonimbus").realpath).hexdigest
+    end
   end
 
   private
@@ -358,6 +363,11 @@ expect_fail "disallowed method definition: def post_install" --registry brew
 write_fixtures
 sed -i.bak 's/  def install/  test do\n    system "strip", bin\/"gonimbus"\n  end\n\n  def install/' "$scratch/web/brew/gonimbus.rb"
 expect_fail "test do contains disallowed statement: system" --registry brew
+
+# Adding a disallowed statement inside test do -> unless build.head? fails closed
+write_fixtures
+sed -i.bak 's/  def install/  test do\n    unless build.head?\n      system "strip", bin\/"gonimbus"\n    end\n  end\n\n  def install/' "$scratch/web/brew/gonimbus.rb"
+expect_fail "test do unless block contains disallowed statement" --registry brew
 
 # Mutation 6d: Homebrew formula desc uses Ruby string interpolation (#{...})
 write_fixtures

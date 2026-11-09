@@ -142,8 +142,20 @@ mkdir "$work/tree"
 scan tree "$work/tree" || failed=1
 rm -rf "$work/tree"
 
+[[ -z "${GONIMBUS_SURFACE_RELEASE_BASE+x}" ]] ||
+	die 'GONIMBUS_SURFACE_RELEASE_BASE override is not permitted'
 if [[ "${GONIMBUS_SURFACE_SCOPE:-pr}" == release ]]; then
-	commits="$(git --no-replace-objects -C "$root" rev-list HEAD)"
+	# Commits before v0.4.6 (f3395dd2b0eaa817f515b32b68691386fec0eba5) predate
+	# Gen-2 surface-scan adoption and are immutable published history.
+	release_base="f3395dd2b0eaa817f515b32b68691386fec0eba5"
+	if [[ -n "$release_base" ]] &&
+		git --no-replace-objects -C "$root" rev-parse --verify --quiet "$release_base^{commit}" >/dev/null &&
+		git --no-replace-objects -C "$root" merge-base --is-ancestor "$release_base" HEAD &&
+		[[ "$(git --no-replace-objects -C "$root" rev-parse HEAD)" != "$(git --no-replace-objects -C "$root" rev-parse "$release_base^{commit}")" ]]; then
+		commits="$(git --no-replace-objects -C "$root" rev-list "$release_base..HEAD")"
+	else
+		commits="$(git --no-replace-objects -C "$root" rev-list HEAD)"
+	fi
 else
 	base="${GONIMBUS_SURFACE_BASE:-origin/main}"
 	git --no-replace-objects -C "$root" rev-parse --verify --quiet "$base^{commit}" >/dev/null || die "base $base not found; fetch it or set GONIMBUS_SURFACE_BASE"

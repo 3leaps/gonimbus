@@ -4,6 +4,68 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## [0.4.7] - 2026-11-09
+
+**Machine-readable `version --json`, throttled probe retries, Gen-2 release provenance and registry verification, durable storage architecture ratification, and digest-pinned runner contracts**
+
+v0.4.7 adds `gonimbus version --json [--extended]` (and allows CLI startup in
+scrubbed environments without `HOME`), retries throttled standalone provider
+probe operations (`HEAD` and body-compare `GET`) during `transfer reflow` with
+AIMD-aware concurrency slot release, upgrades release provenance to Gen-2
+(exact signing-subkey enforcement, workflow SHA-256 pinning, clean-room
+published-release staging, post-publication Go proxy / Homebrew / Scoop
+registry verification, and public-surface hygiene scanning), ratifies the
+durable storage architecture (`ADR-0007`, `ADR-0008`, `DDR-0001`), and codifies
+the raw-asset byte-for-byte packaging and `receipt-jsonl-v1` segment-pruning
+contracts for digest-pinned automation runners.
+
+- **`gonimbus version --json [--extended]` and scrubbed-environment startup.**
+  `gonimbus version --json` emits a single-line JSON object (`name`, `version`,
+  `commit`, `built_at`, `go`, `platform`), and `--json --extended` (`-e`) adds
+  `os`, `arch`, `gofulmen`, `crucible`, and Go module build info (`module_path`,
+  `vcs_revision`, `vcs_time`, `vcs_modified`). Human `gonimbus version
+[--extended]` output is unchanged, extra positional arguments are rejected,
+  and CLI startup no longer exits when `HOME` and `XDG_CONFIG_HOME` are unset
+  (`env -i`) and no explicit `--config` path is given.
+- **AIMD-aware retry for throttled reflow probes.** Standalone provider `HEAD`
+  and body-compare `GET` probe calls in `pkg/reflow` and `transfer reflow`
+  retry `provider.ErrThrottled` up to `RetryMax` (default 3 retries / 4 total
+  attempts), releasing the adaptive concurrency limiter slot before sleeping
+  between attempts and feeding each attempt outcome through
+  `ObserveProviderResult`. Optional pre-transfer source `HEAD` on CLI reflow
+  runs also routes fatal non-404 errors through `RecordFatalError`.
+- **Gen-2 release provenance, registry verification, and surface hygiene.**
+  Enforces the exact OpenPGP signing subkey (`config/release/signing-subkey.txt`)
+  across tag, manifest signature, and post-tag selector checks; pins
+  `.github/workflows/*.yml` digests in `config/release/release-workflow.sha256`;
+  attaches `expected-fingerprints.txt` and `expected-fingerprints.ndjson`
+  alongside the public keys on each immutable GitHub Release; adds `make
+release-stage-published`, `make release-verify-registries`, and `make
+surface-scan`.
+- **Durable storage architecture ratification.** Ratifies `ADR-0007` (Accepted,
+  `2026-09-30`), adds `ADR-0008` and `DDR-0001`, and publishes
+  `docs/architecture/durable-storage.md` and
+  `docs/architecture/canonical-state-conformance.md`.
+- **Raw-asset packaging invariant and `receipt-jsonl-v1` segment-pruning
+  contract.** Codifies the byte-for-byte raw-executable contract across GitHub
+  Releases, `3leaps/homebrew-tap`, and `3leaps/scoop-bucket` (including the
+  Windows Scoop `shims\gonimbus.exe` vs `scoop which gonimbus` distinction for
+  SHA-256 verifiers and the minor-line `@0.4` retention rule for `v0.5.0`), and
+  documents and contract-tests the four `receipt-jsonl-v1` segment-pruning
+  accounting invariants.
+
+### Upgrade
+
+```bash
+brew install 3leaps/tap/gonimbus
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.7
+```
+
+See [docs/releases/v0.4.7.md](docs/releases/v0.4.7.md) for the complete
+release notes.
+
+---
+
 ## [0.4.6] - 2026-11-08
 
 **Advisory control-record marker, faster durable prefix queries, look-alike flag hints, and release provenance hardening**
@@ -81,42 +143,4 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.5
 ```
 
 See [docs/releases/v0.4.5.md](docs/releases/v0.4.5.md) for the complete
-release notes.
-
----
-
-## [0.4.4] - 2026-10-20
-
-**Write receipts, probe outcomes, and listing integrity**
-
-v0.4.4 makes copy and probe pipelines report what each write acknowledged and
-how each probe ended, and makes index builds refuse a listing that ended early.
-
-- **Terminal write receipts.** Terminal reflow records can carry the
-  destination's acknowledgement of each write: payload SHA-256, ETag, revision,
-  and known source last-modified. These are transfer receipts, not independent
-  read-back verification.
-- **Probe summary and exit codes.** `content probe` ends with one
-  `gonimbus.content.probe.summary.v1` record. A completed run with object data
-  errors exits **60**, previously **32**; provider failures remain 32.
-- **Listing integrity.** A page that reports more results without a usable
-  continuation token fails the listing, so an index build fails before
-  sealing instead of attesting a partial listing.
-- **Durable include refusals** name the alternative
-  (`index migrate-match-scope`, `build.scope`, or `--format sqlite`), with a
-  worked `date_partitions` example for a wildcard in a middle path segment.
-- **Release provenance.** A read-only tag workflow builds the release; a
-  signed maintainer ceremony publishes it.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.4
-```
-
-Scripts that match exit code 32 for a completed probe with object data errors
-must handle 60. Upgrade probe producers and reflow consumers together, or filter
-the summary record for an older consumer.
-
-See [docs/releases/v0.4.4.md](docs/releases/v0.4.4.md) for the complete
 release notes.

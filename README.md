@@ -53,7 +53,7 @@ gonimbus version
 sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir ~/.local/bin
 ```
 
-Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`, `windows-amd64`, and `windows-arm64` are attached to each [GitHub release](https://github.com/3leaps/gonimbus/releases), with `SHA256SUMS` and `SHA512SUMS` manifests signed with minisign and GPG. See [docs/security/README.md](docs/security/README.md) to verify the signed tag and release assets.
+Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`, `windows-amd64`, and `windows-arm64` are attached to each immutable [GitHub release](https://github.com/3leaps/gonimbus/releases), alongside `SHA256SUMS` and `SHA512SUMS` manifests, detached minisign (`.minisig`) and OpenPGP (`.asc`) signatures, the tagged public verification keys (`gonimbus-minisign.pub`, `gonimbus-release-signing-key.asc`), and Decernor fingerprint anchors (`expected-fingerprints.txt`, `expected-fingerprints.ndjson`). See [docs/security/README.md](docs/security/README.md) to verify the signed tag, release assets, and published registries.
 
 **Pinned & digest-verified automation runners:** `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` track the latest stable release. Automation runners that gate execution on an exact release `SHA256SUMS` digest should install the tagged raw release binary into a runner-private directory (via [`sfetch`](https://github.com/3leaps/sfetch) or verified GitHub Release assets) or hold workstation upgrades explicitly (`brew pin gonimbus` / `scoop hold gonimbus`). On Windows Scoop, `~\scoop\shims\gonimbus.exe` on `PATH` is Scoop's generic launcher shim; hash the resolved target of `scoop which gonimbus` (`~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe`) when verifying against `SHA256SUMS`, and use `gonimbus version --json [--extended]` for machine-readable preflight checks. See [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory).
 
@@ -196,6 +196,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.4.7 release notes](docs/releases/v0.4.7.md),
 [v0.4.6 release notes](docs/releases/v0.4.6.md),
 [v0.4.5 release notes](docs/releases/v0.4.5.md),
 [v0.4.4 release notes](docs/releases/v0.4.4.md),
@@ -223,8 +224,6 @@ repeated queries on large buckets — see [Local Index](docs/user-guide/index.md
 ## Examples
 
 See `docs/user-guide/examples/README.md` for copy/paste recipes (advanced filtering, s3-compatible endpoints, and more as this project grows).
-
-For automated workflow testing and validation, see [fulseed](https://github.com/fulmenhq/fulseed) - a companion tool for building reproducible test scenarios.
 
 ## CLI Commands
 
@@ -326,14 +325,16 @@ When running in server mode:
 ## Development
 
 ```bash
-make help          # Show all targets
-make bootstrap     # Install dependencies
-make build         # Build binary
-make test          # Run unit tests
-make test-cloud    # Run cloud integration tests (requires moto)
-make lint          # Run linting
-make check-all     # Format, lint, test, API stability, release provenance checks
-make pr-final      # Non-mutating gate run by release preflight
+make help                 # Show all targets
+make bootstrap            # Install dependencies
+make build                # Build binary
+make test                 # Run unit tests
+make test-cloud           # Run cloud integration tests (requires moto)
+make lint                 # Run linting
+make surface-scan         # Run public-surface hygiene and content checks
+make release-tooling-test # Run release provenance and surface-hygiene test suites
+make check-all            # Format, lint, test, API stability, provenance, surface-scan
+make pr-final             # Non-mutating gate run by release preflight
 ```
 
 ### Cloud Integration Tests
@@ -359,6 +360,7 @@ See [docs/architecture.md](docs/architecture.md) for component design:
 - Provider Layer
 - Match Layer (Cloud-Doublestar)
 - Crawl Engine
+- Durable Storage & State Strata ([docs/architecture/durable-storage.md](docs/architecture/durable-storage.md) and [canonical-state conformance](docs/architecture/canonical-state-conformance.md))
 - Job Manifest schemas
 - Output formats
 

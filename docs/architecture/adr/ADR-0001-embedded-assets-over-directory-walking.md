@@ -13,7 +13,7 @@ Gonimbus produces standalone binaries (CLI) and can be consumed as a library by 
 
 The naive approach of walking up the directory tree to find project root markers (`go.mod`, `.git`) and then locating assets relative to that root **fails in production scenarios**:
 
-1. **Installed CLI binaries** - Users run `gonimbus` from arbitrary directories (e.g., `/home/user/data/`). There is no `go.mod` or `.git` to find.
+1. **Installed CLI binaries** - Users run `gonimbus` from arbitrary directories (e.g., `/srv/data/`). There is no `go.mod` or `.git` to find.
 
 2. **Library consumers** - When another project imports `github.com/3leaps/gonimbus/pkg/manifest`, the working directory is the consumer's project, not the gonimbus repository.
 

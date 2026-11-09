@@ -117,7 +117,7 @@ checklists:
     - "Every gate ships at least one negative control: a case that must fail it"
 examples:
   - type: other
-    title: Body capture validation (fulminar)
+    title: Body capture validation
     content: |
       ## QA Findings: Body Content Access (v0.2.0)
 
@@ -153,9 +153,9 @@ examples:
       ### Scenarios
       | Scenario | Go | TS | Py | Status |
       |----------|----|----|-----|--------|
-      | XDG_CONFIG_HOME set | /custom/fulminar | /custom/fulminar | /custom/fulminar | PASS |
-      | XDG_CONFIG_HOME unset | ~/.config/fulminar | ~/.config/fulminar | ~/.config/fulminar | PASS |
-      | Windows fallback | %APPDATA%/fulminar | %APPDATA%/fulminar | N/A | PASS |
+      | XDG_CONFIG_HOME set | /custom/gonimbus | /custom/gonimbus | /custom/gonimbus | PASS |
+      | XDG_CONFIG_HOME unset | ~/.config/gonimbus | ~/.config/gonimbus | ~/.config/gonimbus | PASS |
+      | Windows fallback | %APPDATA%/gonimbus | %APPDATA%/gonimbus | N/A | PASS |
 
       ### Verdict
       Parity confirmed across all three language implementations.

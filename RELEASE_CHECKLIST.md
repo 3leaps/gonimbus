@@ -18,10 +18,13 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] Code formatted: `make fmt`
 - [ ] Lint checks clean: `make lint`
 - [ ] Library API stability gate passing: `make api-stability`
+- [ ] Public-surface hygiene and content checks passing: `make surface-scan`
+- [ ] Release provenance and tooling suites passing: `make release-provenance-check` and `make release-tooling-test`
 - [ ] Sensitive local data reviewed against `docs/architecture/adr/ADR-0005-sensitive-local-data-policy-conformance.md` and the [3 Leaps Sensitive Local Data Policy](https://github.com/3leaps/oss-policies/blob/main/SENSITIVE-LOCAL-DATA.md); none is stored inside the repo tree relying only on `.gitignore`.
 - [ ] Application builds: `make build`
 - [ ] Manual smoke tests completed:
   - [ ] `./bin/gonimbus version`
+  - [ ] `./bin/gonimbus version --json && ./bin/gonimbus version --json --extended`
   - [ ] `./bin/gonimbus serve` (starts without errors)
   - [ ] `./bin/gonimbus health`
   - [ ] `./bin/gonimbus doctor`
@@ -77,7 +80,7 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 - [ ] Commit messages follow attribution standard
 - [ ] No uncommitted changes: `git status` clean
 - [ ] All commits have proper trailers
-- [ ] Pre-push checks run: `make prepush`
+- [ ] Pre-push and final quality gates run: `make check-all`, `make prepush`, and `make pr-final`
 
 ### Final Validation
 
@@ -91,12 +94,17 @@ Standard checklist for gonimbus releases to ensure consistency and quality.
 
 The tag is signed by `3 Leaps Infosec Team <infosec@3leaps.net>` with the
 pinned signing subkey (`config/release/tagger-identity.txt`,
-`docs/security/release-signing-keys.asc`). Set in the shell, never in the repo:
-`GONIMBUS_RELEASE_TAG`, `GONIMBUS_DECERNOR_BIN` (absolute path to `decernor >= 0.1.8`),
+`config/release/signing-subkey.txt`, `docs/security/release-signing-keys.asc`,
+`docs/security/gonimbus-minisign.pub`, and `keys/expected-fingerprints.{txt,ndjson}`).
+Set in the shell, never in the repo: `GONIMBUS_RELEASE_TAG`,
+`GONIMBUS_DECERNOR_BIN` (absolute path to `decernor >= 0.1.8`),
 `GONIMBUS_TAG_MESSAGE_DIR` (outside the repository), `GONIMBUS_TAGGER_NAME`,
 `GONIMBUS_TAGGER_EMAIL`, `GONIMBUS_GPG_SIGNING_FINGERPRINT` (primary),
-`GONIMBUS_PGP_KEY_ID` (`<subkey>!`), and `GONIMBUS_GPG_HOMEDIR` (isolated `0700`
-directory outside the repository, never `~/.gnupg`).
+`GONIMBUS_PGP_KEY_ID` (`<subkey>!` matching `config/release/signing-subkey.txt`),
+`GONIMBUS_GPG_HOMEDIR` (isolated `0700` directory outside the repository, never
+`~/.gnupg`), `GONIMBUS_RELEASE_ANCHOR_FILE` (absolute path outside the
+repository, never a symlink), and `LIMENSAFE_CATALOG_PATH` (required by
+`make release-preflight` for `make surface-scan-release`).
 
 The tag comes only from `GONIMBUS_RELEASE_TAG`. Every `release-*` target refuses
 to start while the generic `RELEASE_TAG` is set, even to an empty value, so
@@ -104,10 +112,13 @@ to start while the generic `RELEASE_TAG` is set, even to an empty value, so
 publishes also requires the tag to match `VERSION`; after a version bump on
 `main`, run the remaining steps from a checkout of the tagged commit.
 
-- [ ] Pre-tag gate on the merged main commit: `make release-preflight`
+- [ ] Remote GitHub tag-protection ruleset and immutable releases preflight: `make release-github-preflight`
+- [ ] Pre-tag gate on the merged main commit (runs committed anchor verification, `make surface-scan-release`, workflow SHA-256 pin check against `config/release/release-workflow.sha256`, `make release-github-preflight`, content-check, dates check, outside-`$HOME` clean-clone test, and `make pr-final`): `make release-preflight`
 - [ ] Prepare and review the external tag message: `make release-prepare-tag-message`
 - [ ] Create and verify the local signed tag: `make release-tag`
 - [ ] Publish and verify the tag (ruleset, remote object, GitHub `valid`): `make release-push-tag`
+- [ ] Verify post-tag ceremony selector environment (`GONIMBUS_RELEASE_TAG`, primary fingerprint, and `<subkey>!` matching `config/release/signing-subkey.txt`): `make release-post-tag-selector`
+- [ ] Verify the published remote tag and record the external ceremony anchor (`GONIMBUS_RELEASE_ANCHOR_FILE`): `make release-record-anchor`
 
 ### Release Artifacts & Signing
 
@@ -115,7 +126,7 @@ The tag workflow is read-only. It verifies the signed tag, builds, and uploads
 `release-artifacts-v<version>` as a workflow artifact. It does not create the
 GitHub Release. A green tag workflow is not release authorization.
 
-- [ ] Download the CI artifacts for the verified tag and record the anchor.
+- [ ] Download the CI artifacts for the verified tag and cross-check the recorded ceremony anchor (`GONIMBUS_RELEASE_ANCHOR_FILE`).
       Name the exact Release workflow run and its successful, latest attempt
       (`gh run list --workflow release.yml`); staging binds to that run's single
       `release-artifacts-v<version>` artifact by id and digest and refuses if a
@@ -123,6 +134,7 @@ GitHub Release. A green tag workflow is not release authorization.
 
   ```bash
   export GONIMBUS_RELEASE_TAG=v<version>
+  export GONIMBUS_RELEASE_ANCHOR_FILE=<abs-path-outside-repo>
   export RELEASE_RUN_ID=<run id> RELEASE_RUN_ATTEMPT=<attempt>
   make release-clean
   make release-download
@@ -133,12 +145,13 @@ GitHub Release. A green tag workflow is not release authorization.
       `docs/releases/v<version>.md` from the tagged commit): `make release-create-draft`
 - [ ] Sign the manifests (minisign and PGP both required; also set
       `GONIMBUS_MINISIGN_KEY`): `make release-sign`
-- [ ] Stage and check public keys from the verified tagged commit: `make release-export-keys release-verify-keys`
-- [ ] Verify signatures: `make release-verify-signatures`
+- [ ] Stage and check public keys (`gonimbus-minisign.pub`, `gonimbus-release-signing-key.asc`) and Decernor fingerprint anchors (`expected-fingerprints.txt`, `expected-fingerprints.ndjson`) from the verified tagged commit: `make release-export-keys release-verify-keys`
+- [ ] Verify signatures (both minisign and exact signing-subkey OpenPGP signatures on `SHA256SUMS` and `SHA512SUMS`): `make release-verify-signatures`
 - [ ] Stage notes: `make release-notes`
-- [ ] Upload provenance assets to the draft: `make release-upload`
+- [ ] Upload provenance assets (`SHA256SUMS`, `SHA512SUMS`, `.minisig`, `.asc`, both public keys, both fingerprint anchor files, and `release-notes-v<version>.md`) to the draft: `make release-upload`
 - [ ] Preserve the package-manager URL and SHA256 block printed by `make release-upload`
 - [ ] Promote the draft after byte-verifying it against the local signed set, then re-download every published asset and assert GitHub immutable release state (`.draft == false` and `.immutable == true`): `make release-publish`
+- [ ] Clean-room download and full verification of the published immutable GitHub release into `dist/published` (verifies `.draft == false`, `.immutable == true`, exact 16-asset set and digests, tagged-commit blob parity for public keys/anchors/notes, Decernor fingerprint verify, and minisign + OpenPGP signatures): `make release-stage-published`
 
 ### Distribution
 
@@ -161,6 +174,7 @@ GitHub Release. A green tag workflow is not release authorization.
   - [ ] Windows ARM64 asset present (raw `gonimbus-windows-arm64.exe` URL, 2-element `bin` rename pair, no `extract_dir`)
   - [ ] `checkver` and `autoupdate` follow bucket convention
 - [ ] Verify Scoop install resolves and runs: `scoop install 3leaps/gonimbus && gonimbus version`
+- [ ] Verify Go module proxy (`proxy.golang.org`, `sum.golang.org`, `pkg.go.dev`), `3leaps/homebrew-tap`, and `3leaps/scoop-bucket` against the staged published release (`dist/published`) and tagged commit: `make release-verify-registries`
 - [ ] If cutting a new minor line (starting with `v0.5.0`), preserve the terminal patch release of the prior minor line as a pinned minor-series package (`Formula/gonimbus@0.4.rb` with `keg_only :versioned_formula` in `3leaps/homebrew-tap` and `bucket/gonimbus-0.4.json` in `3leaps/scoop-bucket`)
 - [ ] Test CLI commands work correctly
 

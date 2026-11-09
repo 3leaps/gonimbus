@@ -8,14 +8,20 @@ public-blob fingerprint, through an independently trusted maintainer channel
 before accepting downloaded public keys. A key distributed beside a signature
 is not independent authentication.
 
-The public pins are [`release-signing-keys.asc`](release-signing-keys.asc) and
-[`gonimbus-minisign.pub`](gonimbus-minisign.pub). The tagger identity is
+The public pins are [`release-signing-keys.asc`](release-signing-keys.asc),
+[`gonimbus-minisign.pub`](gonimbus-minisign.pub), and the exact signing subkey
+[`config/release/signing-subkey.txt`](../../config/release/signing-subkey.txt).
+The tagger identity is
 [`config/release/tagger-identity.txt`](../../config/release/tagger-identity.txt).
 Tag verification and release staging extract these from the verified tagged
 commit as inert blobs, not from the current checkout or an external public-key
-locator. The published `gonimbus-minisign.pub` and
-`gonimbus-release-signing-key.asc` assets must match the committed files
-byte-for-byte; fingerprint verification remains required.
+locator. The published `gonimbus-minisign.pub`,
+`gonimbus-release-signing-key.asc`, `expected-fingerprints.txt`, and
+`expected-fingerprints.ndjson` assets must match the committed files
+byte-for-byte (`make release-stage-published`); independent fingerprint
+verification remains required. Post-publication registry parity across the Go
+module proxy, `3leaps/homebrew-tap`, and `3leaps/scoop-bucket` is verified by
+`make release-verify-registries`.
 
 The text and NDJSON anchors in [`keys/`](../../keys/) use Decernor's
 `openpgp-fingerprint-v1` primary and `minisign-public-blob-sha256-v1` schemes.
