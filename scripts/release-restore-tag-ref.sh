@@ -16,6 +16,8 @@ for _git_var in $(compgen -e); do
 done
 unset _git_var
 export GIT_NO_REPLACE_OBJECTS=1
+# shellcheck source=scripts/release-gh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-gh.sh"
 
 die() {
     echo "error: $*" >&2
@@ -31,7 +33,7 @@ case "$(git config --get remote.origin.url)" in
     *) die 'unexpected release origin' ;;
 esac
 
-ref_json="$(gh api "repos/$repo/git/ref/tags/$tag")" || die 'remote release tag is absent'
+ref_json="$(release_gh api "repos/$repo/git/ref/tags/$tag")" || die 'remote release tag is absent'
 remote_type="$(jq -r '.object.type // empty' <<< "$ref_json")"
 remote_object="$(jq -r '.object.sha // empty' <<< "$ref_json")"
 [[ "$remote_type" == tag ]] || die 'remote release tag must be annotated'

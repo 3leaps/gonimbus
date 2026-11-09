@@ -23,6 +23,9 @@ while [[ $# -gt 0 ]]; do
             jq_expr="$2"
             shift 2
             ;;
+        --hostname)
+            shift 2
+            ;;
         -*) shift ;;
         *)
             path="$1"

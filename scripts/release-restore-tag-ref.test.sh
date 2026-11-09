@@ -11,7 +11,8 @@ git -C "$scratch/source" config user.email 'fixture@example.invalid'
 printf 'fixture\n' > "$scratch/source/file"
 printf '1.2.3\n' > "$scratch/source/VERSION"
 cp "$root/scripts/release-guard-tag-version.sh" "$scratch/source/guard.sh"
-git -C "$scratch/source" add file VERSION guard.sh
+cp "$root/scripts/release-gh.sh" "$scratch/source/release-gh.sh"
+git -C "$scratch/source" add file VERSION guard.sh release-gh.sh
 git -C "$scratch/source" commit -qm 'fixture commit'
 git -C "$scratch/source" tag -am 'Fixture release' v1.2.3
 commit="$(git -C "$scratch/source" rev-parse HEAD)"

@@ -4,6 +4,14 @@
 # holds no write authority; the draft release is created locally afterwards.
 # Usage: release-fetch-ci-artifacts.sh vX.Y.Z [dest_dir]
 set -euo pipefail
+for _git_var in $(compgen -e); do
+    case "$_git_var" in
+        GIT_COMMITTER_NAME | GIT_COMMITTER_EMAIL | GIT_AUTHOR_NAME | GIT_AUTHOR_EMAIL) ;;
+        GIT_*) unset "$_git_var" ;;
+    esac
+done
+unset _git_var
+export GIT_NO_REPLACE_OBJECTS=1
 die() {
     echo "error: $*" >&2
     exit 1
@@ -13,6 +21,8 @@ dest="${2:-dist/release}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'usage: release-fetch-ci-artifacts.sh vX.Y.Z [dest_dir]'
 command -v gh > /dev/null 2>&1 || die 'gh (GitHub CLI) not found in PATH'
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-gh.sh
+source "$root/scripts/release-gh.sh"
 mkdir -p "$dest"
 [[ -z "$(find "$dest" -mindepth 1 -maxdepth 1 2> /dev/null)" ]] || die "$dest is not empty; run make release-clean first"
 # Verify the published tag now and record the verified object and commit. Every
@@ -24,14 +34,47 @@ GONIMBUS_RELEASE_TAG="$tag" GONIMBUS_ANCHOR_OUT="$anchor" "$root/scripts/release
 commit="$(awk -F= '$1=="commit" {print $2}' "$anchor")"
 object="$(awk -F= '$1=="object" {print $2}' "$anchor")"
 [[ "$commit" =~ ^[0-9a-f]{40}$ && "$object" =~ ^[0-9a-f]{40}$ ]] || die 'verification did not return an anchor'
-# The maintainer names the exact run and attempt (re-runs share a run id). The
-# named attempt must be a successful push-triggered release.yml run for this tag
-# on the tagged commit.
-run_id="${RELEASE_RUN_ID:-}"
-run_attempt="${RELEASE_RUN_ATTEMPT:-}"
+if [[ -n "${GONIMBUS_RELEASE_ANCHOR_FILE:-}" ]]; then
+    [[ -f "$GONIMBUS_RELEASE_ANCHOR_FILE" && ! -L "$GONIMBUS_RELEASE_ANCHOR_FILE" ]] ||
+        die "ceremony anchor file not found: $GONIMBUS_RELEASE_ANCHOR_FILE"
+    [[ "$(awk -F= '$1=="tag" {print $2}' "$GONIMBUS_RELEASE_ANCHOR_FILE")" == "$tag" &&
+        "$(awk -F= '$1=="object" {print $2}' "$GONIMBUS_RELEASE_ANCHOR_FILE")" == "$object" &&
+        "$(awk -F= '$1=="commit" {print $2}' "$GONIMBUS_RELEASE_ANCHOR_FILE")" == "$commit" ]] ||
+        die 'verified tag differs from the recorded ceremony anchor'
+fi
+python3 -B -E "$root/scripts/release-workflow-pin.py" verify-commit "$commit" > /dev/null ||
+    die "release workflow pin check failed at tagged commit $commit"
+# The maintainer names the exact run and attempt (re-runs share a run id), or
+# when neither RELEASE_RUN_ID nor RELEASE_RUN_ATTEMPT is set in the environment,
+# deterministically selects the single successful push-triggered release.yml run
+# for this tag on the tagged commit.
+if [[ -z "${RELEASE_RUN_ID+x}" && -z "${RELEASE_RUN_ATTEMPT+x}" ]]; then
+    runs="$(release_gh run list --repo 3leaps/gonimbus --workflow release.yml --branch "$tag" --limit 100 \
+        --json databaseId,headSha,conclusion,event \
+        --jq "[.[] | select(.headSha == \"$commit\" and .conclusion == \"success\" and .event == \"push\") | .databaseId]")" ||
+        die "could not list Release workflow runs for $tag"
+    if [[ -n "${GONIMBUS_RELEASE_RUN_ID:-}" ]]; then
+        run_id="$GONIMBUS_RELEASE_RUN_ID"
+        [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || die 'RELEASE_RUN_ID required (the Release workflow run for this tag)'
+        jq -e --argjson run "$run_id" 'index($run) != null' <<< "$runs" > /dev/null ||
+            die "selected run $run_id is not a successful release run for $tag at $commit"
+    else
+        [[ "$(jq length <<< "$runs")" == 1 ]] ||
+            die 'RELEASE_RUN_ID required (select an exact successful Release workflow run for this tag)'
+        run_id="$(jq -r '.[0]' <<< "$runs")"
+    fi
+    run_attempt="${GONIMBUS_RELEASE_RUN_ATTEMPT:-}"
+    if [[ -z "$run_attempt" ]]; then
+        run_attempt="$(release_gh api "repos/3leaps/gonimbus/actions/runs/$run_id" --jq '.run_attempt')" ||
+            die "could not read run $run_id"
+    fi
+else
+    run_id="${RELEASE_RUN_ID:-}"
+    run_attempt="${RELEASE_RUN_ATTEMPT:-}"
+fi
 [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || die 'RELEASE_RUN_ID required (the Release workflow run for this tag)'
 [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || die 'RELEASE_RUN_ATTEMPT required (the successful attempt of that run)'
-run="$(gh api "repos/3leaps/gonimbus/actions/runs/$run_id/attempts/$run_attempt" \
+run="$(release_gh api "repos/3leaps/gonimbus/actions/runs/$run_id/attempts/$run_attempt" \
     --jq '{path, event, head_branch, head_sha, status, conclusion, run_attempt}')" ||
     die "could not read run $run_id attempt $run_attempt"
 jq -e --arg tag "$tag" --arg commit "$commit" --argjson attempt "$run_attempt" '
@@ -39,17 +82,17 @@ jq -e --arg tag "$tag" --arg commit "$commit" --argjson attempt "$run_attempt" '
     .head_sha == $commit and .status == "completed" and .conclusion == "success" and
     .run_attempt == $attempt' <<< "$run" > /dev/null ||
     die "run $run_id attempt $run_attempt is not a successful release run for $tag at $commit"
-# `gh run download` cannot select an attempt, so bind to one artifact instead:
+# Run-level download cannot select an attempt, so bind to one artifact instead:
 # record its id and digest while the named attempt is the latest, download that
 # exact id, check the bytes against the digest, then confirm nothing moved.
 artifact_name="release-artifacts-$tag"
 snapshot() {
     local latest listing
-    latest="$(gh api "repos/3leaps/gonimbus/actions/runs/$run_id" --jq '.run_attempt')" ||
+    latest="$(release_gh api "repos/3leaps/gonimbus/actions/runs/$run_id" --jq '.run_attempt')" ||
         die "could not read run $run_id"
     [[ "$latest" == "$run_attempt" ]] ||
         die "run $run_id has a later attempt ($latest); artifacts belong to the latest attempt, name it"
-    listing="$(gh api "repos/3leaps/gonimbus/actions/runs/$run_id/artifacts?per_page=100")" ||
+    listing="$(release_gh api "repos/3leaps/gonimbus/actions/runs/$run_id/artifacts?per_page=100")" ||
         die "could not list artifacts for run $run_id"
     # The listing is paginated; judge "exactly one" only over a complete page.
     jq -e '(.total_count | type) == "number" and .total_count == (.artifacts | length)' <<< "$listing" > /dev/null ||
@@ -66,7 +109,7 @@ read -r artifact_id artifact_digest <<< "$before"
 [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "artifact $artifact_id has no sha256 digest"
 work="$(mktemp -d)"
 trap 'rm -f "$anchor"; rm -rf "$work"' EXIT
-gh api "repos/3leaps/gonimbus/actions/artifacts/$artifact_id/zip" > "$work/artifact.zip" ||
+release_gh api "repos/3leaps/gonimbus/actions/artifacts/$artifact_id/zip" > "$work/artifact.zip" ||
     die "could not download artifact $artifact_id"
 actual="sha256:$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$work/artifact.zip")"
 [[ "$actual" == "$artifact_digest" ]] || die "artifact $artifact_id bytes do not match its recorded digest"

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# shellcheck source=scripts/release-gh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-gh.sh"
 
 TAG="${1:-}"
 DEST_DIR="${2:-dist/release}"
@@ -20,6 +22,6 @@ mkdir -p "${DEST_DIR}"
 
 echo "→ Downloading release assets for ${TAG} into ${DEST_DIR}"
 # --clobber allows re-running safely
-gh release download "${TAG}" --dir "${DEST_DIR}" --clobber
+release_gh release download "${TAG}" --dir "${DEST_DIR}" --clobber
 
 echo "✅ Download complete"

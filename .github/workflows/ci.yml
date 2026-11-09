@@ -176,24 +176,17 @@ jobs:
           set -euo pipefail
           test -x "${GONIMBUS_DECERNOR_BIN:?GONIMBUS_DECERNOR_BIN required}"
           make release-anchors-check
-      - name: Install minisign and checksum-pinned yq
+      - name: Install minisign and python3-yaml
         run: |
           set -euo pipefail
           sudo apt-get update -q
-          sudo apt-get install -y -q minisign
-          tool_dir="$(mktemp -d "$RUNNER_TEMP/yq.XXXXXX")"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            'https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64' \
-            --output "$tool_dir/yq_linux_amd64"
-          (cd "$tool_dir" && sha256sum --check "$GITHUB_WORKSPACE/config/release/yq-ci-sha256.txt")
-          install -m 0755 "$tool_dir/yq_linux_amd64" "$tool_dir/yq"
-          echo "$tool_dir" >> "$GITHUB_PATH"
+          sudo apt-get install -y -q minisign python3-yaml
       - name: Signed-tag ceremony regression tests
         run: |
           set -euo pipefail
           git config --global user.name 'CI Fixture'
           git config --global user.email 'ci-fixture@example.invalid'
-          make release-tag-tests
+          make release-tooling-test
   # Native Windows coverage for handle-relative job registry mutation, SQLite
   # snapshot binding, and leased GC quarantine/recovery. These cannot be
   # certified by cross-compilation because share masks, access masks,

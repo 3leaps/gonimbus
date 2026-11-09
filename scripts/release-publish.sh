@@ -35,6 +35,8 @@ tag="${1:-}"
 src="${2:-dist/release}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'usage: release-publish.sh vX.Y.Z [source_dir]'
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-gh.sh
+source "$root/scripts/release-gh.sh"
 # shellcheck source=scripts/release-decernor.sh
 source "$root/scripts/release-decernor.sh"
 resolve_release_decernor ceremony || die 'trusted Decernor identity/version check failed'
@@ -55,6 +57,7 @@ provenance=(
     SHA256SUMS SHA256SUMS.asc SHA256SUMS.minisig
     SHA512SUMS SHA512SUMS.asc SHA512SUMS.minisig
     "${binary}-minisign.pub" "${binary}-release-signing-key.asc"
+    expected-fingerprints.txt expected-fingerprints.ndjson
     "release-notes-${tag}.md"
 )
 expected=("${packages[@]}" "${provenance[@]}")
@@ -80,7 +83,7 @@ tagged_notes="$(git -C "$root" rev-parse --verify --quiet "$anchor_commit:docs/r
     die "release-notes-$tag.md differs from docs/releases/$tag.md at the tagged commit"
 
 # 2. A draft with exactly the expected asset names.
-release="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
+release="$(release_gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
 [[ "$(jq -r '.isDraft' <<< "$release")" == true ]] || die "$tag is not a draft; refusing to re-promote"
 diff <(jq -r '.assets[].name' <<< "$release" | sort) <(printf '%s\n' "${expected[@]}" | sort) > /dev/null ||
     die 'draft assets differ from the expected set'
@@ -124,9 +127,13 @@ pin_minisign="$(awk '$1=="minisign" {print $2}' "$pinned/anchors")"
     --anchors-ndjson "$pinned/anchors.ndjson" \
     --gpg "$pinned/pgp.asc" --minisign "$pinned/minisign.pub" > /dev/null ||
     die 'tagged public exports do not match the fingerprint anchors'
-# The staged minisign public key must be the tagged commit blob, byte-exact.
+# The staged minisign public key and fingerprint anchors must be the tagged commit blobs, byte-exact.
 cmp -s "$pinned/minisign.pub" "$src/${binary}-minisign.pub" ||
     die 'staged minisign key is not the key committed in the tagged commit (not byte-identical to the tagged commit)'
+cmp -s "$pinned/anchors" "$src/expected-fingerprints.txt" ||
+    die 'staged expected-fingerprints.txt is not byte-identical to keys/expected-fingerprints.txt at the tagged commit'
+cmp -s "$pinned/anchors.ndjson" "$src/expected-fingerprints.ndjson" ||
+    die 'staged expected-fingerprints.ndjson is not byte-identical to keys/expected-fingerprints.ndjson at the tagged commit'
 gpg --homedir "$gpg_home" --batch --quiet --import "$pinned/pgp.asc" 2> /dev/null || die 'committed PGP key failed to import'
 listing="$(gpg --homedir "$gpg_home" --batch --with-colons --with-subkey-fingerprint --list-keys)"
 [[ "$(awk -F: '$1=="pub" {n++} END {print n+0}' <<< "$listing")" == 1 ]] || die 'committed PGP key must hold exactly one primary'
@@ -175,7 +182,7 @@ for manifest in SHA256SUMS SHA512SUMS; do
 done
 
 # 5. The draft on GitHub is byte-identical to the verified local set.
-gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the draft assets'
+release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the draft assets'
 for want in "${expected[@]}"; do
     cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
 done
@@ -183,25 +190,25 @@ done
 # 6. Narrow the TOCTOU window (PDR-0010 §2.3, §2.4): re-read draft state and
 # re-download/compare immediately before promotion, then re-download and
 # byte-compare after promotion and assert GitHub immutability.
-pre_promote="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
+pre_promote="$(release_gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
 [[ "$(jq -r '.isDraft' <<< "$pre_promote")" == true ]] ||
     die "$tag is not a draft immediately before promote"
 diff <(jq -r '.assets[].name' <<< "$pre_promote" | sort) <(printf '%s\n' "${expected[@]}" | sort) > /dev/null ||
     die 'draft assets differ from the expected set immediately before promote'
 rm -rf "$fresh"
 mkdir -p "$fresh"
-gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not re-download the draft assets'
+release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not re-download the draft assets'
 for want in "${expected[@]}"; do
     cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
 done
-gh release edit "$tag" --repo "$repo" --draft=false > /dev/null
+release_gh release edit "$tag" --repo "$repo" --draft=false > /dev/null
 rm -rf "$fresh"
 mkdir -p "$fresh"
-gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the published assets'
+release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the published assets'
 for want in "${expected[@]}"; do
     cmp -s "$fresh/$want" "$src/$want" || die "published asset differs from the verified local file: $want (accepted residual race realized)"
 done
-release_meta="$(gh api "repos/$repo/releases/tags/$tag")" ||
+release_meta="$(release_gh api "repos/$repo/releases/tags/$tag")" ||
     die "could not read published release metadata for $tag"
 jq -e '.draft == false and .immutable == true' <<< "$release_meta" > /dev/null ||
     die "published release $tag is not immutable on GitHub"

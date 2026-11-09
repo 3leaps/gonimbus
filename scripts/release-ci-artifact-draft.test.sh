@@ -13,14 +13,16 @@ git -C "$repo" config user.name 'Fixture'
 git -C "$repo" config user.email fixture@example.invalid
 printf 'x\n' > "$repo/file"
 git -C "$repo" add file
-mkdir -p "$repo/docs/releases"
+mkdir -p "$repo/docs/releases" "$repo/.github/workflows" "$repo/config/release" "$repo/scripts"
 printf '# fixture v1.2.3\n\nCurated notes.\n' > "$repo/docs/releases/v1.2.3.md"
-git -C "$repo" add docs/releases/v1.2.3.md
+cp "$root"/.github/workflows/*.yml "$repo/.github/workflows/"
+cp "$root/config/release/release-workflow.sha256" "$repo/config/release/release-workflow.sha256"
+git -C "$repo" add docs/releases/v1.2.3.md .github/workflows config/release/release-workflow.sha256
 git -C "$repo" commit -qm fixture
 git -C "$repo" tag -am 'Fixture release' v1.2.3
 commit="$(git -C "$repo" rev-parse HEAD)"
-mkdir -p "$repo/scripts"
-cp "$root/scripts/release-fetch-ci-artifacts.sh" "$root/scripts/release-create-draft.sh" "$repo/scripts/"
+cp "$root/scripts/release-fetch-ci-artifacts.sh" "$root/scripts/release-create-draft.sh" \
+    "$root/scripts/release-gh.sh" "$root/scripts/release-workflow-pin.py" "$repo/scripts/"
 object="$(git -C "$repo" rev-parse refs/tags/v1.2.3)"
 # Stand-in for the trusted published-tag gate (its own suite uses real
 # signatures). It reports the fixture anchor, records any expected anchor it is

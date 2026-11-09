@@ -30,6 +30,8 @@ tag="${1:-}"
 src="${2:-dist/release}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'usage: release-create-draft.sh vX.Y.Z [source_dir]'
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/release-gh.sh
+source "$root/scripts/release-gh.sh"
 command -v gh > /dev/null 2>&1 || die 'gh (GitHub CLI) not found in PATH'
 [[ -d "$src" && ! -L "$src" ]] || die "source dir not found: $src"
 binary="${GONIMBUS_BINARY_NAME:-gonimbus}"
@@ -86,7 +88,7 @@ for manifest, algorithm, width in (('SHA256SUMS', 'sha256', 64), ('SHA512SUMS', 
             raise SystemExit(f'error: {manifest} digest mismatch for {name}')
 PY
 
-if gh release view "$tag" --repo 3leaps/gonimbus > /dev/null 2>&1; then
+if release_gh release view "$tag" --repo 3leaps/gonimbus > /dev/null 2>&1; then
     die "a release for $tag already exists; do not replace it"
 fi
 # The packages were staged against a verified tag object and commit. Bind the
@@ -116,6 +118,6 @@ files=()
 for want in "${expected[@]}" "${manifests[@]}"; do
     files+=("$src/$want")
 done
-gh release create "$tag" --repo 3leaps/gonimbus --verify-tag --draft \
+release_gh release create "$tag" --repo 3leaps/gonimbus --verify-tag --draft \
     --title "$tag" --notes-file "$notes" "${files[@]}"
 echo "[ok] draft release $tag created from ${#expected[@]} verified package(s)"

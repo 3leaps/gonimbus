@@ -4,6 +4,14 @@
 #
 # Usage: release-preflight.sh   (GONIMBUS_RELEASE_TAG, else v<VERSION>)
 set -euo pipefail
+for _git_var in $(compgen -e); do
+    case "$_git_var" in
+        GIT_COMMITTER_NAME | GIT_COMMITTER_EMAIL | GIT_AUTHOR_NAME | GIT_AUTHOR_EMAIL) ;;
+        GIT_*) unset "$_git_var" ;;
+    esac
+done
+unset _git_var
+export GIT_NO_REPLACE_OBJECTS=1
 die() {
     echo "[!!] $*" >&2
     exit 1
@@ -86,8 +94,23 @@ ok "docs/releases/$tag.md links are absolute and name $tag"
 ./scripts/release-verify-committed-anchors.sh > /dev/null ||
     die 'committed release anchors check failed (run scripts/release-verify-committed-anchors.sh)'
 ok 'committed release anchors and public keys verified'
-./scripts/workflow-pins.test.sh > /dev/null || die 'workflow pins check failed (run scripts/workflow-pins.test.sh)'
-ok 'workflow actions are pinned and off Node 20'
+./scripts/release-workflow-permissions.test.sh > /dev/null ||
+    die 'workflow permissions and pins check failed (run scripts/release-workflow-permissions.test.sh)'
+python3 -B -E "$root/scripts/release-workflow-pin.py" verify-commit HEAD > /dev/null ||
+    die 'HEAD workflows do not match config/release/release-workflow.sha256'
+ok 'workflow actions, permissions, and SHA-256 pins verified'
+./scripts/release-github-preflight.sh > /dev/null ||
+    die 'GitHub release preflight failed (run scripts/release-github-preflight.sh)'
+ok 'GitHub ruleset and immutable releases verified'
+python3 -I -B "$root/scripts/content-check.py" "$root" HEAD > /dev/null ||
+    die 'content-check failed (run python3 -I -B scripts/content-check.py)'
+if [[ -n "${LIMENSAFE_CATALOG_PATH+set}" ]]; then
+    GONIMBUS_SURFACE_SCOPE=release ./scripts/surface-scan.sh > /dev/null ||
+        die 'public-surface hygiene check failed (run scripts/surface-scan.sh)'
+    ok 'public-surface hygiene verified (content-check and limensafe catalog)'
+else
+    ok 'content-check verified (limensafe catalog not set; use make release-preflight for required catalog scan)'
+fi
 goneat assess --categories dates --fail-on high > /dev/null 2>&1 ||
     die 'dates check failed (run goneat assess --categories dates)'
 ok 'dates are consistent with repository history'

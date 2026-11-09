@@ -4,8 +4,9 @@
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
-.PHONY: release-provenance-check release-workflow-check release-anchors-check pr-final
-.PHONY: release-create-draft release-export-pin release-guard-tag-name release-insert-anchors release-preflight release-prepare-tag-message release-publish release-push-tag release-tag release-tag-tests release-validate-pin release-verify-published-tag release-verify-remote-tag
+.PHONY: release-provenance-check release-workflow-check release-anchors-check release-tooling-test pr-final
+.PHONY: release-create-draft release-export-pin release-github-preflight release-guard-tag-name release-insert-anchors release-post-tag-selector release-preflight release-prepare-tag-message release-publish release-push-tag release-record-anchor release-stage-published release-tag release-tag-tests release-validate-pin release-verify-published-tag release-verify-registries release-verify-remote-tag
+.PHONY: doctor content-check host-path-check surface-scan surface-scan-release
 
 # Binary and version information
 BINARY_NAME := gonimbus
@@ -99,6 +100,22 @@ tools:  ## Verify external tools are available
 	@$(GONEAT_RESOLVE); echo "✅ goneat: $$($$GONEAT --version 2>&1 | head -n1)"
 	@echo "✅ All tools verified"
 
+DOCTOR_SCOPE ?= dev
+doctor:  ## Verify required host tools and minimum versions (DOCTOR_SCOPE=dev|release)
+	@./scripts/doctor.sh "$(DOCTOR_SCOPE)"
+
+content-check:  ## Check committed files for local paths, keys, tokens, or commit markers
+	@python3 -I -B ./scripts/content-check.py
+
+host-path-check:  ## Run build-host path embedding checks
+	@./scripts/host-path-check.test.sh
+
+surface-scan: content-check  ## Run two-tier public-surface hygiene checks
+	@./scripts/surface-scan.sh
+
+surface-scan-release: content-check  ## Run release-mode public-surface hygiene checks (requires external limensafe catalog)
+	@GONIMBUS_SURFACE_SCAN_REQUIRED=1 GONIMBUS_SURFACE_SCOPE=release ./scripts/surface-scan.sh
+
 sync:  ## Sync assets from Crucible SSOT (placeholder)
 	@echo "⚠️  Gonimbus does not consume SSOT assets directly"
 	@echo "✅ Sync target satisfied (no-op)"
@@ -182,6 +199,7 @@ $(error RELEASE_TAG is forbidden (origin: $(origin RELEASE_TAG)); unset it and s
 endif
 endif
 DIST_RELEASE ?= dist/release
+DIST_PUBLISHED ?= dist/published
 
 sync-app-version: ## Sync .fulmen/app.yaml + internal/buildinfo/VERSION from VERSION
 	@VERSION_VALUE="$$(cat VERSION)"; \
@@ -204,10 +222,10 @@ sync-embedded-identity: ## Sync embedded identity mirror from .fulmen/app.yaml
 verify-embedded-identity: ## Verify embedded identity mirror is in sync
 	@./scripts/verify-embedded-identity.sh
 
-release-clean: ## Reset dist/release staging to avoid stale artifacts
-	@rm -rf "$(DIST_RELEASE)" "$(DIST_RELEASE).anchor"
+release-clean: ## Reset dist/release and dist/published staging to avoid stale artifacts
+	@rm -rf "$(DIST_RELEASE)" "$(DIST_RELEASE).anchor" "$(DIST_PUBLISHED)" "$(DIST_PUBLISHED).anchor"
 	@mkdir -p "$(DIST_RELEASE)"
-	@echo "✅ Cleaned $(DIST_RELEASE)"
+	@echo "✅ Cleaned $(DIST_RELEASE) and $(DIST_PUBLISHED)"
 
 release-build: sync-embedded-identity release-clean ## Build release artifacts into dist/release
 	@echo "→ Building release artifacts for $(BINARY_NAME) v$(VERSION)..."
@@ -225,8 +243,12 @@ release-build: sync-embedded-identity release-clean ## Build release artifacts i
 # DRAFT (release-create-draft), signs, verifies, uploads provenance ->
 # release-publish promotes draft -> public.
 
-release-preflight: ## Pre-tag gate: clean synced main, notes, pins, dates
+release-github-preflight: ## Verify remote GitHub Tag Publish Protection ruleset and immutable releases
+	@./scripts/release-github-preflight.sh
+
+release-preflight: ## Pre-tag gate: clean synced main, notes, pins, dates, and release surface scan
 	@./scripts/release-verify-committed-anchors.sh
+	@$(MAKE) surface-scan-release
 	@./scripts/release-preflight.sh
 
 # Post-tag operations also bind to the checked-out VERSION: a stale
@@ -294,27 +316,10 @@ release-validate-pin: ## Maintainer-only: read-only validation of the existing p
 release-insert-anchors: release-validate-pin ## Maintainer-only: validate pin, then generate absent public anchors
 	@./scripts/release-insert-anchors.sh
 
-release-tag-tests: ## Signed-tag tooling tests (throwaway keys only; needs gpg, git, python3, jq, yq, minisign, make, decernor)
-	@./scripts/release-decernor.test.sh
-	@./scripts/release-verify-committed-anchors.test.sh
-	@./scripts/release-stage-tagged-pubkeys.test.sh
-	@./scripts/ci-install-decernor.test.sh
-	@./scripts/release-guard-tag-version.test.sh
-	@./scripts/release-make-tag-source.test.sh
-	@./scripts/release-restore-tag-ref.test.sh
-	@./scripts/release-tag-controls.test.sh
-	@./scripts/release-tag-operator.test.sh
-	@./scripts/release-prepare-tag-message.test.sh
-	@./scripts/verify-pinned-tag.test.sh
-	@./scripts/release-verify-published-tag.test.sh
-	@./scripts/release-workflow-permissions.test.sh
-	@./scripts/workflow-pins.test.sh
-	@./scripts/release-ci-artifact-draft.test.sh
-	@./scripts/release-preflight.test.sh
-	@./scripts/release-verify-signatures.test.sh
-	@./scripts/release-publish.test.sh
-	@./scripts/release-pin-precursors.test.sh
-	@./scripts/sign-release-manifests.test.sh
+release-tooling-test: ## Run all release and surface-hygiene tooling test suites
+	@./scripts/release-tooling-test.sh
+
+release-tag-tests: release-tooling-test ## Signed-tag tooling tests (throwaway keys only; needs gpg, git, python3, jq, minisign, make, decernor)
 	@echo "✅ Signed-tag tooling tests passed"
 
 release-checksums: ## Generate SHA256SUMS and SHA512SUMS in dist/release
@@ -343,9 +348,11 @@ release-export-keys: release-guard-tag-version ## Stage public signing keys from
 	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-published-tag.sh
 	@./scripts/release-stage-tagged-pubkeys.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 
-release-verify-keys: ## Verify both exported public keys are present and public-only
+release-verify-keys: ## Verify both exported public keys and fingerprint anchors are present and public-only
 	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub; run make release-export-keys" >&2; exit 1; }
 	@[ -f "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc" ] || { echo "❌ missing $(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc; run make release-export-keys" >&2; exit 1; }
+	@[ -f "$(DIST_RELEASE)/expected-fingerprints.txt" ] || { echo "❌ missing $(DIST_RELEASE)/expected-fingerprints.txt; run make release-export-keys" >&2; exit 1; }
+	@[ -f "$(DIST_RELEASE)/expected-fingerprints.ndjson" ] || { echo "❌ missing $(DIST_RELEASE)/expected-fingerprints.ndjson; run make release-export-keys" >&2; exit 1; }
 	@./scripts/verify-minisign-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-minisign.pub"
 	@./scripts/verify-public-key.sh "$(DIST_RELEASE)/$(BINARY_NAME)-release-signing-key.asc"
 
@@ -379,6 +386,21 @@ release-upload-all: release-guard-tag-version release-verify-checksums release-v
 release-publish: release-guard-tag-version ## Promote the draft to published after byte-verifying it against the local signed set
 	@./scripts/release-publish.sh "$(GONIMBUS_RELEASE_TAG)" "$(DIST_RELEASE)"
 	@echo "   View: https://github.com/3leaps/$(BINARY_NAME)/releases/tag/$(GONIMBUS_RELEASE_TAG)"
+
+DIST_PUBLISHED ?= dist/published
+REGISTRY ?= all
+
+release-post-tag-selector: ## Verify post-tag ceremony env vars (tag, primary, signing subkey!)
+	@./scripts/release-post-tag-selector.sh
+
+release-record-anchor: release-guard-tag-version ## Verify published tag and record external ceremony anchor
+	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-record-anchor.sh
+
+release-stage-published: release-guard-tag-name ## Clean-room download and verify the published immutable GitHub release
+	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-stage-published.sh "$(DIST_PUBLISHED)"
+
+release-verify-registries: release-guard-tag-name ## Verify Go proxy, Homebrew tap, and Scoop bucket against staged published release
+	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-verify-registries.sh --directory "$(DIST_PUBLISHED)" --registry "$(REGISTRY)"
 
 build: sync-embedded-identity ## Build binary for current platform
 	@echo "→ Building $(BINARY_NAME) v$(VERSION)..."
@@ -557,20 +579,20 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, lint, tests, licenses, multi-platform build)
+pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check surface-scan lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, surface-scan, lint, tests, licenses, multi-platform build)
 	@echo "✅ pr-final gate passed"
 
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
 
 release-workflow-check: ## Check workflow pins and the read-only release workflow
-	@./scripts/workflow-pins.test.sh
+	@python3 -B -E ./scripts/release-workflow-pin.py check
 	@./scripts/release-workflow-permissions.test.sh
 
 release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, GONIMBUS_DECERNOR_BIN)
 	@./scripts/release-verify-committed-anchors.sh
 	@./scripts/validate-release-anchors.sh
 
-check-all: fmt verify-embedded-identity api-stability release-provenance-check lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, lint, test)
+check-all: fmt verify-embedded-identity api-stability release-provenance-check surface-scan lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, provenance, surface-scan, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks
