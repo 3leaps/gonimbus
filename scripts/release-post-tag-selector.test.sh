@@ -235,6 +235,12 @@ SH
     grep -q 'default homedir' "$scratch/output" || { cat "$scratch/output" >&2; exit 1; }
     fail env PATH="$scratch/win-gpgconf-bin:$PATH" MOCK_GPGCONF_HOMEDIR="$win_unc_gpg" GONIMBUS_GPG_HOMEDIR="$win_unc_gpg" bash -c 'cd "$1" && "$2" "$3"' _ "$scratch" "$fixture/scripts/release-post-tag-selector.sh" "$scratch/assets"
     grep -q 'default homedir' "$scratch/output" || { cat "$scratch/output" >&2; exit 1; }
+
+    mkdir -m 700 "$scratch/win-real-parent" "$scratch/C:\\alias\\keyring"
+    chmod 700 "$scratch/C:\\alias\\keyring"
+    ln -s "$scratch/win-real-parent" "$scratch/C:\\alias"
+    fail env GONIMBUS_GPG_HOMEDIR="C:\\alias\\keyring" bash -c 'cd "$1" && "$2" "$3"' _ "$scratch" "$fixture/scripts/release-post-tag-selector.sh" "$scratch/assets"
+    grep -q 'symlink ancestors' "$scratch/output" || { cat "$scratch/output" >&2; exit 1; }
 fi
 
 echo "[ok] post-tag selector controls passed"

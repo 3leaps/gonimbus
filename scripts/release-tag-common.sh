@@ -142,7 +142,8 @@ tag_message_file() {
         tag_die 'tag message file required'
         return 1
     }
-    "$tag_root/scripts/release-prepare-tag-message.py" --validate-message "$file" || return 1
+    local expected_subject="Release ${GONIMBUS_RELEASE_TAG#v}"
+    "$tag_root/scripts/release-prepare-tag-message.py" --validate-message "$file" "$expected_subject" || return 1
     printf '%s\n' "$file"
 }
 
@@ -267,13 +268,38 @@ def resolve_path(raw: bytes) -> str:
         return s
     return os.fsdecode(os.path.realpath(raw))
 
-if not is_win_style(os.fsdecode(probe)):
-    cur_check = probe
-    while cur_check and cur_check != b"/":
-        if os.path.islink(cur_check):
-            print("error: GPG home may not contain symlink ancestors", file=sys.stderr)
-            sys.exit(1)
-        cur_check = os.path.dirname(cur_check)
+def split_parent_raw(raw: bytes) -> bytes:
+    idx = max(raw.rfind(b"/"), raw.rfind(b"\\"))
+    if idx < 0:
+        return b""
+    if idx == 0:
+        return raw[:1]
+    if idx == 2 and len(raw) >= 3 and raw[1:2] == b":":
+        return raw[:3]
+    return raw[:idx]
+
+cur_check = probe
+while cur_check and cur_check not in (b"/", b"\\"):
+    if len(cur_check) == 3 and cur_check[1:2] == b":" and cur_check[2:3] in (b"/", b"\\"):
+        break
+    cur_str = os.fsdecode(cur_check)
+    p_obj = pathlib.Path(cur_str)
+    is_reparse = False
+    if os.name == "nt" and p_obj.exists():
+        try:
+            st = os.lstat(cur_check)
+            is_reparse = bool(getattr(st, "st_reparse_tag", 0)) or bool(
+                getattr(st, "st_file_attributes", 0) & 0x400
+            )
+        except OSError:
+            is_reparse = True
+    if os.path.islink(cur_check) or p_obj.is_symlink() or is_reparse:
+        print("error: GPG home may not contain symlink ancestors", file=sys.stderr)
+        sys.exit(1)
+    nxt = split_parent_raw(cur_check)
+    if nxt == cur_check:
+        break
+    cur_check = nxt
 
 home = pathlib.Path(resolve_path(os.fsencode(sys.argv[1])))
 repo_root = pathlib.Path(resolve_path(os.fsencode(sys.argv[2])))

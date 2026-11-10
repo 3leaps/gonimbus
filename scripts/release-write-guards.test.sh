@@ -55,7 +55,33 @@ for signature in SHA256SUMS.minisig SHA512SUMS.minisig SHA256SUMS.asc SHA512SUMS
     rm "$assets/$signature"
 done
 
-# 3. Anchor writer refuses to clobber an existing file or planted symlink (set -C).
+# 3. Mid-signing symlink insertion race (between pre-check and destination open) is refused via exclusive creation.
+race_home="$scratch/race-gpg"
+mkdir -m 700 "$race_home"
+gpg --homedir "$race_home" --batch --pinentry-mode loopback --passphrase '' \
+    --quick-generate-key 'Race signer <race@example.invalid>' ed25519 cert 1d > /dev/null 2>&1
+race_primary="$(gpg --homedir "$race_home" --batch --with-colons --fingerprint --list-keys | awk -F: '$1=="fpr" {print $10;exit}')"
+gpg --homedir "$race_home" --batch --pinentry-mode loopback --passphrase '' \
+    --quick-add-key "$race_primary" ed25519 sign 1d > /dev/null 2>&1
+race_subkey="$(gpg --homedir "$race_home" --batch --with-colons --with-subkey-fingerprint --list-keys | awk -F: '$1=="sub" {s=1;next} s && $1=="fpr" {print $10;exit}')"
+minisign -G -W -p "$scratch/race.pub" -s "$scratch/race.key" > /dev/null
+real_minisign="$(command -v minisign)"
+mkdir -p "$scratch/race-bin"
+cat > "$scratch/race-bin/minisign" << SH
+#!/usr/bin/env bash
+ln -sf "$scratch/victim" "$assets/SHA256SUMS.minisig"
+exec "$real_minisign" "\$@"
+SH
+chmod +x "$scratch/race-bin/minisign"
+refused 'SHA256SUMS.minisig already exists' env PATH="$scratch/race-bin:$PATH" \
+    GONIMBUS_MINISIGN_KEY="$scratch/race.key" \
+    GONIMBUS_PGP_KEY_ID="${race_subkey}!" \
+    GONIMBUS_GPG_HOMEDIR="$race_home" \
+    "$root/scripts/sign-release-manifests.sh" v1.2.3 "$assets"
+rm -f "$assets/SHA256SUMS.minisig"
+gpgconf --homedir "$race_home" --kill all > /dev/null 2>&1 || true
+
+# 4. Anchor writer refuses to clobber an existing file or planted symlink (set -C).
 anchor_link="$scratch/anchor-link"
 ln -s "$scratch/victim" "$anchor_link"
 if GONIMBUS_RELEASE_TAG=v1.2.3 \

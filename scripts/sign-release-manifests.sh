@@ -86,10 +86,31 @@ if [ ! -f "${DIR}/SHA256SUMS" ]; then
 fi
 
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+sig_scratch="$(mktemp -d)"
+trap 'rm -rf "${sig_scratch}"' EXIT
+
+install_exclusive_sig() {
+    local src_sig="$1"
+    local dst_sig="$2"
+    local label="$3"
+
+    if [ -e "${dst_sig}" ] || [ -L "${dst_sig}" ]; then
+        echo "error: ${label} already exists" >&2
+        exit 1
+    fi
+    if ! (
+        set -C
+        cat "${src_sig}" > "${dst_sig}"
+    ) 2> /dev/null; then
+        echo "error: ${label} already exists" >&2
+        exit 1
+    fi
+}
 
 sign_minisign() {
     local manifest="$1"
     local base="${DIR}/${manifest}"
+    local tmp_sig="${sig_scratch}/${manifest}.minisig"
 
     if [ ! -f "${base}" ]; then
         return 0
@@ -101,12 +122,14 @@ sign_minisign() {
     fi
 
     echo "🔏 [minisign] Signing ${manifest}"
-    minisign -S -s "${MINISIGN_KEY}" -t "gonimbus ${TAG} ${timestamp}" -m "${base}"
+    minisign -S -s "${MINISIGN_KEY}" -t "gonimbus ${TAG} ${timestamp}" -m "${base}" -x "${tmp_sig}"
+    install_exclusive_sig "${tmp_sig}" "${base}.minisig" "${manifest}.minisig"
 }
 
 sign_pgp() {
     local manifest="$1"
     local base="${DIR}/${manifest}"
+    local tmp_sig="${sig_scratch}/${manifest}.asc"
 
     if [ ! -f "${base}" ]; then
         return 0
@@ -118,7 +141,8 @@ sign_pgp() {
     fi
 
     echo "🔏 [PGP] Signing ${manifest}"
-    gpg --batch --armor --homedir "${GPG_HOME}" --local-user "${PGP_KEY_ID}" --detach-sign -o "${base}.asc" "${base}"
+    gpg --batch --armor --homedir "${GPG_HOME}" --local-user "${PGP_KEY_ID}" --detach-sign -o "${tmp_sig}" "${base}"
+    install_exclusive_sig "${tmp_sig}" "${base}.asc" "${manifest}.asc"
 }
 
 sign_minisign "SHA256SUMS"

@@ -72,6 +72,8 @@ printf 'Release 1.2.3\n\nMissing footer.\n' > "$directory/v1.2.3.txt"
 expect_fail "$scratch/repo/scripts/release-prepare-tag-message.py" --validate-message "$directory/v1.2.3.txt"
 printf 'Release 1.2.3 \n\nBad trailing space.\n\nRole: devlead\nCo-authored-by: Example Model <noreply@3leaps.net>\nCommitter-of-Record: @3leapsdave\n' > "$directory/v1.2.3.txt"
 expect_fail "$scratch/repo/scripts/release-prepare-tag-message.py" --validate-message "$directory/v1.2.3.txt"
+printf 'Release 1.2.3\n\nSummary.\n\nRole: devlead\nCo-authored-by: Example Model <noreply@3leaps.dev>\nCommitter-of-Record: @3leapsdave\n' > "$directory/v1.2.3.txt"
+expect_fail "$scratch/repo/scripts/release-prepare-tag-message.py" --validate-message "$directory/v1.2.3.txt"
 rm "$directory/v1.2.3.txt"
 ln -s "$scratch/external/alternate" "$directory/v1.2.3.txt"
 expect_fail "$operator" prepare-message
