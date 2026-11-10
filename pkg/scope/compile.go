@@ -130,7 +130,7 @@ func compileUnion(ctx context.Context, cfg *manifest.IndexScopeConfig, basePrefi
 		}
 	}
 
-	return normalizePrefixes(prefixes), nil
+	return dedupeAndSortPrefixes(prefixes), nil
 }
 
 func compileDatePartitions(ctx context.Context, cfg *manifest.IndexScopeConfig, basePrefix string, lister provider.PrefixLister) ([]string, error) {
@@ -193,7 +193,7 @@ func compileDatePartitions(ctx context.Context, cfg *manifest.IndexScopeConfig, 
 		}
 	}
 
-	return normalizePrefixes(out), nil
+	return dedupeAndSortPrefixes(out), nil
 }
 
 func compileSegments(ctx context.Context, cfg *manifest.IndexScopeConfig, basePrefix string, lister provider.PrefixLister) ([]string, error) {
@@ -225,7 +225,7 @@ func compileSegments(ctx context.Context, cfg *manifest.IndexScopeConfig, basePr
 					next = append(next, ensureTrailingDelimiter(prefix+lit, delimiter))
 				}
 			}
-			prefixes = normalizePrefixes(next)
+			prefixes = dedupeAndSortPrefixes(next)
 			if len(prefixes) > MaxDiscoveredPrefixesPerLevel {
 				return nil, fmt.Errorf("%w: level %d prefix count %d exceeds maximum %d", ErrDiscoveryBudgetExceeded, segment.Index, len(prefixes), MaxDiscoveredPrefixesPerLevel)
 			}
@@ -242,7 +242,7 @@ func compileSegments(ctx context.Context, cfg *manifest.IndexScopeConfig, basePr
 	if len(prefixes) > MaxCompiledScopePrefixes {
 		return nil, fmt.Errorf("%w: compiled prefix count %d exceeds maximum %d", ErrDiscoveryBudgetExceeded, len(prefixes), MaxCompiledScopePrefixes)
 	}
-	return normalizePrefixes(prefixes), nil
+	return dedupeAndSortPrefixes(prefixes), nil
 }
 
 // CanonicalizeSegmentsTemplate validates a scope.type="segments" configuration
@@ -357,47 +357,38 @@ func normalizeAndValidateSegmentRule(seg manifest.IndexScopeDiscoverSegment, del
 		if strings.TrimSpace(raw) != raw {
 			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].allow %q must not have leading or trailing whitespace", seg.Index, raw)
 		}
+		if err := validateSingleSegmentPattern(raw, delimiter, false); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].allow %q: %w", seg.Index, raw, err)
+		}
 	}
 	for _, raw := range seg.Deny {
 		if strings.TrimSpace(raw) != raw {
 			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].deny %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+		if err := validateSingleSegmentPattern(raw, delimiter, false); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].deny %q: %w", seg.Index, raw, err)
 		}
 	}
 	for _, raw := range seg.GlobAllow {
 		if strings.TrimSpace(raw) != raw {
 			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_allow %q must not have leading or trailing whitespace", seg.Index, raw)
 		}
+		if err := validateSingleSegmentPattern(raw, delimiter, true); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_allow %q: %w", seg.Index, raw, err)
+		}
 	}
 	for _, raw := range seg.GlobDeny {
 		if strings.TrimSpace(raw) != raw {
 			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_deny %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+		if err := validateSingleSegmentPattern(raw, delimiter, true); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_deny %q: %w", seg.Index, raw, err)
 		}
 	}
 	allow := normalizeLiteralList(seg.Allow)
 	deny := normalizeLiteralList(seg.Deny)
 	globAllow := normalizeGlobList(seg.GlobAllow)
 	globDeny := normalizeGlobList(seg.GlobDeny)
-
-	for _, lit := range allow {
-		if err := validateSingleSegmentPattern(lit, delimiter, false); err != nil {
-			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].allow %q: %w", seg.Index, lit, err)
-		}
-	}
-	for _, lit := range deny {
-		if err := validateSingleSegmentPattern(lit, delimiter, false); err != nil {
-			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].deny %q: %w", seg.Index, lit, err)
-		}
-	}
-	for _, pat := range globAllow {
-		if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
-			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_allow %q: %w", seg.Index, pat, err)
-		}
-	}
-	for _, pat := range globDeny {
-		if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
-			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_deny %q: %w", seg.Index, pat, err)
-		}
-	}
 
 	if len(allow) == 0 && len(deny) == 0 && len(globAllow) == 0 && len(globDeny) == 0 {
 		return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d] must specify allow, deny, glob_allow, or glob_deny", seg.Index)
@@ -451,11 +442,11 @@ func discoverSegmentPrefixesBounded(
 		}
 		rawObserved += len(children)
 		for _, child := range children {
-			value := strings.TrimPrefix(child, prefix)
-			value = strings.TrimSuffix(value, delimiter)
-			if value == "" {
+			if child == "" || !strings.HasPrefix(child, prefix) || child == prefix {
 				continue
 			}
+			rel := strings.TrimPrefix(child, prefix)
+			value := strings.TrimSuffix(rel, delimiter)
 			allowed, err := segmentAllowed(value, segment)
 			if err != nil {
 				return nil, err
@@ -469,7 +460,7 @@ func discoverSegmentPrefixesBounded(
 			}
 		}
 	}
-	return normalizePrefixes(out), nil
+	return dedupeAndSortPrefixes(out), nil
 }
 
 func parseDateRange(cfg *manifest.IndexScopeDateRange) (time.Time, time.Time, error) {
@@ -522,11 +513,11 @@ func discoverSegmentPrefixes(ctx context.Context, lister provider.PrefixLister, 
 			return nil, err
 		}
 		for _, child := range children {
-			value := strings.TrimPrefix(child, prefix)
-			value = strings.TrimSuffix(value, delimiter)
-			if value == "" {
+			if child == "" || !strings.HasPrefix(child, prefix) || child == prefix {
 				continue
 			}
+			rel := strings.TrimPrefix(child, prefix)
+			value := strings.TrimSuffix(rel, delimiter)
 			allowed, err := segmentAllowed(value, segment)
 			if err != nil {
 				return nil, err
@@ -538,7 +529,7 @@ func discoverSegmentPrefixes(ctx context.Context, lister provider.PrefixLister, 
 		}
 	}
 
-	return normalizePrefixes(out), nil
+	return dedupeAndSortPrefixes(out), nil
 }
 
 func segmentAllowed(value string, segment manifest.IndexScopeDiscoverSegment) (bool, error) {
@@ -644,6 +635,31 @@ func normalizePrefixes(prefixes []string) []string {
 		}
 		seen[trimmed] = struct{}{}
 		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+
+	sort.Strings(out)
+	return out
+}
+
+func dedupeAndSortPrefixes(prefixes []string) []string {
+	if len(prefixes) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(prefixes))
+	out := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if prefix == "" {
+			continue
+		}
+		if _, exists := seen[prefix]; exists {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		out = append(out, prefix)
 	}
 	if len(out) == 0 {
 		return nil

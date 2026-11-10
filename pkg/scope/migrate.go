@@ -683,7 +683,7 @@ func buildDiscoveredScopeProposal(
 	if !strings.HasSuffix(normalized, "/**") {
 		return nil, nil
 	}
-	body := strings.TrimPrefix(strings.TrimSuffix(normalized, "/**"), "/")
+	body := strings.TrimSuffix(normalized, "/**")
 	if body == "" {
 		return nil, nil
 	}

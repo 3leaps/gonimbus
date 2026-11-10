@@ -726,6 +726,21 @@ func TestPlanMatchPrefixMigration_DiscoveredDatePartitionsAndSegments(t *testing
 	if wsPlan.Classification != scope.ClassificationRefused || wsPlan.DiscoveredScopeProposal != nil {
 		t.Fatalf("expected whitespace-padded segment to be refused without proposal, got %s", wsPlan.Classification)
 	}
+
+	// 4. Double leading slash ("//tenant=*/table=orders/**") represents an empty
+	// leading segment under baseKey and must be refused without proposal.
+	doubleSlashRaw := testManifestYAML(includeLines("//tenant=*/table=orders/**"), "")
+	doubleSlashPlan, err := scope.PlanMatchPrefixMigration(doubleSlashRaw, scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doubleSlashPlan.Classification != scope.ClassificationRefused || doubleSlashPlan.DiscoveredScopeProposal != nil {
+		t.Fatalf("expected double-slash include to be refused without proposal, got %s", doubleSlashPlan.Classification)
+	}
 }
 
 func equalStrings(a, b []string) bool {

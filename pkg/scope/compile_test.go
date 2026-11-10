@@ -241,6 +241,35 @@ func TestCompileSegments_DiscoveredAndLiteralTail(t *testing.T) {
 	plan2, err := Compile(context.Background(), constraintsForm, "data/", lister2)
 	require.NoError(t, err)
 	require.Equal(t, plan.Prefixes, plan2.Prefixes)
+
+	// Empty discovered segments (e.g., "data//") and discovered prefixes with
+	// leading whitespace (e.g., " tenant=a/") preserve their exact bytes.
+	edgeLister := &fakePrefixLister{prefixes: map[string][]string{
+		"data/": {"data//", "data/ tenant=a/"},
+		"":      {" tenant=a/"},
+	}}
+	emptySegPlan, err := Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "*"},
+			{Index: 1, Glob: "table=orders"},
+		},
+	}, "data/", edgeLister)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"data/ tenant=a/table=orders/",
+		"data//table=orders/",
+	}, emptySegPlan.Prefixes)
+
+	rootWSPlan, err := Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "*"},
+			{Index: 1, Glob: "table=orders"},
+		},
+	}, "", edgeLister)
+	require.NoError(t, err)
+	require.Equal(t, []string{" tenant=a/table=orders/"}, rootWSPlan.Prefixes)
 }
 
 func TestCompileSegments_RefusesInvalidGrammarAndBounds(t *testing.T) {
@@ -360,4 +389,16 @@ func TestCompileSegments_RefusesInvalidGrammarAndBounds(t *testing.T) {
 		},
 	}, "data/", lister)
 	require.ErrorContains(t, err, "leading or trailing whitespace")
+
+	// Leading slash in literal allow/deny values is refused before normalization.
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, GlobAllow: []string{"tenant=*"}},
+				{Index: 1, Allow: []string{"/table=orders"}},
+			},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "must not contain path delimiter")
 }
