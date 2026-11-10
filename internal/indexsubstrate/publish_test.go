@@ -519,6 +519,8 @@ func publishTestConfig(t *testing.T) (PublishConfig, []CurrentObjectRow) {
 	runStartedAt := base.Add(time.Hour)
 	standard := "STANDARD"
 	old := segmentTestRow("idx_test", "data/missing.xml", 9, `"old"`, base.Add(-time.Hour), &standard, nil, nil, nil)
+	old.FirstSeenAt = base.Add(-time.Hour)
+	old.LastChangedAt = base.Add(-time.Hour)
 	old.LastSeenRunID = "run_old"
 	old.LastSeenAt = base.Add(-time.Hour)
 

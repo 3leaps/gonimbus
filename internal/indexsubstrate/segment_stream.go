@@ -159,7 +159,8 @@ func WriteStreamingSegmentSet(ctx context.Context, config SegmentWriterConfig, s
 	ops := resolveSegmentFileOps(config)
 	var (
 		ownedPaths  []string
-		open        []segmentParquetRow
+		open        []durableParquetRow
+		openBytes   int64
 		counts      ManifestCounts
 		etagSeen    = make(map[string]struct{})
 		havePrevKey bool
@@ -202,6 +203,7 @@ func WriteStreamingSegmentSet(ctx context.Context, config SegmentWriterConfig, s
 		// Drop prior segment rows so pointer-backed fields are not retained.
 		clear(open)
 		open = open[:0]
+		openBytes = 0
 		return nil
 	}
 
@@ -241,25 +243,32 @@ func WriteStreamingSegmentSet(ctx context.Context, config SegmentWriterConfig, s
 		havePrevKey = true
 		prevRelKey = prepared.RelKey
 
-		pq := segmentParquetFromCurrentRow(prepared)
+		pq := durableParquetFromCurrentRow(prepared, config.RunID)
+		rowBytes := estimatedDurableParquetRowBytes(pq)
+		if len(open) > 0 && openBytes+rowBytes > maxSegmentUncompressedPayloadBytes {
+			if err := sealOpen(); err != nil {
+				return fail(err)
+			}
+		}
 		open = append(open, pq)
+		openBytes += rowBytes
 		counts.Rows++
-		if pq.DeletedAt != nil {
+		if pq.Deleted != nil {
 			counts.Tombstones++
 		} else {
 			counts.ActiveRows++
 		}
-		if pq.LastSeenRunID != "" && pq.LastSeenRunID != config.RunID {
+		if pq.LastSeen.SnapshotID != "" && pq.LastSeen.SnapshotID != config.RunID {
 			counts.RetainedUnobservedRows++
 		}
-		if pq.ETag != "" {
-			if _, ok := etagSeen[pq.ETag]; !ok {
-				etagSeen[pq.ETag] = struct{}{}
+		if pq.Revision != nil && pq.Revision.Value != "" {
+			if _, ok := etagSeen[pq.Revision.Value]; !ok {
+				etagSeen[pq.Revision.Value] = struct{}{}
 				counts.DistinctETags++
 			}
 		}
 
-		if len(open) >= config.TargetRowsPerSegment {
+		if len(open) >= config.TargetRowsPerSegment || openBytes >= maxSegmentUncompressedPayloadBytes {
 			if err := sealOpen(); err != nil {
 				return fail(err)
 			}
@@ -303,6 +312,9 @@ func prepareStreamingSegmentRow(row CurrentObjectRow, indexSetID string) (Curren
 	}
 	if row.IndexSetID != indexSetID {
 		return CurrentObjectRow{}, errors.New("index_set_id mismatch")
+	}
+	if err := validateCurrentRowInvariants(row); err != nil {
+		return CurrentObjectRow{}, err
 	}
 	return row, nil
 }

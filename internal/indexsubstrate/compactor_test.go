@@ -35,9 +35,9 @@ func TestCompactMatchesIndexstoreSchemaV8MutationSemantics(t *testing.T) {
 	require.NoError(t, err)
 
 	oldAt := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
-	oldChangedAt := oldAt.Add(time.Hour)
+	oldChangedAt := oldAt
 	runStartedAt := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
-	observedAt := runStartedAt.Add(10 * time.Minute)
+	observedAt := runStartedAt
 	oldModified := time.Date(2026, 7, 1, 8, 0, 0, 0, time.FixedZone("offset", -4*60*60))
 	newModified := oldModified.Add(time.Hour)
 	deletedAt := oldAt.Add(2 * time.Hour)
@@ -484,7 +484,7 @@ func indexstoreRowFromRecord(indexSetID string, runID string, record ObjectRecor
 		ETag:          record.ETag,
 		StorageClass:  stringPtrCopy(record.StorageClass),
 		LastSeenRunID: runID,
-		LastSeenAt:    record.ObservedAt.UTC(),
+		LastSeenAt:    time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC),
 	}
 }
 

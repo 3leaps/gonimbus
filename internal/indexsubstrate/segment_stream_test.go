@@ -26,6 +26,9 @@ func TestWriteStreamingSegmentSetDifferentialVsBatch(t *testing.T) {
 		segmentTestRow("idx_test", "data/deleted.xml", 40, `"etag-deleted"`, base.Add(4*time.Minute), &storageClass, nil, nil, nil),
 	}
 	rows[3].DeletedAt = &deletedAt
+	rows[3].LastChangedRunID = "run_del"
+	rows[3].LastChangedAt = deletedAt
+	rows[3].HeadEnrichedAt = nil
 
 	parents := []ManifestReference{{IndexSetID: "idx_test", RunID: "run_parent", ManifestSHA256: strings.Repeat("ab", 32)}}
 	cov := []CoverageAttestation{{

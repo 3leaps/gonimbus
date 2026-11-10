@@ -1332,10 +1332,13 @@ func basePrefixFromURI(baseURI string) (string, error) {
 }
 
 func buildMatcher(basePrefix string, cfg MatchConfig) (*match.Matcher, error) {
+	// durable-index/v0 A2 (enumerated_key_omitted): confirmed-complete durable
+	// scopes are exact UTF-8 byte-prefix slices and never omit dot-prefixed
+	// segments within an observed scope.
 	matchCfg := match.Config{
 		Includes:      prefixPatterns(basePrefix, cfg.Includes),
 		Excludes:      prefixPatterns(basePrefix, cfg.Excludes),
-		IncludeHidden: cfg.IncludeHidden,
+		IncludeHidden: true,
 	}
 	if len(matchCfg.Includes) == 0 {
 		matchCfg.Includes = []string{basePrefix + "**"}

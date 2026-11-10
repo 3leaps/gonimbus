@@ -77,14 +77,17 @@ type PublishedParentRowSource struct {
 }
 
 type parentSegmentCursor struct {
-	file     *os.File
-	root     *os.Root
-	reader   *parquet.GenericReader[segmentParquetRow]
-	buf      []segmentParquetRow
-	bufN     int
-	bufPos   int
-	rowsRead int
-	expected int
+	file          *os.File
+	root          *os.Root
+	indexSetID    string
+	durableReader *parquet.GenericReader[durableParquetRow]
+	durableBuf    []durableParquetRow
+	legacyReader  *parquet.GenericReader[segmentParquetRow]
+	legacyBuf     []segmentParquetRow
+	bufN          int
+	bufPos        int
+	rowsRead      int
+	expected      int
 }
 
 // NewPublishedParentRowSource builds a bounded pull source over the snapshot's
@@ -205,13 +208,33 @@ func (s *PublishedParentRowSource) openSegment(desc SegmentDescriptor) error {
 		_ = root.Close()
 		return parentErr(ParentReaderIO, "seek", "seek segment after digest failed", nil)
 	}
-	s.cur = &parentSegmentCursor{
-		file:     file,
-		root:     root,
-		reader:   parquet.NewGenericReader[segmentParquetRow](file),
-		buf:      make([]segmentParquetRow, 64),
-		expected: desc.Rows,
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = root.Close()
+		return parentErr(ParentReaderIO, "stat", "stat segment failed", nil)
 	}
+	pf, isDurable, err := openParquetSegmentFile(file, info.Size())
+	if err != nil {
+		_ = file.Close()
+		_ = root.Close()
+		return parentErr(ParentReaderParse, "open", "open parquet segment failed", nil)
+	}
+	indexSetID, _ := pf.Lookup("gonimbus.index_set_id")
+	cur := &parentSegmentCursor{
+		file:       file,
+		root:       root,
+		indexSetID: indexSetID,
+		expected:   desc.Rows,
+	}
+	if isDurable {
+		cur.durableReader = parquet.NewGenericReader[durableParquetRow](pf)
+		cur.durableBuf = make([]durableParquetRow, 64)
+	} else {
+		cur.legacyReader = parquet.NewGenericReader[segmentParquetRow](pf)
+		cur.legacyBuf = make([]segmentParquetRow, 64)
+	}
+	s.cur = cur
 	return nil
 }
 
@@ -223,7 +246,15 @@ func (s *PublishedParentRowSource) readCurrent(ctx context.Context) (CurrentObje
 	}
 	c := s.cur
 	if c.bufPos >= c.bufN {
-		n, err := c.reader.Read(c.buf)
+		var (
+			n   int
+			err error
+		)
+		if c.durableReader != nil {
+			n, err = c.durableReader.Read(c.durableBuf)
+		} else {
+			n, err = c.legacyReader.Read(c.legacyBuf)
+		}
 		if n == 0 {
 			if err == io.EOF {
 				return CurrentObjectRow{}, false, nil
@@ -240,9 +271,19 @@ func (s *PublishedParentRowSource) readCurrent(ctx context.Context) (CurrentObje
 			return CurrentObjectRow{}, false, parentErr(ParentReaderParse, "read", "read segment failed", nil)
 		}
 	}
-	pr := c.buf[c.bufPos]
-	c.bufPos++
-	current, err := currentRowFromSegmentParquet(pr)
+	var (
+		current CurrentObjectRow
+		err     error
+	)
+	if c.durableReader != nil {
+		dr := c.durableBuf[c.bufPos]
+		c.bufPos++
+		current, err = currentRowFromDurableParquet(dr, c.indexSetID)
+	} else {
+		pr := c.legacyBuf[c.bufPos]
+		c.bufPos++
+		current, err = currentRowFromSegmentParquet(pr)
+	}
 	if err != nil {
 		return CurrentObjectRow{}, false, parentErr(ParentReaderParse, "convert", "malformed segment row", nil)
 	}
@@ -271,8 +312,13 @@ func (s *PublishedParentRowSource) closeCurrent() error {
 		return nil
 	}
 	var first error
-	if s.cur.reader != nil {
-		if err := s.cur.reader.Close(); err != nil {
+	if s.cur.durableReader != nil {
+		if err := s.cur.durableReader.Close(); err != nil {
+			first = parentErr(ParentReaderIO, "close", "close segment reader failed", nil)
+		}
+	}
+	if s.cur.legacyReader != nil {
+		if err := s.cur.legacyReader.Close(); err != nil && first == nil {
 			first = parentErr(ParentReaderIO, "close", "close segment reader failed", nil)
 		}
 	}

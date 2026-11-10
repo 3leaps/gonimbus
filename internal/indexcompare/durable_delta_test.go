@@ -24,6 +24,8 @@ func TestCompareDurableDeltaClassifiesRowsWithCoverageAttribution(t *testing.T) 
 	deletedAt := base.Add(2 * time.Hour)
 	afterGone := compareDurableRow(indexSetIDForTest, "data/gone.xml", 20, base, "etag-gone", "STANDARD")
 	afterGone.DeletedAt = &deletedAt
+	afterGone.LastChangedAt = deletedAt
+	afterGone.LastChangedRunID = "run_after"
 	afterManifest, afterDir := setupDurableDeltaRows(t, "run_after", base.Add(time.Hour), []indexsubstrate.ManifestReference{{
 		IndexSetID: indexSetIDForTest,
 		RunID:      "run_before",
@@ -120,6 +122,8 @@ func TestCompareDurableDeltaRejectsAfterTombstoneWithoutPriorRow(t *testing.T) {
 	deletedAt := base.Add(time.Hour)
 	deleted := compareDurableRow(indexSetIDForTest, "data/gone.xml", 10, base, "etag-gone", "STANDARD")
 	deleted.DeletedAt = &deletedAt
+	deleted.LastChangedAt = deletedAt
+	deleted.LastChangedRunID = "run_after"
 	afterManifest, afterDir := setupDurableDeltaRows(t, "run_after", base.Add(time.Hour), nil, []indexsubstrate.CurrentObjectRow{deleted})
 
 	_, err := CompareDurableDelta(context.Background(), DurableDeltaInput{

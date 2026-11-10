@@ -30,13 +30,21 @@ func MarkObjectsDeletedNotSeenInRun(ctx context.Context, db *sql.DB, indexSetID,
 }
 
 func markObjectsDeletedNotSeenInRun(ctx context.Context, exec indexRunSQLExecutor, indexSetID, runID string, runStartedAt time.Time) (int64, error) {
+	ts := timeString(runStartedAt)
 	result, err := exec.ExecContext(ctx,
 		`UPDATE objects_current
-		 SET deleted_at = ?
+		 SET deleted_at = ?,
+		     last_changed_run_id = ?,
+		     last_changed_at = ?,
+		     archive_status = NULL,
+		     restore_state = NULL,
+		     restore_expiry = NULL,
+		     content_type = NULL,
+		     head_enriched_at = NULL
 		 WHERE index_set_id = ?
 		   AND deleted_at IS NULL
 		   AND last_seen_run_id != ?`,
-		timeString(runStartedAt), indexSetID, runID)
+		ts, runID, ts, indexSetID, runID)
 
 	if err != nil {
 		return 0, fmt.Errorf("mark deleted: %w", err)

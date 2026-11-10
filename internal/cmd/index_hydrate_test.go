@@ -581,7 +581,7 @@ func writeLocalDurableSnapshotStreamedForHubTest(t *testing.T, indexSetID, runID
 			LastChangedRunID: runID,
 			LastChangedAt:    base,
 			LastSeenRunID:    runID,
-			LastSeenAt:       base.Add(time.Minute),
+			LastSeenAt:       base,
 		},
 	}
 	manifest, err := indexsubstrate.WriteStreamingSegmentSet(context.Background(), indexsubstrate.SegmentWriterConfig{
@@ -1072,7 +1072,7 @@ func writeLocalDurableSnapshotForHubTest(t *testing.T, indexSetID, runID string)
 			LastChangedRunID: runID,
 			LastChangedAt:    base,
 			LastSeenRunID:    runID,
-			LastSeenAt:       base.Add(time.Minute),
+			LastSeenAt:       base,
 		},
 	}
 	manifest, err := indexsubstrate.WriteSegmentSet(indexsubstrate.SegmentWriterConfig{

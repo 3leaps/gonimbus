@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/output"
 	"github.com/3leaps/gonimbus/pkg/provider"
@@ -59,6 +60,25 @@ func TestRunnerBuildPublishesDeterministicSnapshotAndRetryParity(t *testing.T) {
 	manifestAfter, err := os.ReadFile(cfg.Paths.ManifestPath)
 	require.NoError(t, err)
 	require.Equal(t, manifestBefore, manifestAfter)
+
+	// Verify multi-object build with a stepping clock produces segments that pass strict
+	// durableindex.ReadParquetInventoryMember (one uniform observation timestamp per snapshot_id).
+	cfgStepping := testConfig(t, "stepping-clock")
+	cfgStepping.TargetRowsPerSegment = 10
+	tick := 0
+	cfgStepping.Clock = func() time.Time {
+		tick++
+		return time.Date(2026, 7, 7, 12, 0, tick, 0, time.UTC)
+	}
+	stepSummary, err := NewRunner(cfgStepping).Build(ctx)
+	require.NoError(t, err)
+	require.Len(t, stepSummary.Manifest.Segments, 1)
+	segBytes, err := os.ReadFile(filepath.Join(cfgStepping.Paths.SegmentDir, stepSummary.Manifest.Segments[0].Path))
+	require.NoError(t, err)
+	decodedRows, err := durableindex.ReadParquetInventoryMember(segBytes, 0)
+	require.NoError(t, err)
+	require.Len(t, decodedRows, 2)
+	require.Equal(t, decodedRows[0].LastSeen, decodedRows[1].LastSeen)
 }
 
 func TestPublicRetryRejectsWhenWriteLeaseHeld(t *testing.T) {
@@ -506,6 +526,30 @@ func TestRetryRefusesNonUTCRunStartedAtBeforeSideEffects(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "UTC")
 	require.NoFileExists(t, cfg.Paths.LatestPath)
+}
+
+func TestRunnerBuildIncludesDotPrefixedSegmentsInConfirmedCompleteScopes(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "dot-segments")
+	base := cfg.RunStartedAt
+	cfg.Source.Provider = fakeProvider{
+		objects: []provider.ObjectSummary{
+			{Key: "data/.hidden/a1.xml", Size: 10, ETag: `"h"`, LastModified: base.Add(-time.Hour), StorageClass: "STANDARD"},
+			{Key: "data/a.xml", Size: 10, ETag: `"a"`, LastModified: base.Add(-time.Hour), StorageClass: "STANDARD"},
+			{Key: "data/b.xml", Size: 11, ETag: `"b"`, LastModified: base.Add(-time.Minute), StorageClass: "STANDARD"},
+		},
+	}
+
+	summary, err := NewRunner(cfg).Build(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), summary.ObjectsObserved)
+
+	_, rows, err := ReadLatest(cfg.Paths.LatestPath)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	require.Equal(t, ".hidden/a1.xml", rows[0].RelKey)
+	require.Equal(t, "a.xml", rows[1].RelKey)
+	require.Equal(t, "b.xml", rows[2].RelKey)
 }
 
 func testConfig(t *testing.T, name string) Config {
