@@ -908,4 +908,32 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 	require.Equal(t, snap.CompletePath, absSnap.CompletePath)
 	require.Equal(t, snap.ManifestPath, absSnap.ManifestPath)
 	require.Equal(t, snap.SegmentDir, absSnap.SegmentDir)
+
+	// Simulate an interrupted publication retry where complete.json was already
+	// written with legacy absolute paths before latest.json advanced: retry must
+	// adopt the existing complete.json verbatim and advance latest.json cleanly.
+	require.NoError(t, os.Remove(relocatedLatestPath))
+	retryJournal := filepath.Join(relocatedSetRoot, "journals", "jrn_portable.jsonl")
+	retryLease, err := AcquireWriteLease(relocatedSetRoot, "idx_portable", "portable-retry", 0)
+	require.NoError(t, err)
+	retryCfg := PublishConfig{
+		IndexSetID:              "idx_portable",
+		RunID:                   "run_portable_1",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       runStartedAt.Add(3 * time.Minute),
+		SnapshotCompletionClock: func() time.Time { return runStartedAt.Add(9 * time.Minute) },
+		JournalPaths:            []string{retryJournal},
+		Coverage:                []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:              snap.SegmentDir,
+		ManifestPath:            snap.ManifestPath,
+		CompletePath:            snap.CompletePath,
+		LatestPath:              relocatedLatestPath,
+		TargetRowsPerSegment:    10,
+		WriteLease:              retryLease,
+	}
+	retryRes, err := PublishSnapshot(retryCfg)
+	require.NoError(t, err)
+	require.True(t, retryRes.LatestAdvanced)
+	require.Equal(t, runStartedAt.Add(4*time.Minute), retryRes.SnapshotCompletedAt)
+	require.NoError(t, retryLease.Release())
 }

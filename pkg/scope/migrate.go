@@ -693,7 +693,7 @@ func buildDiscoveredScopeProposal(
 	}
 	hasWildcard := false
 	for _, part := range parts {
-		if part == "" || part == "." || part == ".." {
+		if part == "" || part == "." || part == ".." || strings.TrimSpace(part) != part {
 			return nil, nil
 		}
 		if err := validateSingleSegmentPattern(part, "/", true); err != nil {

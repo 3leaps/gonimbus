@@ -260,7 +260,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		return result, fmt.Errorf("hash manifest: %w", err)
 	}
 	result.ManifestSHA256 = manifestDigest
-	snapshotCompletedAt, adopted, err := existingSnapshotCompletion(
+	existingComplete, snapshotCompletedAt, adopted, err := existingSnapshotCompletion(
 		config,
 		manifest,
 		manifestDigest,
@@ -268,6 +268,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 	if err != nil {
 		return result, err
 	}
+	var complete publishedCompleteDoc
 	if !adopted {
 		snapshotCompletedAt = config.SnapshotCompletionClock()
 		if err := ValidateExactSnapshotCompletion(
@@ -278,17 +279,19 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		); err != nil {
 			return result, fmt.Errorf("sample snapshot completion: %w", err)
 		}
-	}
-	complete := publishedCompleteDoc{
-		Type:                        CompleteMarkerTypeV2,
-		IndexSetID:                  config.IndexSetID,
-		RunID:                       config.RunID,
-		SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
-		SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
-		ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
-		ManifestSHA256:              manifestDigest,
-		SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
-		Segments:                    len(manifest.Segments),
+		complete = publishedCompleteDoc{
+			Type:                        CompleteMarkerTypeV2,
+			IndexSetID:                  config.IndexSetID,
+			RunID:                       config.RunID,
+			SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+			SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
+			ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
+			ManifestSHA256:              manifestDigest,
+			SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
+			Segments:                    len(manifest.Segments),
+		}
+	} else {
+		complete = existingComplete
 	}
 	result.SnapshotCompletedAt = snapshotCompletedAt.UTC()
 	if err := writeJSONImmutableOrEqual(config.CompletePath, complete); err != nil {
@@ -334,13 +337,13 @@ func existingSnapshotCompletion(
 	config PublishConfig,
 	manifest InternalManifest,
 	manifestDigest string,
-) (time.Time, bool, error) {
+) (publishedCompleteDoc, time.Time, bool, error) {
 	existing, err := readCompleteDocFile(config.CompletePath)
 	if err != nil {
 		if errors.Is(err, ErrSnapshotNotPublished) {
-			return time.Time{}, false, nil
+			return publishedCompleteDoc{}, time.Time{}, false, nil
 		}
-		return time.Time{}, false, err
+		return publishedCompleteDoc{}, time.Time{}, false, err
 	}
 	resolvedManifestPath, manifestErr := resolvePublishedArtifactPath(config.CompletePath, existing.ManifestPath, "manifest_path")
 	resolvedSegmentDir, segmentErr := resolvePublishedArtifactPath(config.CompletePath, existing.SegmentDir, "segment_dir")
@@ -353,14 +356,14 @@ func existingSnapshotCompletion(
 		existing.ManifestSHA256 != manifestDigest ||
 		filepath.Clean(resolvedSegmentDir) != filepath.Clean(config.SegmentDir) ||
 		existing.Segments != len(manifest.Segments) {
-		return time.Time{}, false, nil
+		return publishedCompleteDoc{}, time.Time{}, false, nil
 	}
 	snapshot := PublishedSnapshot{Complete: existing, Manifest: manifest}
 	completedAt, err := snapshot.ExactSnapshotCompletedAt()
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("validate existing complete marker: %w", err)
+		return publishedCompleteDoc{}, time.Time{}, false, fmt.Errorf("validate existing complete marker: %w", err)
 	}
-	return completedAt, true, nil
+	return existing, completedAt, true, nil
 }
 
 // PublishedSnapshot is a verified local durable snapshot opened from a latest

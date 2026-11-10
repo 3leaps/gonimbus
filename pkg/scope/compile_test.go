@@ -308,4 +308,56 @@ func TestCompileSegments_RefusesInvalidGrammarAndBounds(t *testing.T) {
 		},
 	}, "data/", truncLister)
 	require.ErrorIs(t, err, provider.ErrIncompleteListing)
+
+	// Cumulative raw-observed prefixes across multiple parent prefixes must
+	// enforce MaxDiscoveredPrefixesPerLevel even when remaining budget hits 0
+	// and earlier prefixes were filtered out.
+	parent1Children := make([]string, MaxDiscoveredPrefixesPerLevel)
+	for i := range parent1Children {
+		parent1Children[i] = "data/region=a/other-" + string(rune('a'+(i%26))) + "/"
+	}
+	multiParentLister := &fakePrefixLister{prefixes: map[string][]string{
+		"data/":          {"data/region=a/", "data/region=b/"},
+		"data/region=a/": parent1Children,
+		"data/region=b/": {"data/region=b/tenant=1/"},
+	}}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "region=*"},
+			{Index: 1, Glob: "tenant=*"},
+		},
+	}, "data/", multiParentLister)
+	require.ErrorIs(t, err, ErrDiscoveryBudgetExceeded)
+
+	// Literal Cartesian expansion exceeding MaxDiscoveredPrefixesPerLevel is
+	// refused before allocating the product slice.
+	manyParents := make([]string, 200)
+	manyLiterals := make([]string, 100)
+	for i := range manyParents {
+		manyParents[i] = "data/tenant=" + string(rune('a'+(i%26))) + string(rune('0'+(i/26))) + "/"
+	}
+	for i := range manyLiterals {
+		manyLiterals[i] = "table=" + string(rune('a'+(i%26))) + string(rune('0'+(i/26)))
+	}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, GlobAllow: []string{"tenant=*"}},
+				{Index: 1, Allow: manyLiterals},
+			},
+		},
+	}, "data/", &fakePrefixLister{prefixes: map[string][]string{"data/": manyParents}})
+	require.ErrorIs(t, err, ErrDiscoveryBudgetExceeded)
+
+	// Leading/trailing whitespace in segment patterns is refused.
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+			{Index: 1, Glob: " table=orders"},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "leading or trailing whitespace")
 }

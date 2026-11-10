@@ -215,13 +215,14 @@ func compileSegments(ctx context.Context, cfg *manifest.IndexScopeConfig, basePr
 			return nil, nil
 		}
 		if isLiteralSegmentRule(segment) {
+			maxAllowed := min(MaxDiscoveredPrefixesPerLevel, MaxCompiledScopePrefixes)
+			if len(segment.Allow) > maxAllowed || (len(segment.Allow) > 0 && len(prefixes) > maxAllowed/len(segment.Allow)) {
+				return nil, fmt.Errorf("%w: level %d prefix count exceeds maximum %d", ErrDiscoveryBudgetExceeded, segment.Index, maxAllowed)
+			}
 			next := make([]string, 0, len(prefixes)*len(segment.Allow))
 			for _, prefix := range prefixes {
 				for _, lit := range segment.Allow {
 					next = append(next, ensureTrailingDelimiter(prefix+lit, delimiter))
-					if len(next) > MaxCompiledScopePrefixes {
-						return nil, fmt.Errorf("%w: compiled prefix count exceeds maximum %d", ErrDiscoveryBudgetExceeded, MaxCompiledScopePrefixes)
-					}
 				}
 			}
 			prefixes = normalizePrefixes(next)
@@ -277,9 +278,12 @@ func CanonicalizeSegmentsTemplate(cfg *manifest.IndexScopeConfig) ([]manifest.In
 	if hasConstraints {
 		rawSegments = make([]manifest.IndexScopeDiscoverSegment, 0, len(cfg.Constraints))
 		for _, c := range cfg.Constraints {
-			pat := strings.TrimSpace(c.Glob)
-			if pat == "" {
+			pat := c.Glob
+			if pat == "" || strings.TrimSpace(pat) == "" {
 				return nil, fmt.Errorf("scope.constraints[%d].glob must not be empty", c.Index)
+			}
+			if strings.TrimSpace(pat) != pat {
+				return nil, fmt.Errorf("scope.constraints[%d].glob %q must not have leading or trailing whitespace", c.Index, c.Glob)
 			}
 			if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
 				return nil, fmt.Errorf("scope.constraints[%d].glob: %w", c.Index, err)
@@ -349,6 +353,26 @@ func isWildcardSegmentPattern(pattern string) bool {
 }
 
 func normalizeAndValidateSegmentRule(seg manifest.IndexScopeDiscoverSegment, delimiter string) (manifest.IndexScopeDiscoverSegment, error) {
+	for _, raw := range seg.Allow {
+		if strings.TrimSpace(raw) != raw {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].allow %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+	}
+	for _, raw := range seg.Deny {
+		if strings.TrimSpace(raw) != raw {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].deny %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+	}
+	for _, raw := range seg.GlobAllow {
+		if strings.TrimSpace(raw) != raw {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_allow %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+	}
+	for _, raw := range seg.GlobDeny {
+		if strings.TrimSpace(raw) != raw {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_deny %q must not have leading or trailing whitespace", seg.Index, raw)
+		}
+	}
 	allow := normalizeLiteralList(seg.Allow)
 	deny := normalizeLiteralList(seg.Deny)
 	globAllow := normalizeGlobList(seg.GlobAllow)
@@ -567,10 +591,14 @@ func matchAnyGlob(patterns []string, value string) (bool, error) {
 }
 
 func listAllPrefixes(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string) ([]string, error) {
-	return listAllPrefixesBounded(ctx, lister, prefix, delimiter, 0)
+	return listAllPrefixesInternal(ctx, lister, prefix, delimiter, false, 0)
 }
 
 func listAllPrefixesBounded(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string, maxPrefixes int) ([]string, error) {
+	return listAllPrefixesInternal(ctx, lister, prefix, delimiter, true, maxPrefixes)
+}
+
+func listAllPrefixesInternal(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string, bounded bool, maxPrefixes int) ([]string, error) {
 	var token string
 	var out []string
 	seen := map[string]struct{}{}
@@ -580,8 +608,8 @@ func listAllPrefixesBounded(ctx context.Context, lister provider.PrefixLister, p
 			return nil, err
 		}
 		out = append(out, res.Prefixes...)
-		if maxPrefixes > 0 && len(out) > maxPrefixes {
-			return nil, fmt.Errorf("list prefixes under %q: %w: discovered prefixes exceed level budget (%d)", prefix, ErrDiscoveryBudgetExceeded, maxPrefixes)
+		if bounded && (maxPrefixes < 0 || len(out) > maxPrefixes) {
+			return nil, fmt.Errorf("list prefixes under %q: %w: discovered prefixes exceed level budget (%d)", prefix, ErrDiscoveryBudgetExceeded, MaxDiscoveredPrefixesPerLevel)
 		}
 		if !res.IsTruncated {
 			return out, nil

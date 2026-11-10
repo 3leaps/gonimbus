@@ -712,6 +712,20 @@ func TestPlanMatchPrefixMigration_DiscoveredDatePartitionsAndSegments(t *testing
 	if roundTripSeg.Classification != scope.ClassificationAlreadyMigrated {
 		t.Fatalf("round-trip got %s/%s", roundTripSeg.Classification, roundTripSeg.ReasonCode)
 	}
+
+	// 3. Segment with leading/trailing whitespace is refused (not silently trimmed).
+	wsRaw := testManifestYAML(includeLines("tenant=*/ table=orders/**"), "")
+	wsPlan, err := scope.PlanMatchPrefixMigration(wsRaw, scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wsPlan.Classification != scope.ClassificationRefused || wsPlan.DiscoveredScopeProposal != nil {
+		t.Fatalf("expected whitespace-padded segment to be refused without proposal, got %s", wsPlan.Classification)
+	}
 }
 
 func equalStrings(a, b []string) bool {
