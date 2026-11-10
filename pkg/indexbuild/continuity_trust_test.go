@@ -386,12 +386,15 @@ func TestBuildRefusesOffLayoutCapturedParentPointer(t *testing.T) {
 
 	canonicalComplete, err := os.ReadFile(filepath.Join(setRoot, "runs", "run2", "complete.json"))
 	require.NoError(t, err)
+	canonicalManifest, err := os.ReadFile(filepath.Join(setRoot, "runs", "run2", "manifest.json"))
+	require.NoError(t, err)
 	latestOriginal, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
 
-	// Each case relocates run2's byte-identical complete marker off the
-	// canonical layout and points latest at the copy. The marker still parses
-	// and digest-validates; only the layout relationship differs.
+	// Each case relocates run2's byte-identical complete marker (and its
+	// co-located manifest) off the canonical layout and points latest at the
+	// copy. The marker still parses and digest-validates; only the layout
+	// relationship differs.
 	cases := map[string]struct {
 		completePath string
 		wantMessage  string
@@ -423,6 +426,7 @@ func TestBuildRefusesOffLayoutCapturedParentPointer(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(tc.completePath), 0o700))
 			require.NoError(t, os.WriteFile(tc.completePath, canonicalComplete, 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(tc.completePath), "manifest.json"), canonicalManifest, 0o600))
 			var doc map[string]any
 			require.NoError(t, json.Unmarshal(latestOriginal, &doc))
 			doc["complete_path"] = tc.completePath

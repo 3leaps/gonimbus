@@ -511,7 +511,7 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 			return nil, err
 		}
 		runDir := filepath.Dir(filepath.Clean(snap.CompletePath))
-		if !pathWithinDir(snap.Complete.ManifestPath, runDir) || !pathWithinDir(snap.SegmentDir, runDir) {
+		if !pathWithinDir(snap.ManifestPath, runDir) || !pathWithinDir(snap.SegmentDir, runDir) {
 			return nil, fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
 		}
 	}
@@ -552,7 +552,7 @@ func (p *verifiedParentPlan) preflightContinuityLayout(runID string, paths PathC
 	snap := p.snapshot
 	if strings.TrimSpace(snap.Complete.RunID) == runID {
 		if filepath.Clean(paths.CompletePath) != filepath.Clean(snap.CompletePath) ||
-			filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.Complete.ManifestPath) ||
+			filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.ManifestPath) ||
 			filepath.Clean(paths.SegmentDir) != filepath.Clean(snap.SegmentDir) {
 			return fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
 		}
@@ -564,7 +564,7 @@ func (p *verifiedParentPlan) preflightContinuityLayout(runID string, paths PathC
 		return fmt.Errorf("captured parent for continuity edge: %w", err)
 	}
 	parentRunDir := filepath.Dir(filepath.Clean(snap.CompletePath))
-	if !pathWithinDir(snap.Complete.ManifestPath, parentRunDir) || !pathWithinDir(snap.SegmentDir, parentRunDir) {
+	if !pathWithinDir(snap.ManifestPath, parentRunDir) || !pathWithinDir(snap.SegmentDir, parentRunDir) {
 		return fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
 	}
 	// The new continuity-bearing target must itself be canonical.

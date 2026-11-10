@@ -915,7 +915,7 @@ func TestResolveAncestry_AggregateBudgetNoOverread(t *testing.T) {
 	afterFileReadForTestMu.Lock()
 	prev := afterFileReadForTest
 	afterFileReadForTest = func(path string, n int) {
-		if path == base.completePath || path == base.snap.Complete.ManifestPath {
+		if path == base.completePath || path == base.snap.ManifestPath {
 			mu.Lock()
 			parentBytes += n
 			mu.Unlock()
@@ -958,7 +958,7 @@ func TestResolveAncestry_TOCTOUSameBytes(t *testing.T) {
 		},
 	})
 	// Replace parent manifest bytes while complete digest still names the original.
-	require.NoError(t, os.WriteFile(parent.snap.Complete.ManifestPath, []byte(`{"type":"tampered"}`), 0o600))
+	require.NoError(t, os.WriteFile(parent.snap.ManifestPath, []byte(`{"type":"tampered"}`), 0o600))
 
 	_, err := ResolveAncestry(child.snap, AncestryResolveConfig{
 		Lookup: func(indexSetID, runID string) (string, error) { return parent.completePath, nil },

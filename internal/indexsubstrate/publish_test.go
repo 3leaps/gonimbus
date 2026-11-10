@@ -1,6 +1,7 @@
 package indexsubstrate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -799,4 +800,112 @@ func TestPublishRefusesInvalidSpillBudgetBeforeJournalValidation(t *testing.T) {
 			require.NoFileExists(t, cfg.LatestPath)
 		})
 	}
+}
+
+func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testing.T) {
+	parentDir := t.TempDir()
+	origSetRoot := filepath.Join(parentDir, "origin", "idx_portable")
+	runDir := filepath.Join(origSetRoot, "runs", "run_portable_1")
+	require.NoError(t, os.MkdirAll(runDir, 0o700))
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	runStartedAt := base.Add(time.Hour)
+	journalPath := filepath.Join(origSetRoot, "journals", "jrn_portable.jsonl")
+	writer, err := CreateJournal(journalPath, JournalHeader{
+		Type:               JournalHeaderType,
+		JournalID:          "jrn_portable",
+		IndexSetID:         "idx_portable",
+		RunID:              "run_portable_1",
+		Shard:              "shard-0001",
+		Scope:              &Scope{Prefix: "data/"},
+		CrawlPrefixes:      []string{"data/"},
+		IndexSchemaVersion: IndexSchemaVersion,
+		StartedAt:          runStartedAt,
+	})
+	require.NoError(t, err)
+	size := int64(42)
+	standard := "STANDARD"
+	_, err = writer.Append(ObjectRecord{
+		Op:           ObjectRecordOpObserve,
+		RelKey:       "data/portable.xml",
+		ObservedAt:   runStartedAt.Add(time.Minute),
+		SizeBytes:    &size,
+		ETag:         `"etag-portable"`,
+		StorageClass: &standard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Seal(runStartedAt.Add(2*time.Minute)))
+	require.NoError(t, writer.Close())
+
+	lease, err := AcquireWriteLease(origSetRoot, "idx_portable", "portable-test", 0)
+	require.NoError(t, err)
+	cfg := PublishConfig{
+		IndexSetID:              "idx_portable",
+		RunID:                   "run_portable_1",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       runStartedAt.Add(3 * time.Minute),
+		SnapshotCompletionClock: func() time.Time { return runStartedAt.Add(4 * time.Minute) },
+		JournalPaths:            []string{journalPath},
+		Coverage:                []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:              runDir,
+		ManifestPath:            filepath.Join(runDir, "manifest.json"),
+		CompletePath:            filepath.Join(runDir, "complete.json"),
+		LatestPath:              filepath.Join(origSetRoot, "latest.json"),
+		TargetRowsPerSegment:    10,
+		WriteLease:              lease,
+	}
+	res, err := PublishSnapshot(cfg)
+	require.NoError(t, err)
+	require.True(t, res.LatestAdvanced)
+	require.NoError(t, lease.Release())
+
+	completeDoc, err := readCompleteDocFile(cfg.CompletePath)
+	require.NoError(t, err)
+	require.Equal(t, "manifest.json", completeDoc.ManifestPath)
+	require.Equal(t, ".", completeDoc.SegmentDir)
+
+	latestRaw, err := os.ReadFile(cfg.LatestPath)
+	require.NoError(t, err)
+	var latestDoc publishedLatestDoc
+	require.NoError(t, json.Unmarshal(latestRaw, &latestDoc))
+	require.Equal(t, "runs/run_portable_1/complete.json", latestDoc.CompletePath)
+
+	// Relocate the entire index set directory to a new parent directory without
+	// editing complete.json, latest.json, or manifest.json.
+	relocatedSetRoot := filepath.Join(parentDir, "relocated-bundle", "idx_portable")
+	require.NoError(t, os.MkdirAll(filepath.Dir(relocatedSetRoot), 0o700))
+	require.NoError(t, os.Rename(origSetRoot, relocatedSetRoot))
+
+	relocatedLatestPath := filepath.Join(relocatedSetRoot, "latest.json")
+	snap, err := OpenLatestPublishedSnapshot(relocatedLatestPath)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(relocatedSetRoot, "runs", "run_portable_1", "complete.json"), snap.CompletePath)
+	require.Equal(t, filepath.Join(relocatedSetRoot, "runs", "run_portable_1", "manifest.json"), snap.ManifestPath)
+	require.Equal(t, filepath.Join(relocatedSetRoot, "runs", "run_portable_1"), snap.SegmentDir)
+
+	manifest, rows, err := ReadLatestPublishedRows(relocatedLatestPath)
+	require.NoError(t, err)
+	require.Equal(t, "run_portable_1", manifest.RunID)
+	require.Len(t, rows, 1)
+	require.Equal(t, "data/portable.xml", rows[0].RelKey)
+
+	// Verify legacy absolute paths in complete.json and latest.json remain readable.
+	absComplete := completeDoc
+	absComplete.ManifestPath = snap.ManifestPath
+	absComplete.SegmentDir = snap.SegmentDir
+	absCompleteBytes, err := json.MarshalIndent(absComplete, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(snap.CompletePath, append(absCompleteBytes, '\n'), 0o600))
+
+	absLatest := latestDoc
+	absLatest.CompletePath = snap.CompletePath
+	absLatestBytes, err := json.MarshalIndent(absLatest, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(relocatedLatestPath, append(absLatestBytes, '\n'), 0o600))
+
+	absSnap, err := OpenLatestPublishedSnapshot(relocatedLatestPath)
+	require.NoError(t, err)
+	require.Equal(t, snap.CompletePath, absSnap.CompletePath)
+	require.Equal(t, snap.ManifestPath, absSnap.ManifestPath)
+	require.Equal(t, snap.SegmentDir, absSnap.SegmentDir)
 }

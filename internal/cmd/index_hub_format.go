@@ -184,14 +184,22 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 	if strings.TrimSpace(complete.ManifestPath) == "" || strings.TrimSpace(complete.SegmentDir) == "" {
 		return durableExportSnapshot{}, fmt.Errorf("local durable complete marker is missing manifest or segment path")
 	}
-	manifestSHA, manifestSize, err := hashFile(complete.ManifestPath)
+	manifestPath, err := resolveLocalDurableCompleteArtifactPath(completePath, complete.ManifestPath, false)
+	if err != nil {
+		return durableExportSnapshot{}, err
+	}
+	segmentDir, err := resolveLocalDurableCompleteArtifactPath(completePath, complete.SegmentDir, true)
+	if err != nil {
+		return durableExportSnapshot{}, err
+	}
+	manifestSHA, manifestSize, err := hashFile(manifestPath)
 	if err != nil {
 		return durableExportSnapshot{}, fmt.Errorf("hash local durable manifest: %w", err)
 	}
 	if manifestSHA != complete.ManifestSHA256 {
 		return durableExportSnapshot{}, fmt.Errorf("local durable manifest digest mismatch")
 	}
-	manifest, err := indexsubstrate.ReadInternalManifestFile(complete.ManifestPath)
+	manifest, err := indexsubstrate.ReadInternalManifestFile(manifestPath)
 	if err != nil {
 		return durableExportSnapshot{}, fmt.Errorf("read local durable manifest: %w", err)
 	}
@@ -201,7 +209,7 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 	if len(manifest.Segments) != complete.Segments {
 		return durableExportSnapshot{}, fmt.Errorf("local durable manifest segment count mismatch")
 	}
-	if err := verifyLocalDurableSegments(complete.SegmentDir, manifest); err != nil {
+	if err := verifyLocalDurableSegments(segmentDir, manifest); err != nil {
 		return durableExportSnapshot{}, err
 	}
 	if complete.Type != indexsubstrate.CompleteMarkerTypeV2 {
@@ -224,13 +232,38 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 	}
 	return durableExportSnapshot{
 		Manifest:                    manifest,
-		ManifestPath:                complete.ManifestPath,
+		ManifestPath:                manifestPath,
 		ManifestSHA:                 manifestSHA,
 		ManifestSize:                manifestSize,
-		SegmentDir:                  complete.SegmentDir,
+		SegmentDir:                  segmentDir,
 		SnapshotCompletedAt:         snapshotCompletedAt,
 		SnapshotCompletionSemantics: complete.SnapshotCompletionSemantics,
 	}, nil
+}
+
+func resolveLocalDurableCompleteArtifactPath(completePath, raw string, allowDot bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("local durable complete marker is missing manifest or segment path")
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw), nil
+	}
+	if strings.Contains(raw, "\\") {
+		return "", fmt.Errorf("local durable complete marker path is not a safe relative path")
+	}
+	fromSlash := filepath.FromSlash(raw)
+	clean := filepath.Clean(fromSlash)
+	if clean == "." {
+		if allowDot && raw == "." {
+			return filepath.Clean(filepath.Dir(completePath)), nil
+		}
+		return "", fmt.Errorf("local durable complete marker path is not a safe relative path")
+	}
+	if clean != fromSlash || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("local durable complete marker path is not a safe relative path")
+	}
+	return filepath.Join(filepath.Dir(completePath), clean), nil
 }
 
 func validateDurableHubManifest(indexSetID, runID string, manifest indexsubstrate.InternalManifest) error {
