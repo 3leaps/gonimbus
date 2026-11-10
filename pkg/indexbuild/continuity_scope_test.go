@@ -17,13 +17,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexenrich"
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
 
 // scopedContConfig is contConfig with an explicit crawl-prefix plan and its
 // matching per-prefix coverage attestation (provider-key space, like the CLI
-// adapter passes them).
+// adapter passes them). When a published latest already exists at setRoot and
+// the scoped plan reduces coverage relative to that parent, scopedContConfig
+// attaches a pinned LossAcknowledgment so existing continuity-merge tests
+// exercise the acknowledged scope-loss path.
 func scopedContConfig(setRoot, runID string, objs []provider.ObjectSummary, prefixes []string, started time.Time) Config {
 	cfg := contConfig(setRoot, runID, objs, started)
 	cfg.CrawlPrefixes = append([]string(nil), prefixes...)
@@ -36,7 +40,47 @@ func scopedContConfig(setRoot, runID string, objs []provider.ObjectSummary, pref
 		})
 	}
 	cfg.Coverage = coverage
+	if ack := maybeAcknowledgeScopeLossForTest(cfg.Paths.LatestPath, cfg.IndexSetID, cfg.BaseURI, cfg.Coverage, started); ack != nil {
+		cfg.LossAcknowledgment = ack
+	}
 	return cfg
+}
+
+func maybeAcknowledgeScopeLossForTest(latestPath, indexSetID, baseURI string, coverage []CoverageAttestation, started time.Time) *durableindex.TransitionAcknowledgment {
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	if err != nil {
+		return nil
+	}
+	normCov, err := normalizeCoverageForBaseURI(baseURI, coverage)
+	if err != nil {
+		return nil
+	}
+	currScopes, err := durableScopesFromCoverage(normCov)
+	if err != nil {
+		return nil
+	}
+	_, _, currDigest, err := durableindex.BuildIndexPlan(indexSetID, currScopes)
+	if err != nil {
+		return nil
+	}
+	parentScopes, err := durableScopesFromSubstrateCoverage(snap.Manifest.Coverage)
+	if err != nil {
+		return nil
+	}
+	lost, err := durableindex.HasScopeLoss(parentScopes, currScopes)
+	if err != nil || !lost {
+		return nil
+	}
+	ackAt, err := durableindex.FormatInstant(started.UTC())
+	if err != nil {
+		return nil
+	}
+	return &durableindex.TransitionAcknowledgment{
+		ParentSHA256:   snap.Complete.ManifestSHA256,
+		PlanDigest:     currDigest,
+		AcknowledgedBy: "operator-test",
+		AcknowledgedAt: ackAt,
+	}
 }
 
 // manifestCoveragePrefixes reads the published manifest's coverage prefixes
@@ -377,4 +421,206 @@ func TestBuildRefusesUnfaithfulCoverageForCrawlPlan(t *testing.T) {
 		require.ElementsMatch(t, []string{"siteA/", "siteB/"},
 			manifestCoveragePrefixes(t, filepath.Join(setRoot, "latest.json")))
 	})
+}
+
+func TestBuildRefusesUnacknowledgedScopeLossBeforeSideEffects(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	_, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+		obj("data/siteB/b1.xml", `"b1"`, 2, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	prov := &countingListProvider{inner: fakeProvider{objects: []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+	}}}
+	cfg2 := scopedContConfig(setRoot, "run2", nil, []string{"data/siteA/"}, base.Add(time.Hour))
+	cfg2.Source = Source{Provider: prov, ProviderName: "s3"}
+	cfg2.LossAcknowledgment = nil
+
+	_, err = NewRunner(cfg2).Build(ctx)
+	require.Error(t, err)
+	reason, ok := durableindex.RefusalReason(err)
+	require.True(t, ok)
+	require.Equal(t, "scope_loss", reason)
+	require.Zero(t, prov.lists.Load(), "unacknowledged scope_loss must refuse before any provider crawl")
+	require.NoDirExists(t, cfg2.Paths.JournalDir, "unacknowledged scope_loss must not create journals")
+
+	snapAfter, err := indexsubstrate.OpenLatestPublishedSnapshot(filepath.Join(setRoot, "latest.json"))
+	require.NoError(t, err)
+	require.Equal(t, "run1", snapAfter.Manifest.RunID, "latest.json must remain at run1")
+}
+
+func TestBuildAcknowledgedScopeLossAndRetainedUnobservedRows(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	latestPath := filepath.Join(setRoot, "latest.json")
+
+	sum1, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+		obj("data/siteB/b1.xml", `"b1"`, 2, base),
+		obj("data/siteB/b2.xml", `"b2"`, 3, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+	require.Equal(t, durableindex.AdmissionBaselineNotCompared, sum1.Manifest.Admission)
+	require.Equal(t, 0, sum1.Manifest.RetainedUnobservedRows)
+
+	// run2 with acknowledged scope loss (siteA only): retains 2 unobserved rows from siteB.
+	cfg2 := scopedContConfig(setRoot, "run2", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+	}, []string{"data/siteA/"}, base.Add(time.Hour))
+	sum2, err := NewRunner(cfg2).Build(ctx)
+	require.NoError(t, err)
+	require.Equal(t, durableindex.AdmissionLossAcknowledged, sum2.Manifest.Admission)
+	require.Equal(t, 2, sum2.Manifest.RetainedUnobservedRows)
+
+	// run3 with identical siteA scope: no_loss relative to run2, still retains 2 unobserved rows.
+	cfg3 := scopedContConfig(setRoot, "run3", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+	}, []string{"data/siteA/"}, base.Add(2*time.Hour))
+	require.Nil(t, cfg3.LossAcknowledgment, "same scope must not require loss acknowledgment")
+	sum3, err := NewRunner(cfg3).Build(ctx)
+	require.NoError(t, err)
+	require.Equal(t, durableindex.AdmissionNoLoss, sum3.Manifest.Admission)
+	require.Equal(t, 2, sum3.Manifest.RetainedUnobservedRows)
+
+	// Supplying a LossAcknowledgment when there is no scope_loss must refuse with unexpected_acknowledgment.
+	cfgUnexpected := scopedContConfig(setRoot, "run4", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+	}, []string{"data/siteA/"}, base.Add(3*time.Hour))
+	ackAt, err := durableindex.FormatInstant(base.Add(3 * time.Hour).UTC())
+	require.NoError(t, err)
+	cfgUnexpected.LossAcknowledgment = &durableindex.TransitionAcknowledgment{
+		ParentSHA256:   sum3.ManifestSHA256,
+		PlanDigest:     sum3.Manifest.PlanDigest,
+		AcknowledgedBy: "operator-test",
+		AcknowledgedAt: ackAt,
+	}
+	_, err = NewRunner(cfgUnexpected).Build(ctx)
+	require.Error(t, err)
+	reason, ok := durableindex.RefusalReason(err)
+	require.True(t, ok)
+	require.Equal(t, "unexpected_acknowledgment", reason)
+
+	snapLatest, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, "run3", snapLatest.Manifest.RunID)
+}
+
+func TestRetryEnforcesSealedJournalLossAcknowledgment(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	_, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+		obj("data/siteB/b1.xml", `"b1"`, 2, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	cfg2 := scopedContConfig(setRoot, "run2", []provider.ObjectSummary{
+		obj("data/siteA/a1.xml", `"a1"`, 1, base),
+	}, []string{"data/siteA/"}, base.Add(time.Hour))
+	sum2, err := NewRunner(cfg2).Build(ctx)
+	require.NoError(t, err)
+
+	// Retry of run2 without passing LossAcknowledgment on RetryConfig succeeds because the
+	// acknowledgment is sealed inside the journal headers.
+	retrySum, err := Retry(ctx, RetryConfig{
+		IndexSetID:           cfg2.IndexSetID,
+		RunID:                cfg2.RunID,
+		BaseURI:              cfg2.BaseURI,
+		Paths:                cfg2.Paths,
+		JournalPaths:         sum2.JournalPaths,
+		Coverage:             cfg2.Coverage,
+		RunStartedAt:         cfg2.RunStartedAt,
+		ManifestCreatedAt:    cfg2.ManifestCreatedAt,
+		TargetRowsPerSegment: cfg2.TargetRowsPerSegment,
+	})
+	require.NoError(t, err)
+	require.Equal(t, durableindex.AdmissionLossAcknowledged, retrySum.Manifest.Admission)
+
+	// Retry with a mismatched LossAcknowledgment on RetryConfig must refuse with acknowledgment_mismatch.
+	badAck := *cfg2.LossAcknowledgment
+	badAck.AcknowledgedBy = "forged-actor"
+	_, err = Retry(ctx, RetryConfig{
+		IndexSetID:           cfg2.IndexSetID,
+		RunID:                cfg2.RunID,
+		BaseURI:              cfg2.BaseURI,
+		Paths:                cfg2.Paths,
+		JournalPaths:         sum2.JournalPaths,
+		Coverage:             cfg2.Coverage,
+		LossAcknowledgment:   &badAck,
+		RunStartedAt:         cfg2.RunStartedAt,
+		ManifestCreatedAt:    cfg2.ManifestCreatedAt,
+		TargetRowsPerSegment: cfg2.TargetRowsPerSegment,
+	})
+	require.Error(t, err)
+	reason, ok := durableindex.RefusalReason(err)
+	require.True(t, ok)
+	require.Equal(t, "acknowledgment_mismatch", reason)
+}
+
+func TestBuildAndRetryRejectLiteralDotRootSentinelCollision(t *testing.T) {
+	ctx := context.Background()
+	setRoot := t.TempDir()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	sum1, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+		obj("data/alpha/a.txt", `"a1"`, 1, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	// Build with CrawlPrefixes=["data/."] must be refused before any journal or publish side effect.
+	cfgDot := contConfig(setRoot, "run2", []provider.ObjectSummary{}, base.Add(time.Hour))
+	cfgDot.CrawlPrefixes = []string{"data/."}
+	cfgDot.Coverage = []CoverageAttestation{{
+		Scope:    &Scope{Prefix: "data/."},
+		Basis:    CoverageBasisConfirmed,
+		Complete: true,
+	}}
+	_, err = NewRunner(cfgDot).Build(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "relative-root sentinel")
+
+	// Hand-crafted sealed journal with CrawlPrefixes=["data/."] must also be refused by Retry.
+	badJrnPath := filepath.Join(t.TempDir(), "bad.ndjson")
+	jw, err := indexsubstrate.CreateJournal(badJrnPath, indexsubstrate.JournalHeader{
+		Type:               indexsubstrate.JournalHeaderType,
+		JournalID:          "jrn_run2_0001",
+		IndexSetID:         cfgDot.IndexSetID,
+		RunID:              "run2",
+		Shard:              "shard-0001",
+		Scope:              &indexsubstrate.Scope{Prefix: "data/"},
+		CrawlPrefixes:      []string{"data/."},
+		IndexSchemaVersion: indexsubstrate.IndexSchemaVersion,
+		StartedAt:          base.Add(time.Hour),
+	})
+	require.NoError(t, err)
+	require.NoError(t, jw.Seal(base.Add(time.Hour)))
+	require.NoError(t, jw.Close())
+
+	_, err = Retry(ctx, RetryConfig{
+		IndexSetID:           cfgDot.IndexSetID,
+		RunID:                "run2",
+		BaseURI:              cfgDot.BaseURI,
+		Paths:                cfgDot.Paths,
+		JournalPaths:         []string{badJrnPath},
+		Coverage:             cfgDot.Coverage,
+		RunStartedAt:         base.Add(time.Hour),
+		ManifestCreatedAt:    base.Add(time.Hour),
+		TargetRowsPerSegment: cfgDot.TargetRowsPerSegment,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "relative-root sentinel")
+
+	// Verify run1 remains intact and alpha/a.txt is still active.
+	snapAfter, err := indexsubstrate.OpenLatestPublishedSnapshot(filepath.Join(setRoot, "latest.json"))
+	require.NoError(t, err)
+	require.Equal(t, sum1.RunID, snapAfter.Manifest.RunID)
+	require.Equal(t, 1, snapAfter.Manifest.Counts.ActiveRows)
 }

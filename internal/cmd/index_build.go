@@ -21,8 +21,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/internal/indexcompare"
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/indexstore"
@@ -152,6 +154,10 @@ var (
 	indexBuildSpillWorkspaceMax  string
 	indexBuildSpillRecordMax     string
 	indexBuildSpillRoot          string
+	indexBuildAckLossParent      string
+	indexBuildAckLossPlan        string
+	indexBuildAckLossBy          string
+	indexBuildAckLossAt          string
 	// indexBuildSpillResolved is the spill configuration resolved across CLI flag >
 	// env > config > default, set by resolveIndexBuildSpill before the crawl.
 	indexBuildSpillResolved indexBuildSpillResolution
@@ -186,6 +192,10 @@ func init() {
 	indexBuildCmd.Flags().StringVar(&indexBuildSpillWorkspaceMax, "spill-workspace-max", "", "Max on-disk scratch for the durable merge (e.g. 24GiB, 16GB); empty uses the 16GiB default. Size to the corpus: a successive build stages the full prior index state before merging. Also settable via GONIMBUS_SPILL_WORKSPACE_MAX or the index.spill.workspace_max config key")
 	indexBuildCmd.Flags().StringVar(&indexBuildSpillRecordMax, "spill-record-max", "", "Max single journal-record size for the durable merge (e.g. 32MiB); empty uses the 16MiB default. Very wide/dense scopes need a larger bound (the journal header carries the crawl-prefix plan). Also settable via GONIMBUS_SPILL_RECORD_MAX or the index.spill.record_max config key")
 	indexBuildCmd.Flags().StringVar(&indexBuildSpillRoot, "spill-root", "", "Directory for the durable merge's scratch workspace (default: beside the run journals). Point at a disk with room for --spill-workspace-max. Also settable via GONIMBUS_SPILL_ROOT or the index.spill.root config key")
+	indexBuildCmd.Flags().StringVar(&indexBuildAckLossParent, "acknowledge-scope-loss-parent", "", "Parent manifest SHA-256 for explicit scope-loss acknowledgment")
+	indexBuildCmd.Flags().StringVar(&indexBuildAckLossPlan, "acknowledge-scope-loss-plan", "", "Proposed plan digest SHA-256 for explicit scope-loss acknowledgment")
+	indexBuildCmd.Flags().StringVar(&indexBuildAckLossBy, "acknowledge-scope-loss-by", "", "Actor identifier for explicit scope-loss acknowledgment")
+	indexBuildCmd.Flags().StringVar(&indexBuildAckLossAt, "acknowledge-scope-loss-at", "", "Exact 9-digit UTC timestamp (YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ) for explicit scope-loss acknowledgment")
 
 	// Provider identity overrides (ENTARCH: explicit, never inferred)
 	indexBuildCmd.Flags().StringVar(&indexBuildStorageProv, "storage-provider", "", "Storage provider (aws_s3, cloudflare_r2, wasabi, gcs, azure_blob, generic_s3)")
@@ -430,6 +440,9 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	identityResult, err := indexstore.ComputeIndexSetID(params)
 	if err != nil {
 		return fmt.Errorf("compute index identity: %w", err)
+	}
+	if selectedIndexBuildFormat() == "durable" || selectedIndexBuildFormat() == "both" {
+		identityResult, params = resolveExistingDurableSetCarryForward(params, identityResult)
 	}
 
 	// Show plan in dry-run mode. This intentionally does not create/open the
@@ -2268,6 +2281,7 @@ func runCrawlForIndex(
 		}
 	}
 	writer.setDeltaPrefixes(crawlPrefixes)
+	warnSQLiteScopeLossIfReduced(ctx, db, indexSetID, basePrefix, crawlPrefixes)
 	_, crawlErr := c.Run(ctx)
 
 	// Always close writer to flush remaining batches, even on error.
@@ -2335,4 +2349,124 @@ func finalizeIndexRun(
 		return fmt.Errorf("update run status: %w", err)
 	}
 	return nil
+}
+
+func resolveIndexBuildLossAcknowledgment() (*durableindex.TransitionAcknowledgment, error) {
+	parent := strings.TrimSpace(indexBuildAckLossParent)
+	plan := strings.TrimSpace(indexBuildAckLossPlan)
+	by := strings.TrimSpace(indexBuildAckLossBy)
+	at := strings.TrimSpace(indexBuildAckLossAt)
+	if parent == "" && plan == "" && by == "" && at == "" {
+		return nil, nil
+	}
+	if parent == "" || plan == "" || by == "" || at == "" {
+		return nil, fmt.Errorf("scope-loss acknowledgment requires all four flags: --acknowledge-scope-loss-parent, --acknowledge-scope-loss-plan, --acknowledge-scope-loss-by, and --acknowledge-scope-loss-at")
+	}
+	return &durableindex.TransitionAcknowledgment{
+		ParentSHA256:   parent,
+		PlanDigest:     plan,
+		AcknowledgedBy: by,
+		AcknowledgedAt: at,
+	}, nil
+}
+
+// resolveExistingDurableSetCarryForward carries forward set_id (idx_) verbatim from an
+// existing verified durable set when the only difference in IndexSetParams is GonimbusVersion
+// (e.g., across a Gonimbus version upgrade).
+func resolveExistingDurableSetCarryForward(params indexstore.IndexSetParams, current *indexstore.IndexSetIdentityResult) (*indexstore.IndexSetIdentityResult, indexstore.IndexSetParams) {
+	if current == nil || strings.TrimSpace(indexBuildDBPath) != "" {
+		return current, params
+	}
+	if segRoot, err := indexSubstrateSegmentCacheDir(current.IndexSetID); err == nil {
+		latestPath := filepath.Join(segRoot, "latest.json")
+		if _, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(latestPath, indexsubstrate.DefaultMaxPublishedMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes); err == nil {
+			return current, params
+		}
+	}
+	dataDir, err := indexDataDir()
+	if err != nil {
+		return current, params
+	}
+	indexesRoot := filepath.Join(dataDir, "indexes")
+	entries, err := os.ReadDir(indexesRoot)
+	if err != nil {
+		return current, params
+	}
+	var matchedResult *indexstore.IndexSetIdentityResult
+	var matchedParams indexstore.IndexSetParams
+	matchCount := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "idx_") {
+			continue
+		}
+		idPath := filepath.Join(indexesRoot, entry.Name(), "identity.json")
+		localID, err := indexreader.ReadLocalIdentityFile(idPath, int64(maxHubMarkerBytes))
+		if err != nil || strings.TrimSpace(localID.IndexSetID) == "" {
+			continue
+		}
+		testParams := params
+		testParams.BuildParams.GonimbusVersion = localID.Payload.Build.GonimbusVersion
+		recomputed, err := indexstore.ComputeIndexSetID(testParams)
+		if err != nil || recomputed.IndexSetID != localID.IndexSetID || recomputed.CanonicalJSON != string(localID.Raw) {
+			continue
+		}
+		segRoot, err := indexSubstrateSegmentCacheDir(localID.IndexSetID)
+		if err != nil {
+			continue
+		}
+		latestPath := filepath.Join(segRoot, "latest.json")
+		snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(latestPath, indexsubstrate.DefaultMaxPublishedMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes)
+		if err != nil || strings.TrimSpace(snap.Manifest.IndexSetID) != localID.IndexSetID {
+			continue
+		}
+		matchedResult = recomputed
+		matchedParams = testParams
+		matchCount++
+	}
+	if matchCount == 1 && matchedResult != nil {
+		return matchedResult, matchedParams
+	}
+	return current, params
+}
+
+func warnSQLiteScopeLossIfReduced(ctx context.Context, db *sql.DB, indexSetID, basePrefix string, crawlPrefixes []string) {
+	if db == nil || strings.TrimSpace(indexSetID) == "" {
+		return
+	}
+	rows, err := db.QueryContext(ctx, `SELECT rel_key FROM objects_current WHERE index_set_id = ? AND deleted_at IS NULL`, indexSetID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	relPrefixes := make([]string, 0, len(crawlPrefixes))
+	baseTrim := strings.TrimPrefix(strings.TrimSpace(basePrefix), "/")
+	for _, raw := range crawlPrefixes {
+		p := strings.TrimPrefix(strings.TrimSpace(raw), "/")
+		if baseTrim != "" {
+			if p == strings.TrimSuffix(baseTrim, "/") || p == baseTrim {
+				p = ""
+			} else if strings.HasPrefix(p, baseTrim) {
+				p = strings.TrimPrefix(p, baseTrim)
+			}
+		}
+		relPrefixes = append(relPrefixes, p)
+	}
+	for rows.Next() {
+		var relKey string
+		if err := rows.Scan(&relKey); err != nil {
+			return
+		}
+		covered := false
+		for _, rp := range relPrefixes {
+			if strings.HasPrefix(relKey, rp) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: scope_loss: current crawl scope reduces coverage relative to prior SQLite index state\n")
+			return
+		}
+	}
 }

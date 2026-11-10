@@ -392,13 +392,14 @@ func (s *serializedEventSink) OnEvent(ctx context.Context, event Event) error {
 
 // crawlLanesConfig is the resolved input for one run's crawl.
 type crawlLanesConfig struct {
-	build       Config
-	basePrefix  string
-	matcher     *match.Matcher
-	crawl       crawler.Config
-	maxLanes    int
-	journalPlan []string
-	prefixes    []string
+	build              Config
+	basePrefix         string
+	matcher            *match.Matcher
+	crawl              crawler.Config
+	maxLanes           int
+	journalPlan        []string
+	prefixes           []string
+	lossAcknowledgment *indexsubstrate.LossAcknowledgment
 }
 
 // crawlLanesResult is what publication needs from a completed crawl.
@@ -451,17 +452,18 @@ func runCrawlLanes(ctx context.Context, cfg crawlLanesConfig) (crawlLanesResult,
 		}
 		path := filepath.Join(cfg.build.Paths.JournalDir, laneJournalFileName(ln.ordinal))
 		w, err := newJournalWriter(journalWriterConfig{
-			Path:          path,
-			IndexSetID:    cfg.build.IndexSetID,
-			RunID:         cfg.build.RunID,
-			StartedAt:     cfg.build.RunStartedAt,
-			BaseURI:       cfg.build.BaseURI,
-			BasePrefix:    cfg.basePrefix,
-			CrawlPrefixes: journalPlan,
-			CrawlPlanMode: mode,
-			LaneOrdinal:   ln.ordinal,
-			Now:           cfg.build.Clock,
-			Events:        events,
+			Path:               path,
+			IndexSetID:         cfg.build.IndexSetID,
+			RunID:              cfg.build.RunID,
+			StartedAt:          cfg.build.RunStartedAt,
+			BaseURI:            cfg.build.BaseURI,
+			BasePrefix:         cfg.basePrefix,
+			CrawlPrefixes:      journalPlan,
+			CrawlPlanMode:      mode,
+			LaneOrdinal:        ln.ordinal,
+			LossAcknowledgment: cfg.lossAcknowledgment,
+			Now:                cfg.build.Clock,
+			Events:             events,
 		})
 		if err != nil {
 			_ = closeLaneWriters(writers)

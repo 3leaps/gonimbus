@@ -14,6 +14,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/uri"
@@ -80,6 +81,10 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	if err := plan.preflightContinuityLayout(cfg.RunID, cfg.Paths); err != nil {
 		return Summary{}, err
 	}
+	_, _, substrateAck, err := evaluateBuildAdmission(plan, cfg.IndexSetID, cfg.RunID, cfg.BaseURI, cfg.Coverage, cfg.LossAcknowledgment)
+	if err != nil {
+		return Summary{}, err
+	}
 
 	basePrefix, err := basePrefixFromURI(cfg.BaseURI)
 	if err != nil {
@@ -119,13 +124,14 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	}
 
 	crawlResult, err := runCrawlLanes(ctx, crawlLanesConfig{
-		build:       cfg,
-		basePrefix:  basePrefix,
-		matcher:     matcher,
-		crawl:       crawlCfg,
-		maxLanes:    maxLanes,
-		journalPlan: journalPlan,
-		prefixes:    prefixes,
+		build:              cfg,
+		basePrefix:         basePrefix,
+		matcher:            matcher,
+		crawl:              crawlCfg,
+		maxLanes:           maxLanes,
+		journalPlan:        journalPlan,
+		prefixes:           prefixes,
+		lossAcknowledgment: substrateAck,
 	})
 	if err != nil {
 		return Summary{}, err
@@ -142,6 +148,7 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 		JournalPaths:         crawlResult.journalPaths,
 		Coverage:             cfg.Coverage,
 		ExpectedParent:       cfg.ExpectedParent,
+		LossAcknowledgment:   cfg.LossAcknowledgment,
 		RunStartedAt:         cfg.RunStartedAt,
 		ManifestCreatedAt:    cfg.ManifestCreatedAt,
 		Clock:                cfg.Clock,
@@ -211,10 +218,14 @@ func Retry(ctx context.Context, cfg RetryConfig) (summary Summary, retryErr erro
 	if err != nil {
 		return Summary{}, err
 	}
-	boundPlan, err := boundCrawlPlanFromJournals(cfg.JournalPaths, budget.MaxRecordBytes)
+	boundPlan, sealedAck, err := boundJournalProvenance(cfg.JournalPaths, budget.MaxRecordBytes)
 	if err != nil {
 		return Summary{}, err
 	}
+	if cfg.LossAcknowledgment != nil && !equalLossAcknowledgment(cfg.LossAcknowledgment, sealedAck) {
+		return Summary{}, durableindex.NewRefusal("acknowledgment_mismatch", "retry loss_acknowledgment disagrees with sealed journal provenance")
+	}
+	cfg.LossAcknowledgment = sealedAck
 	if err := validateCoverageMatchesCrawlPlan(cfg.BaseURI, boundPlan, cfg.Coverage); err != nil {
 		return Summary{}, fmt.Errorf("retry coverage authority: %w", err)
 	}
@@ -298,6 +309,17 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	continuity, err := plan.continuityInputs(cfg.RunID, cfg.Paths)
 	if err != nil {
 		return Summary{}, err
+	}
+	planDigest, admission, substrateAck, err := evaluateBuildAdmission(plan, cfg.IndexSetID, cfg.RunID, cfg.BaseURI, cfg.Coverage, cfg.LossAcknowledgment)
+	if err != nil {
+		return Summary{}, err
+	}
+	if continuity.lineage != nil {
+		cp := *continuity.lineage
+		cp.PlanDigest = planDigest
+		cp.Admission = admission
+		cp.LossAcknowledgment = substrateAck
+		continuity.lineage = &cp
 	}
 
 	// Revalidate the stable authority at the commit boundary. This is separate
@@ -840,36 +862,46 @@ func journalCrawlPlan(basePrefix string, crawlPrefixes []string) ([]string, erro
 // SpillMergeBudgetExhausted here — before any publish work — rather than
 // allocating unbounded during provenance binding.
 func boundCrawlPlanFromJournals(journalPaths []string, maxRecordBytes int64) ([]string, error) {
+	prefixes, _, err := boundJournalProvenance(journalPaths, maxRecordBytes)
+	return prefixes, err
+}
+
+func boundJournalProvenance(journalPaths []string, maxRecordBytes int64) ([]string, *durableindex.TransitionAcknowledgment, error) {
 	if len(journalPaths) == 0 {
-		return nil, fmt.Errorf("journal paths are required")
+		return nil, nil, fmt.Errorf("journal paths are required")
 	}
 	type journalPlan struct {
 		mode     string
 		prefixes []string
+		ack      *durableindex.TransitionAcknowledgment
 	}
 	plans := make([]journalPlan, 0, len(journalPaths))
 	for i, path := range journalPaths {
 		summary, err := indexsubstrate.ValidateJournalBounded(path, maxRecordBytes)
 		if err != nil {
-			return nil, fmt.Errorf("read journal header for coverage provenance: %w", err)
+			return nil, nil, fmt.Errorf("read journal header for coverage provenance: %w", err)
 		}
 		if strings.TrimSpace(summary.ContentSHA256) == "" {
-			return nil, fmt.Errorf("%w: journal %d is not content-integrity sealed; recovery cannot trust its crawl-plan provenance", indexsubstrate.ErrStaleParent, i)
+			return nil, nil, fmt.Errorf("%w: journal %d is not content-integrity sealed; recovery cannot trust its crawl-plan provenance", indexsubstrate.ErrStaleParent, i)
 		}
 		if len(summary.Header.CrawlPrefixes) == 0 {
-			return nil, fmt.Errorf("%w: journal %d predates crawl-plan provenance; recovery cannot validate coverage authority", indexsubstrate.ErrStaleParent, i)
-		}
-		if err := validateJournalPlanCanonical(summary.Header.CrawlPrefixes); err != nil {
-			return nil, fmt.Errorf("%w: journal %d: %v", indexsubstrate.ErrStaleParent, i, err)
+			return nil, nil, fmt.Errorf("%w: journal %d predates crawl-plan provenance; recovery cannot validate coverage authority", indexsubstrate.ErrStaleParent, i)
 		}
 		mode := summary.Header.CrawlPlanMode
 		if mode != "" && mode != indexsubstrate.CrawlPlanModeLaneLocal {
-			return nil, fmt.Errorf("%w: journal %d records unrecognized crawl_plan_mode %q; recovery cannot interpret its crawl-plan provenance", indexsubstrate.ErrStaleParent, i, mode)
+			return nil, nil, fmt.Errorf("%w: journal %d records unrecognized crawl_plan_mode %q; recovery cannot interpret its crawl-plan provenance", indexsubstrate.ErrStaleParent, i, mode)
+		}
+		if err := validateJournalPlanCanonical(mode, summary.Header.CrawlPrefixes); err != nil {
+			return nil, nil, fmt.Errorf("%w: journal %d: %v", indexsubstrate.ErrStaleParent, i, err)
 		}
 		if len(plans) > 0 && mode != plans[0].mode {
-			return nil, fmt.Errorf("%w: sealed journals mix legacy whole-plan and lane-local crawl-plan provenance", indexsubstrate.ErrStaleParent)
+			return nil, nil, fmt.Errorf("%w: sealed journals mix legacy whole-plan and lane-local crawl-plan provenance", indexsubstrate.ErrStaleParent)
 		}
-		plans = append(plans, journalPlan{mode: mode, prefixes: append([]string(nil), summary.Header.CrawlPrefixes...)})
+		ack := fromSubstrateLossAcknowledgment(summary.Header.LossAcknowledgment)
+		if len(plans) > 0 && !equalLossAcknowledgment(ack, plans[0].ack) {
+			return nil, nil, fmt.Errorf("%w: sealed journals disagree on their loss_acknowledgment provenance", indexsubstrate.ErrStaleParent)
+		}
+		plans = append(plans, journalPlan{mode: mode, prefixes: append([]string(nil), summary.Header.CrawlPrefixes...), ack: ack})
 	}
 	if plans[0].mode == indexsubstrate.CrawlPlanModeLaneLocal {
 		union := make([]string, 0, len(plans))
@@ -877,22 +909,169 @@ func boundCrawlPlanFromJournals(journalPaths []string, maxRecordBytes int64) ([]
 		for i, p := range plans {
 			for _, prefix := range p.prefixes {
 				if j, dup := claimedBy[prefix]; dup {
-					return nil, fmt.Errorf("%w: crawl-plan entry %q is claimed by journals %d and %d; lane-local plans must be disjoint", indexsubstrate.ErrStaleParent, prefix, j, i)
+					return nil, nil, fmt.Errorf("%w: crawl-plan entry %q is claimed by journals %d and %d; lane-local plans must be disjoint", indexsubstrate.ErrStaleParent, prefix, j, i)
 				}
 				claimedBy[prefix] = i
 				union = append(union, prefix)
 			}
 		}
 		sort.Strings(union)
-		return union, nil
+		return union, plans[0].ack, nil
 	}
 	planKey := crawlPlanSetKey(plans[0].prefixes)
 	for i := 1; i < len(plans); i++ {
 		if crawlPlanSetKey(plans[i].prefixes) != planKey {
-			return nil, fmt.Errorf("%w: sealed journals disagree on their crawl-prefix plan", indexsubstrate.ErrStaleParent)
+			return nil, nil, fmt.Errorf("%w: sealed journals disagree on their crawl-prefix plan", indexsubstrate.ErrStaleParent)
 		}
 	}
-	return append([]string(nil), plans[0].prefixes...), nil
+	return append([]string(nil), plans[0].prefixes...), plans[0].ack, nil
+}
+
+func evaluateBuildAdmission(
+	plan *verifiedParentPlan,
+	indexSetID string,
+	runID string,
+	baseURI string,
+	coverage []CoverageAttestation,
+	ack *durableindex.TransitionAcknowledgment,
+) (string, string, *indexsubstrate.LossAcknowledgment, error) {
+	normalizedCov, err := normalizeCoverageForBaseURI(baseURI, coverage)
+	if err != nil {
+		return "", "", nil, err
+	}
+	currScopes, err := durableScopesFromCoverage(normalizedCov)
+	if err != nil {
+		return "", "", nil, err
+	}
+	setID := strings.TrimSpace(indexSetID)
+	_, _, currDigest, err := durableindex.BuildIndexPlan(setID, currScopes)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if !plan.hasParent() {
+		admission, err := durableindex.EvaluateAdmission(durableindex.ModeBaseline, setID, "", nil, currScopes, ack)
+		if err != nil {
+			return "", "", nil, err
+		}
+		return currDigest, admission, nil, nil
+	}
+
+	parentSnap := plan.snapshot
+	if strings.TrimSpace(parentSnap.Complete.RunID) == strings.TrimSpace(runID) {
+		sp := parentSnap.Manifest.StateParent
+		if sp == nil {
+			admission, err := durableindex.EvaluateAdmission(durableindex.ModeBaseline, setID, "", nil, currScopes, ack)
+			if err != nil {
+				return "", "", nil, err
+			}
+			return currDigest, admission, nil, nil
+		}
+		lookup := runCompleteLookup(parentSnap)
+		gpComplete, err := lookup(strings.TrimSpace(sp.IndexSetID), strings.TrimSpace(sp.RunID))
+		if err != nil {
+			return "", "", nil, fmt.Errorf("resolve re-publish parent for admission: %w", err)
+		}
+		gp, err := indexsubstrate.OpenPublishedRunSnapshot(gpComplete, strings.TrimSpace(sp.IndexSetID), strings.TrimSpace(sp.RunID))
+		if err != nil {
+			return "", "", nil, fmt.Errorf("open re-publish parent for admission: %w", err)
+		}
+		parentSnap = &gp
+	}
+
+	parentScopes, err := durableScopesFromSubstrateCoverage(parentSnap.Manifest.Coverage)
+	if err != nil {
+		if !indexsubstrate.HasContinuousLineage(parentSnap.Manifest) {
+			admission, err := durableindex.EvaluateAdmission(durableindex.ModeBaseline, setID, "", nil, currScopes, ack)
+			if err != nil {
+				return "", "", nil, err
+			}
+			return currDigest, admission, nil, nil
+		}
+		return "", "", nil, err
+	}
+
+	parentSHA256 := strings.TrimSpace(parentSnap.Complete.ManifestSHA256)
+	admission, err := durableindex.EvaluateAdmission(durableindex.ModeObserve, setID, parentSHA256, parentScopes, currScopes, ack)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return currDigest, admission, toSubstrateLossAcknowledgment(ack), nil
+}
+
+func durableScopesFromCoverage(normalized []CoverageAttestation) ([]durableindex.Scope, error) {
+	if len(normalized) == 0 {
+		return nil, durableindex.NewRefusal("incomplete_coverage", "coverage attestation is required")
+	}
+	scopes := make([]durableindex.Scope, 0, len(normalized))
+	for _, entry := range normalized {
+		if entry.Scope == nil || entry.Scope.Window != nil || !entry.Complete || entry.Basis != CoverageBasisConfirmed || len(entry.Gaps) > 0 {
+			return nil, durableindex.NewRefusal("incomplete_coverage", "coverage attestation must be confirmed, complete, non-windowed, and gap-free")
+		}
+		p := entry.Scope.Prefix
+		if p == indexsubstrate.RelativeRootScopePrefix {
+			p = ""
+		}
+		scopes = append(scopes, durableindex.Scope{
+			Namespace: durableindex.DefaultObjectNamespace,
+			Prefix:    p,
+		})
+	}
+	return scopes, nil
+}
+
+func durableScopesFromSubstrateCoverage(in []indexsubstrate.CoverageAttestation) ([]durableindex.Scope, error) {
+	if len(in) == 0 {
+		return nil, durableindex.NewRefusal("incomplete_coverage", "coverage attestation is required")
+	}
+	scopes := make([]durableindex.Scope, 0, len(in))
+	for _, entry := range in {
+		if entry.Scope == nil || entry.Scope.Window != nil || !entry.Complete || entry.Basis != indexsubstrate.CoverageBasisConfirmed || len(entry.Gaps) > 0 {
+			return nil, durableindex.NewRefusal("incomplete_coverage", "coverage attestation must be confirmed, complete, non-windowed, and gap-free")
+		}
+		p := entry.Scope.Prefix
+		if p == indexsubstrate.RelativeRootScopePrefix {
+			p = ""
+		}
+		scopes = append(scopes, durableindex.Scope{
+			Namespace: durableindex.DefaultObjectNamespace,
+			Prefix:    p,
+		})
+	}
+	return scopes, nil
+}
+
+func toSubstrateLossAcknowledgment(ack *durableindex.TransitionAcknowledgment) *indexsubstrate.LossAcknowledgment {
+	if ack == nil {
+		return nil
+	}
+	return &indexsubstrate.LossAcknowledgment{
+		ParentSHA256:   ack.ParentSHA256,
+		PlanDigest:     ack.PlanDigest,
+		AcknowledgedBy: ack.AcknowledgedBy,
+		AcknowledgedAt: ack.AcknowledgedAt,
+	}
+}
+
+func fromSubstrateLossAcknowledgment(ack *indexsubstrate.LossAcknowledgment) *durableindex.TransitionAcknowledgment {
+	if ack == nil {
+		return nil
+	}
+	return &durableindex.TransitionAcknowledgment{
+		ParentSHA256:   ack.ParentSHA256,
+		PlanDigest:     ack.PlanDigest,
+		AcknowledgedBy: ack.AcknowledgedBy,
+		AcknowledgedAt: ack.AcknowledgedAt,
+	}
+}
+
+func equalLossAcknowledgment(a, b *durableindex.TransitionAcknowledgment) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.ParentSHA256 == b.ParentSHA256 &&
+		a.PlanDigest == b.PlanDigest &&
+		a.AcknowledgedBy == b.AcknowledgedBy &&
+		a.AcknowledgedAt == b.AcknowledgedAt
 }
 
 // crawlPlanSetKey is an order-independent identity for a canonical plan so
@@ -909,7 +1088,7 @@ func crawlPlanSetKey(prefixes []string) string {
 // no-duplicate rules on a recovered journal plan that Build enforces on the
 // caller plan, so a structurally valid but non-canonical or duplicated journal
 // plan is rejected rather than trimmed/deduplicated into agreement.
-func validateJournalPlanCanonical(prefixes []string) error {
+func validateJournalPlanCanonical(mode string, prefixes []string) error {
 	if err := validateCrawlPlanCanonical(prefixes); err != nil {
 		return err
 	}
@@ -918,7 +1097,22 @@ func validateJournalPlanCanonical(prefixes []string) error {
 		if _, dup := seen[p]; dup {
 			return fmt.Errorf("crawl plan has duplicate prefix %q", p)
 		}
+		if p == indexsubstrate.RelativeRootScopePrefix && (mode == indexsubstrate.CrawlPlanModeLaneLocal || len(prefixes) > 1) {
+			return fmt.Errorf("crawl plan reserves %q solely for a single-lane unscoped bucket-root build", indexsubstrate.RelativeRootScopePrefix)
+		}
 		seen[p] = struct{}{}
+	}
+	return nil
+}
+
+func validateCallerCrawlPlanCanonical(crawlPrefixes []string) error {
+	if err := validateCrawlPlanCanonical(crawlPrefixes); err != nil {
+		return err
+	}
+	for i, raw := range crawlPrefixes {
+		if raw == indexsubstrate.RelativeRootScopePrefix {
+			return fmt.Errorf("crawl prefix plan[%d] must not be the relative-root sentinel %q; omit CrawlPrefixes for an unscoped bucket-root build", i, indexsubstrate.RelativeRootScopePrefix)
+		}
 	}
 	return nil
 }
@@ -1021,7 +1215,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if err := validateCrawlPlanCanonical(cfg.CrawlPrefixes); err != nil {
+	if err := validateCallerCrawlPlanCanonical(cfg.CrawlPrefixes); err != nil {
 		return Config{}, err
 	}
 	if err := validateDurableObservationSelector(cfg); err != nil {
@@ -1189,11 +1383,16 @@ func deriveRelKey(baseURI, fullKey string) string {
 
 func manifestSummary(manifest indexsubstrate.InternalManifest) ManifestSummary {
 	out := ManifestSummary{
-		Rows:          manifest.Counts.Rows,
-		ActiveRows:    manifest.Counts.ActiveRows,
-		Tombstones:    manifest.Counts.Tombstones,
-		DistinctETags: manifest.Counts.DistinctETags,
-		Segments:      make([]SegmentSummary, 0, len(manifest.Segments)),
+		Rows:                   manifest.Counts.Rows,
+		ActiveRows:             manifest.Counts.ActiveRows,
+		Tombstones:             manifest.Counts.Tombstones,
+		DistinctETags:          manifest.Counts.DistinctETags,
+		RetainedUnobservedRows: manifest.Counts.RetainedUnobservedRows,
+		Segments:               make([]SegmentSummary, 0, len(manifest.Segments)),
+	}
+	if manifest.Lineage != nil {
+		out.PlanDigest = manifest.Lineage.PlanDigest
+		out.Admission = manifest.Lineage.Admission
 	}
 	for _, segment := range manifest.Segments {
 		out.Segments = append(out.Segments, SegmentSummary{

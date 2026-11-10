@@ -8,6 +8,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/crawler"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexcoord"
 	"github.com/3leaps/gonimbus/pkg/match"
 	"github.com/3leaps/gonimbus/pkg/output"
@@ -211,6 +212,11 @@ type Config struct {
 	// Stale provided tokens are validated immediately after lease acquisition
 	// and before any crawl/observation mutation.
 	ExpectedParent *ParentToken
+	// LossAcknowledgment records an explicit pinned scope-loss acknowledgment
+	// bound to the parent manifest SHA-256 and current plan digest. When present,
+	// it is sealed into the run's journal headers so recovery re-publications
+	// verify the exact recorded acknowledgment rather than ambient flags.
+	LossAcknowledgment *durableindex.TransitionAcknowledgment
 	// Authority optionally supplies caller-held whole-set exclusion. When nil,
 	// Build acquires the same stable authority used by CLI and GC. A supplied
 	// lease remains caller-owned and is never released by Build.
@@ -313,6 +319,10 @@ type RetryConfig struct {
 	PriorRows []ObjectState
 	// ExpectedParent enforces latest CAS when republishing over an existing set.
 	ExpectedParent *ParentToken
+	// LossAcknowledgment, when supplied on Retry, must match the acknowledgment
+	// already sealed in the journal headers; Retry never accepts an unsealed
+	// acknowledgment override.
+	LossAcknowledgment *durableindex.TransitionAcknowledgment
 	// Authority follows Config.Authority semantics for public Retry.
 	Authority *indexcoord.Lease
 

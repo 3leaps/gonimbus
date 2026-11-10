@@ -1268,3 +1268,22 @@ func TestDurableQuery_PrefixPrunesBeforeAndAfterSegments(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestOpenDurableReaderRejectsSetIDMismatchBetweenDiscoveryAndOpen(t *testing.T) {
+	env := setupDurableTestEnv(t, []indexsubstrate.CurrentObjectRow{
+		durableRow("a/one.json", 100, "etag-a", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	latestPath := filepath.Join(env.segmentRoot, "latest.json")
+	opts := normalizeResolveOptions(env.opts)
+
+	_, err := openDurableReader(opts, candidate{
+		meta: Meta{
+			Format:     FormatDurableV2,
+			IndexSetID: "idx_" + strings.Repeat("f", 64),
+			SourcePath: latestPath,
+		},
+		latest: latestPath,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "discovered index_set_id")
+}

@@ -67,13 +67,24 @@ type StateParent struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
+// LossAcknowledgment records an explicit pinned scope-loss acknowledgment.
+type LossAcknowledgment struct {
+	ParentSHA256   string `json:"parent_sha256"`
+	PlanDigest     string `json:"plan_digest"`
+	AcknowledgedBy string `json:"acknowledged_by"`
+	AcknowledgedAt string `json:"acknowledged_at"`
+}
+
 // LineageRecord is the all-or-nothing versioned lineage contract.
 // Absence of the whole object means pre-continuity / no continuous ancestry —
 // never "generation 0" inferred from timestamps or directory order.
 type LineageRecord struct {
-	Version    int  `json:"version"`
-	Generation int  `json:"generation"`
-	Baseline   bool `json:"baseline"`
+	Version            int                 `json:"version"`
+	Generation         int                 `json:"generation"`
+	Baseline           bool                `json:"baseline"`
+	PlanDigest         string              `json:"plan_digest,omitempty"`
+	Admission          string              `json:"admission,omitempty"`
+	LossAcknowledgment *LossAcknowledgment `json:"loss_acknowledgment,omitempty"`
 }
 
 // LineageError is a fail-closed ancestry/structure error with a stable code.
@@ -734,6 +745,16 @@ func NormalizeLineage(lin *LineageRecord) *LineageRecord {
 		return nil
 	}
 	out := *lin
+	out.PlanDigest = strings.TrimSpace(out.PlanDigest)
+	out.Admission = strings.TrimSpace(out.Admission)
+	if lin.LossAcknowledgment != nil {
+		ack := *lin.LossAcknowledgment
+		ack.ParentSHA256 = strings.TrimSpace(ack.ParentSHA256)
+		ack.PlanDigest = strings.TrimSpace(ack.PlanDigest)
+		ack.AcknowledgedBy = strings.TrimSpace(ack.AcknowledgedBy)
+		ack.AcknowledgedAt = strings.TrimSpace(ack.AcknowledgedAt)
+		out.LossAcknowledgment = &ack
+	}
 	return &out
 }
 

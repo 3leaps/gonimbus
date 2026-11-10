@@ -57,9 +57,39 @@ func normalizeCoveragePrefix(basePrefix string, prefix string) (string, error) {
 		if rel == "" {
 			return indexsubstrate.RelativeRootScopePrefix, nil
 		}
+		if rel == indexsubstrate.RelativeRootScopePrefix {
+			return "", fmt.Errorf("coverage prefix %q resolves to relative-root sentinel %q; literal %q prefix cannot be represented unambiguously", prefix, indexsubstrate.RelativeRootScopePrefix, indexsubstrate.RelativeRootScopePrefix)
+		}
 		return rel, nil
 	}
 	return "", fmt.Errorf("coverage prefix %q is outside base_uri prefix %q", prefix, baseWithSlash)
+}
+
+func normalizeCrawlPlanPrefix(basePrefix string, prefix string) (string, error) {
+	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	basePrefix = strings.TrimPrefix(strings.TrimSpace(basePrefix), "/")
+	basePrefix = strings.TrimSuffix(basePrefix, "/")
+	if basePrefix == "" {
+		if prefix == "" {
+			return indexsubstrate.RelativeRootScopePrefix, nil
+		}
+		return prefix, nil
+	}
+	if prefix == basePrefix || prefix == basePrefix+"/" {
+		return indexsubstrate.RelativeRootScopePrefix, nil
+	}
+	baseWithSlash := basePrefix + "/"
+	if strings.HasPrefix(prefix, baseWithSlash) {
+		rel := strings.TrimPrefix(prefix, baseWithSlash)
+		if rel == "" {
+			return indexsubstrate.RelativeRootScopePrefix, nil
+		}
+		if rel == indexsubstrate.RelativeRootScopePrefix {
+			return "", fmt.Errorf("crawl prefix %q resolves to relative-root sentinel %q; literal %q prefix cannot be represented unambiguously", prefix, indexsubstrate.RelativeRootScopePrefix, indexsubstrate.RelativeRootScopePrefix)
+		}
+		return rel, nil
+	}
+	return "", fmt.Errorf("crawl prefix %q is outside base_uri prefix %q", prefix, baseWithSlash)
 }
 
 // validateCoverageMatchesCrawlPlan enforces exact set equality between the
@@ -88,7 +118,7 @@ func validateCoverageMatchesCrawlPlan(baseURI string, crawlPrefixes []string, co
 	}
 	crawlSet := make(map[string]struct{}, len(crawlPrefixes))
 	for _, raw := range crawlPrefixes {
-		key, err := normalizeCoveragePrefix(basePrefix, raw)
+		key, err := normalizeCrawlPlanPrefix(basePrefix, raw)
 		if err != nil {
 			return fmt.Errorf("crawl prefix plan: %w", err)
 		}

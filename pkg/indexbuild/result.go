@@ -22,11 +22,14 @@ type Summary struct {
 }
 
 type ManifestSummary struct {
-	Rows          int
-	ActiveRows    int
-	Tombstones    int
-	DistinctETags int
-	Segments      []SegmentSummary
+	Rows                   int
+	ActiveRows             int
+	Tombstones             int
+	DistinctETags          int
+	RetainedUnobservedRows int
+	PlanDigest             string
+	Admission              string
+	Segments               []SegmentSummary
 }
 
 type SegmentSummary struct {
