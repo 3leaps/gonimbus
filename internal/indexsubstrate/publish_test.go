@@ -936,4 +936,43 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 	require.True(t, retryRes.LatestAdvanced)
 	require.Equal(t, runStartedAt.Add(4*time.Minute), retryRes.SnapshotCompletedAt)
 	require.NoError(t, retryLease.Release())
+
+	// Mixed absolute and relative publication paths (e.g. absolute LatestPath with
+	// CWD-relative CompletePath/ManifestPath/SegmentDir, plus an external CompletePath
+	// fallback) must still produce a readable latest pointer and complete marker.
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	mixedSetRoot := filepath.Join(workDir, "state")
+	mixedRunRelDir := filepath.Join("state", "runs", "run_portable_1")
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, mixedRunRelDir), 0o700))
+	mixedLease, err := AcquireWriteLease(mixedSetRoot, "idx_portable", "mixed-test", 0)
+	require.NoError(t, err)
+	mixedCfg := PublishConfig{
+		IndexSetID:              "idx_portable",
+		RunID:                   "run_portable_1",
+		RunStartedAt:            runStartedAt,
+		ManifestCreatedAt:       runStartedAt.Add(3 * time.Minute),
+		SnapshotCompletionClock: func() time.Time { return runStartedAt.Add(5 * time.Minute) },
+		JournalPaths:            []string{retryJournal},
+		Coverage:                []CoverageAttestation{{Scope: &Scope{Prefix: "data/"}, Basis: CoverageBasisConfirmed, Complete: true}},
+		SegmentDir:              mixedRunRelDir,
+		ManifestPath:            filepath.Join(mixedRunRelDir, "manifest.json"),
+		CompletePath:            filepath.Join(mixedRunRelDir, "complete.json"),
+		LatestPath:              filepath.Join(mixedSetRoot, "latest.json"),
+		TargetRowsPerSegment:    10,
+		WriteLease:              mixedLease,
+	}
+	_, err = PublishSnapshot(mixedCfg)
+	require.NoError(t, err)
+	require.NoError(t, mixedLease.Release())
+
+	mixedLatestRaw, err := os.ReadFile(mixedCfg.LatestPath)
+	require.NoError(t, err)
+	var mixedLatestDoc publishedLatestDoc
+	require.NoError(t, json.Unmarshal(mixedLatestRaw, &mixedLatestDoc))
+	require.Equal(t, "runs/run_portable_1/complete.json", mixedLatestDoc.CompletePath)
+
+	mixedSnap, err := OpenLatestPublishedSnapshot(mixedCfg.LatestPath)
+	require.NoError(t, err)
+	require.Equal(t, "run_portable_1", mixedSnap.Manifest.RunID)
 }
