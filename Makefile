@@ -1,6 +1,6 @@
 .PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo test-libsql build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
-.PHONY: sync-embedded-identity verify-embedded-identity validate-roles lint-cross-os
+.PHONY: sync-embedded-identity verify-embedded-identity validate-roles contract-fixture-integrity lint-cross-os
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
 .PHONY: release-clean release-download release-sign release-export-keys release-verify-keys release-verify-signatures release-checksums release-verify-checksums release-notes release-upload release-upload-provenance release-upload-all release-guard-tag-version release-guard-signing-tag
 .PHONY: version-set version-bump-major version-bump-minor version-bump-patch release-check release-prepare release-build
@@ -574,12 +574,15 @@ validate-roles: ## Validate role prompts (schema meta-validation, then role conf
 	@echo "🔍 Phase 2: validating role prompts against it..."
 	@go run ./internal/tools/rolevalidate
 
+contract-fixture-integrity: ## Verify pinned durable-index/v0 contract closure and upstream controls
+	@./scripts/check-contract-fixtures.sh
+
 api-stability: ## Verify library API stability manifest and soft diff gate
 	@echo "Running API stability checks..."
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-pr-final: verify-embedded-identity verify-app-version api-stability release-provenance-check surface-scan lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, provenance, surface-scan, lint, tests, licenses, multi-platform build)
+pr-final: verify-embedded-identity verify-app-version api-stability contract-fixture-integrity release-provenance-check surface-scan lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, contracts, provenance, surface-scan, lint, tests, licenses, multi-platform build)
 	@echo "✅ pr-final gate passed"
 
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
@@ -592,7 +595,7 @@ release-anchors-check: ## Check the committed public keys against both fingerpri
 	@./scripts/release-verify-committed-anchors.sh
 	@./scripts/validate-release-anchors.sh
 
-check-all: fmt verify-embedded-identity api-stability release-provenance-check surface-scan lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, provenance, surface-scan, lint, test)
+check-all: fmt verify-embedded-identity api-stability contract-fixture-integrity release-provenance-check surface-scan lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, contracts, provenance, surface-scan, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks

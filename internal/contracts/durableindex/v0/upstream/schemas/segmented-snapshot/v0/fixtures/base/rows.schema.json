@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:example.snapshot/v0/rows.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "value"],
+  "properties": {
+    "key": { "type": "string" },
+    "value": { "type": "integer" }
+  }
+}

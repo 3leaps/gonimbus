@@ -1,0 +1,104 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/enrichment-only.json",
+  "replace": {
+    "parent": {
+      "publication_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "set_id": "set-example",
+      "snapshot_id": "snapshot-0",
+      "generation": 0,
+      "scopes": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "beta/"
+        }
+      ],
+      "rows": [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": [
+            {
+              "name": "content.type",
+              "value": "text/plain",
+              "operation": "head",
+              "observed_at": "2026-10-18T01:00:00.000000001Z",
+              "against_revision": {
+                "kind": "opaque-etag",
+                "value": "r1"
+              }
+            }
+          ]
+        },
+        {
+          "namespace": "objects",
+          "key": "beta/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": []
+        }
+      ]
+    },
+    "enrichments": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "attribute": {
+          "name": "content.type",
+          "value": "text/plain",
+          "operation": "head",
+          "observed_at": "2026-10-18T00:00:00.000000000Z",
+          "against_revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "stale_enrichment"
+  }
+}

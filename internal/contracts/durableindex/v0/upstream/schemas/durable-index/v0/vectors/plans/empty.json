@@ -1,0 +1,22 @@
+{
+  "set_id": "set-example",
+  "input": [],
+  "canonical": [],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c6500000000",
+  "sha256": "c259636989f5d985b7eac6a864e9a1901448b4b211426bc5490df40c47420660",
+  "comparisons": [
+    {
+      "next": [],
+      "loss": false
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "a"
+        }
+      ],
+      "loss": false
+    }
+  ]
+}

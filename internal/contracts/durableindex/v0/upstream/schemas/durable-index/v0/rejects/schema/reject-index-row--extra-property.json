@@ -1,0 +1,26 @@
+{
+  "namespace": "objects",
+  "key": "alpha/one",
+  "revision": {
+    "kind": "opaque-etag",
+    "value": "revision-a"
+  },
+  "size_bytes": 12,
+  "last_modified": null,
+  "storage_class": null,
+  "first_seen": {
+    "snapshot_id": "snapshot-1",
+    "at": "2026-10-18T00:00:00.000000000Z"
+  },
+  "last_seen": {
+    "snapshot_id": "snapshot-1",
+    "at": "2026-10-18T00:00:00.000000000Z"
+  },
+  "last_changed": {
+    "snapshot_id": "snapshot-1",
+    "at": "2026-10-18T00:00:00.000000000Z"
+  },
+  "deleted": null,
+  "enrichments": [],
+  "extra": true
+}

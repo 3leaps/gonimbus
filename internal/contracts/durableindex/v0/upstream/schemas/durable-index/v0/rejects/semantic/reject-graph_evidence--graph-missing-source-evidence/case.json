@@ -1,0 +1,10 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "source_evidence": {}
+  },
+  "expected": {
+    "refusal": "graph_evidence"
+  }
+}

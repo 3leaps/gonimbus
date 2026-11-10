@@ -1,0 +1,76 @@
+{
+  "capabilities": ["contract: data-artifact/v0"],
+  "artifact_id": "urn:uuid:00000000-0000-7000-8000-000000000202",
+  "lifecycle": "complete",
+  "producer": {
+    "name": "object-indexer",
+    "version": "1.0.0",
+    "profile": "object-index.artifact/v0",
+    "run_id": "00000000-0000-7000-8000-000000000302"
+  },
+  "grains": [
+    {
+      "id": "objects",
+      "kind": "object_index",
+      "record_kind": "object",
+      "row_count": 3,
+      "primary_keys": ["object_key"],
+      "field_catalog_ref": "fields/objects.fields.json"
+    }
+  ],
+  "representations": [
+    {
+      "id": "objects_oracle_bad",
+      "grain": "objects",
+      "role": "object_index",
+      "format": "parquet",
+      "profile": "tabular-projection/v0",
+      "uri": "objects/oracle-bad/manifest.json",
+      "row_count": 3,
+      "field_catalog_ref": "fields/objects.fields.json",
+      "read_path": {
+        "range_readable": true,
+        "partitioned": false,
+        "sharded": false,
+        "appendable": false,
+        "scan_capabilities": ["columnar_scan", "predicate_pushdown"],
+        "read_path_granularity": "column",
+        "gateable_unit_granularity": "column",
+        "sidecar_required": true,
+        "physical_ordering": "not_promised"
+      },
+      "protection_enforceable_granularity": "column"
+    }
+  ],
+  "field_catalogs": [
+    {
+      "id": "fields/objects.fields.json",
+      "grain": "objects",
+      "fields": [
+        {
+          "name": "size_bytes",
+          "type": "integer",
+          "required": true,
+          "semantic_role": "measure",
+          "sensitivity": "public",
+          "protection_tags": ["measure", "safe_to_profile"],
+          "export_action": "allow"
+        },
+        {
+          "name": "object_key",
+          "type": "string",
+          "required": true,
+          "semantic_role": "identifier",
+          "sensitivity": "restricted",
+          "protection_tags": ["direct_identifier", "source_structure"],
+          "export_action": "block_export"
+        }
+      ]
+    }
+  ],
+  "protection": {
+    "default_action": "block_export",
+    "default_export_class": "public",
+    "profile_ref": "profile:object-index-witness"
+  }
+}

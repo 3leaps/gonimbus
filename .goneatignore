@@ -1,0 +1,9 @@
+# Goneat ignore file - exclude files/directories from goneat scanning and formatting
+# Same format as .gitignore
+
+# Build artifacts
+bin/
+dist/
+
+# Exact upstream contract assets; the embedded inventory verifies every byte.
+/internal/contracts/durableindex/v0/upstream/

@@ -1,0 +1,15 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/ack-retains-omitted-row.json",
+  "replace": {
+    "acknowledgment": {
+      "parent_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "plan_digest": "012461297cc803c1d3fe8cf8834f611ee1f9b73c942489abfae00e6e172bdc23",
+      "acknowledged_by": "operator-example",
+      "acknowledged_at": "2026-02-30T00:00:00.000000000Z"
+    }
+  },
+  "expected": {
+    "refusal": "invalid_instant"
+  }
+}

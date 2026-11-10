@@ -1,0 +1,14 @@
+{
+  "capabilities": ["contract: segmented-snapshot/v0"],
+  "kind": "snapshot_profile",
+  "profile_id": "example.snapshot/v0",
+  "semantic_spec": { "id": "example.snapshot-semantics/v0", "ref": "artifact:profile-spec", "sha256": "38fc872a56f32cdf02bc3fc267316ae61933d4508f9842ae13e46cece3a6f926", "byte_length": 947 },
+  "operations": ["full_scan", "full_verify", "selective_verify"],
+  "count_relations": ["equal"],
+  "physical_orders": ["manifest_order"],
+  "empty_snapshots": true,
+  "streaming": "unsupported",
+  "durability_claim": "none",
+  "retention": "unsupported",
+  "limits": { "max_members": 16, "max_metadata_bytes": 65536, "max_member_bytes": 1048576 }
+}

@@ -1,0 +1,18 @@
+{
+  "capabilities": ["contract: segmented-snapshot/v0"],
+  "kind": "snapshot_verification",
+  "verification_id": "verification-1",
+  "selection": { "namespace_id": "example-store", "snapshot_id": "snapshot-1", "artifact_id": "artifact:example-data" },
+  "publication": { "id": "publication-1", "ref": "artifact:publication", "sha256": "770066ee4ce69de91ee2b27ef4b1156e1e6c414a3966c3c69e53329000b96fe2", "byte_length": 790 },
+  "manifest": { "id": "snapshot-1", "ref": "artifact:manifest", "sha256": "271ad5ad7dcf4145e78dd7eff0eed2c07322818de0f7a50693db90caa6642bc6", "byte_length": 1381 },
+  "profile": { "id": "example.snapshot/v0", "ref": "artifact:profile", "sha256": "9d75e4211b6703de4833cd0521e35a2f60d836dc4e4f48b0c1fb8bd61f6c1709", "byte_length": 668 },
+  "verifier": { "name": "fixture-verifier", "version": "1.0.0", "semantic_layer": "segmented-snapshot/v0-semantics/0.1.0" },
+  "operation": "full_verify",
+  "scope": "full_snapshot",
+  "requested_member_ids": [],
+  "verified_member_ids": ["member-a", "member-b"],
+  "outcome": "verified",
+  "terminal": true,
+  "output_state": "none",
+  "coverage_attestation": { "id": "attestation-1", "ref": "artifact:coverage", "sha256": "b173a6a19bc9408532c011880b80acb7f3c9bbd46b90e30264d540abc0cd479d", "byte_length": 659 }
+}

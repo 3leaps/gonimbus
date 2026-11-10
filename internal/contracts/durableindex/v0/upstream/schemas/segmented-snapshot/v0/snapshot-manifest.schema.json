@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:segmented-snapshot/v0/snapshot-manifest.schema.json",
+  "title": "Self-contained Snapshot Manifest",
+  "description": "One grain/representation with an exhaustive flat member list. Paged manifests and snapshots requiring external parent reconstruction are unsupported in this version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capabilities",
+    "kind",
+    "selection",
+    "profile",
+    "grain_id",
+    "representation_id",
+    "row_schema",
+    "field_catalog",
+    "physical_row_count",
+    "count_relation",
+    "physical_order",
+    "coverage_subject_uri",
+    "members"
+  ],
+  "properties": {
+    "capabilities": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/capabilities"
+    },
+    "kind": {
+      "const": "snapshot_manifest"
+    },
+    "selection": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/selection"
+    },
+    "profile": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding"
+    },
+    "grain_id": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/id"
+    },
+    "representation_id": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/id"
+    },
+    "row_schema": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/schema_binding"
+    },
+    "field_catalog": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding"
+    },
+    "physical_row_count": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/count"
+    },
+    "count_relation": {
+      "enum": ["equal", "subset"]
+    },
+    "physical_order": {
+      "enum": ["manifest_order", "unordered"]
+    },
+    "coverage_subject_uri": {
+      "type": "string",
+      "pattern": "^snapshot:[0-9a-f]{64}$"
+    },
+    "members": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ref", "sha256", "byte_length", "row_count"],
+        "properties": {
+          "id": {
+            "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/id"
+          },
+          "ref": {
+            "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/logical_ref"
+          },
+          "sha256": {
+            "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/sha256"
+          },
+          "byte_length": {
+            "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/count"
+          },
+          "row_count": {
+            "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/count"
+          }
+        }
+      }
+    },
+    "profile_metadata": {
+      "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding",
+      "description": "Optional profile-defined required metadata. When present it is a required digest-bound graph dependency, not an ignorable hint. The selected profile defines its schema, identity and semantics."
+    }
+  }
+}

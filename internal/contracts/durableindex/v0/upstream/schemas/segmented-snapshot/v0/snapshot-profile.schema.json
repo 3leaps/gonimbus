@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:segmented-snapshot/v0/snapshot-profile.schema.json",
+  "title": "Snapshot Implementation Profile",
+  "description": "Versioned support declaration and exact behavioral specification binding. Support declarations require separate implementation evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "kind", "profile_id", "semantic_spec", "operations", "count_relations", "physical_orders", "empty_snapshots", "streaming", "durability_claim", "retention", "limits"],
+  "properties": {
+    "capabilities": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/capabilities" },
+    "kind": { "const": "snapshot_profile" },
+    "profile_id": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/profile_id" },
+    "semantic_spec": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/operation" }
+    },
+    "count_relations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["equal", "subset"] }
+    },
+    "physical_orders": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["manifest_order", "unordered"] }
+    },
+    "empty_snapshots": { "type": "boolean" },
+    "streaming": { "enum": ["unsupported", "verified_before_emit", "provisional_until_terminal"] },
+    "durability_claim": { "enum": ["none", "process_crash", "power_loss"] },
+    "retention": { "enum": ["unsupported", "profile_defined"] },
+    "retention_spec": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_members", "max_metadata_bytes", "max_member_bytes"],
+      "properties": {
+        "max_members": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_metadata_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "max_member_bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "retention": { "const": "profile_defined" } } },
+      "then": { "required": ["retention_spec"] },
+      "else": { "not": { "required": ["retention_spec"] } }
+    }
+  ]
+}

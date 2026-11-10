@@ -1,0 +1,9 @@
+{
+  "runner": "parsing",
+  "input": {
+    "hex": "7b2261223a312c2261223a327d"
+  },
+  "expected": {
+    "refusal": "duplicate_key"
+  }
+}

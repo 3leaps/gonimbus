@@ -1,0 +1,4 @@
+{
+  "capability": "contract: coverage-attestation/v0",
+  "entry_schema": "coverage-attestation.schema.json"
+}

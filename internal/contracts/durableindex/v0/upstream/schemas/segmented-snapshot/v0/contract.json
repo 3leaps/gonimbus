@@ -1,0 +1,10 @@
+{
+  "capability": "contract: segmented-snapshot/v0",
+  "entry_schema": "snapshot-publication.schema.json",
+  "object_schemas": {
+    "snapshot_manifest": "snapshot-manifest.schema.json",
+    "snapshot_profile": "snapshot-profile.schema.json",
+    "verification_result": "verification-result.schema.json"
+  },
+  "status": "proposed"
+}

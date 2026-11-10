@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:durable-index/v0/index-publication.schema.json",
+  "title": "Durable Index Specialization of Snapshot Publication",
+  "allOf": [
+    {
+      "$ref": "contract:segmented-snapshot/v0/snapshot-publication.schema.json"
+    }
+  ],
+  "properties": {
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "contains": {
+        "const": "contract: durable-index/v0"
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    }
+  }
+}

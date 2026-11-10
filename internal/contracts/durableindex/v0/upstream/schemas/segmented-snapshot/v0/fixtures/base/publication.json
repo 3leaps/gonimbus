@@ -1,0 +1,10 @@
+{
+  "capabilities": ["contract: segmented-snapshot/v0"],
+  "kind": "snapshot_publication",
+  "publication_id": "publication-1",
+  "selection": { "namespace_id": "example-store", "snapshot_id": "snapshot-1", "artifact_id": "artifact:example-data" },
+  "state": "committed",
+  "profile": { "id": "example.snapshot/v0", "ref": "artifact:profile", "sha256": "9d75e4211b6703de4833cd0521e35a2f60d836dc4e4f48b0c1fb8bd61f6c1709", "byte_length": 668 },
+  "descriptor": { "id": "artifact:example-data", "ref": "artifact:descriptor", "sha256": "7264feafcc337da7e09096b833455dbf408aec656183c1db5a584577d33ae98b", "byte_length": 1185 },
+  "manifest": { "id": "snapshot-1", "ref": "artifact:manifest", "sha256": "271ad5ad7dcf4145e78dd7eff0eed2c07322818de0f7a50693db90caa6642bc6", "byte_length": 1381 }
+}

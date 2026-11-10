@@ -1,0 +1,52 @@
+{
+  "runner": "cutover",
+  "baseline": "vectors/cutover/explicit-new-set.json",
+  "replace": {
+    "record": {
+      "capabilities": ["contract: durable-index/v0"],
+      "kind": "index_cutover",
+      "old": {
+        "selection": {
+          "namespace_id": "set-example",
+          "snapshot_id": "snapshot-1",
+          "artifact_id": "artifact:example-data"
+        },
+        "publication": {
+          "id": "publication-old",
+          "ref": "artifact:old-publication",
+          "sha256": "206a8632af4c65451fbed28b2897b8b188d9102ae3bd80c10a37933631e3b649",
+          "byte_length": 900
+        }
+      },
+      "new": {
+        "selection": {
+          "namespace_id": "set-new",
+          "snapshot_id": "snapshot-new",
+          "artifact_id": "artifact:example-data"
+        },
+        "publication": {
+          "id": "publication-new",
+          "ref": "artifact:new-publication",
+          "sha256": "762b3e1756f623871bfc30b7829696e25cd269f1eb0ac9d52191e812803eac3e",
+          "byte_length": 903
+        }
+      },
+      "authorized_by": "operator-example",
+      "accepted_at": "2026-10-18T02:00:00.000000000Z",
+      "rollback": {
+        "id": "publication-old",
+        "ref": "artifact:old-publication",
+        "sha256": "206a8632af4c65451fbed28b2897b8b188d9102ae3bd80c10a37933631e3b649",
+        "byte_length": 900
+      }
+    }
+  },
+  "expected": {
+    "refusal": "cutover_baseline"
+  },
+  "store_overlay": {
+    "artifact:new-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-new\",\n  \"selection\": {\n    \"namespace_id\": \"set-new\",\n    \"snapshot_id\": \"snapshot-new\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.snapshot/v0\",\n    \"ref\": \"artifact:profile\",\n    \"sha256\": \"9d75e4211b6703de4833cd0521e35a2f60d836dc4e4f48b0c1fb8bd61f6c1709\",\n    \"byte_length\": 668\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:descriptor\",\n    \"sha256\": \"7264feafcc337da7e09096b833455dbf408aec656183c1db5a584577d33ae98b\",\n    \"byte_length\": 1185\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-new\",\n    \"ref\": \"artifact:new-manifest\",\n    \"sha256\": \"8ec9a8f12b322730ecac68324c16db0e447f4eef5a9803f84c22cfc0b00b922a\",\n    \"byte_length\": 331\n  }\n}\n",
+    "artifact:new-manifest": "{\n  \"selection\": {\n    \"namespace_id\": \"set-new\",\n    \"snapshot_id\": \"snapshot-new\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile_metadata\": {\n    \"id\": \"snapshot-new\",\n    \"ref\": \"artifact:new-metadata\",\n    \"sha256\": \"f55d11ba5c977d25a8875e56c8be4b10c76b99308a190566a2ddd54ee0aaa03c\",\n    \"byte_length\": 1538\n  }\n}\n",
+    "artifact:new-metadata": "{\n  \"capabilities\": [\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"index_metadata\",\n  \"selection\": {\n    \"namespace_id\": \"set-new\",\n    \"snapshot_id\": \"snapshot-new\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"row_profile\": \"object-inventory/v0\",\n  \"encoding_profile\": \"parquet-inventory/v0\",\n  \"mode\": \"observe\",\n  \"generation\": 1,\n  \"parent\": {\n    \"selection\": {\n      \"namespace_id\": \"set-example\",\n      \"snapshot_id\": \"snapshot-1\",\n      \"artifact_id\": \"artifact:example-data\"\n    },\n    \"publication\": {\n      \"id\": \"publication-old\",\n      \"ref\": \"artifact:old-publication\",\n      \"sha256\": \"206a8632af4c65451fbed28b2897b8b188d9102ae3bd80c10a37933631e3b649\",\n      \"byte_length\": 900\n    }\n  },\n  \"plan\": {\n    \"id\": \"set-example\",\n    \"ref\": \"artifact:plan\",\n    \"sha256\": \"88e33b2a50d9d4c39bb4f65692d2daf823082ef077b2021cb201ecdce12ae719\",\n    \"byte_length\": 297\n  },\n  \"plan_digest\": \"78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5\",\n  \"effective_scope_count\": 2,\n  \"coverage\": [\n    {\n      \"id\": \"coverage-0\",\n      \"ref\": \"artifact:coverage-0\",\n      \"sha256\": \"ac686d8514ffbfb5a01cd0eda09ebe927e3b914b7cd1f0d5cd70caafdd98b27d\",\n      \"byte_length\": 810\n    },\n    {\n      \"id\": \"coverage-1\",\n      \"ref\": \"artifact:coverage-1\",\n      \"sha256\": \"cb13b476ab5c2957bc2bdc82874a3f0c4e3db2502bad4edb9dc27841963a82f3\",\n      \"byte_length\": 809\n    }\n  ],\n  \"admission\": \"no_loss\",\n  \"loss_acknowledgment\": null,\n  \"observation_at\": \"2026-10-18T00:00:00.000000000Z\",\n  \"retained_unobserved_rows\": 0\n}\n"
+  }
+}

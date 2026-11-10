@@ -1,0 +1,10 @@
+{
+  "runner": "cutover_graphs",
+  "baseline": "vectors/graphs/cutover.json",
+  "replace": {
+    "record": null
+  },
+  "expected": {
+    "refusal": "cutover_required"
+  }
+}

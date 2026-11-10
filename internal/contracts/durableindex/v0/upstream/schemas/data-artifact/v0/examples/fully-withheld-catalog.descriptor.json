@@ -1,0 +1,57 @@
+{
+  "capabilities": ["contract: data-artifact/v0"],
+  "artifact_id": "urn:uuid:00000000-0000-7000-8000-000000000204",
+  "lifecycle": "complete",
+  "producer": {
+    "name": "restricted-index-exporter",
+    "version": "1.0.0",
+    "profile": "object-index.artifact/v0",
+    "run_id": "00000000-0000-7000-8000-000000000304"
+  },
+  "grains": [
+    {
+      "id": "objects",
+      "kind": "object_index",
+      "record_kind": "object",
+      "row_count": 12,
+      "field_catalog_ref": "fields/objects.fields.json"
+    }
+  ],
+  "representations": [
+    {
+      "id": "objects_gated",
+      "grain": "objects",
+      "role": "object_index",
+      "format": "parquet",
+      "profile": "tabular-projection/v0",
+      "uri": "objects/gated/manifest.json",
+      "row_count": 12,
+      "field_catalog_ref": "fields/objects.fields.json",
+      "read_path": {
+        "range_readable": true,
+        "partitioned": false,
+        "sharded": false,
+        "appendable": false,
+        "scan_capabilities": ["columnar_scan"],
+        "read_path_granularity": "column",
+        "gateable_unit_granularity": "column",
+        "sidecar_required": true,
+        "physical_ordering": "not_promised"
+      },
+      "protection_enforceable_granularity": "column"
+    }
+  ],
+  "field_catalogs": [
+    {
+      "id": "fields/objects.fields.json",
+      "grain": "objects",
+      "fields": [],
+      "withheld_field_count": 4
+    }
+  ],
+  "protection": {
+    "default_action": "block_export",
+    "default_export_class": "restricted",
+    "profile_ref": "profile:fully-withheld-witness"
+  }
+}

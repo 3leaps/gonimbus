@@ -1,0 +1,10 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "projection": "physical"
+  },
+  "expected": {
+    "refusal": "graph_profile"
+  }
+}

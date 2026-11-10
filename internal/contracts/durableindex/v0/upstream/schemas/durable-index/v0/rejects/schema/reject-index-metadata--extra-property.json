@@ -1,0 +1,41 @@
+{
+  "capabilities": ["contract: durable-index/v0"],
+  "kind": "index_metadata",
+  "selection": {
+    "namespace_id": "set-example",
+    "snapshot_id": "snapshot-1",
+    "artifact_id": "artifact:example-data"
+  },
+  "row_profile": "object-inventory/v0",
+  "encoding_profile": "parquet-inventory/v0",
+  "mode": "baseline",
+  "generation": 0,
+  "parent": null,
+  "plan": {
+    "id": "set-example",
+    "ref": "artifact:plan",
+    "sha256": "88e33b2a50d9d4c39bb4f65692d2daf823082ef077b2021cb201ecdce12ae719",
+    "byte_length": 297
+  },
+  "plan_digest": "78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5",
+  "effective_scope_count": 2,
+  "coverage": [
+    {
+      "id": "coverage-0",
+      "ref": "artifact:coverage-0",
+      "sha256": "ac686d8514ffbfb5a01cd0eda09ebe927e3b914b7cd1f0d5cd70caafdd98b27d",
+      "byte_length": 810
+    },
+    {
+      "id": "coverage-1",
+      "ref": "artifact:coverage-1",
+      "sha256": "cb13b476ab5c2957bc2bdc82874a3f0c4e3db2502bad4edb9dc27841963a82f3",
+      "byte_length": 809
+    }
+  ],
+  "admission": "baseline_not_compared",
+  "loss_acknowledgment": null,
+  "observation_at": "2026-10-18T00:00:00.000000000Z",
+  "retained_unobserved_rows": 0,
+  "extra": true
+}

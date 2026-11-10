@@ -1,0 +1,10 @@
+{
+  "runner": "cutover",
+  "baseline": "vectors/cutover/explicit-new-set.json",
+  "replace": {
+    "authorized_actors": []
+  },
+  "expected": {
+    "refusal": "cutover_actor"
+  }
+}

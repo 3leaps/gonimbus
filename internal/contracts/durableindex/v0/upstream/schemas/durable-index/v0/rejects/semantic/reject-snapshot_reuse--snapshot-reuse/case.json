@@ -1,0 +1,10 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/observe-and-tombstone.json",
+  "replace": {
+    "snapshot_id": "snapshot-0"
+  },
+  "expected": {
+    "refusal": "snapshot_reuse"
+  }
+}

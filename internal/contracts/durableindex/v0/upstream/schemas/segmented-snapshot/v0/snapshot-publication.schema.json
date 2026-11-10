@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:segmented-snapshot/v0/snapshot-publication.schema.json",
+  "title": "Snapshot Publication",
+  "description": "A producer completion fact, not independent proof of durability or coverage. Readers must check the exact graph and profile semantics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "kind", "publication_id", "selection", "state", "profile", "descriptor", "manifest"],
+  "properties": {
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "contains": { "const": "contract: segmented-snapshot/v0" },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "kind": { "const": "snapshot_publication" },
+    "publication_id": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/id" },
+    "selection": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/selection" },
+    "state": { "const": "committed" },
+    "profile": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "descriptor": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "manifest": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" }
+  }
+}

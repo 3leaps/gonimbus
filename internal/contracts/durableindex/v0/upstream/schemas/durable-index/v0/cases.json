@@ -1,0 +1,283 @@
+{
+  "shape": [
+    {
+      "file": "examples/index-plan.json",
+      "schema": "index-plan.schema.json",
+      "valid": true
+    },
+    {
+      "file": "examples/index-row.json",
+      "schema": "index-row.schema.json",
+      "valid": true
+    },
+    {
+      "file": "rejects/schema/reject-index-plan--extra-property.json",
+      "schema": "index-plan.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-plan--null-scopes.json",
+      "schema": "index-plan.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-plan--unknown-profile.json",
+      "schema": "index-plan.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-row--empty-revision.json",
+      "schema": "index-row.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-row--extra-property.json",
+      "schema": "index-row.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-row--negative-size.json",
+      "schema": "index-row.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-row--null-enrichments.json",
+      "schema": "index-row.schema.json",
+      "valid": false
+    },
+    {
+      "file": "examples/index-metadata.json",
+      "schema": "index-metadata.schema.json",
+      "valid": true
+    },
+    {
+      "file": "examples/index-publication.json",
+      "schema": "index-publication.schema.json",
+      "valid": true
+    },
+    {
+      "file": "examples/coverage-0.json",
+      "schema": "../../coverage-attestation/v0/coverage-attestation.schema.json",
+      "valid": true
+    },
+    {
+      "file": "examples/coverage-1.json",
+      "schema": "../../coverage-attestation/v0/coverage-attestation.schema.json",
+      "valid": true
+    },
+    {
+      "file": "rejects/schema/reject-index-metadata--negative-generation.json",
+      "schema": "index-metadata.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-metadata--extra-property.json",
+      "schema": "index-metadata.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-publication--not-committed.json",
+      "schema": "index-publication.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-publication--missing-index-capability.json",
+      "schema": "index-publication.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-publication--missing-snapshot-capability.json",
+      "schema": "index-publication.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-publication--extra-property.json",
+      "schema": "index-publication.schema.json",
+      "valid": false
+    },
+    {
+      "file": "examples/index-cutover.json",
+      "schema": "index-cutover.schema.json",
+      "valid": true
+    },
+    {
+      "file": "rejects/schema/reject-index-cutover--extra-property.json",
+      "schema": "index-cutover.schema.json",
+      "valid": false
+    },
+    {
+      "file": "rejects/schema/reject-index-cutover--missing-actor.json",
+      "schema": "index-cutover.schema.json",
+      "valid": false
+    }
+  ],
+  "plans": [
+    "vectors/plans/canonical-prefixes.json",
+    "vectors/plans/empty.json",
+    "vectors/plans/frame-a-bc.json",
+    "vectors/plans/frame-ab-c.json",
+    "vectors/plans/multiple-namespaces.json",
+    "vectors/plans/raw-prefix.json",
+    "vectors/plans/reader-preserves-prefix-bytes.json",
+    "vectors/plans/unicode-and-no-cleanup.json"
+  ],
+  "transitions": [
+    "vectors/transitions/ack-retains-omitted-row.json",
+    "vectors/transitions/broader-prefix-no-loss.json",
+    "vectors/transitions/empty-baseline.json",
+    "vectors/transitions/enrichment-only.json",
+    "vectors/transitions/explicit-baseline.json",
+    "vectors/transitions/observe-and-tombstone.json",
+    "vectors/transitions/partial-preserves-absent.json",
+    "vectors/transitions/repeated-shrink-still-stale.json",
+    "vectors/transitions/resurrection.json",
+    "vectors/transitions/retained-tombstone.json",
+    "vectors/transitions/revision-change-clears-enrichment.json",
+    "vectors/transitions/tombstone-clears-enrichment.json"
+  ],
+  "scenarios": [
+    "rejects/semantic/reject-discovery_failed--ack-cannot-override-discovery-failure/case.json",
+    "rejects/semantic/reject-clock_reversal--clock-reversal/case.json",
+    "rejects/semantic/reject-duplicate_observation--duplicate-observation/case.json",
+    "rejects/semantic/reject-enrichment_scope_change--enrichment-cannot-change-plan/case.json",
+    "rejects/semantic/reject-enrichment_observation--enrichment-cannot-observe/case.json",
+    "rejects/semantic/reject-enrichment_revision--enrichment-wrong-revision/case.json",
+    "rejects/semantic/reject-scope_loss--equal-count-loss/case.json",
+    "rejects/semantic/reject-invalid_baseline--invalid-baseline/case.json",
+    "rejects/semantic/reject-acknowledgment_actor--empty-ack-actor/case.json",
+    "rejects/semantic/reject-acknowledgment_mismatch--wrong-ack-parent/case.json",
+    "rejects/semantic/reject-acknowledgment_mismatch--wrong-ack-plan/case.json",
+    "rejects/semantic/reject-capacity--multibyte-key/case.json",
+    "rejects/semantic/reject-capacity--multibyte-prefix/case.json",
+    "rejects/semantic/reject-clock_reversal--deleted-after-observation/case.json",
+    "rejects/semantic/reject-duplicate_key_row--duplicate-across-members/case.json",
+    "rejects/semantic/reject-fabricated_freshness--retained-current-stamp/case.json",
+    "rejects/semantic/reject-generation_mismatch--wrong-generation/case.json",
+    "rejects/semantic/reject-invalid_instant--invalid-ack-time/case.json",
+    "rejects/semantic/reject-invalid_instant--invalid-calendar-date/case.json",
+    "rejects/semantic/reject-invalid_instant--omitted-fraction/case.json",
+    "rejects/semantic/reject-invalid_instant--parent-invalid-date/case.json",
+    "rejects/semantic/reject-invalid_instant--source-february-30/case.json",
+    "rejects/semantic/reject-invalid_instant--source-leap-second/case.json",
+    "rejects/semantic/reject-invalid_instant--trimmed-fraction/case.json",
+    "rejects/semantic/reject-invalid_instant--unsupported-precision/case.json",
+    "rejects/semantic/reject-lineage_order--deleted-before-last/case.json",
+    "rejects/semantic/reject-lineage_order--first-after-last/case.json",
+    "rejects/semantic/reject-noncanonical_plan--noncanonical-wire-plan/case.json",
+    "rejects/semantic/reject-observation_fields--observation-enrichments/case.json",
+    "rejects/semantic/reject-observation_fields--observation-first_seen/case.json",
+    "rejects/semantic/reject-observation_outside_plan--out-of-plan-observation/case.json",
+    "rejects/semantic/reject-parent_cycle--parent-cycle/case.json",
+    "rejects/semantic/reject-parent_unavailable--missing-parent-not-baseline/case.json",
+    "rejects/semantic/reject-row_order--parent-unsorted/case.json",
+    "rejects/semantic/reject-scope_loss--net-growth-still-loses/case.json",
+    "rejects/semantic/reject-set_mismatch--wrong-set/case.json",
+    "rejects/semantic/reject-snapshot_reuse--snapshot-reuse/case.json",
+    "rejects/semantic/reject-stale_enrichment--stale-enrichment/case.json",
+    "rejects/semantic/reject-stale_parent--stale-parent/case.json",
+    "rejects/semantic/reject-stamp_conflict--stamp-time-reuse/case.json",
+    "rejects/semantic/reject-invalid_shape--invalid-row-shape/case.json",
+    "rejects/semantic/reject-coverage_outside_plan--authority-outside-plan/case.json",
+    "rejects/semantic/reject-enrichment_order--retained-enrichment-order/case.json",
+    "rejects/semantic/reject-enrichment_order--retained-enrichment-duplicate/case.json",
+    "rejects/semantic/reject-enrichment_revision--retained-enrichment-revision/case.json",
+    "rejects/semantic/reject-enrichment_target--retained-enrichment-tombstone/case.json",
+    "rejects/semantic/reject-enrichment_revision--unknown-revision-target/case.json",
+    "rejects/semantic/reject-duplicate_enrichment--duplicate-attribute-update/case.json",
+    "rejects/semantic/reject-enrichment_target--missing-enrichment-target/case.json",
+    "rejects/semantic/reject-unexpected_acknowledgment--no-loss-with-ack/case.json",
+    "vectors/transitions/producer-upgrade-carries-token.json",
+    "vectors/transitions/raw-prefix-observes-alphabet.json",
+    "vectors/bindings/baseline.json",
+    "rejects/semantic/reject-scope_count--wrong-count/case.json",
+    "rejects/semantic/reject-plan_digest--wrong-plan-digest/case.json",
+    "rejects/semantic/reject-coverage_count--missing-coverage/case.json",
+    "rejects/semantic/reject-binding_alias--duplicate-coverage-ref/case.json",
+    "rejects/semantic/reject-coverage_identity--duplicate-coverage-id/case.json",
+    "rejects/semantic/reject-coverage_identity--wrong-attestation-id/case.json",
+    "rejects/semantic/reject-plan_identity--wrong-plan-set/case.json",
+    "rejects/semantic/reject-binding_unavailable--missing-bytes/case.json",
+    "rejects/semantic/reject-binding_integrity--altered-bytes/case.json",
+    "rejects/semantic/reject-coverage_scope--reordered-coverage/case.json",
+    "rejects/semantic/reject-coverage_subject--wrong-grain_id/case.json",
+    "rejects/semantic/reject-coverage_subject--wrong-artifact_id/case.json",
+    "rejects/semantic/reject-coverage_subject--wrong-subject_uri/case.json",
+    "rejects/semantic/reject-coverage_emitter--wrong-run/case.json",
+    "rejects/semantic/reject-coverage_emitter--wrong-relation/case.json",
+    "rejects/semantic/reject-coverage_time--wrong-as-of/case.json",
+    "rejects/semantic/reject-coverage_volume--volume-observed/case.json",
+    "rejects/semantic/reject-coverage_volume--volume-expected/case.json",
+    "rejects/semantic/reject-coverage_volume--volume-fractional/case.json",
+    "rejects/semantic/reject-coverage_complete_gap--complete-with-gap/case.json",
+    "rejects/semantic/reject-coverage_gap--gap-outside-plan/case.json",
+    "rejects/semantic/reject-enumerated_key_omitted--hidden-key-filtered/case.json",
+    "vectors/bindings/partial-does-not-authorize.json",
+    "vectors/bindings/inferred-does-not-authorize.json",
+    "vectors/bindings/hidden-key-included.json",
+    "vectors/bindings/inherited-provenance.json",
+    "rejects/semantic/reject-coverage_inheritance--reissued-inherited-coverage/case.json",
+    "vectors/cutover/explicit-new-set.json",
+    "rejects/semantic/reject-cutover_required--changed-id-no-record/case.json",
+    "rejects/semantic/reject-cutover_actor--unrecognized-actor/case.json",
+    "rejects/semantic/reject-cutover_selection--wrong-new-token/case.json",
+    "rejects/semantic/reject-cutover_rollback--wrong-rollback/case.json",
+    "rejects/semantic/reject-cutover_baseline--cutover-successor/case.json",
+    "vectors/parsing/duplicate.json",
+    "vectors/parsing/overflow.json",
+    "vectors/parsing/nan.json",
+    "vectors/parsing/invalid-utf8.json",
+    "vectors/parsing/surrogate.json",
+    "vectors/parsing/syntax.json",
+    "vectors/rows/two-members.json",
+    "rejects/semantic/reject-duplicate_key_row--member-boundary/case.json",
+    "vectors/rows/exact-multibyte-ceiling.json",
+    "vectors/bound_transitions/baseline.json",
+    "rejects/semantic/reject-metadata_transition--retained-count/case.json",
+    "vectors/bound_transitions/observe.json",
+    "rejects/semantic/reject-metadata_transition--parent-selection/case.json",
+    "vectors/transitions/raw-prefix-authorizes-alphabet-absence.json",
+    "vectors/graphs/baseline.json",
+    "vectors/graphs/observe.json",
+    "vectors/graphs/enrich.json",
+    "rejects/semantic/reject-graph_profile--graph-wrong-projection/case.json",
+    "rejects/semantic/reject-graph_identity--graph-wrong-publication-id/case.json",
+    "rejects/semantic/reject-graph_identity--graph-manifest-selection/case.json",
+    "rejects/semantic/reject-graph_publication--graph-draft-descriptor/case.json",
+    "rejects/semantic/reject-graph_profile--graph-unknown-profile/case.json",
+    "rejects/semantic/reject-graph_dependency--graph-missing-metadata/case.json",
+    "rejects/semantic/reject-graph_row_schema--graph-wrong-row-schema/case.json",
+    "rejects/semantic/reject-graph_catalog--graph-catalog-grain/case.json",
+    "rejects/semantic/reject-graph_descriptor--graph-descriptor-grain/case.json",
+    "rejects/semantic/reject-graph_catalog--graph-catalog-omitted-field/case.json",
+    "rejects/semantic/reject-protected_export--graph-protected-export/case.json",
+    "rejects/semantic/reject-graph_members--graph-duplicate-member-id/case.json",
+    "rejects/semantic/reject-graph_count--graph-wrong-member-count/case.json",
+    "rejects/semantic/reject-graph_evidence--graph-missing-source-evidence/case.json",
+    "rejects/semantic/reject-binding_alias--graph-metadata-member-alias/case.json",
+    "rejects/semantic/reject-binding_integrity--graph-altered-parent-bytes/case.json",
+    "rejects/semantic/reject-binding_unavailable--graph-missing-parent-bytes/case.json",
+    "rejects/semantic/reject-capacity--graph-member-budget/case.json",
+    "rejects/semantic/reject-capacity--graph-metadata-budget/case.json",
+    "rejects/semantic/reject-coverage_subject--graph-bad-coverage-subject/case.json",
+    "rejects/semantic/reject-graph_transition--graph-enrich-fresh-stamp/case.json",
+    "rejects/semantic/reject-graph_transition--graph-unknown-lineage-snapshot/case.json",
+    "rejects/semantic/reject-graph_transition--graph-unobserved-row-change/case.json",
+    "rejects/semantic/reject-row_order--graph-out-of-order-members/case.json",
+    "rejects/semantic/reject-stale_parent--graph-stale-admission/case.json",
+    "vectors/graphs/inherited-protection.json",
+    "vectors/graphs/cutover.json",
+    "rejects/semantic/reject-cutover_selection--graph-cutover-endpoint/case.json",
+    "rejects/semantic/reject-enumerated_key_omitted--graph-hidden-key/case.json",
+    "rejects/semantic/reject-cutover_required--graph-cutover-missing-record/case.json",
+    "rejects/semantic/reject-cutover_selection--graph-cutover-reused-selection/case.json",
+    "vectors/graphs/cutover-same-set.json",
+    "rejects/semantic/reject-cutover_time--graph-cutover-before-observation/case.json",
+    "vectors/graphs/cutover-time-equal.json",
+    "rejects/semantic/reject-cutover_time--cutover-before-observation/case.json",
+    "vectors/cutover/cutover-time-equal.json",
+    "vectors/graphs/metadata-at-limit.json",
+    "rejects/semantic/reject-capacity--metadata-one-byte-over/case.json",
+    "rejects/semantic/reject-invalid_json--depth-257/case.json",
+    "rejects/semantic/reject-invalid_json--depth-3000/case.json"
+  ]
+}

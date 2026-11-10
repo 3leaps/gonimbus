@@ -1,0 +1,9 @@
+{
+  "runner": "parsing",
+  "input": {
+    "hex": "225c756438303022"
+  },
+  "expected": {
+    "refusal": "invalid_unicode"
+  }
+}

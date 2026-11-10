@@ -1,0 +1,19 @@
+{
+  "runner": "bindings",
+  "baseline": "vectors/bindings/baseline.json",
+  "replace": {
+    "enumerated": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one"
+      },
+      {
+        "namespace": "objects",
+        "key": "alpha/.dot"
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "enumerated_key_omitted"
+  }
+}

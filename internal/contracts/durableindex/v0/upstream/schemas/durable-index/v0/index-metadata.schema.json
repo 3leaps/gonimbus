@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:durable-index/v0/index-metadata.schema.json",
+  "title": "Durable Index Profile Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capabilities",
+    "kind",
+    "selection",
+    "row_profile",
+    "encoding_profile",
+    "mode",
+    "generation",
+    "parent",
+    "plan",
+    "plan_digest",
+    "effective_scope_count",
+    "coverage",
+    "admission",
+    "loss_acknowledgment",
+    "observation_at",
+    "retained_unobserved_rows"
+  ],
+  "properties": {
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "contains": {
+        "const": "contract: durable-index/v0"
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "kind": {
+      "const": "index_metadata"
+    },
+    "selection": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/selection"
+    },
+    "row_profile": {
+      "const": "object-inventory/v0"
+    },
+    "encoding_profile": {
+      "const": "parquet-inventory/v0"
+    },
+    "mode": {
+      "enum": ["baseline", "observe", "enrich"]
+    },
+    "generation": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/count"
+    },
+    "parent": {
+      "anyOf": [
+        {
+          "$ref": "contract:durable-index/v0/common.schema.json#/$defs/parent"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "plan": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/binding"
+    },
+    "plan_digest": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/sha256"
+    },
+    "effective_scope_count": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/count"
+    },
+    "coverage": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "$ref": "contract:durable-index/v0/common.schema.json#/$defs/binding"
+      }
+    },
+    "admission": {
+      "enum": ["baseline_not_compared", "no_loss", "loss_acknowledged", "inherited"]
+    },
+    "loss_acknowledgment": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parent", "plan_sha256", "acknowledged_by", "acknowledged_at"],
+          "properties": {
+            "parent": {
+              "$ref": "contract:durable-index/v0/common.schema.json#/$defs/parent"
+            },
+            "plan_sha256": {
+              "$ref": "contract:durable-index/v0/common.schema.json#/$defs/sha256"
+            },
+            "acknowledged_by": {
+              "$ref": "contract:durable-index/v0/common.schema.json#/$defs/id"
+            },
+            "acknowledged_at": {
+              "$ref": "contract:durable-index/v0/common.schema.json#/$defs/instant"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observation_at": {
+      "anyOf": [
+        {
+          "$ref": "contract:durable-index/v0/common.schema.json#/$defs/instant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retained_unobserved_rows": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/count"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "baseline"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parent": {
+            "type": "null"
+          },
+          "generation": {
+            "const": 0
+          },
+          "admission": {
+            "const": "baseline_not_compared"
+          },
+          "observation_at": {
+            "$ref": "contract:durable-index/v0/common.schema.json#/$defs/instant"
+          },
+          "loss_acknowledgment": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "parent": {
+            "$ref": "contract:durable-index/v0/common.schema.json#/$defs/parent"
+          },
+          "generation": {
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "enrich"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "admission": {
+            "const": "inherited"
+          },
+          "observation_at": {
+            "type": "null"
+          },
+          "loss_acknowledgment": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "observe"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "admission": {
+            "enum": ["no_loss", "loss_acknowledged"]
+          },
+          "observation_at": {
+            "$ref": "contract:durable-index/v0/common.schema.json#/$defs/instant"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "admission": {
+            "const": "loss_acknowledged"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "loss_acknowledgment": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "loss_acknowledgment": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

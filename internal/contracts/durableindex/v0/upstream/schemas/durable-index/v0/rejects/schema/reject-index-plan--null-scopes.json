@@ -1,0 +1,7 @@
+{
+  "capabilities": ["contract: durable-index/v0"],
+  "kind": "index_plan",
+  "set_id": "set-example",
+  "scope_profile": "unicode-prefix/v0",
+  "scopes": null
+}

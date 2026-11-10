@@ -1,0 +1,47 @@
+{
+  "capabilities": ["contract: data-artifact/v0"],
+  "artifact_id": "urn:uuid:00000000-0000-7000-8000-000000000205",
+  "lifecycle": "complete",
+  "producer": {
+    "name": "archive-bundler",
+    "version": "1.0.0",
+    "profile": "raw-archive.artifact/v0",
+    "run_id": "00000000-0000-7000-8000-000000000305"
+  },
+  "grains": [
+    {
+      "id": "payload",
+      "kind": "record_stream",
+      "record_kind": "opaque_blob",
+      "row_count": 1
+    }
+  ],
+  "representations": [
+    {
+      "id": "payload_blob",
+      "grain": "payload",
+      "role": "sidecar",
+      "format": "json",
+      "profile": "raw-archive/v0",
+      "uri": "payload/blob.bin",
+      "row_count": 1,
+      "read_path": {
+        "range_readable": false,
+        "partitioned": false,
+        "sharded": false,
+        "appendable": false,
+        "scan_capabilities": [],
+        "read_path_granularity": "artifact",
+        "gateable_unit_granularity": "artifact",
+        "sidecar_required": false,
+        "physical_ordering": "not_promised"
+      },
+      "protection_enforceable_granularity": "artifact"
+    }
+  ],
+  "protection": {
+    "default_action": "block_export",
+    "default_export_class": "controlled",
+    "profile_ref": "profile:raw-archival-witness"
+  }
+}

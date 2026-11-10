@@ -18,10 +18,13 @@
 .gitignore text eol=lf
 .golangci.yml text eol=lf
 .goneatignore text eol=lf
+.prettierignore text eol=lf
 .yamlfmt text eol=lf
 Makefile text eol=lf
 
-# Binary files (do not normalize)
+# Binary files and byte-pinned upstream contract fixtures (do not normalize)
+/internal/contracts/durableindex/v0/upstream/** -text
+*.parquet binary
 *.png binary
 *.jpg binary
 *.jpeg binary

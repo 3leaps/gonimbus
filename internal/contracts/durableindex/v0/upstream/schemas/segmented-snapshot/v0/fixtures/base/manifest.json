@@ -1,0 +1,18 @@
+{
+  "capabilities": ["contract: segmented-snapshot/v0"],
+  "kind": "snapshot_manifest",
+  "selection": { "namespace_id": "example-store", "snapshot_id": "snapshot-1", "artifact_id": "artifact:example-data" },
+  "profile": { "id": "example.snapshot/v0", "ref": "artifact:profile", "sha256": "9d75e4211b6703de4833cd0521e35a2f60d836dc4e4f48b0c1fb8bd61f6c1709", "byte_length": 668 },
+  "grain_id": "records",
+  "representation_id": "records_ndjson",
+  "row_schema": { "schema_id": "contract:example.snapshot/v0/rows.schema.json", "ref": "artifact:row-schema", "sha256": "345e308934906404944dfe5c0ba1154e62698e1d70a0c0e35b8f752557ab40e7", "byte_length": 298 },
+  "field_catalog": { "id": "artifact:catalog", "ref": "artifact:catalog", "sha256": "e07e1e6fcae57c912e794c16210ea2e3077052cbcaa4ddc8f876aa28a05b0e82", "byte_length": 374 },
+  "physical_row_count": 2,
+  "count_relation": "equal",
+  "physical_order": "manifest_order",
+  "coverage_subject_uri": "snapshot:66b50835bfb9276ed12d774aeceee04c8bd289c8868a798c78b42615f17c62a4",
+  "members": [
+    { "id": "member-a", "ref": "artifact:member-a", "sha256": "4e216572523f1b9ad2b21c6b3254eab847728730f9a0a5f49b39af9f7f67f9c6", "byte_length": 22, "row_count": 1 },
+    { "id": "member-b", "ref": "artifact:member-b", "sha256": "0bebed30e7105a310a4255293afb9cb8b184f71ef764a3c4e98c597661e889f1", "byte_length": 22, "row_count": 1 }
+  ]
+}

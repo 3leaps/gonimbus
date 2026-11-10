@@ -1,0 +1,49 @@
+{
+  "capabilities": ["contract: coverage-attestation/v0"],
+  "attestation_id": "urn:uuid:2f6d1c9a-8f4e-4b0a-9c3d-5e7a1b2c4d6e",
+  "supersedes": "urn:uuid:9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+  "subject": {
+    "artifact_id": "urn:uuid:7c0a4e2d-1b3f-4c5a-9d8e-6f2a0b1c3d4e",
+    "grain_id": "objects"
+  },
+  "emitter": {
+    "name": "mirror-reconciler",
+    "version": "1.4.0",
+    "run_id": "run_000000000000000001",
+    "relation": "independent"
+  },
+  "as_of": "2026-07-02T16:20:00Z",
+  "coverage_state": "partial",
+  "claims": [
+    {
+      "scope": {
+        "partition": { "site": "opaque:site-0007" },
+        "window": { "from": "2026-04-01", "to": "2026-04-20" }
+      },
+      "basis": "confirmed",
+      "method": "enumerated",
+      "volume": { "unit": "objects", "observed": 425003, "expected": 425003 }
+    },
+    {
+      "scope": {
+        "partition": { "site": "opaque:site-0007" },
+        "window": { "from": "2026-04-21", "to": "2026-04-30" }
+      },
+      "basis": "inferred",
+      "method": "derived",
+      "volume": { "unit": "objects", "observed": 110079 },
+      "note": "Derived from arrival cadence; not yet reconciled against source enumeration."
+    }
+  ],
+  "gaps": [
+    {
+      "code": "source_listing_truncated",
+      "scope": {
+        "partition": { "site": "opaque:site-0012" },
+        "window": { "from": "2026-04-08", "to": "2026-04-14" }
+      },
+      "note": "Source listing truncated mid-window; volume deficit suspected despite object presence."
+    }
+  ],
+  "protection": { "default_action": "block_export" }
+}

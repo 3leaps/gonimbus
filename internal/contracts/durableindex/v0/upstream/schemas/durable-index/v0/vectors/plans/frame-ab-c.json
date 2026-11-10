@@ -1,0 +1,18 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "ab",
+      "prefix": "c"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "ab",
+      "prefix": "c"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c65000000010000000261620000000163",
+  "sha256": "c7b39d1141a4dce84a78d9e876be8820a295581bae1581235af3b7ec801b739b",
+  "comparisons": []
+}

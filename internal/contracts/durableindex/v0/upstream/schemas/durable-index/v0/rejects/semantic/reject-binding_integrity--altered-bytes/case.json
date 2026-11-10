@@ -1,0 +1,11 @@
+{
+  "runner": "bindings",
+  "baseline": "vectors/bindings/baseline.json",
+  "replace": {},
+  "expected": {
+    "refusal": "binding_integrity"
+  },
+  "store_overlay": {
+    "artifact:plan": "{\n  \"capabilities\": [\"contract: durable-index/v0\"],\n  \"kind\": \"index_plan\",\n  \"set_id\": \"set-example\",\n  \"scope_profile\": \"unicode-prefix/v0\",\n  \"scopes\": [\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"alpha/\"\n    },\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"beta/\"\n    }\n  ]\n}\n "
+  }
+}

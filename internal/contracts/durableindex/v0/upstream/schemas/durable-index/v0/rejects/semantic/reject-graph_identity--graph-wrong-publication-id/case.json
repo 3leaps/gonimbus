@@ -1,0 +1,15 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "publication": {
+      "id": "wrong",
+      "ref": "artifact:g0-publication",
+      "sha256": "dd1df94b27410a60e32c7e67944f99b4e23e5f92ce92fb864880ef6a18c8f55b",
+      "byte_length": 917
+    }
+  },
+  "expected": {
+    "refusal": "graph_identity"
+  }
+}

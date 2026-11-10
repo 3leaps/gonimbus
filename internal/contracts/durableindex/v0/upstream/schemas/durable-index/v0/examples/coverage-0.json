@@ -1,0 +1,35 @@
+{
+  "capabilities": ["contract: coverage-attestation/v0"],
+  "attestation_id": "coverage-0",
+  "subject": {
+    "artifact_id": "artifact:example-data",
+    "grain_id": "objects",
+    "subject_uri": "snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a"
+  },
+  "emitter": {
+    "name": "synthetic-producer",
+    "relation": "producer",
+    "run_id": "snapshot-1"
+  },
+  "as_of": "2026-10-18T00:00:00.000000000Z",
+  "coverage_state": "complete",
+  "claims": [
+    {
+      "scope": {
+        "partition": {
+          "namespace": "objects"
+        },
+        "prefix": "alpha/"
+      },
+      "basis": "confirmed",
+      "method": "enumerated",
+      "volume": {
+        "unit": "objects",
+        "observed": 1
+      }
+    }
+  ],
+  "protection": {
+    "default_action": "block_export"
+  }
+}

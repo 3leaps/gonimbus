@@ -1,0 +1,255 @@
+{
+  "runner": "bound_transitions",
+  "input": {
+    "evidence": {
+      "metadata": {
+        "capabilities": ["contract: durable-index/v0"],
+        "kind": "index_metadata",
+        "selection": {
+          "namespace_id": "set-example",
+          "snapshot_id": "snapshot-1",
+          "artifact_id": "artifact:example-data"
+        },
+        "row_profile": "object-inventory/v0",
+        "encoding_profile": "parquet-inventory/v0",
+        "mode": "observe",
+        "generation": 1,
+        "parent": {
+          "selection": {
+            "namespace_id": "set-example",
+            "snapshot_id": "snapshot-0",
+            "artifact_id": "artifact:example-data"
+          },
+          "publication": {
+            "id": "publication-0",
+            "ref": "artifact:parent",
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "byte_length": 1
+          }
+        },
+        "plan": {
+          "id": "set-example",
+          "ref": "artifact:plan",
+          "sha256": "88e33b2a50d9d4c39bb4f65692d2daf823082ef077b2021cb201ecdce12ae719",
+          "byte_length": 297
+        },
+        "plan_digest": "78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5",
+        "effective_scope_count": 2,
+        "coverage": [
+          {
+            "id": "coverage-0",
+            "ref": "artifact:coverage-0",
+            "sha256": "ebb367e0d6220223795e8a57870977baa6378f024db3210d415ac15bfa07eb6b",
+            "byte_length": 818
+          },
+          {
+            "id": "coverage-1",
+            "ref": "artifact:coverage-1",
+            "sha256": "4916d6bc331f3ebef9bc7d2012fd2306f6721bc4283658aaff2492a2aab6c01c",
+            "byte_length": 817
+          }
+        ],
+        "admission": "no_loss",
+        "loss_acknowledgment": null,
+        "observation_at": "2026-10-18T01:00:00.000000001Z",
+        "retained_unobserved_rows": 1
+      },
+      "store": {
+        "artifact:plan": "{\n  \"capabilities\": [\"contract: durable-index/v0\"],\n  \"kind\": \"index_plan\",\n  \"set_id\": \"set-example\",\n  \"scope_profile\": \"unicode-prefix/v0\",\n  \"scopes\": [\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"alpha/\"\n    },\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"beta/\"\n    }\n  ]\n}\n",
+        "artifact:coverage-0": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-0\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-1\"\n  },\n  \"as_of\": \"2026-10-18T01:00:00.000000001Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"alpha/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 1\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n",
+        "artifact:coverage-1": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-1\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-1\"\n  },\n  \"as_of\": \"2026-10-18T01:00:00.000000001Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"beta/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 0\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n"
+      },
+      "grain_id": "objects",
+      "observations": [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null
+        }
+      ],
+      "enumerated": [
+        {
+          "namespace": "objects",
+          "key": "alpha/one"
+        }
+      ]
+    },
+    "transition": {
+      "mode": "observe",
+      "set_id": "set-example",
+      "snapshot_id": "snapshot-1",
+      "generation": 1,
+      "observation_at": "2026-10-18T01:00:00.000000001Z",
+      "discovery_complete": true,
+      "parent": {
+        "publication_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "set_id": "set-example",
+        "snapshot_id": "snapshot-0",
+        "generation": 0,
+        "scopes": [
+          {
+            "namespace": "objects",
+            "prefix": "alpha/"
+          },
+          {
+            "namespace": "objects",
+            "prefix": "beta/"
+          }
+        ],
+        "rows": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null,
+            "first_seen": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "last_seen": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "last_changed": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "deleted": null,
+            "enrichments": []
+          },
+          {
+            "namespace": "objects",
+            "key": "beta/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null,
+            "first_seen": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "last_seen": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "last_changed": {
+              "snapshot_id": "snapshot-0",
+              "at": "2026-10-18T00:00:00.000000000Z"
+            },
+            "deleted": null,
+            "enrichments": []
+          }
+        ]
+      },
+      "admitted_parent_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "scopes": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "beta/"
+        }
+      ],
+      "acknowledgment": null,
+      "observations": [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null
+        }
+      ],
+      "absence_authority": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "beta/"
+        }
+      ],
+      "enrichments": []
+    }
+  },
+  "expected": {
+    "rows": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "deleted": null,
+        "enrichments": []
+      },
+      {
+        "namespace": "objects",
+        "key": "beta/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "deleted": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "enrichments": []
+      }
+    ],
+    "admission": "no_loss",
+    "retained_unobserved_rows": 1
+  }
+}

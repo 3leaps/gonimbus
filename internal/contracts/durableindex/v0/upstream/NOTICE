@@ -1,0 +1,54 @@
+3leaps Crucible
+Copyright (c) 2025 3 Leaps, LLC
+
+This repository (`3leaps/crucible`) contains content under two complementary
+licenses, depending on the asset type (`(MIT AND CC0-1.0)`):
+
+## Dual-License Scope Boundary
+
+- **Creative Works, Documentation, Schemas, Role Prompts & Standards (`CC0-1.0`, see `LICENSE-CC0`):**
+  All standards documentation (`docs/`), JSON Schemas (`schemas/`),
+  configuration catalogs and role prompts (`config/`), and conformance test
+  vectors and examples are dedicated to the public domain under the CC0 1.0
+  Universal Public Domain Dedication.
+- **Code & Automation (`MIT`, see `LICENSE`):**
+  All executable scripts (`scripts/`), CI/CD workflows (`.github/`),
+  `Makefile`, and test harnesses are licensed under the MIT License.
+- **Mixed Files:**
+  Code examples embedded in documentation or schemas are dedicated under
+  `CC0-1.0` alongside the surrounding specification unless otherwise noted;
+  executable scripts and test runners are licensed under `MIT`. Please respect
+  the distinction between code and creative assets: code is governed by the MIT
+  License, which requires inclusion of the license text in derivative works,
+  while creative assets are dedicated under `CC0-1.0` and may be used without
+  copyright restriction. If in doubt about the licensing of a specific file,
+  contact the maintainers at legal@3leaps.net.
+
+## Scope Limitation
+
+This repository (`3leaps/crucible`) is intentionally limited to standards
+documentation, schemas, catalogs, and lightweight CI/CD automation. It does not
+contain, and is not intended to contain, large-scale code surfaces such as
+servers, runtime libraries, or workflow engines. Such implementations live in
+dedicated downstream repositories.
+
+## Trademark Notice
+
+"3 Leaps®" is a registered trademark of 3 Leaps, LLC, a North Carolina LLC.
+"3 Leaps", "3leaps", "Crucible", and associated logos and marks are trademarks
+of 3 Leaps, LLC. Neither the MIT License (`LICENSE`) nor the CC0 1.0 Universal
+Public Domain Dedication (`LICENSE-CC0`) grants any rights to use these
+trademarks.
+
+While code and documentation are open under the licenses above, use of these
+trademarks is reserved for official implementations to prevent confusion. Use
+of these marks in derivative works does not imply endorsement by 3 Leaps, LLC.
+As a courtesy, please rename derivative projects to avoid using "3leaps" or
+"crucible" in repository or package names.
+
+For questions regarding trademark usage, contact legal@3leaps.net.
+
+---
+
+For additional governance details and contributor obligations, see the 3 Leaps
+Open Source Policies at https://github.com/3leaps/oss-policies.

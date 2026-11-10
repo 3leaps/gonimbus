@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:durable-index/v0/index-plan.schema.json",
+  "title": "Effective Index Observation Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "kind", "set_id", "scope_profile", "scopes"],
+  "properties": {
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "contains": {
+        "const": "contract: durable-index/v0"
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "kind": {
+      "const": "index_plan"
+    },
+    "set_id": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/id"
+    },
+    "scope_profile": {
+      "const": "unicode-prefix/v0"
+    },
+    "scopes": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "$ref": "contract:durable-index/v0/common.schema.json#/$defs/scope"
+      }
+    }
+  }
+}

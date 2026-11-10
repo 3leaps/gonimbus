@@ -1,0 +1,108 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "objects",
+      "prefix": "alpha/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": " /beta/ "
+    },
+    {
+      "namespace": "objects",
+      "prefix": "/gamma/"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "objects",
+      "prefix": " /beta/ "
+    },
+    {
+      "namespace": "objects",
+      "prefix": "/gamma/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "alpha/"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c6500000003000000076f626a6563747300000008202f626574612f20000000076f626a65637473000000072f67616d6d612f000000076f626a6563747300000006616c7068612f",
+  "sha256": "ee7ea3514a824cb286ddfb23b13f29285a09b0c853490cc62bdd0d8be4012094",
+  "comparisons": [],
+  "membership": [
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      "namespace": "objects",
+      "key": "alpha/one",
+      "contains": true
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      "namespace": "objects",
+      "key": "alphabet/one",
+      "contains": false
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "alpha"
+      },
+      "namespace": "objects",
+      "key": "alphabet/one",
+      "contains": true
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": " /beta/ "
+      },
+      "namespace": "objects",
+      "key": " /beta/ one",
+      "contains": true
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": " /beta/ "
+      },
+      "namespace": "objects",
+      "key": "beta/one",
+      "contains": false
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "/gamma/"
+      },
+      "namespace": "objects",
+      "key": "/gamma/one",
+      "contains": true
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "/gamma/"
+      },
+      "namespace": "objects",
+      "key": "gamma/one",
+      "contains": false
+    },
+    {
+      "scope": {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      "namespace": "other",
+      "key": "alpha/one",
+      "contains": false
+    }
+  ]
+}

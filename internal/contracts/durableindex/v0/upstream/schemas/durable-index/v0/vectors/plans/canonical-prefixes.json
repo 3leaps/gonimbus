@@ -1,0 +1,95 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "objects",
+      "prefix": "beta/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "alpha/deep/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "alpha/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "alpha/"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "objects",
+      "prefix": "alpha/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "beta/"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c6500000002000000076f626a6563747300000006616c7068612f000000076f626a6563747300000005626574612f",
+  "sha256": "78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5",
+  "comparisons": [
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": ""
+        }
+      ],
+      "loss": false
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "gamma/"
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "gamma/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "omega/"
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "beta/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "gamma/"
+        }
+      ],
+      "loss": false
+    },
+    {
+      "next": [],
+      "loss": true
+    }
+  ]
+}

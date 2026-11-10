@@ -1,0 +1,8 @@
+{
+  "id": "artifact:catalog",
+  "grain": "records",
+  "fields": [
+    { "name": "key", "type": "string", "required": true, "sensitivity": "public", "protection_tags": ["safe_to_profile"], "export_action": "allow" },
+    { "name": "value", "type": "integer", "required": true, "sensitivity": "public", "protection_tags": ["safe_to_profile"], "export_action": "allow" }
+  ]
+}
