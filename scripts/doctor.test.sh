@@ -19,7 +19,7 @@ populate_good_stubs() {
     local dir="$1"
     mkdir -p "$dir"
     make_stub "$dir" go 'echo "go version go1.26.10 darwin/arm64"'
-    make_stub "$dir" goneat 'echo "goneat v0.6.7"'
+    make_stub "$dir" goneat 'echo "goneat v0.6.8"'
     make_stub "$dir" decernor 'echo "decernor 0.1.9"'
     make_stub "$dir" limensafe 'echo "limensafe 0.2.0"'
     make_stub "$dir" minisign 'echo "minisign 0.12"'

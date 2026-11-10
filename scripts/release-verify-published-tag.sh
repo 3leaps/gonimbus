@@ -50,10 +50,19 @@ if [[ -n "$expected_object" || -n "$expected_commit" ]]; then
         die 'expected tag object and commit must both be 40-hex'
     [[ "$remote_object" == "$expected_object" ]] || die 'remote tag object differs from the verified anchor'
 fi
-git fetch --quiet --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
-[[ "$(git rev-parse "refs/tags/$tag")" == "$remote_object" ]] || die 'local tag differs from remote tag object'
+# Fetch into a private namespace and verify there; local refs/tags change only
+# after every check passes.
+staging="refs/gonimbus-verify/$$.$RANDOM/tags/"
+cleanup_staging() {
+    git for-each-ref --format='%(refname)' "${staging%tags/}" | while IFS= read -r ref; do
+        git update-ref -d "$ref"
+    done
+}
+trap cleanup_staging EXIT
+git fetch --quiet --no-tags origin "+refs/tags/$tag:$staging$tag"
+[[ "$(git rev-parse "$staging$tag")" == "$remote_object" ]] || die 'local tag differs from remote tag object'
 [[ "$(git cat-file -t "$remote_object")" == tag ]] || die 'annotated tag required'
-commit="$(git rev-parse "refs/tags/$tag^{}")"
+commit="$(git rev-parse "$staging$tag^{}")"
 [[ -z "$expected_commit" || "$commit" == "$expected_commit" ]] || die 'tagged commit differs from the verified anchor'
 # The verifier and its helpers run from this trusted operator checkout. The
 # tagged commit is read only as inert git objects (tag object, pin, anchors,
@@ -61,12 +70,15 @@ commit="$(git rev-parse "refs/tags/$tag^{}")"
 pinned="$(git cat-file blob "$commit:keys/expected-fingerprints.txt" 2> /dev/null | awk '$1=="gpg" {print $2}')" ||
     die 'tagged commit has no fingerprint anchors'
 [[ "$pinned" == "$approved" ]] || die 'pin in the tagged commit is not the approved primary'
-GONIMBUS_RELEASE_TAG="$tag" "$root/scripts/verify-pinned-tag.sh" --published > /dev/null ||
+GONIMBUS_RELEASE_TAG="$tag" "$root/scripts/verify-pinned-tag.sh" --published --staged-prefix "$staging" > /dev/null ||
     die 'published tag signature does not verify against the pin committed in its commit'
 tag_json="$(release_gh api "repos/3leaps/gonimbus/git/tags/$remote_object")" || die 'GitHub tag object unavailable'
 jq -e --arg tag "$tag" --arg commit "$commit" \
     '.tag == $tag and .object.type == "commit" and .object.sha == $commit and .verification.verified == true and .verification.reason == "valid"' \
     <<< "$tag_json" > /dev/null || die 'GitHub does not report the published tag verified'
+# Every check passed: now, and only now, install the verified object as the
+# local tag.
+git update-ref "refs/tags/$tag" "$remote_object"
 echo "[ok] published $tag object $remote_object verified against its committed pin and GitHub"
 # Machine-readable anchor for callers that bind later steps to this result.
 if [[ -n "${GONIMBUS_ANCHOR_OUT:-}" ]]; then

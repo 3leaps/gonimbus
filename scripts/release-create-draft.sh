@@ -52,18 +52,18 @@ manifests=(SHA256SUMS SHA512SUMS)
 while IFS= read -r -d '' entry; do
     name="${entry##*/}"
     allowed=0
-    for want in "${expected[@]}" "${manifests[@]}"; do
+    for want in ${expected[@]+"${expected[@]}"} ${manifests[@]+"${manifests[@]}"}; do
         [[ "$name" == "$want" ]] && allowed=1
     done
     [[ "$allowed" == 1 ]] || die "unexpected file in $src: $name (run make release-clean and restage)"
     [[ -f "$entry" && ! -L "$entry" ]] || die "not a regular file: $name"
 done < <(find "$src" -mindepth 1 -maxdepth 1 -print0)
-for want in "${expected[@]}" "${manifests[@]}"; do
+for want in ${expected[@]+"${expected[@]}"} ${manifests[@]+"${manifests[@]}"}; do
     [[ -f "$src/$want" && -s "$src/$want" ]] || die "missing release file: $want"
 done
 
 # Each manifest lists exactly the expected binaries, and each matches.
-python3 - "$src" "${expected[@]}" << 'PY'
+python3 - "$src" ${expected[@]+"${expected[@]}"} << 'PY'
 import hashlib
 import pathlib
 import sys
@@ -115,9 +115,9 @@ tagged_notes="$(git -C "$root" rev-parse --verify --quiet "$anchor_commit:docs/r
 [[ "$(git -C "$root" hash-object -- "$notes")" == "$tagged_notes" ]] ||
     die "docs/releases/$tag.md differs from the tagged commit"
 files=()
-for want in "${expected[@]}" "${manifests[@]}"; do
+for want in ${expected[@]+"${expected[@]}"} ${manifests[@]+"${manifests[@]}"}; do
     files+=("$src/$want")
 done
 release_gh release create "$tag" --repo 3leaps/gonimbus --verify-tag --draft \
-    --title "$tag" --notes-file "$notes" "${files[@]}"
+    --title "$tag" --notes-file "$notes" ${files[@]+"${files[@]}"}
 echo "[ok] draft release $tag created from ${#expected[@]} verified package(s)"

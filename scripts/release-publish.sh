@@ -60,8 +60,8 @@ provenance=(
     expected-fingerprints.txt expected-fingerprints.ndjson
     "release-notes-${tag}.md"
 )
-expected=("${packages[@]}" "${provenance[@]}")
-for want in "${expected[@]}"; do
+expected=(${packages[@]+"${packages[@]}"} ${provenance[@]+"${provenance[@]}"})
+for want in ${expected[@]+"${expected[@]}"}; do
     [[ -f "$src/$want" && ! -L "$src/$want" && -s "$src/$want" ]] || die "missing local release file: $want"
 done
 
@@ -85,13 +85,13 @@ tagged_notes="$(git -C "$root" rev-parse --verify --quiet "$anchor_commit:docs/r
 # 2. A draft with exactly the expected asset names.
 release="$(release_gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
 [[ "$(jq -r '.isDraft' <<< "$release")" == true ]] || die "$tag is not a draft; refusing to re-promote"
-diff <(jq -r '.assets[].name' <<< "$release" | sort) <(printf '%s\n' "${expected[@]}" | sort) > /dev/null ||
+diff <(jq -r '.assets[].name' <<< "$release" | sort) <(printf '%s\n' ${expected[@]+"${expected[@]}"} | sort) > /dev/null ||
     die 'draft assets differ from the expected set'
 
 # 3. Each manifest lists exactly the packages, and they match.
 for bits in 256 512; do
     diff <(awk '{sub(/^\*/, "", $2); print $2}' "$src/SHA${bits}SUMS" | sort) \
-        <(printf '%s\n' "${packages[@]}" | sort) > /dev/null ||
+        <(printf '%s\n' ${packages[@]+"${packages[@]}"} | sort) > /dev/null ||
         die "SHA${bits}SUMS does not list exactly the expected packages"
     if command -v "sha${bits}sum" > /dev/null 2>&1; then
         (cd "$src" && "sha${bits}sum" -c "SHA${bits}SUMS" > /dev/null)
@@ -181,33 +181,20 @@ for manifest in SHA256SUMS SHA512SUMS; do
         die "PGP signature on $manifest is not a good signature by the pinned signing subkey"
 done
 
-# 5. The draft on GitHub is byte-identical to the verified local set.
-release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the draft assets'
-for want in "${expected[@]}"; do
-    cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
-done
-
-# 6. Narrow the TOCTOU window (PDR-0010 §2.3, §2.4): re-read draft state and
-# re-download/compare immediately before promotion, then re-download and
-# byte-compare after promotion and assert GitHub immutability.
+# 5. Narrow the TOCTOU window (PDR-0010 §2.3, §2.4): re-read draft state and
+# perform one verified pre-promote download with visible progress (the 1+1
+# pattern: 1 pre-promote download here + 1 post-promote clean-room download in
+# make release-stage-published), then promote and assert GitHub immutability.
 pre_promote="$(release_gh release view "$tag" --repo "$repo" --json isDraft,assets)" || die "no release for $tag"
 [[ "$(jq -r '.isDraft' <<< "$pre_promote")" == true ]] ||
     die "$tag is not a draft immediately before promote"
-diff <(jq -r '.assets[].name' <<< "$pre_promote" | sort) <(printf '%s\n' "${expected[@]}" | sort) > /dev/null ||
+diff <(jq -r '.assets[].name' <<< "$pre_promote" | sort) <(printf '%s\n' ${expected[@]+"${expected[@]}"} | sort) > /dev/null ||
     die 'draft assets differ from the expected set immediately before promote'
-rm -rf "$fresh"
-mkdir -p "$fresh"
-release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not re-download the draft assets'
-for want in "${expected[@]}"; do
+release_gh release download "$tag" --repo "$repo" --dir "$fresh" || die 'could not download the draft assets'
+for want in ${expected[@]+"${expected[@]}"}; do
     cmp -s "$fresh/$want" "$src/$want" || die "draft asset differs from the verified local file: $want"
 done
 release_gh release edit "$tag" --repo "$repo" --draft=false > /dev/null
-rm -rf "$fresh"
-mkdir -p "$fresh"
-release_gh release download "$tag" --repo "$repo" --dir "$fresh" > /dev/null || die 'could not download the published assets'
-for want in "${expected[@]}"; do
-    cmp -s "$fresh/$want" "$src/$want" || die "published asset differs from the verified local file: $want (accepted residual race realized)"
-done
 release_meta="$(release_gh api "repos/$repo/releases/tags/$tag")" ||
     die "could not read published release metadata for $tag"
 jq -e '.draft == false and .immutable == true' <<< "$release_meta" > /dev/null ||

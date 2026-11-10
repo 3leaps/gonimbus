@@ -2,6 +2,7 @@ ci-install-decernor
 content-check
 doctor
 host-path-check
+jq-portability
 release-ci-artifact-draft
 release-decernor
 release-gh
@@ -12,6 +13,7 @@ release-pin-precursors
 release-post-tag-selector
 release-preflight
 release-prepare-tag-message
+release-promotion-recovery
 release-publish
 release-restore-tag-ref
 release-stage-published
@@ -24,6 +26,7 @@ release-verify-published-tag
 release-verify-registries
 release-verify-signatures
 release-workflow-permissions
+release-write-guards
 sign-release-manifests
 surface-scan
 verify-pinned-tag

@@ -28,6 +28,16 @@ if [ ! -d "$DIR" ]; then
     exit 1
 fi
 
+# Never write through a link or overwrite an existing signature.
+for manifest in SHA256SUMS SHA512SUMS; do
+    for signature in "${manifest}.minisig" "${manifest}.asc"; do
+        if [ -e "${DIR}/${signature}" ] || [ -L "${DIR}/${signature}" ]; then
+            echo "error: ${signature} already exists" >&2
+            exit 1
+        fi
+    done
+done
+
 MINISIGN_KEY="${GONIMBUS_MINISIGN_KEY:-}"
 PGP_KEY_ID="${GONIMBUS_PGP_KEY_ID:-}"
 GPG_HOME="${GONIMBUS_GPG_HOMEDIR:-}"
@@ -85,8 +95,12 @@ sign_minisign() {
         return 0
     fi
 
+    if [ -e "${base}.minisig" ] || [ -L "${base}.minisig" ]; then
+        echo "error: ${manifest}.minisig already exists" >&2
+        exit 1
+    fi
+
     echo "🔏 [minisign] Signing ${manifest}"
-    rm -f "${base}.minisig"
     minisign -S -s "${MINISIGN_KEY}" -t "gonimbus ${TAG} ${timestamp}" -m "${base}"
 }
 
@@ -98,9 +112,13 @@ sign_pgp() {
         return 0
     fi
 
+    if [ -e "${base}.asc" ] || [ -L "${base}.asc" ]; then
+        echo "error: ${manifest}.asc already exists" >&2
+        exit 1
+    fi
+
     echo "🔏 [PGP] Signing ${manifest}"
-    rm -f "${base}.asc"
-    gpg --batch --yes --armor --homedir "${GPG_HOME}" --local-user "${PGP_KEY_ID}" --detach-sign -o "${base}.asc" "${base}"
+    gpg --batch --armor --homedir "${GPG_HOME}" --local-user "${PGP_KEY_ID}" --detach-sign -o "${base}.asc" "${base}"
 }
 
 sign_minisign "SHA256SUMS"

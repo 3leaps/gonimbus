@@ -19,14 +19,25 @@ die() {
 # data is still read only as inert git objects from the tagged commit; no file
 # from that commit is ever executed.
 published=0
-if [[ "${1:-}" == --published ]]; then
-    published=1
-elif [[ $# -gt 0 ]]; then
-    die 'usage: verify-pinned-tag.sh [--published]'
-fi
+staged_prefix=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --published) published=1 ;;
+        --staged-prefix)
+            [[ $# -ge 2 ]] || die 'usage: verify-pinned-tag.sh [--published] [--staged-prefix PREFIX]'
+            staged_prefix="$2"
+            shift
+            ;;
+        *) die 'usage: verify-pinned-tag.sh [--published] [--staged-prefix PREFIX]' ;;
+    esac
+    shift
+done
+[[ "$staged_prefix" == "" || "$staged_prefix" =~ ^refs/gonimbus-verify/[0-9]+\.[0-9]+/tags/$ ]] ||
+    die 'invalid --staged-prefix'
+ref_prefix="${staged_prefix:-refs/tags/}"
 tag="${GONIMBUS_RELEASE_TAG:-}"
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'canonical release tag required'
-object="$(git rev-parse "refs/tags/$tag" 2> /dev/null)" || die 'tag absent'
+object="$(git rev-parse "${ref_prefix}${tag}" 2> /dev/null)" || die 'tag absent'
 [[ "$(git cat-file -t "$object")" == tag ]] || die 'annotated tag required'
 target="$(git rev-parse "${object}^{}")"
 [[ "$published" == 1 || "$target" == "$(git rev-parse HEAD)" ]] || die 'tag target must be HEAD'

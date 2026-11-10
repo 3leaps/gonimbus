@@ -150,7 +150,7 @@ GitHub Release. A green tag workflow is not release authorization.
 - [ ] Stage notes: `make release-notes`
 - [ ] Upload provenance assets (`SHA256SUMS`, `SHA512SUMS`, `.minisig`, `.asc`, both public keys, both fingerprint anchor files, and `release-notes-v<version>.md`) to the draft: `make release-upload`
 - [ ] Preserve the package-manager URL and SHA256 block printed by `make release-upload`
-- [ ] Promote the draft after byte-verifying it against the local signed set, then re-download every published asset and assert GitHub immutable release state (`.draft == false` and `.immutable == true`): `make release-publish`
+- [ ] Promote the draft after byte-verifying a pre-promote download against the local signed set and assert GitHub immutable release state (`.draft == false` and `.immutable == true`): `make release-publish`
 - [ ] Clean-room download and full verification of the published immutable GitHub release into `dist/published` (verifies `.draft == false`, `.immutable == true`, exact 16-asset set and digests, tagged-commit blob parity for public keys/anchors/notes, Decernor fingerprint verify, and minisign + OpenPGP signatures): `make release-stage-published`
 
 ### Distribution

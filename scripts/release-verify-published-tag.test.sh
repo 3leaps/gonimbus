@@ -8,7 +8,7 @@ bin="${GONIMBUS_DECERNOR_BIN:-$(command -v decernor || true)}"
     exit 1
 }
 export GONIMBUS_DECERNOR_BIN="$bin"
-scratch="$(mktemp -d)"
+scratch="$(cd "$(mktemp -d)" && pwd -P)"
 cleanup() {
     local home
     for home in "$scratch/gpg" "$scratch/attacker"; do
@@ -34,7 +34,7 @@ git -C "$src" config gpg.format openpgp
 git -C "$src" config gpg.program gpg
 git -C "$src" config commit.gpgsign false
 mkdir -p "$src/scripts" "$src/docs/security" "$src/keys" "$src/config/release"
-cp "$root/scripts/"{verify-pinned-tag.sh,validate-release-anchors.sh,release-verify-published-tag.sh,release-decernor.sh,release-gh.sh} "$src/scripts/"
+cp "$root/scripts/"{verify-pinned-tag.sh,validate-release-anchors.sh,release-verify-published-tag.sh,release-record-anchor.sh,release-decernor.sh,release-gh.sh} "$src/scripts/"
 cp "$root/config/release/tagger-identity.txt" "$src/config/release/"
 gpg --batch --armor --export "$primary" > "$src/docs/security/release-signing-keys.asc"
 python3 - "$src/docs/security/gonimbus-minisign.pub" << 'PY'
@@ -89,7 +89,7 @@ export PATH="$scratch/bin:$PATH" FIXTURE_REMOTE="$scratch/remote.git" GONIMBUS_R
 export GONIMBUS_GPG_SIGNING_FINGERPRINT="$primary"
 
 # The operator's trusted checkout carries the current verifier and helpers.
-cp "$root/scripts/"{verify-pinned-tag.sh,validate-release-anchors.sh,release-verify-published-tag.sh,release-decernor.sh,release-gh.sh} "$op/scripts/"
+cp "$root/scripts/"{verify-pinned-tag.sh,validate-release-anchors.sh,release-verify-published-tag.sh,release-record-anchor.sh,release-decernor.sh,release-gh.sh} "$op/scripts/"
 gate() { (cd "$op" && ./scripts/release-verify-published-tag.sh); }
 expect_fail() {
     if gate > "$scratch/out" 2>&1; then
@@ -248,6 +248,23 @@ grep -q 'must both be 40-hex' "$scratch/out"
 # Restore the original signed object: the anchored check passes again.
 git -C "$scratch/remote.git" update-ref refs/tags/v1.2.3 "$anchor_object"
 anchored > /dev/null
+
+# release-record-anchor.sh requires expected object + commit and refuses to overwrite an existing anchor.
+if (cd "$op" && GONIMBUS_RELEASE_ANCHOR_FILE="$scratch/rec.anchor" ./scripts/release-record-anchor.sh) > "$scratch/out" 2>&1; then
+    echo 'error: release-record-anchor accepted missing expected tag object/commit' >&2
+    exit 1
+fi
+grep -q 'original approved tag object (GONIMBUS_EXPECTED_TAG_OBJECT) and commit (GONIMBUS_EXPECTED_COMMIT) required' "$scratch/out"
+(cd "$op" && GONIMBUS_RELEASE_ANCHOR_FILE="$scratch/rec.anchor" \
+    GONIMBUS_EXPECTED_TAG_OBJECT="$anchor_object" GONIMBUS_EXPECTED_COMMIT="$anchor_commit" \
+    ./scripts/release-record-anchor.sh) > /dev/null
+if (cd "$op" && GONIMBUS_RELEASE_ANCHOR_FILE="$scratch/rec.anchor" \
+    GONIMBUS_EXPECTED_TAG_OBJECT="$anchor_object" GONIMBUS_EXPECTED_COMMIT="$anchor_commit" \
+    ./scripts/release-record-anchor.sh) > "$scratch/out" 2>&1; then
+    echo 'error: release-record-anchor overwrote existing anchor file' >&2
+    exit 1
+fi
+grep -q 'absent absolute GONIMBUS_RELEASE_ANCHOR_FILE outside the repository required' "$scratch/out"
 
 # Absent remote tag: must fail.
 git -C "$scratch/remote.git" update-ref -d refs/tags/v1.2.3

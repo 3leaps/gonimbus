@@ -159,7 +159,7 @@ PY
 moved=()
 unstage() {
     local m
-    for m in "${moved[@]}"; do rm -f "$dest/$m"; done
+    for m in ${moved[@]+"${moved[@]}"}; do rm -f "$dest/$m"; done
 }
 for f in "$work/extract"/*; do
     if [[ -e "$dest/${f##*/}" ]]; then

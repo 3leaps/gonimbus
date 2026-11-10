@@ -98,6 +98,6 @@ if [[ "${is_draft}" != "true" ]]; then
 fi
 
 echo "→ Uploading ${#assets[@]} provenance assets to ${TAG} (clobber enabled)"
-release_gh release upload "${TAG}" --repo "${REPO}" "${assets[@]}" --clobber
+release_gh release upload "${TAG}" --repo "${REPO}" ${assets[@]+"${assets[@]}"} --clobber
 
 echo "✅ Upload complete"

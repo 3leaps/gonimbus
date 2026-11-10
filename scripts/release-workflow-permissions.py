@@ -130,8 +130,18 @@ def inspect_yaml_ast(text: str) -> dict:
 
     # Fallback when PyYAML is not installed in a container environment
     stripped_expr = re.sub(r"\$\{\{.*?\}\}", "", text)
+    in_block_indent: int | None = None
     for line in stripped_expr.splitlines():
+        raw_stripped = line.lstrip(" ")
+        indent = len(line) - len(raw_stripped)
+        if in_block_indent is not None:
+            if not raw_stripped or indent > in_block_indent:
+                continue
+            in_block_indent = None
         code = line.split("#", 1)[0]
+        if re.match(r"^\s*run:\s*[|>]", code):
+            in_block_indent = indent
+            continue
         check_error("<<" not in code or "<<<" in code, "YAML merge keys are forbidden")
         check_error(
             not re.search(r"(^|[\s,:])&[A-Za-z0-9_-]+", code),

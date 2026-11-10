@@ -78,14 +78,14 @@ provenance=(
     expected-fingerprints.txt expected-fingerprints.ndjson
     "release-notes-${tag}.md"
 )
-expected=("${packages[@]}" "${provenance[@]}")
+expected=(${packages[@]+"${packages[@]}"} ${provenance[@]+"${provenance[@]}"})
 
 release_gh api "repos/$repo/releases/tags/$tag" > "$scratch/release.json" ||
     die "could not read published release metadata for $tag"
 jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .immutable == true' "$scratch/release.json" > /dev/null ||
     die 'release is not a published immutable release for this tag'
 
-printf '%s\n' "${expected[@]}" | LC_ALL=C sort > "$scratch/expected.names"
+printf '%s\n' ${expected[@]+"${expected[@]}"} | LC_ALL=C sort > "$scratch/expected.names"
 jq -r '.assets[].name' "$scratch/release.json" | LC_ALL=C sort > "$scratch/remote.names"
 cmp -s "$scratch/expected.names" "$scratch/remote.names" || die 'published release asset names do not match expected set'
 
@@ -109,7 +109,7 @@ done < "$scratch/expected.names"
 # Verify checksums cover all 5 packages and match
 for bits in 256 512; do
     diff <(awk '{sub(/^\*/, "", $2); print $2}' "$staged/SHA${bits}SUMS" | LC_ALL=C sort) \
-        <(printf '%s\n' "${packages[@]}" | LC_ALL=C sort) > /dev/null ||
+        <(printf '%s\n' ${packages[@]+"${packages[@]}"} | LC_ALL=C sort) > /dev/null ||
         die "SHA${bits}SUMS does not list exactly the expected packages"
 done
 "$root/scripts/verify-checksums.sh" "$staged" > /dev/null

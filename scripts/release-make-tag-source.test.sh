@@ -71,7 +71,7 @@ expect_refused() {
     fi
 }
 
-for target in "${targets[@]}"; do
+for target in ${targets[@]+"${targets[@]}"}; do
     for dry in "" "-n"; do
         expect_refused "env alias" 'RELEASE_TAG is forbidden.*GONIMBUS_RELEASE_TAG' \
             RELEASE_TAG=v1.2.3 GONIMBUS_RELEASE_TAG=v1.2.3 make -s $dry "$target"
@@ -87,7 +87,7 @@ done
 # format-only name guard and the read-only published-tag verifier, which may
 # check any published tag. Every target that fetches, drafts, signs, uploads or
 # publishes runs the VERSION guard first.
-for target in "${targets[@]}"; do
+for target in ${targets[@]+"${targets[@]}"}; do
     case "$target" in
         release-guard-tag-name | release-verify-published-tag) continue ;;
     esac
