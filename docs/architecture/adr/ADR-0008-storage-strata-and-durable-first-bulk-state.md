@@ -1,6 +1,6 @@
 # ADR-0008: Storage Strata and Durable-First Bulk State
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-30
 **Decision Makers:** @3leapsdave
 

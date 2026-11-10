@@ -355,13 +355,27 @@ lineage**. Operator sequence:
 Migration never rewrites identity on the old set, never adopts old DB/segments
 under a new scope hash, and never synthesizes parent linkage.
 
-### Wildcard in a middle path segment
+### Wildcard in a middle path segment (`date_partitions` and `segments`)
 
-An include such as `region=*/year=2026/month=09/**` is not prefix-shaped, so
-the migration refuses it. When the wildcard covers one path segment and the
-rest of the path is a date, express the listing as a `date_partitions` scope.
-The scope discovers the wildcard segment with one delimiter listing at build
-time and lists only the matching month prefixes:
+An include such as `region=*/year=2026/month=09/**` or
+`tenant=*/table=orders/**` is not a static literal prefix, so default
+`prefix_list` migration refuses it (`non_prefix_include`) while attaching an
+offline `discovered_scope_proposal` to the audit report. Pass
+`--propose-discovered-scope` to convert a single mid-path wildcard pattern
+offline into either `date_partitions` (when the tail is a date partition shape)
+or `segments` (when the tail is a non-date literal or segment template):
+
+```bash
+# Propose and emit a date_partitions or segments manifest offline
+gonimbus index migrate-match-scope --job legacy.yaml \
+  --propose-discovered-scope \
+  --emit-manifest proposed.yaml
+```
+
+When the wildcard covers one path segment and the rest of the path is a date,
+express the listing as a `date_partitions` scope. The scope discovers the
+wildcard segment with one delimiter listing at build time and lists only the
+matching month prefixes:
 
 ```yaml
 build:
@@ -381,15 +395,35 @@ build:
     includes: ["**"]
 ```
 
-Each day in the range renders to the same month prefix, and the compiler
-deduplicates them. New `region=` values are picked up on the next build without
-editing the manifest. This is a new index-set identity; use the parallel
-cutover above when replacing an existing set.
+When the tail is a non-date literal segment (such as `tenant=*/table=orders/**`),
+express the listing as a `segments` scope (`ADR-0009`):
 
-The compiled plan is not yet compared with the parent run. If discovery stops
-returning a partition, rows under it are retained rather than tombstoned, but
-they stay active without a fresh observation and the published coverage no
-longer lists their prefix.
+```yaml
+build:
+  scope:
+    type: segments
+    discover:
+      segments:
+        - index: 0
+          glob_allow: ["tenant=*"]
+        - index: 1
+          allow: ["table=orders"]
+  match:
+    includes: ["**"]
+```
+
+New `region=` or `tenant=` values are picked up on the next build without
+editing the manifest because the index-set identity hashes the scope template,
+not the runtime discovered values. This is a new index-set identity; use the
+parallel cutover above when replacing an existing set.
+
+Every durable build compares the compiled `unicode-prefix/v0` `index_plan`
+against the verified parent publication. If discovery stops returning a
+previously covered prefix, the build refuses publication by default
+(`scope_loss`) so silent partial discovery never publishes as a valid successor.
+When a partition is intentionally retired, pass `--acknowledge-scope-loss` with
+`--acknowledged-by <actor>` to record the bound acknowledgment and
+`retained_unobserved_rows` on the published snapshot.
 
 ### Still open (non-prefix match controls)
 

@@ -616,6 +616,104 @@ func TestPlanMatchPrefixMigration_SourceDigest(t *testing.T) {
 	}
 }
 
+func TestPlanMatchPrefixMigration_DiscoveredDatePartitionsAndSegments(t *testing.T) {
+	// 1. Mid-path wildcard + date tail: region=*/year=2026/month=09/**
+	dateRaw := testManifestYAML(includeLines("region=*/year=2026/month=09/**"), "")
+
+	// Default PlanOptions keeps classification=refused (non_prefix_include) while
+	// attaching DiscoveredScopeProposal offline.
+	refusedPlan, err := scope.PlanMatchPrefixMigration(dateRaw, scope.PlanOptions{
+		GonimbusVersion: testGonimbusVersion,
+		ComputeIdentity: testComputeIdentity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusedPlan.Classification != scope.ClassificationRefused || refusedPlan.ReasonCode != scope.ReasonNonPrefixInclude {
+		t.Fatalf("got %s/%s", refusedPlan.Classification, refusedPlan.ReasonCode)
+	}
+	if refusedPlan.DiscoveredScopeProposal == nil || refusedPlan.DiscoveredScopeProposal.ProposedScope == nil {
+		t.Fatal("expected offline DiscoveredScopeProposal for date_partitions shape")
+	}
+	if refusedPlan.DiscoveredScopeProposal.ProposedScope.Type != "date_partitions" {
+		t.Fatalf("expected date_partitions proposal, got %s", refusedPlan.DiscoveredScopeProposal.ProposedScope.Type)
+	}
+
+	// With AllowDiscoveredScope=true, classifies as convertible and emits valid YAML.
+	datePlan, err := scope.PlanMatchPrefixMigration(dateRaw, scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if datePlan.Classification != scope.ClassificationConvertible || datePlan.ReasonCode != scope.ReasonDatePartitionsConvertible {
+		t.Fatalf("got %s/%s: %s", datePlan.Classification, datePlan.ReasonCode, datePlan.Detail)
+	}
+	if datePlan.ProposedScope == nil || datePlan.ProposedScope.Type != "date_partitions" {
+		t.Fatalf("proposed scope=%+v", datePlan.ProposedScope)
+	}
+	if datePlan.ProposedScope.Date == nil || datePlan.ProposedScope.Date.Format != "year=2006/month=01" {
+		t.Fatalf("proposed date=%+v", datePlan.ProposedScope.Date)
+	}
+	if datePlan.ProposedScope.Date.Range == nil || datePlan.ProposedScope.Date.Range.After != "2026-09-01" || datePlan.ProposedScope.Date.Range.Before != "2026-10-01" {
+		t.Fatalf("proposed range=%+v", datePlan.ProposedScope.Date.Range)
+	}
+	if datePlan.ProposedManifestYAML == "" {
+		t.Fatal("expected proposed manifest YAML")
+	}
+	// Round-trip emitted YAML with AllowDiscoveredScope=true -> already_migrated.
+	roundTripDate, err := scope.PlanMatchPrefixMigration([]byte(datePlan.ProposedManifestYAML), scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTripDate.Classification != scope.ClassificationAlreadyMigrated {
+		t.Fatalf("round-trip got %s/%s", roundTripDate.Classification, roundTripDate.ReasonCode)
+	}
+
+	// 2. Mid-path wildcard + literal non-date tail: tenant=*/table=orders/**
+	segRaw := testManifestYAML(includeLines("tenant=*/table=orders/**"), "")
+	segPlan, err := scope.PlanMatchPrefixMigration(segRaw, scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if segPlan.Classification != scope.ClassificationConvertible || segPlan.ReasonCode != scope.ReasonSegmentsConvertible {
+		t.Fatalf("got %s/%s: %s", segPlan.Classification, segPlan.ReasonCode, segPlan.Detail)
+	}
+	if segPlan.ProposedScope == nil || segPlan.ProposedScope.Type != "segments" {
+		t.Fatalf("proposed scope=%+v", segPlan.ProposedScope)
+	}
+	if segPlan.ProposedScope.Discover == nil || len(segPlan.ProposedScope.Discover.Segments) != 2 {
+		t.Fatalf("proposed discover=%+v", segPlan.ProposedScope.Discover)
+	}
+	if !equalStrings(segPlan.ProposedScope.Discover.Segments[0].GlobAllow, []string{"tenant=*"}) {
+		t.Fatalf("seg[0]=%+v", segPlan.ProposedScope.Discover.Segments[0])
+	}
+	if !equalStrings(segPlan.ProposedScope.Discover.Segments[1].Allow, []string{"table=orders"}) {
+		t.Fatalf("seg[1]=%+v", segPlan.ProposedScope.Discover.Segments[1])
+	}
+	roundTripSeg, err := scope.PlanMatchPrefixMigration([]byte(segPlan.ProposedManifestYAML), scope.PlanOptions{
+		GonimbusVersion:      testGonimbusVersion,
+		ComputeIdentity:      testComputeIdentity,
+		AllowDiscoveredScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTripSeg.Classification != scope.ClassificationAlreadyMigrated {
+		t.Fatalf("round-trip got %s/%s", roundTripSeg.Classification, roundTripSeg.ReasonCode)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

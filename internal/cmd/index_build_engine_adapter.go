@@ -366,7 +366,7 @@ func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName 
 // include gate. Each is an explicit step; none relaxes the gate.
 const durableIncludeRemedies = "for prefix-shaped includes run `gonimbus index migrate-match-scope`; " +
 	"for a wildcard in a middle path segment express the listing as build.scope " +
-	"(prefix_list, or date_partitions with discover glob_allow); " +
+	"(prefix_list, segments, or date_partitions with discover glob_allow); " +
 	"otherwise use --format sqlite"
 
 func isDefaultIndexBuildIncludes(includes []string) bool {

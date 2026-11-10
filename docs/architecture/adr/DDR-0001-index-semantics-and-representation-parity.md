@@ -1,6 +1,6 @@
 # DDR-0001: Index Semantics and Representation Parity
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-30
 **Decision Makers:** @3leapsdave
 

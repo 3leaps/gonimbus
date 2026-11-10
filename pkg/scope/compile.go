@@ -18,6 +18,22 @@ import (
 const defaultDelimiter = "/"
 const defaultDateFormat = "2006-01-02"
 
+const (
+	// MaxSegmentsTemplateDepth is the maximum number of path segments in a
+	// scope.type="segments" template (ADR-0009).
+	MaxSegmentsTemplateDepth = 16
+	// MaxDiscoveredPrefixesPerLevel is the maximum number of discovered
+	// prefixes permitted at any single segment level in scope.type="segments".
+	MaxDiscoveredPrefixesPerLevel = 10000
+	// MaxCompiledScopePrefixes is the maximum total compiled prefixes permitted
+	// from scope.type="segments" (matches durable-index/v0 MaxPlanScopes).
+	MaxCompiledScopePrefixes = 65536
+)
+
+// ErrDiscoveryBudgetExceeded is returned when a scope.type="segments" template
+// exceeds template depth or discovered-prefix resource bounds.
+var ErrDiscoveryBudgetExceeded = errors.New("scope discovery budget exceeded")
+
 type Plan struct {
 	Prefixes []string
 }
@@ -47,6 +63,12 @@ func Compile(ctx context.Context, cfg *manifest.IndexScopeConfig, basePrefix str
 			return nil, err
 		}
 		return &Plan{Prefixes: prefixes}, nil
+	case "segments":
+		prefixes, err := compileSegments(ctx, cfg, basePrefix, lister)
+		if err != nil {
+			return nil, err
+		}
+		return &Plan{Prefixes: prefixes}, nil
 	case "":
 		return nil, errors.New("scope.type is required")
 	default:
@@ -58,7 +80,7 @@ func RequiresPrefixLister(cfg *manifest.IndexScopeConfig) bool {
 	if cfg == nil {
 		return false
 	}
-	if cfg.Type == "date_partitions" {
+	if cfg.Type == "date_partitions" || cfg.Type == "segments" {
 		return true
 	}
 	if cfg.Type == "union" {
@@ -171,6 +193,258 @@ func compileDatePartitions(ctx context.Context, cfg *manifest.IndexScopeConfig, 
 		}
 	}
 
+	return normalizePrefixes(out), nil
+}
+
+func compileSegments(ctx context.Context, cfg *manifest.IndexScopeConfig, basePrefix string, lister provider.PrefixLister) ([]string, error) {
+	template, err := CanonicalizeSegmentsTemplate(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if lister == nil {
+		return nil, errors.New("scope.segments requires provider prefix listing")
+	}
+
+	delimiter := normalizeDelimiter(cfg.Delimiter)
+	root := joinPrefix(basePrefix, cfg.BasePrefix, delimiter)
+	root = ensureTrailingDelimiter(root, delimiter)
+
+	prefixes := []string{root}
+	for _, segment := range template {
+		if len(prefixes) == 0 {
+			return nil, nil
+		}
+		if isLiteralSegmentRule(segment) {
+			next := make([]string, 0, len(prefixes)*len(segment.Allow))
+			for _, prefix := range prefixes {
+				for _, lit := range segment.Allow {
+					next = append(next, ensureTrailingDelimiter(prefix+lit, delimiter))
+					if len(next) > MaxCompiledScopePrefixes {
+						return nil, fmt.Errorf("%w: compiled prefix count exceeds maximum %d", ErrDiscoveryBudgetExceeded, MaxCompiledScopePrefixes)
+					}
+				}
+			}
+			prefixes = normalizePrefixes(next)
+			if len(prefixes) > MaxDiscoveredPrefixesPerLevel {
+				return nil, fmt.Errorf("%w: level %d prefix count %d exceeds maximum %d", ErrDiscoveryBudgetExceeded, segment.Index, len(prefixes), MaxDiscoveredPrefixesPerLevel)
+			}
+			continue
+		}
+
+		next, err := discoverSegmentPrefixesBounded(ctx, lister, prefixes, delimiter, segment, MaxDiscoveredPrefixesPerLevel)
+		if err != nil {
+			return nil, err
+		}
+		prefixes = next
+	}
+
+	if len(prefixes) > MaxCompiledScopePrefixes {
+		return nil, fmt.Errorf("%w: compiled prefix count %d exceeds maximum %d", ErrDiscoveryBudgetExceeded, len(prefixes), MaxCompiledScopePrefixes)
+	}
+	return normalizePrefixes(prefixes), nil
+}
+
+// CanonicalizeSegmentsTemplate validates a scope.type="segments" configuration
+// and returns its ordered, canonical segment rules (indices 0..N-1).
+func CanonicalizeSegmentsTemplate(cfg *manifest.IndexScopeConfig) ([]manifest.IndexScopeDiscoverSegment, error) {
+	if cfg == nil {
+		return nil, errors.New("scope config is nil")
+	}
+	if cfg.Date != nil {
+		return nil, errors.New("scope.segments does not support date configuration (use date_partitions)")
+	}
+	if len(cfg.Prefixes) > 0 {
+		return nil, errors.New("scope.segments does not support prefixes (use prefix_list)")
+	}
+	if len(cfg.Scopes) > 0 {
+		return nil, errors.New("scope.segments does not support nested scopes (use union)")
+	}
+	if strings.TrimSpace(cfg.DepthMode) != "" {
+		return nil, fmt.Errorf("scope.segments unsupported depth_mode %q", cfg.DepthMode)
+	}
+
+	delimiter := normalizeDelimiter(cfg.Delimiter)
+	hasDiscover := cfg.Discover != nil && len(cfg.Discover.Segments) > 0
+	hasConstraints := len(cfg.Constraints) > 0
+	if hasDiscover && hasConstraints {
+		return nil, errors.New("scope.segments cannot specify both discover.segments and constraints")
+	}
+	if !hasDiscover && !hasConstraints {
+		return nil, errors.New("scope.segments requires discover.segments or constraints")
+	}
+
+	var rawSegments []manifest.IndexScopeDiscoverSegment
+	if hasConstraints {
+		rawSegments = make([]manifest.IndexScopeDiscoverSegment, 0, len(cfg.Constraints))
+		for _, c := range cfg.Constraints {
+			pat := strings.TrimSpace(c.Glob)
+			if pat == "" {
+				return nil, fmt.Errorf("scope.constraints[%d].glob must not be empty", c.Index)
+			}
+			if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
+				return nil, fmt.Errorf("scope.constraints[%d].glob: %w", c.Index, err)
+			}
+			if isWildcardSegmentPattern(pat) {
+				rawSegments = append(rawSegments, manifest.IndexScopeDiscoverSegment{
+					Index:     c.Index,
+					GlobAllow: []string{pat},
+				})
+			} else {
+				rawSegments = append(rawSegments, manifest.IndexScopeDiscoverSegment{
+					Index: c.Index,
+					Allow: []string{pat},
+				})
+			}
+		}
+	} else {
+		rawSegments = append(rawSegments, cfg.Discover.Segments...)
+	}
+
+	if len(rawSegments) > MaxSegmentsTemplateDepth {
+		return nil, fmt.Errorf("%w: scope.segments depth %d exceeds maximum %d", ErrDiscoveryBudgetExceeded, len(rawSegments), MaxSegmentsTemplateDepth)
+	}
+
+	byIndex := make(map[int]manifest.IndexScopeDiscoverSegment, len(rawSegments))
+	for _, seg := range rawSegments {
+		if seg.Index < 0 {
+			return nil, fmt.Errorf("scope.segments index %d must be >= 0", seg.Index)
+		}
+		if seg.Index >= MaxSegmentsTemplateDepth {
+			return nil, fmt.Errorf("%w: scope.segments index %d exceeds maximum depth %d", ErrDiscoveryBudgetExceeded, seg.Index, MaxSegmentsTemplateDepth)
+		}
+		if _, exists := byIndex[seg.Index]; exists {
+			return nil, fmt.Errorf("scope.segments index %d specified more than once", seg.Index)
+		}
+		norm, err := normalizeAndValidateSegmentRule(seg, delimiter)
+		if err != nil {
+			return nil, err
+		}
+		byIndex[seg.Index] = norm
+	}
+
+	out := make([]manifest.IndexScopeDiscoverSegment, len(rawSegments))
+	hasDiscoveredLevel := false
+	for i := 0; i < len(rawSegments); i++ {
+		seg, ok := byIndex[i]
+		if !ok {
+			return nil, fmt.Errorf("scope.segments must define contiguous indices starting at 0 (missing index %d)", i)
+		}
+		if !isLiteralSegmentRule(seg) {
+			hasDiscoveredLevel = true
+		}
+		out[i] = seg
+	}
+	if !hasDiscoveredLevel {
+		return nil, errors.New("scope.segments requires at least one discovered segment level (use prefix_list for static prefixes)")
+	}
+	return out, nil
+}
+
+func isLiteralSegmentRule(seg manifest.IndexScopeDiscoverSegment) bool {
+	return len(seg.Allow) > 0 && len(seg.Deny) == 0 && len(seg.GlobAllow) == 0 && len(seg.GlobDeny) == 0
+}
+
+func isWildcardSegmentPattern(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[]{}\\")
+}
+
+func normalizeAndValidateSegmentRule(seg manifest.IndexScopeDiscoverSegment, delimiter string) (manifest.IndexScopeDiscoverSegment, error) {
+	allow := normalizeLiteralList(seg.Allow)
+	deny := normalizeLiteralList(seg.Deny)
+	globAllow := normalizeGlobList(seg.GlobAllow)
+	globDeny := normalizeGlobList(seg.GlobDeny)
+
+	for _, lit := range allow {
+		if err := validateSingleSegmentPattern(lit, delimiter, false); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].allow %q: %w", seg.Index, lit, err)
+		}
+	}
+	for _, lit := range deny {
+		if err := validateSingleSegmentPattern(lit, delimiter, false); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].deny %q: %w", seg.Index, lit, err)
+		}
+	}
+	for _, pat := range globAllow {
+		if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_allow %q: %w", seg.Index, pat, err)
+		}
+	}
+	for _, pat := range globDeny {
+		if err := validateSingleSegmentPattern(pat, delimiter, true); err != nil {
+			return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d].glob_deny %q: %w", seg.Index, pat, err)
+		}
+	}
+
+	if len(allow) == 0 && len(deny) == 0 && len(globAllow) == 0 && len(globDeny) == 0 {
+		return manifest.IndexScopeDiscoverSegment{}, fmt.Errorf("scope.segments[%d] must specify allow, deny, glob_allow, or glob_deny", seg.Index)
+	}
+
+	return manifest.IndexScopeDiscoverSegment{
+		Index:     seg.Index,
+		Allow:     allow,
+		Deny:      deny,
+		GlobAllow: globAllow,
+		GlobDeny:  globDeny,
+	}, nil
+}
+
+func validateSingleSegmentPattern(raw string, delimiter string, allowGlob bool) error {
+	if raw == "" {
+		return errors.New("segment pattern must not be empty")
+	}
+	if strings.Contains(raw, "\\") {
+		return errors.New("backslash is not permitted in segment patterns")
+	}
+	if strings.Contains(raw, "/") || (delimiter != "" && strings.Contains(raw, delimiter)) {
+		return errors.New("segment pattern must not contain path delimiter")
+	}
+	if strings.Contains(raw, "**") {
+		return errors.New("recursive wildcard ** is not permitted inside a segment template")
+	}
+	if !allowGlob && isWildcardSegmentPattern(raw) {
+		return errors.New("literal segment value must not contain glob metacharacters (use glob_allow/glob_deny)")
+	}
+	if allowGlob && !doublestar.ValidatePattern(raw) {
+		return fmt.Errorf("invalid glob pattern %q", raw)
+	}
+	return nil
+}
+
+func discoverSegmentPrefixesBounded(
+	ctx context.Context,
+	lister provider.PrefixLister,
+	prefixes []string,
+	delimiter string,
+	segment manifest.IndexScopeDiscoverSegment,
+	maxPerLevel int,
+) ([]string, error) {
+	var out []string
+	var rawObserved int
+	for _, prefix := range prefixes {
+		children, err := listAllPrefixesBounded(ctx, lister, prefix, delimiter, maxPerLevel-rawObserved)
+		if err != nil {
+			return nil, err
+		}
+		rawObserved += len(children)
+		for _, child := range children {
+			value := strings.TrimPrefix(child, prefix)
+			value = strings.TrimSuffix(value, delimiter)
+			if value == "" {
+				continue
+			}
+			allowed, err := segmentAllowed(value, segment)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				continue
+			}
+			out = append(out, ensureTrailingDelimiter(child, delimiter))
+			if maxPerLevel > 0 && len(out) > maxPerLevel {
+				return nil, fmt.Errorf("%w: level %d discovered prefix count exceeds maximum %d", ErrDiscoveryBudgetExceeded, segment.Index, maxPerLevel)
+			}
+		}
+	}
 	return normalizePrefixes(out), nil
 }
 
@@ -293,6 +567,10 @@ func matchAnyGlob(patterns []string, value string) (bool, error) {
 }
 
 func listAllPrefixes(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string) ([]string, error) {
+	return listAllPrefixesBounded(ctx, lister, prefix, delimiter, 0)
+}
+
+func listAllPrefixesBounded(ctx context.Context, lister provider.PrefixLister, prefix string, delimiter string, maxPrefixes int) ([]string, error) {
 	var token string
 	var out []string
 	seen := map[string]struct{}{}
@@ -302,6 +580,9 @@ func listAllPrefixes(ctx context.Context, lister provider.PrefixLister, prefix s
 			return nil, err
 		}
 		out = append(out, res.Prefixes...)
+		if maxPrefixes > 0 && len(out) > maxPrefixes {
+			return nil, fmt.Errorf("list prefixes under %q: %w: discovered prefixes exceed level budget (%d)", prefix, ErrDiscoveryBudgetExceeded, maxPrefixes)
+		}
 		if !res.IsTruncated {
 			return out, nil
 		}

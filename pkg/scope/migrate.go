@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -33,26 +34,40 @@ const (
 
 // Stable reason codes for classification (allowlist + refuse matrix).
 const (
-	ReasonConvertible           = "prefix_includes_convertible"
-	ReasonAlreadyCompatible     = "default_match_no_scope"
-	ReasonAlreadyMigrated       = "proposed_form_present"
-	ReasonExistingScope         = "existing_scope"
-	ReasonNonPrefixInclude      = "non_prefix_include"
-	ReasonHasExcludes           = "has_excludes"
-	ReasonHasFilters            = "has_filters"
-	ReasonIncludeHidden         = "include_hidden"
-	ReasonEmptyOrRootPrefix     = "empty_or_root_prefix"
-	ReasonBaseAnchorMismatch    = "base_anchor_mismatch"
-	ReasonEmptyLegacyPlan       = "empty_legacy_plan"
-	ReasonPlanInequality        = "plan_inequality"
-	ReasonInvalidBaseURI        = "invalid_base_uri"
-	ReasonInvalidManifest       = "invalid_manifest"
-	ReasonEmitValidateFailed    = "emit_validate_failed"
-	ReasonUnsupportedScopeType  = "unsupported_scope_type"
-	ReasonIdentityComputeFailed = "identity_compute_failed"
-	ReasonNoIncludes            = "no_includes"
-	ReasonMixedDefaultAndPrefix = "mixed_default_and_prefix"
+	ReasonConvertible               = "prefix_includes_convertible"
+	ReasonDatePartitionsConvertible = "date_partitions_include_convertible"
+	ReasonSegmentsConvertible       = "segments_include_convertible"
+	ReasonAlreadyCompatible         = "default_match_no_scope"
+	ReasonAlreadyMigrated           = "proposed_form_present"
+	ReasonExistingScope             = "existing_scope"
+	ReasonNonPrefixInclude          = "non_prefix_include"
+	ReasonHasExcludes               = "has_excludes"
+	ReasonHasFilters                = "has_filters"
+	ReasonIncludeHidden             = "include_hidden"
+	ReasonEmptyOrRootPrefix         = "empty_or_root_prefix"
+	ReasonBaseAnchorMismatch        = "base_anchor_mismatch"
+	ReasonEmptyLegacyPlan           = "empty_legacy_plan"
+	ReasonPlanInequality            = "plan_inequality"
+	ReasonInvalidBaseURI            = "invalid_base_uri"
+	ReasonInvalidManifest           = "invalid_manifest"
+	ReasonEmitValidateFailed        = "emit_validate_failed"
+	ReasonUnsupportedScopeType      = "unsupported_scope_type"
+	ReasonIdentityComputeFailed     = "identity_compute_failed"
+	ReasonNoIncludes                = "no_includes"
+	ReasonMixedDefaultAndPrefix     = "mixed_default_and_prefix"
 )
+
+// DiscoveredScopeProposal describes an offline discovered-scope candidate
+// (date_partitions or segments) when a single mid-path wildcard include
+// pattern cannot be converted to a static prefix_list.
+type DiscoveredScopeProposal struct {
+	ReasonCode             string                     `json:"reason_code"`
+	Detail                 string                     `json:"detail,omitempty"`
+	ProposedScope          *manifest.IndexScopeConfig `json:"proposed_scope"`
+	ProposedScopeHash      string                     `json:"proposed_scope_hash"`
+	ProposedManifestYAML   string                     `json:"proposed_manifest_yaml,omitempty"`
+	ProposedManifestDigest string                     `json:"proposed_manifest_digest,omitempty"`
+}
 
 // MigrationPlan is the immutable audit record for one match→scope classification.
 //
@@ -81,6 +96,7 @@ type MigrationPlan struct {
 	ProposedPlanDigest       string                     `json:"proposed_plan_digest,omitempty"`
 	ProposedPlanCount        int                        `json:"proposed_plan_count,omitempty"`
 	ProposedScopeHash        string                     `json:"proposed_scope_hash,omitempty"`
+	DiscoveredScopeProposal  *DiscoveredScopeProposal   `json:"discovered_scope_proposal,omitempty"`
 	LegacyConfigIdentity     *ComputedIdentityEvidence  `json:"legacy_config_identity_under_current_binary,omitempty"`
 	ProposedConfigIdentity   *ComputedIdentityEvidence  `json:"proposed_config_identity_under_current_binary,omitempty"`
 }
@@ -109,11 +125,19 @@ type PlanOptions struct {
 	// ComputeIdentity is optional. When set (and GonimbusVersion is non-empty), identity
 	// evidence is attached. Implementations may live in storageful packages (CLI adapter).
 	ComputeIdentity IdentityComputer
+	// AllowDiscoveredScope enables converting a single mid-path wildcard include
+	// pattern into a discovered build.scope (date_partitions when the tail is a
+	// date partition shape, or segments when the tail is literal/non-date).
+	// When false (default), such patterns remain classified as refused
+	// (non_prefix_include) while attaching DiscoveredScopeProposal for offline
+	// operator inspection.
+	AllowDiscoveredScope bool
 }
 
 // PlanMatchPrefixMigration classifies and, when convertible, converts prefix-shaped
-// match.includes into an explicit build.scope prefix_list. It never mutates disk or
-// contacts a provider.
+// match.includes into an explicit build.scope prefix_list (or a discovered
+// date_partitions / segments scope when opts.AllowDiscoveredScope is set). It never
+// mutates disk or contacts a provider.
 func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, error) {
 	if len(raw) == 0 {
 		return refusedPlan("", ReasonInvalidManifest, "manifest bytes are empty"), nil
@@ -138,7 +162,10 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 	// Existing scope: either already migrated (default match) or refuse combine.
 	if m.Build != nil && m.Build.Scope != nil {
 		if isDefaultDurableMatch(m.Build.Match) {
-			if strings.TrimSpace(m.Build.Scope.Type) != "prefix_list" {
+			scopeType := strings.TrimSpace(m.Build.Scope.Type)
+			supportedAlreadyMigrated := scopeType == "prefix_list" ||
+				(opts.AllowDiscoveredScope && (scopeType == "date_partitions" || scopeType == "segments"))
+			if !supportedAlreadyMigrated {
 				plan.Classification = ClassificationRefused
 				plan.ReasonCode = ReasonUnsupportedScopeType
 				plan.Detail = fmt.Sprintf("existing scope.type %q is not prefix_list", m.Build.Scope.Type)
@@ -211,6 +238,39 @@ func PlanMatchPrefixMigration(raw []byte, opts PlanOptions) (*MigrationPlan, err
 				plan.ReasonCode = ReasonEmptyOrRootPrefix
 				plan.Detail = fmt.Sprintf("include %q is empty or root-relative after conversion", inc)
 				return plan, nil
+			}
+			if len(includes) == 1 {
+				if baseKey, baseErr := baseKeyFromManifest(m); baseErr == nil {
+					if proposal, reparsed := buildDiscoveredScopeProposal(m, baseKey, inc); proposal != nil {
+						plan.DiscoveredScopeProposal = proposal
+						if opts.AllowDiscoveredScope {
+							plan.Classification = ClassificationConvertible
+							plan.ReasonCode = proposal.ReasonCode
+							plan.Detail = proposal.Detail
+							plan.ProposedScope = cloneScope(proposal.ProposedScope)
+							plan.ProposedScopeHash = proposal.ProposedScopeHash
+							plan.ProposedManifestYAML = proposal.ProposedManifestYAML
+							plan.ProposedManifestDigest = proposal.ProposedManifestDigest
+							if err := attachIdentityEvidence(plan, m, reparsed, opts); err != nil {
+								plan.Classification = ClassificationRefused
+								plan.ReasonCode = ReasonIdentityComputeFailed
+								plan.Detail = err.Error()
+								plan.ProposedManifestYAML = ""
+								return plan, nil
+							}
+							if plan.LegacyConfigIdentity != nil && plan.ProposedConfigIdentity != nil {
+								if plan.LegacyConfigIdentity.IndexSetID == plan.ProposedConfigIdentity.IndexSetID {
+									plan.Classification = ClassificationRefused
+									plan.ReasonCode = ReasonIdentityComputeFailed
+									plan.Detail = "legacy and proposed identities are equal; migration must change index-set identity"
+									plan.ProposedManifestYAML = ""
+									return plan, nil
+								}
+							}
+							return plan, nil
+						}
+					}
+				}
 			}
 			plan.Classification = ClassificationRefused
 			plan.ReasonCode = ReasonNonPrefixInclude
@@ -557,6 +617,40 @@ func cloneScope(cfg *manifest.IndexScopeConfig) *manifest.IndexScopeConfig {
 	if cfg.Prefixes != nil {
 		out.Prefixes = append([]string(nil), cfg.Prefixes...)
 	}
+	if cfg.Discover != nil {
+		disc := &manifest.IndexScopeDiscoverConfig{}
+		if cfg.Discover.Segments != nil {
+			disc.Segments = make([]manifest.IndexScopeDiscoverSegment, len(cfg.Discover.Segments))
+			for i, seg := range cfg.Discover.Segments {
+				cp := seg
+				if seg.Allow != nil {
+					cp.Allow = append([]string(nil), seg.Allow...)
+				}
+				if seg.Deny != nil {
+					cp.Deny = append([]string(nil), seg.Deny...)
+				}
+				if seg.GlobAllow != nil {
+					cp.GlobAllow = append([]string(nil), seg.GlobAllow...)
+				}
+				if seg.GlobDeny != nil {
+					cp.GlobDeny = append([]string(nil), seg.GlobDeny...)
+				}
+				disc.Segments[i] = cp
+			}
+		}
+		out.Discover = disc
+	}
+	if cfg.Date != nil {
+		dateCp := *cfg.Date
+		if cfg.Date.Range != nil {
+			rangeCp := *cfg.Date.Range
+			dateCp.Range = &rangeCp
+		}
+		out.Date = &dateCp
+	}
+	if cfg.Constraints != nil {
+		out.Constraints = append([]manifest.IndexScopeSegmentConstraint(nil), cfg.Constraints...)
+	}
 	if cfg.Scopes != nil {
 		out.Scopes = make([]manifest.IndexScopeConfig, len(cfg.Scopes))
 		for i := range cfg.Scopes {
@@ -567,6 +661,196 @@ func cloneScope(cfg *manifest.IndexScopeConfig) *manifest.IndexScopeConfig {
 		}
 	}
 	return &out
+}
+
+func buildDiscoveredScopeProposal(
+	m *manifest.IndexManifest,
+	baseKey string,
+	rawInclude string,
+) (*DiscoveredScopeProposal, *manifest.IndexManifest) {
+	trimmed := strings.TrimSpace(rawInclude)
+	if trimmed == "" || strings.Contains(trimmed, `\`) || strings.ContainsAny(trimmed, "{}") {
+		return nil, nil
+	}
+	normalized := match.NormalizePattern(strings.TrimPrefix(trimmed, "/"))
+	if baseKey != "" {
+		baseNorm := baseKey
+		if !strings.HasSuffix(baseNorm, "/") {
+			baseNorm += "/"
+		}
+		normalized = strings.TrimPrefix(normalized, baseNorm)
+	}
+	if !strings.HasSuffix(normalized, "/**") {
+		return nil, nil
+	}
+	body := strings.TrimPrefix(strings.TrimSuffix(normalized, "/**"), "/")
+	if body == "" {
+		return nil, nil
+	}
+	parts := strings.Split(body, "/")
+	if len(parts) < 2 || len(parts) > MaxSegmentsTemplateDepth {
+		return nil, nil
+	}
+	hasWildcard := false
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return nil, nil
+		}
+		if err := validateSingleSegmentPattern(part, "/", true); err != nil {
+			return nil, nil
+		}
+		if isWildcardSegmentPattern(part) {
+			hasWildcard = true
+		}
+	}
+	if !hasWildcard {
+		return nil, nil
+	}
+
+	var proposedScope *manifest.IndexScopeConfig
+	var reasonCode string
+	var detail string
+
+	if tailLen, dateFormat, afterStr, beforeStr, ok := parseDateTailSegments(parts); ok {
+		prefixParts := parts[:len(parts)-tailLen]
+		discoverSegs := make([]manifest.IndexScopeDiscoverSegment, len(prefixParts))
+		for i, seg := range prefixParts {
+			if isWildcardSegmentPattern(seg) {
+				discoverSegs[i] = manifest.IndexScopeDiscoverSegment{
+					Index:     i,
+					GlobAllow: []string{seg},
+				}
+			} else {
+				discoverSegs[i] = manifest.IndexScopeDiscoverSegment{
+					Index: i,
+					Allow: []string{seg},
+				}
+			}
+		}
+		proposedScope = &manifest.IndexScopeConfig{
+			Type: "date_partitions",
+			Discover: &manifest.IndexScopeDiscoverConfig{
+				Segments: discoverSegs,
+			},
+			Date: &manifest.IndexScopeDateConfig{
+				SegmentIndex: len(prefixParts),
+				Format:       dateFormat,
+				Range: &manifest.IndexScopeDateRange{
+					After:  afterStr,
+					Before: beforeStr,
+				},
+			},
+		}
+		reasonCode = ReasonDatePartitionsConvertible
+		detail = fmt.Sprintf("include %q matches mid-path wildcard + date tail (%s); proposed scope.type=date_partitions", rawInclude, dateFormat)
+	} else {
+		discoverSegs := make([]manifest.IndexScopeDiscoverSegment, len(parts))
+		for i, seg := range parts {
+			if isWildcardSegmentPattern(seg) {
+				discoverSegs[i] = manifest.IndexScopeDiscoverSegment{
+					Index:     i,
+					GlobAllow: []string{seg},
+				}
+			} else {
+				discoverSegs[i] = manifest.IndexScopeDiscoverSegment{
+					Index: i,
+					Allow: []string{seg},
+				}
+			}
+		}
+		proposedScope = &manifest.IndexScopeConfig{
+			Type: "segments",
+			Discover: &manifest.IndexScopeDiscoverConfig{
+				Segments: discoverSegs,
+			},
+		}
+		reasonCode = ReasonSegmentsConvertible
+		detail = fmt.Sprintf("include %q matches mid-path wildcard + segment template; proposed scope.type=segments", rawInclude)
+	}
+
+	proposed := cloneManifestForEmit(m)
+	proposed.Build.Scope = proposedScope
+	proposed.Build.Match = &manifest.IndexMatchConfig{
+		Includes:      []string{manifest.DefaultIndexIncludes},
+		IncludeHidden: false,
+	}
+
+	emittedYAML, err := yaml.Marshal(proposed)
+	if err != nil {
+		return nil, nil
+	}
+	reparsed, err := manifest.LoadIndexManifestFromBytes(emittedYAML, "migration-discovered-proposed")
+	if err != nil || reparsed.Build == nil || reparsed.Build.Scope == nil {
+		return nil, nil
+	}
+	scopeHash, err := HashConfig(reparsed.Build.Scope)
+	if err != nil {
+		return nil, nil
+	}
+	return &DiscoveredScopeProposal{
+		ReasonCode:             reasonCode,
+		Detail:                 detail,
+		ProposedScope:          cloneScope(reparsed.Build.Scope),
+		ProposedScopeHash:      scopeHash,
+		ProposedManifestYAML:   string(emittedYAML),
+		ProposedManifestDigest: sha256Hex(emittedYAML),
+	}, reparsed
+}
+
+func parseDateTailSegments(parts []string) (tailLen int, dateFormat string, afterStr string, beforeStr string, ok bool) {
+	hasWildcardIn := func(segs []string) bool {
+		for _, s := range segs {
+			if isWildcardSegmentPattern(s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 3-segment tails: year=YYYY/month=MM/day=DD or YYYY/MM/DD
+	if len(parts) >= 4 && hasWildcardIn(parts[:len(parts)-3]) {
+		tail := parts[len(parts)-3:]
+		if !hasWildcardIn(tail) {
+			joined := strings.Join(tail, "/")
+			for _, layout := range []string{"year=2006/month=01/day=02", "2006/01/02"} {
+				if t, err := time.Parse(layout, joined); err == nil && t.Format(layout) == joined {
+					t = t.UTC()
+					return 3, layout, t.Format("2006-01-02"), t.AddDate(0, 0, 1).Format("2006-01-02"), true
+				}
+			}
+		}
+	}
+
+	// 2-segment tails: year=YYYY/month=MM or YYYY/MM
+	if len(parts) >= 3 && hasWildcardIn(parts[:len(parts)-2]) {
+		tail := parts[len(parts)-2:]
+		if !hasWildcardIn(tail) {
+			joined := strings.Join(tail, "/")
+			for _, layout := range []string{"year=2006/month=01", "2006/01"} {
+				if t, err := time.Parse(layout, joined); err == nil && t.Format(layout) == joined {
+					t = t.UTC()
+					start := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+					end := start.AddDate(0, 1, 0)
+					return 2, layout, start.Format("2006-01-02"), end.Format("2006-01-02"), true
+				}
+			}
+		}
+	}
+
+	// 1-segment tails: dt=YYYY-MM-DD, date=YYYY-MM-DD, or YYYY-MM-DD
+	if len(parts) >= 2 && hasWildcardIn(parts[:len(parts)-1]) {
+		last := parts[len(parts)-1]
+		if !isWildcardSegmentPattern(last) {
+			for _, layout := range []string{"dt=2006-01-02", "date=2006-01-02", "2006-01-02"} {
+				if t, err := time.Parse(layout, last); err == nil && t.Format(layout) == last {
+					t = t.UTC()
+					return 1, layout, t.Format("2006-01-02"), t.AddDate(0, 0, 1).Format("2006-01-02"), true
+				}
+			}
+		}
+	}
+
+	return 0, "", "", "", false
 }
 
 func cloneManifestForEmit(m *manifest.IndexManifest) *manifest.IndexManifest {
