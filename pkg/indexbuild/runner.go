@@ -1124,14 +1124,11 @@ func validateCallerCrawlPlanCanonical(crawlPrefixes []string) error {
 // coverage of a prefix it never listed and tombstone live parent rows.
 func validateCrawlPlanCanonical(crawlPrefixes []string) error {
 	for i, raw := range crawlPrefixes {
-		if raw != strings.TrimSpace(raw) {
-			return fmt.Errorf("crawl prefix plan[%d] has surrounding whitespace; supply the exact provider-key prefix", i)
-		}
-		if raw == "" {
+		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("crawl prefix plan[%d] is empty", i)
 		}
-		if strings.HasPrefix(raw, "/") {
-			return fmt.Errorf("crawl prefix plan[%d] must not begin with '/'; supply the exact provider-key prefix", i)
+		if raw != indexsubstrate.RelativeRootScopePrefix && strings.TrimRight(raw, " \t\r\n") != raw {
+			return fmt.Errorf("crawl prefix plan[%d] has trailing whitespace; supply the exact provider-key prefix", i)
 		}
 	}
 	return nil
@@ -1376,12 +1373,15 @@ func deriveRelKey(baseURI, fullKey string) string {
 	}
 	basePrefix := strings.TrimSuffix(parsed.Key, "/")
 	if basePrefix == "" {
-		return strings.TrimPrefix(fullKey, "/")
+		return fullKey
+	}
+	if strings.HasPrefix(fullKey, basePrefix+"/") {
+		return strings.TrimPrefix(fullKey, basePrefix+"/")
 	}
 	if strings.HasPrefix(fullKey, basePrefix) {
 		return strings.TrimPrefix(strings.TrimPrefix(fullKey, basePrefix), "/")
 	}
-	return strings.TrimPrefix(fullKey, "/")
+	return fullKey
 }
 
 func manifestSummary(manifest indexsubstrate.InternalManifest) ManifestSummary {

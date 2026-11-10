@@ -624,3 +624,123 @@ func TestBuildAndRetryRejectLiteralDotRootSentinelCollision(t *testing.T) {
 	require.Equal(t, sum1.RunID, snapAfter.Manifest.RunID)
 	require.Equal(t, 1, snapAfter.Manifest.Counts.ActiveRows)
 }
+
+func TestScopedBuildPreservesEmptyAndWhitespaceLeadingSegmentsUnderBaseAndRoot(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	t.Run("under base prefix data/", func(t *testing.T) {
+		setRoot := t.TempDir()
+		// Baseline run1 observes:
+		// - data//table=orders/drop.xml (empty first segment under data/)
+		// - data//table=orders/stay.xml
+		// - data/ tenant=a/table=orders/drop.xml (whitespace-leading first segment under data/)
+		// - data/ tenant=a/table=orders/stay.xml
+		// - data/table=orders/keep.xml (distinct prefix without empty segment - must not be tombstoned!)
+		// - data/tenant=a/table=orders/keep.xml (distinct prefix without leading space - must not be tombstoned!)
+		_, err := NewRunner(contConfig(setRoot, "run1", []provider.ObjectSummary{
+			obj("data//table=orders/drop.xml", `"e1"`, 1, base),
+			obj("data//table=orders/stay.xml", `"e2"`, 2, base),
+			obj("data/ tenant=a/table=orders/drop.xml", `"w1"`, 3, base),
+			obj("data/ tenant=a/table=orders/stay.xml", `"w2"`, 4, base),
+			obj("data/table=orders/keep.xml", `"k1"`, 5, base),
+			obj("data/tenant=a/table=orders/keep.xml", `"k2"`, 6, base),
+		}, base)).Build(ctx)
+		require.NoError(t, err)
+
+		// Successor run2 crawls only the discovered prefixes data//table=orders/ and data/ tenant=a/table=orders/
+		// after drop.xml is deleted in both.
+		plan := []string{"data//table=orders/", "data/ tenant=a/table=orders/"}
+		cfg2 := scopedContConfig(setRoot, "run2", []provider.ObjectSummary{
+			obj("data//table=orders/stay.xml", `"e2"`, 2, base),
+			obj("data/ tenant=a/table=orders/stay.xml", `"w2"`, 4, base),
+			obj("data/table=orders/keep.xml", `"k1"`, 5, base),
+			obj("data/tenant=a/table=orders/keep.xml", `"k2"`, 6, base),
+		}, plan, base.Add(time.Hour))
+		_, err = NewRunner(cfg2).Build(ctx)
+		require.NoError(t, err)
+
+		_, rows, err := ReadLatest(filepath.Join(setRoot, "latest.json"))
+		require.NoError(t, err)
+		byKey := map[string]ObjectState{}
+		for _, r := range rows {
+			byKey[r.RelKey] = r
+		}
+		require.Len(t, byKey, 6)
+		require.NotNil(t, byKey["/table=orders/drop.xml"].DeletedAt, "deleted object under empty segment prefix must be tombstoned")
+		require.Nil(t, byKey["/table=orders/stay.xml"].DeletedAt)
+		require.NotNil(t, byKey[" tenant=a/table=orders/drop.xml"].DeletedAt, "deleted object under whitespace-leading segment prefix must be tombstoned")
+		require.Nil(t, byKey[" tenant=a/table=orders/stay.xml"].DeletedAt)
+		require.Nil(t, byKey["table=orders/keep.xml"].DeletedAt, "out-of-scope non-empty segment prefix must remain active")
+		require.Nil(t, byKey["tenant=a/table=orders/keep.xml"].DeletedAt, "out-of-scope non-whitespace segment prefix must remain active")
+	})
+
+	t.Run("at bucket root s3://bucket/", func(t *testing.T) {
+		setRoot := t.TempDir()
+		rootContConfig := func(runID string, objs []provider.ObjectSummary, crawlPrefixes []string, started time.Time) Config {
+			paths := contRunPaths(setRoot, runID)
+			var coverage []CoverageAttestation
+			if len(crawlPrefixes) == 0 {
+				coverage = []CoverageAttestation{{
+					Scope:    &Scope{Prefix: ""},
+					Basis:    CoverageBasisConfirmed,
+					Complete: true,
+				}}
+			} else {
+				for _, p := range crawlPrefixes {
+					coverage = append(coverage, CoverageAttestation{
+						Scope:    &Scope{Prefix: p},
+						Basis:    CoverageBasisConfirmed,
+						Complete: true,
+					})
+				}
+			}
+			return Config{
+				IndexSetID:         "idx_root",
+				RunID:              runID,
+				BaseURI:            "s3://bucket/",
+				Source:             Source{Provider: fakeProvider{objects: objs}, ProviderName: "s3"},
+				Paths:              paths,
+				CrawlPrefixes:      crawlPrefixes,
+				Coverage:           coverage,
+				LossAcknowledgment: maybeAcknowledgeScopeLossForTest(paths.LatestPath, "idx_root", "s3://bucket/", coverage, started),
+				RunStartedAt:       started,
+				ManifestCreatedAt:  started.Add(time.Minute),
+				Clock:              func() time.Time { return started.Add(2 * time.Minute) },
+			}
+		}
+
+		_, err := NewRunner(rootContConfig("run1", []provider.ObjectSummary{
+			obj("/table=orders/drop.xml", `"e1"`, 1, base),
+			obj("/table=orders/stay.xml", `"e2"`, 2, base),
+			obj(" tenant=a/table=orders/drop.xml", `"w1"`, 3, base),
+			obj(" tenant=a/table=orders/stay.xml", `"w2"`, 4, base),
+			obj("table=orders/keep.xml", `"k1"`, 5, base),
+			obj("tenant=a/table=orders/keep.xml", `"k2"`, 6, base),
+		}, nil, base)).Build(ctx)
+		require.NoError(t, err)
+
+		plan := []string{"/table=orders/", " tenant=a/table=orders/"}
+		_, err = NewRunner(rootContConfig("run2", []provider.ObjectSummary{
+			obj("/table=orders/stay.xml", `"e2"`, 2, base),
+			obj(" tenant=a/table=orders/stay.xml", `"w2"`, 4, base),
+			obj("table=orders/keep.xml", `"k1"`, 5, base),
+			obj("tenant=a/table=orders/keep.xml", `"k2"`, 6, base),
+		}, plan, base.Add(time.Hour))).Build(ctx)
+		require.NoError(t, err)
+
+		_, rows, err := ReadLatest(filepath.Join(setRoot, "latest.json"))
+		require.NoError(t, err)
+		byKey := map[string]ObjectState{}
+		for _, r := range rows {
+			byKey[r.RelKey] = r
+		}
+		require.Len(t, byKey, 6)
+		require.NotNil(t, byKey["/table=orders/drop.xml"].DeletedAt, "deleted object under root empty segment prefix must be tombstoned")
+		require.Nil(t, byKey["/table=orders/stay.xml"].DeletedAt)
+		require.NotNil(t, byKey[" tenant=a/table=orders/drop.xml"].DeletedAt, "deleted object under root whitespace-leading segment prefix must be tombstoned")
+		require.Nil(t, byKey[" tenant=a/table=orders/stay.xml"].DeletedAt)
+		require.Nil(t, byKey["table=orders/keep.xml"].DeletedAt, "out-of-scope root prefix must remain active")
+		require.Nil(t, byKey["tenant=a/table=orders/keep.xml"].DeletedAt, "out-of-scope root prefix must remain active")
+	})
+}
