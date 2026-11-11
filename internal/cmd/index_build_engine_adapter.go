@@ -115,14 +115,15 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	})
 	sqliteWriter.setDeltaPrefixes(crawlPrefixes)
 	cfg := indexbuild.Config{
-		IndexSetID:    indexSet.IndexSetID,
-		RunID:         run.RunID,
-		BaseURI:       m.Connection.BaseURI,
-		Source:        indexbuild.Source{Provider: prov, ProviderName: m.Connection.Provider},
-		Match:         indexBuildEngineMatchConfig(m),
-		Filter:        nil,
-		Crawl:         indexBuildEngineCrawlConfig(m),
-		CrawlPrefixes: crawlPrefixes,
+		IndexSetID:      indexSet.IndexSetID,
+		RunID:           run.RunID,
+		GonimbusVersion: versionInfo.Version,
+		BaseURI:         m.Connection.BaseURI,
+		Source:          indexbuild.Source{Provider: prov, ProviderName: m.Connection.Provider},
+		Match:           indexBuildEngineMatchConfig(m),
+		Filter:          nil,
+		Crawl:           indexBuildEngineCrawlConfig(m),
+		CrawlPrefixes:   crawlPrefixes,
 		// Dual-format keeps the single-journal form. Its SQLite sink is written
 		// synchronously on the observation path, so this arm cannot benefit from
 		// journal lanes, and it stays the compatibility/verification arm the
@@ -238,9 +239,10 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 
 	now := time.Now().UTC()
 	cfg := indexbuild.Config{
-		IndexSetID: identityResult.IndexSetID,
-		RunID:      runID,
-		BaseURI:    m.Connection.BaseURI,
+		IndexSetID:      identityResult.IndexSetID,
+		RunID:           runID,
+		GonimbusVersion: versionInfo.Version,
+		BaseURI:         m.Connection.BaseURI,
 		Source: indexbuild.Source{
 			Provider:     prov,
 			ProviderName: m.Connection.Provider,

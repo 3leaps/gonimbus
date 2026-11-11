@@ -90,6 +90,13 @@ func Resolve(ldVersion, ldCommit, ldBuildDate string) (version, commit, buildDat
 	return version, commit, buildDate
 }
 
+// DefaultVersion returns the default resolved engine version for internal
+// libraries when no explicit version override is supplied.
+func DefaultVersion() string {
+	v, _, _ := Resolve("", "", "")
+	return v
+}
+
 // normalizeModuleVersion strips the leading "v" from a Go module version so
 // it matches the format in the VERSION file (e.g., "v0.2.0" → "0.2.0").
 // Returns the empty string for placeholder/unset values.

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/3leaps/gonimbus/internal/buildinfo"
 )
 
 var (
@@ -51,6 +53,7 @@ type ExpectedParentToken struct {
 type PublishConfig struct {
 	IndexSetID        string
 	RunID             string
+	GonimbusVersion   string
 	RunStartedAt      time.Time
 	ManifestCreatedAt time.Time
 	// SnapshotCompletionClock is sampled immediately before the immutable
@@ -117,6 +120,7 @@ type publishedCompleteDoc struct {
 	Type                        string `json:"type"`
 	IndexSetID                  string `json:"index_set_id"`
 	RunID                       string `json:"run_id"`
+	GonimbusVersion             string `json:"gonimbus_version,omitempty"`
 	CompletedAt                 string `json:"completed_at,omitempty"`
 	SnapshotCompletedAt         string `json:"snapshot_completed_at,omitempty"`
 	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
@@ -221,6 +225,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		Dir:                    config.SegmentDir,
 		IndexSetID:             config.IndexSetID,
 		RunID:                  config.RunID,
+		GonimbusVersion:        config.GonimbusVersion,
 		CreatedAt:              config.ManifestCreatedAt,
 		TargetRowsPerSegment:   config.TargetRowsPerSegment,
 		AllowExistingIdentical: true,
@@ -283,6 +288,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 			Type:                        CompleteMarkerTypeV2,
 			IndexSetID:                  config.IndexSetID,
 			RunID:                       config.RunID,
+			GonimbusVersion:             config.GonimbusVersion,
 			SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
 			SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
 			ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
@@ -818,6 +824,10 @@ func ReadLatestPublishedRows(latestPath string) (InternalManifest, []CurrentObje
 func normalizePublishConfig(config PublishConfig) PublishConfig {
 	config.IndexSetID = strings.TrimSpace(config.IndexSetID)
 	config.RunID = strings.TrimSpace(config.RunID)
+	config.GonimbusVersion = strings.TrimSpace(config.GonimbusVersion)
+	if config.GonimbusVersion == "" {
+		config.GonimbusVersion = buildinfo.DefaultVersion()
+	}
 	config.SegmentDir = strings.TrimSpace(config.SegmentDir)
 	config.ManifestPath = strings.TrimSpace(config.ManifestPath)
 	config.CompletePath = strings.TrimSpace(config.CompletePath)

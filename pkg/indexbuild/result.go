@@ -22,11 +22,14 @@ type Summary struct {
 }
 
 type ManifestSummary struct {
+	GonimbusVersion        string
+	DotSegmentPolicy       string
 	Rows                   int
 	ActiveRows             int
 	Tombstones             int
 	DistinctETags          int
 	RetainedUnobservedRows int
+	DotSegmentRows         int
 	PlanDigest             string
 	Admission              string
 	Segments               []SegmentSummary

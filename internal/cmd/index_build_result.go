@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/jobregistry"
@@ -36,10 +37,13 @@ type indexBuildResultRecord struct {
 	FormatsCommitted []string                          `json:"formats_committed"`
 	IndexSetID       string                            `json:"index_set_id"`
 	RunID            string                            `json:"run_id"`
+	GonimbusVersion  string                            `json:"gonimbus_version,omitempty"`
+	DotSegmentPolicy string                            `json:"dot_segment_policy,omitempty"`
 	ScopeHash        string                            `json:"scope_hash,omitempty"`
 	Rows             *int                              `json:"rows,omitempty"`
 	ActiveRows       *int                              `json:"active_rows,omitempty"`
 	Tombstones       *int                              `json:"tombstones,omitempty"`
+	DotSegmentRows   *int                              `json:"dot_segment_rows,omitempty"`
 	Segments         *int                              `json:"segments,omitempty"`
 	ObjectsObserved  *int64                            `json:"objects_observed,omitempty"`
 	ObjectsIngested  *int64                            `json:"objects_ingested,omitempty"`
@@ -70,6 +74,14 @@ func intPtr(v int) *int       { return &v }
 func int64Ptr(v int64) *int64 { return &v }
 
 func newDurableBuildResultRecord(summary indexbuild.Summary, scopeHash, requestedFormat string, formats []string) indexBuildResultRecord {
+	gonimbusVer := strings.TrimSpace(summary.Manifest.GonimbusVersion)
+	if gonimbusVer == "" {
+		gonimbusVer = strings.TrimSpace(versionInfo.Version)
+	}
+	dotPolicy := strings.TrimSpace(summary.Manifest.DotSegmentPolicy)
+	if dotPolicy == "" {
+		dotPolicy = indexsubstrate.DotSegmentPolicyInclude
+	}
 	return indexBuildResultRecord{
 		Type:             indexBuildResultType,
 		SchemaVersion:    indexBuildResultVersion,
@@ -78,10 +90,13 @@ func newDurableBuildResultRecord(summary indexbuild.Summary, scopeHash, requeste
 		FormatsCommitted: append([]string(nil), formats...),
 		IndexSetID:       summary.IndexSetID,
 		RunID:            summary.RunID,
+		GonimbusVersion:  gonimbusVer,
+		DotSegmentPolicy: dotPolicy,
 		ScopeHash:        strings.TrimSpace(scopeHash),
 		Rows:             intPtr(summary.Manifest.Rows),
 		ActiveRows:       intPtr(summary.Manifest.ActiveRows),
 		Tombstones:       intPtr(summary.Manifest.Tombstones),
+		DotSegmentRows:   intPtr(summary.Manifest.DotSegmentRows),
 		Segments:         intPtr(len(summary.Manifest.Segments)),
 		ObjectsObserved:  int64Ptr(summary.ObjectsObserved),
 		ManifestSHA256:   summary.ManifestSHA256,
@@ -97,6 +112,7 @@ func newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status string, obj
 		FormatsCommitted: []string{string(indexreader.FormatSQLiteV1)},
 		IndexSetID:       indexSetID,
 		RunID:            runID,
+		GonimbusVersion:  strings.TrimSpace(versionInfo.Version),
 		ScopeHash:        strings.TrimSpace(scopeHash),
 		ObjectsIngested:  int64Ptr(objectsIngested),
 	}
@@ -161,7 +177,7 @@ func validateIndexBuildResultRecord(rec indexBuildResultRecord) error {
 	}
 
 	if hasDurable {
-		if rec.Rows == nil || rec.ActiveRows == nil || rec.Tombstones == nil || rec.Segments == nil || rec.ObjectsObserved == nil {
+		if rec.Rows == nil || rec.ActiveRows == nil || rec.Tombstones == nil || rec.DotSegmentRows == nil || rec.Segments == nil || rec.ObjectsObserved == nil {
 			return fmt.Errorf("build result durable counts are required")
 		}
 		if status == "success" && strings.TrimSpace(rec.ManifestSHA256) == "" {

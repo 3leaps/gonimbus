@@ -17,13 +17,15 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 
+	"github.com/3leaps/gonimbus/internal/buildinfo"
 	"github.com/3leaps/gonimbus/pkg/durableindex"
 )
 
 const (
-	ManifestType         = "gonimbus.index.manifest.v1"
-	SegmentFormatParquet = "parquet"
-	ManifestRenderType   = "internal"
+	ManifestType            = "gonimbus.index.manifest.v1"
+	SegmentFormatParquet    = "parquet"
+	ManifestRenderType      = "internal"
+	DotSegmentPolicyInclude = "include"
 
 	DefaultTargetRowsPerSegment = 500_000
 	SegmentSizingRationale      = "real-corpus rebaseline for hub export and hydrate artifact counts"
@@ -51,6 +53,7 @@ type SegmentWriterConfig struct {
 	Dir                    string
 	IndexSetID             string
 	RunID                  string
+	GonimbusVersion        string
 	CreatedAt              time.Time
 	TargetRowsPerSegment   int
 	AllowExistingIdentical bool
@@ -76,6 +79,8 @@ type InternalManifest struct {
 	Render             string    `json:"render"`
 	IndexSetID         string    `json:"index_set_id"`
 	RunID              string    `json:"run_id"`
+	GonimbusVersion    string    `json:"gonimbus_version,omitempty"`
+	DotSegmentPolicy   string    `json:"dot_segment_policy,omitempty"`
 	IndexSchemaVersion int       `json:"index_schema_version"`
 	CreatedAt          time.Time `json:"created_at"`
 	// RunStartedAt is the optional authoritative run start.
@@ -125,6 +130,7 @@ type ManifestCounts struct {
 	Tombstones             int `json:"tombstones"`
 	DistinctETags          int `json:"distinct_etags"`
 	RetainedUnobservedRows int `json:"retained_unobserved_rows"`
+	DotSegmentRows         int `json:"dot_segment_rows"`
 }
 
 type SegmentDescriptor struct {
@@ -345,6 +351,8 @@ func newSegmentManifestSkeleton(config SegmentWriterConfig, runStartedAt *time.T
 		Render:             ManifestRenderType,
 		IndexSetID:         config.IndexSetID,
 		RunID:              config.RunID,
+		GonimbusVersion:    config.GonimbusVersion,
+		DotSegmentPolicy:   DotSegmentPolicyInclude,
 		IndexSchemaVersion: IndexSchemaVersion,
 		CreatedAt:          config.CreatedAt,
 		RunStartedAt:       runStartedAt,
@@ -1016,6 +1024,10 @@ func normalizeSegmentWriterConfig(config SegmentWriterConfig) SegmentWriterConfi
 	config.Dir = strings.TrimSpace(config.Dir)
 	config.IndexSetID = strings.TrimSpace(config.IndexSetID)
 	config.RunID = strings.TrimSpace(config.RunID)
+	config.GonimbusVersion = strings.TrimSpace(config.GonimbusVersion)
+	if config.GonimbusVersion == "" {
+		config.GonimbusVersion = buildinfo.DefaultVersion()
+	}
 	if config.CreatedAt.IsZero() {
 		config.CreatedAt = time.Now().UTC()
 	} else {
@@ -1118,7 +1130,32 @@ func manifestCountsForRun(rows []CurrentObjectRow, runID string) ManifestCounts 
 		Tombstones:             tombstoneCount(rows),
 		DistinctETags:          distinctETagCount(rows),
 		RetainedUnobservedRows: retainedUnobservedCount(rows, runID),
+		DotSegmentRows:         dotSegmentRowCount(rows),
 	}
+}
+
+// HasDotPrefixedSegment reports whether any /-separated path segment of relKey
+// starts with '.'. Marker-style names such as _SUCCESS are not dot-prefixed.
+func HasDotPrefixedSegment(relKey string) bool {
+	for _, seg := range strings.Split(relKey, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func dotSegmentRowCount(rows []CurrentObjectRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.DeletedAt != nil {
+			continue
+		}
+		if HasDotPrefixedSegment(row.RelKey) {
+			count++
+		}
+	}
+	return count
 }
 
 func retainedUnobservedCount(rows []CurrentObjectRow, runID string) int {

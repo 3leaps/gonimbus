@@ -143,6 +143,7 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 	retryCfg := RetryConfig{
 		IndexSetID:           cfg.IndexSetID,
 		RunID:                cfg.RunID,
+		GonimbusVersion:      cfg.GonimbusVersion,
 		BaseURI:              cfg.BaseURI,
 		Paths:                cfg.Paths,
 		JournalPaths:         crawlResult.journalPaths,
@@ -331,6 +332,7 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 	result, err := indexsubstrate.PublishSnapshotContext(ctx, indexsubstrate.PublishConfig{
 		IndexSetID:              cfg.IndexSetID,
 		RunID:                   cfg.RunID,
+		GonimbusVersion:         cfg.GonimbusVersion,
 		RunStartedAt:            cfg.RunStartedAt,
 		ManifestCreatedAt:       cfg.ManifestCreatedAt,
 		SnapshotCompletionClock: func() time.Time { return cfg.Clock() },
@@ -1386,11 +1388,14 @@ func deriveRelKey(baseURI, fullKey string) string {
 
 func manifestSummary(manifest indexsubstrate.InternalManifest) ManifestSummary {
 	out := ManifestSummary{
+		GonimbusVersion:        manifest.GonimbusVersion,
+		DotSegmentPolicy:       manifest.DotSegmentPolicy,
 		Rows:                   manifest.Counts.Rows,
 		ActiveRows:             manifest.Counts.ActiveRows,
 		Tombstones:             manifest.Counts.Tombstones,
 		DistinctETags:          manifest.Counts.DistinctETags,
 		RetainedUnobservedRows: manifest.Counts.RetainedUnobservedRows,
+		DotSegmentRows:         manifest.Counts.DotSegmentRows,
 		Segments:               make([]SegmentSummary, 0, len(manifest.Segments)),
 	}
 	if manifest.Lineage != nil {

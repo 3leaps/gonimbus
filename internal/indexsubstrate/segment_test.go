@@ -712,3 +712,64 @@ func segmentTestRow(indexSetID, relKey string, size int64, etag string, seenAt t
 		LastSeenAt:       seenAt,
 	}
 }
+
+func TestDotSegmentRowsExcludesTombstonesAndNonDotMarkersInBatchAndStreaming(t *testing.T) {
+	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	deletedAt := base.Add(time.Minute)
+
+	tombstoneDotRow := segmentTestRow("idx_test", ".deleted_dotfile", 15, `"etag-del-dot"`, base, nil, nil, nil, nil)
+	tombstoneDotRow.HeadEnrichedAt = nil
+	tombstoneDotRow.LastChangedRunID = "run_test"
+	tombstoneDotRow.LastChangedAt = deletedAt
+	tombstoneDotRow.DeletedAt = &deletedAt
+
+	rows := []CurrentObjectRow{
+		tombstoneDotRow,
+		segmentTestRow("idx_test", ".dotfile", 10, `"etag-dot"`, base, nil, nil, nil, nil),
+		segmentTestRow("idx_test", "_SUCCESS", 0, `"etag-success"`, base, nil, nil, nil, nil),
+		segmentTestRow("idx_test", "data/a.xml", 20, `"etag-a"`, base, nil, nil, nil, nil),
+		segmentTestRow("idx_test", "sub/.dotdir/item.xml", 30, `"etag-subdot"`, base, nil, nil, nil, nil),
+	}
+
+	batchManifest, err := WriteSegmentSet(SegmentWriterConfig{
+		Dir:             t.TempDir(),
+		IndexSetID:      "idx_test",
+		RunID:           "run_test",
+		GonimbusVersion: "v0.5.0-test",
+		CreatedAt:       base,
+	}, rows)
+	require.NoError(t, err)
+	require.Equal(t, DotSegmentPolicyInclude, batchManifest.DotSegmentPolicy)
+	require.Equal(t, "v0.5.0-test", batchManifest.GonimbusVersion)
+	require.Equal(t, 5, batchManifest.Counts.Rows)
+	require.Equal(t, 4, batchManifest.Counts.ActiveRows)
+	require.Equal(t, 1, batchManifest.Counts.Tombstones)
+	require.Equal(t, 2, batchManifest.Counts.DotSegmentRows)
+
+	streamManifest, err := WriteStreamingSegmentSet(context.Background(), SegmentWriterConfig{
+		Dir:        t.TempDir(),
+		IndexSetID: "idx_test",
+		RunID:      "run_test",
+		CreatedAt:  base,
+	}, &sliceRowSource{rows: rows})
+	require.NoError(t, err)
+	require.Equal(t, DotSegmentPolicyInclude, streamManifest.DotSegmentPolicy)
+	require.NotEmpty(t, streamManifest.GonimbusVersion)
+	require.Equal(t, batchManifest.Counts, streamManifest.Counts)
+}
+
+type sliceRowSource struct {
+	rows []CurrentObjectRow
+	idx  int
+}
+
+func (s *sliceRowSource) Next(_ context.Context) (CurrentObjectRow, error) {
+	if s.idx >= len(s.rows) {
+		return CurrentObjectRow{}, io.EOF
+	}
+	row := s.rows[s.idx]
+	s.idx++
+	return row, nil
+}
+
+func (s *sliceRowSource) Close() error { return nil }

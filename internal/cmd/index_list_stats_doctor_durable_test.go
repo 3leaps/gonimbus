@@ -15,6 +15,7 @@ import (
 
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
+	"github.com/3leaps/gonimbus/pkg/manifest"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/uri"
 )
@@ -374,8 +375,6 @@ func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
 	require.NoError(t, os.Remove(identities[0]))
 	before, err := os.ReadFile(dbs[0])
 	require.NoError(t, err)
-	beforeInfo, err := os.Stat(dbs[0])
-	require.NoError(t, err)
 	segmentRoot := filepath.Join(dataRoot, "cache", "segments", setID)
 	journalRoot := filepath.Join(dataRoot, "journals", "crawl", setID)
 	require.NoError(t, os.MkdirAll(segmentRoot, 0o700))
@@ -384,44 +383,87 @@ func TestSQLiteRebuildPublishesTrustedIdentityVisibleToList(t *testing.T) {
 	segmentBefore := snapshotIndexGCTreeState(t, segmentRoot)
 	journalBefore := snapshotIndexGCTreeState(t, journalRoot)
 
+	m, err := manifest.LoadIndexManifest(manifestPath)
+	require.NoError(t, err)
+	scopeHash, err := computeScopeHash(m)
+	require.NoError(t, err)
+	durableSetID := computeTestIndexSetIDForFormat(t, m, scopeHash, "durable")
+	durableIdentityDir := filepath.Join(dataRoot, "indexes", "idx_"+strings.TrimPrefix(durableSetID, "idx_")[:16])
+	durableDBPath := filepath.Join(durableIdentityDir, "index.db")
+	require.NoError(t, os.MkdirAll(durableIdentityDir, 0o700))
+	require.NoError(t, os.WriteFile(durableDBPath, before, 0o600))
+	t.Cleanup(func() { _ = os.RemoveAll(durableIdentityDir) })
+	durableSegmentRoot := filepath.Join(dataRoot, "cache", "segments", durableSetID)
+	durableJournalRoot := filepath.Join(dataRoot, "journals", "crawl", durableSetID)
+	require.NoError(t, os.MkdirAll(durableSegmentRoot, 0o700))
+	require.NoError(t, os.MkdirAll(durableJournalRoot, 0o700))
+	durableIdentityBefore := snapshotIndexGCTreeState(t, durableIdentityDir)
+	durableSegmentBefore := snapshotIndexGCTreeState(t, durableSegmentRoot)
+	durableJournalBefore := snapshotIndexGCTreeState(t, durableJournalRoot)
+
 	for _, refusal := range []struct {
-		name     string
-		format   string
-		explicit bool
+		name           string
+		format         string
+		explicit       bool
+		targetDB       string
+		targetIdDir    string
+		targetSegRoot  string
+		targetJourRoot string
+		idBefore       any
+		segBefore      any
+		jourBefore     any
 	}{
-		{name: "default durable", format: "durable"},
-		{name: "explicit canonical sqlite", format: "sqlite", explicit: true},
-		{name: "explicit canonical both", format: "both", explicit: true},
+		{
+			name: "default durable", format: "durable",
+			targetDB: durableDBPath, targetIdDir: durableIdentityDir,
+			targetSegRoot: durableSegmentRoot, targetJourRoot: durableJournalRoot,
+			idBefore: durableIdentityBefore, segBefore: durableSegmentBefore, jourBefore: durableJournalBefore,
+		},
+		{
+			name: "explicit canonical sqlite", format: "sqlite", explicit: true,
+			targetDB: dbs[0], targetIdDir: identityDir,
+			targetSegRoot: segmentRoot, targetJourRoot: journalRoot,
+			idBefore: identityBefore, segBefore: segmentBefore, jourBefore: journalBefore,
+		},
+		{
+			name: "explicit canonical both", format: "both", explicit: true,
+			targetDB: durableDBPath, targetIdDir: durableIdentityDir,
+			targetSegRoot: durableSegmentRoot, targetJourRoot: durableJournalRoot,
+			idBefore: durableIdentityBefore, segBefore: durableSegmentBefore, jourBefore: durableJournalBefore,
+		},
 	} {
 		t.Run(refusal.name, func(t *testing.T) {
+			targetBeforeInfo, statBeforeErr := os.Stat(refusal.targetDB)
+			require.NoError(t, statBeforeErr)
 			indexBuildFormat = refusal.format
 			indexBuildDBPath = ""
 			if refusal.explicit {
-				indexBuildDBPath = dbs[0]
+				indexBuildDBPath = refusal.targetDB
 			}
 			providerCalls = 0
 			err = runBuild()
 			require.ErrorIs(t, err, indexreader.ErrCanonicalSQLiteAdoption)
 			require.Zero(t, providerCalls, "refusal must happen before provider construction")
-			afterRefusal, readErr := os.ReadFile(dbs[0])
+			afterRefusal, readErr := os.ReadFile(refusal.targetDB)
 			require.NoError(t, readErr)
-			afterRefusalInfo, statErr := os.Stat(dbs[0])
+			afterRefusalInfo, statErr := os.Stat(refusal.targetDB)
 			require.NoError(t, statErr)
 			require.Equal(t, before, afterRefusal)
-			require.Equal(t, beforeInfo.Mode(), afterRefusalInfo.Mode())
-			require.Equal(t, beforeInfo.ModTime(), afterRefusalInfo.ModTime())
-			require.Equal(t, identityBefore, snapshotIndexGCTreeState(t, identityDir))
-			require.Equal(t, segmentBefore, snapshotIndexGCTreeState(t, segmentRoot))
-			require.Equal(t, journalBefore, snapshotIndexGCTreeState(t, journalRoot))
-			require.NoFileExists(t, filepath.Join(identityDir, "identity.json"))
-			require.NoFileExists(t, dbs[0]+"-wal")
-			require.NoFileExists(t, dbs[0]+"-shm")
-			require.NoFileExists(t, dbs[0]+"-journal")
-			aliases, globErr := filepath.Glob(filepath.Join(identityDir, ".gonimbus-index-write-*.db*"))
+			require.Equal(t, targetBeforeInfo.Mode(), afterRefusalInfo.Mode())
+			require.Equal(t, targetBeforeInfo.ModTime(), afterRefusalInfo.ModTime())
+			require.Equal(t, refusal.idBefore, snapshotIndexGCTreeState(t, refusal.targetIdDir))
+			require.Equal(t, refusal.segBefore, snapshotIndexGCTreeState(t, refusal.targetSegRoot))
+			require.Equal(t, refusal.jourBefore, snapshotIndexGCTreeState(t, refusal.targetJourRoot))
+			require.NoFileExists(t, filepath.Join(refusal.targetIdDir, "identity.json"))
+			require.NoFileExists(t, refusal.targetDB+"-wal")
+			require.NoFileExists(t, refusal.targetDB+"-shm")
+			require.NoFileExists(t, refusal.targetDB+"-journal")
+			aliases, globErr := filepath.Glob(filepath.Join(refusal.targetIdDir, ".gonimbus-index-write-*.db*"))
 			require.NoError(t, globErr)
 			require.Empty(t, aliases)
 		})
 	}
+	require.NoError(t, os.RemoveAll(durableIdentityDir))
 
 	backupDir := filepath.Join(t.TempDir(), filepath.Base(identityDir))
 	require.NoError(t, os.Rename(identityDir, backupDir))
