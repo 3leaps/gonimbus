@@ -1,0 +1,185 @@
+{
+  "input": {
+    "mode": "observe",
+    "set_id": "set-example",
+    "snapshot_id": "snapshot-1",
+    "generation": 1,
+    "observation_at": "2026-10-18T01:00:00.000000001Z",
+    "discovery_complete": true,
+    "parent": {
+      "publication_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "set_id": "set-example",
+      "snapshot_id": "snapshot-0",
+      "generation": 0,
+      "scopes": [
+        {
+          "namespace": "objects",
+          "prefix": "alpha/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "beta/"
+        }
+      ],
+      "rows": [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": [
+            {
+              "name": "content.type",
+              "value": "text/plain",
+              "operation": "head",
+              "observed_at": "2026-10-18T01:00:00.000000001Z",
+              "against_revision": {
+                "kind": "opaque-etag",
+                "value": "r1"
+              }
+            }
+          ]
+        },
+        {
+          "namespace": "objects",
+          "key": "beta/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": []
+        }
+      ]
+    },
+    "admitted_parent_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "scopes": [
+      {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      {
+        "namespace": "objects",
+        "prefix": "beta/"
+      }
+    ],
+    "acknowledgment": null,
+    "observations": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r2"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null
+      }
+    ],
+    "absence_authority": [
+      {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      {
+        "namespace": "objects",
+        "prefix": "beta/"
+      }
+    ],
+    "enrichments": []
+  },
+  "expected": {
+    "rows": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r2"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "deleted": null,
+        "enrichments": []
+      },
+      {
+        "namespace": "objects",
+        "key": "beta/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "deleted": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "enrichments": []
+      }
+    ],
+    "admission": "no_loss",
+    "retained_unobserved_rows": 1
+  },
+  "runner": "transitions"
+}

@@ -1,0 +1,19 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/partial-preserves-absent.json",
+  "replace": {
+    "scopes": [
+      {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      {
+        "namespace": "objects",
+        "prefix": "gamma/"
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "scope_loss"
+  }
+}

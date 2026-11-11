@@ -1,0 +1,9 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/observe.json",
+  "replace": {},
+  "expected": {
+    "refusal": "binding_unavailable"
+  },
+  "omit_refs": ["artifact:g0-publication"]
+}

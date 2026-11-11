@@ -12,6 +12,9 @@
 # https://github.com/google/yamlfmt/blob/main/docs/config-file.md and the
 # goneat appnote `yaml-format-lint-alignment`.
 
+exclude:
+  - internal/contracts/durableindex/v0/upstream/**
+
 formatter:
   type: basic
   indent: 2

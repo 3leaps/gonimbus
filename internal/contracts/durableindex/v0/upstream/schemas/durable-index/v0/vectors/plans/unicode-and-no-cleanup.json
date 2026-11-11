@@ -1,0 +1,65 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "objects",
+      "prefix": "é"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "é"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "../"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "é"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "objects",
+      "prefix": "../"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "é"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "é"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c6500000004000000076f626a65637473000000032e2e2f000000076f626a65637473000000012f000000076f626a656374730000000365cc81000000076f626a6563747300000002c3a9",
+  "sha256": "f470b7564873a96ddcabca153aebc4a81b294976f5d3f132267a1048346a85f8",
+  "comparisons": [
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "é"
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": ""
+        }
+      ],
+      "loss": false
+    }
+  ]
+}

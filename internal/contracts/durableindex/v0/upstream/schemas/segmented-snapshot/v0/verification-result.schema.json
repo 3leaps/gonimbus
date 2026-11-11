@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:segmented-snapshot/v0/verification-result.schema.json",
+  "title": "Snapshot Verification Result",
+  "description": "Terminal result bound to an admitted selection. Pre-admission parse/resolution errors use the caller transport error surface, never a fabricated successful snapshot binding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "kind", "verification_id", "selection", "publication", "manifest", "profile", "verifier", "operation", "scope", "requested_member_ids", "verified_member_ids", "outcome", "terminal", "output_state"],
+  "properties": {
+    "capabilities": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/capabilities" },
+    "kind": { "const": "snapshot_verification" },
+    "verification_id": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/id" },
+    "selection": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/selection" },
+    "publication": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "manifest": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "profile": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "semantic_layer"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "semantic_layer": { "const": "segmented-snapshot/v0-semantics/0.1.0" }
+      }
+    },
+    "operation": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/operation" },
+    "scope": { "enum": ["full_snapshot", "selected_members"] },
+    "requested_member_ids": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/member_ids" },
+    "verified_member_ids": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/member_ids" },
+    "outcome": {
+      "enum": ["verified", "invalid_structure", "unresolved_reference", "unauthorized_reference", "unsupported", "identity_mismatch", "integrity_mismatch", "incomplete_publication", "capacity_exceeded", "incomplete_read"]
+    },
+    "terminal": { "const": true },
+    "output_state": { "enum": ["none", "provisional", "verified"] },
+    "coverage_attestation": { "$ref": "contract:segmented-snapshot/v0/common.schema.json#/$defs/binding" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "verified" } } },
+      "then": { "properties": { "output_state": { "enum": ["none", "verified"] } } }
+    },
+    {
+      "if": { "properties": { "scope": { "const": "full_snapshot" } } },
+      "then": { "properties": { "requested_member_ids": { "maxItems": 0 } } },
+      "else": { "properties": { "requested_member_ids": { "minItems": 1 } } }
+    }
+  ]
+}

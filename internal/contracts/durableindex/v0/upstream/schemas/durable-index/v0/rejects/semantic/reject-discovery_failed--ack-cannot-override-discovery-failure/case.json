@@ -1,0 +1,10 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/ack-retains-omitted-row.json",
+  "replace": {
+    "discovery_complete": false
+  },
+  "expected": {
+    "refusal": "discovery_failed"
+  }
+}

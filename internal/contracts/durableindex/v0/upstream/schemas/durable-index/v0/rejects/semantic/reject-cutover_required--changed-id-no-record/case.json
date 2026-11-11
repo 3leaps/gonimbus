@@ -1,0 +1,10 @@
+{
+  "runner": "cutover",
+  "baseline": "vectors/cutover/explicit-new-set.json",
+  "replace": {
+    "record": null
+  },
+  "expected": {
+    "refusal": "cutover_required"
+  }
+}

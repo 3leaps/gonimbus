@@ -1,0 +1,19 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "publication": {
+      "id": "publication-0",
+      "ref": "artifact:g0-publication",
+      "sha256": "c3ca0233ea7cbb0269662f4f14789e788c7ad0ce50efecf4f4e3647dca7c608e",
+      "byte_length": 917
+    }
+  },
+  "expected": {
+    "refusal": "graph_publication"
+  },
+  "store_overlay": {
+    "artifact:g0-descriptor": "{\n  \"capabilities\": [\n    \"contract: data-artifact/v0\"\n  ],\n  \"artifact_id\": \"artifact:example-data\",\n  \"lifecycle\": \"draft\",\n  \"producer\": {\n    \"name\": \"snapshot-fixture\",\n    \"version\": \"1.0.0\",\n    \"profile\": \"example.index-logical/v0\"\n  },\n  \"grains\": [\n    {\n      \"id\": \"objects\",\n      \"kind\": \"record_stream\",\n      \"record_kind\": \"object-inventory/v0\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\"\n    }\n  ],\n  \"representations\": [\n    {\n      \"id\": \"logical-rows\",\n      \"grain\": \"objects\",\n      \"role\": \"audit_stream\",\n      \"format\": \"ndjson\",\n      \"profile\": \"example.index-logical/v0\",\n      \"uri\": \"artifact:g0-manifest\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\",\n      \"read_path\": {\n        \"range_readable\": false,\n        \"sharded\": true,\n        \"appendable\": false,\n        \"scan_capabilities\": [],\n        \"read_path_granularity\": \"artifact\",\n        \"gateable_unit_granularity\": \"artifact\",\n        \"sidecar_required\": true,\n        \"physical_ordering\": \"manifest_order\"\n      },\n      \"protection_enforceable_granularity\": \"artifact\"\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\",\n    \"default_export_class\": \"restricted\",\n    \"profile_ref\": \"profile:logical-projection\"\n  }\n}\n",
+    "artifact:g0-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-0\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-0\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g0-descriptor\",\n    \"sha256\": \"9e32e418bc1709ea234511d3a7efbe45d2b5e74e8e328f9a3cd8a6977e683f38\",\n    \"byte_length\": 1286\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-0\",\n    \"ref\": \"artifact:g0-manifest\",\n    \"sha256\": \"87a40d37b36bed7994123e0654faf2b22daa195a9e0b6f6c7568a4764ffd404c\",\n    \"byte_length\": 1780\n  }\n}\n"
+  }
+}

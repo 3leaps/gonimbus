@@ -1,0 +1,19 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "publication": {
+      "id": "publication-0",
+      "ref": "artifact:g0-publication",
+      "sha256": "6b02bc2398a949484624ee49431ca51e7b6936b59173fa264ad47781ee7b7ea5",
+      "byte_length": 917
+    }
+  },
+  "expected": {
+    "refusal": "graph_identity"
+  },
+  "store_overlay": {
+    "artifact:g0-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"wrong\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:b804f91ce7db7e38c0eda8cc5e09a459c811c40d1464a4fa60e62a5c0d805f4d\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g0-member-0\",\n      \"sha256\": \"7b46dc26edaa64fe6bfa4cb41f445033252bd97c1e5f84b230895ae460d2f8f6\",\n      \"byte_length\": 420,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g0-member-1\",\n      \"sha256\": \"92e6705922108dc729964003fc4470b76705057cd4d555e4b692daf56c369e15\",\n      \"byte_length\": 419,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-0\",\n    \"ref\": \"artifact:g0-metadata\",\n    \"sha256\": \"c67ad776bb1f35f416b128cb11c5e41f252584f7bc4c00e054c769cc8040e13e\",\n    \"byte_length\": 1213\n  }\n}\n",
+    "artifact:g0-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-0\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-0\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g0-descriptor\",\n    \"sha256\": \"91ad04ef2f94643aef47ec60ce33e845cc229f50f2008ffea8d5065ca51de324\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-0\",\n    \"ref\": \"artifact:g0-manifest\",\n    \"sha256\": \"08fae970a14da61f18da1a01222245e424e11d2fb5684d1e3fb04bc690475dd3\",\n    \"byte_length\": 1775\n  }\n}\n"
+  }
+}

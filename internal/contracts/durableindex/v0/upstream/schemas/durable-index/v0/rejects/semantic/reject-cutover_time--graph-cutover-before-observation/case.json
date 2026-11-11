@@ -1,0 +1,49 @@
+{
+  "runner": "cutover_graphs",
+  "baseline": "vectors/graphs/cutover.json",
+  "replace": {
+    "record": {
+      "capabilities": [
+        "contract: durable-index/v0"
+      ],
+      "kind": "index_cutover",
+      "old": {
+        "publication": {
+          "id": "publication-0",
+          "ref": "artifact:g0-publication",
+          "sha256": "dd1df94b27410a60e32c7e67944f99b4e23e5f92ce92fb864880ef6a18c8f55b",
+          "byte_length": 917
+        },
+        "selection": {
+          "namespace_id": "set-example",
+          "snapshot_id": "snapshot-0",
+          "artifact_id": "artifact:example-data"
+        }
+      },
+      "new": {
+        "publication": {
+          "id": "publication-new",
+          "ref": "artifact:new-g0-publication",
+          "sha256": "89d6615c6a191df0935f8a584d3e84ae4a9cf89857fccc7152e2b6b685fc5b27",
+          "byte_length": 939
+        },
+        "selection": {
+          "namespace_id": "set-new",
+          "snapshot_id": "snapshot-new",
+          "artifact_id": "artifact:new-example-data"
+        }
+      },
+      "authorized_by": "operator-example",
+      "accepted_at": "2000-01-01T00:00:00.000000000Z",
+      "rollback": {
+        "id": "publication-0",
+        "ref": "artifact:g0-publication",
+        "sha256": "dd1df94b27410a60e32c7e67944f99b4e23e5f92ce92fb864880ef6a18c8f55b",
+        "byte_length": 917
+      }
+    }
+  },
+  "expected": {
+    "refusal": "cutover_time"
+  }
+}

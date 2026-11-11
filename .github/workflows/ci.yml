@@ -103,6 +103,10 @@ jobs:
         run: |
           set -euo pipefail
           make release-workflow-check
+      - name: Contract fixture integrity
+        run: |
+          set -euo pipefail
+          make contract-fixture-integrity
       - name: Install golangci-lint (v2)
         # goneat-tools-runner does not ship golangci-lint yet.
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0

@@ -1,0 +1,10 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "request_export": true
+  },
+  "expected": {
+    "refusal": "protected_export"
+  }
+}

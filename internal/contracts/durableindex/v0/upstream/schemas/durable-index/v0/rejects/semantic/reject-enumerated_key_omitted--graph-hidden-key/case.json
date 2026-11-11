@@ -1,0 +1,54 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/baseline.json",
+  "replace": {
+    "source_evidence": {
+      "snapshot-0": {
+        "observations": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null
+          },
+          {
+            "namespace": "objects",
+            "key": "beta/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null
+          }
+        ],
+        "enumerated": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one"
+          },
+          {
+            "namespace": "objects",
+            "key": "beta/one"
+          },
+          {
+            "namespace": "objects",
+            "key": "alpha/.dot"
+          }
+        ],
+        "discovery_complete": true,
+        "admitted_parent_sha256": null,
+        "enrichments": []
+      }
+    }
+  },
+  "expected": {
+    "refusal": "enumerated_key_omitted"
+  }
+}

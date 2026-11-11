@@ -1,0 +1,20 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/observe.json",
+  "replace": {
+    "publication": {
+      "id": "publication-1",
+      "ref": "artifact:g1-publication",
+      "sha256": "20c3808019e917372fe8767b3d93df15ea0fbaed15c4c49a5b6eeac19dcc6e0d",
+      "byte_length": 917
+    }
+  },
+  "expected": {
+    "refusal": "graph_transition"
+  },
+  "store_overlay": {
+    "artifact:g1-member-0": "{\"namespace\":\"objects\",\"key\":\"alpha/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":999,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[]}\n",
+    "artifact:g1-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-1\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g1-member-0\",\n      \"sha256\": \"e57a34788fdcd54152d5fc73357626814d33074a4c7819572ab546d973d272cf\",\n      \"byte_length\": 421,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g1-member-1\",\n      \"sha256\": \"85061f89ec97f767d6b46cea35510b08a9095c11029985e410ccd9e3350569e5\",\n      \"byte_length\": 481,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-1\",\n    \"ref\": \"artifact:g1-metadata\",\n    \"sha256\": \"a324933387755e53f2142518a1691d7b364dc8c91be3e1bd2c8334b6c45221ec\",\n    \"byte_length\": 1547\n  }\n}\n",
+    "artifact:g1-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-1\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-1\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g1-descriptor\",\n    \"sha256\": \"e3a37fe24ca6b5acc406f32e07954ae51ef7a73bf7a13725fc2d3e2f3c6b38fc\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-1\",\n    \"ref\": \"artifact:g1-manifest\",\n    \"sha256\": \"7eaef3e94d2d7acd571653b9de90513137f956e0f728946c89be12ad835344ef\",\n    \"byte_length\": 1780\n  }\n}\n"
+  }
+}

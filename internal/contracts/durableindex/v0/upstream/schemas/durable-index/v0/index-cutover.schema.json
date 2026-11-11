@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:durable-index/v0/index-cutover.schema.json",
+  "title": "Explicit Durable Index Baseline Cutover",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "kind", "old", "new", "authorized_by", "accepted_at", "rollback"],
+  "properties": {
+    "capabilities": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/capabilities"
+    },
+    "kind": {
+      "const": "index_cutover"
+    },
+    "old": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/parent"
+    },
+    "new": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/parent"
+    },
+    "authorized_by": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/id"
+    },
+    "accepted_at": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/instant"
+    },
+    "rollback": {
+      "$ref": "contract:durable-index/v0/common.schema.json#/$defs/binding"
+    }
+  }
+}

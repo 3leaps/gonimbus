@@ -1,0 +1,15 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/enrichment-only.json",
+  "replace": {
+    "scopes": [
+      {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "enrichment_scope_change"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "capabilities": ["contract: data-artifact/v0"],
+  "artifact_id": "artifact:example-data",
+  "lifecycle": "partial",
+  "producer": { "name": "snapshot-fixture", "version": "1.0.0", "profile": "example.snapshot/v0" },
+  "grains": [
+    { "id": "records", "kind": "record_stream", "record_kind": "example.record", "row_count": 2, "field_catalog_ref": "artifact:catalog" }
+  ],
+  "representations": [
+    {
+      "id": "records_ndjson",
+      "grain": "records",
+      "role": "audit_stream",
+      "format": "ndjson",
+      "profile": "example.snapshot/v0",
+      "uri": "artifact:manifest",
+      "row_count": 2,
+      "field_catalog_ref": "artifact:catalog",
+      "read_path": {
+        "range_readable": false,
+        "sharded": true,
+        "appendable": false,
+        "scan_capabilities": [],
+        "read_path_granularity": "artifact",
+        "gateable_unit_granularity": "artifact",
+        "sidecar_required": true,
+        "physical_ordering": "manifest_order"
+      },
+      "protection_enforceable_granularity": "artifact"
+    }
+  ],
+  "protection": { "default_action": "block_export", "default_export_class": "public", "profile_ref": "profile:synthetic-fixture" }
+}

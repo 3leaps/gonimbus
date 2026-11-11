@@ -1,0 +1,99 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "objects",
+      "prefix": "z/"
+    },
+    {
+      "namespace": "archive",
+      "prefix": "z/deep/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "a/"
+    },
+    {
+      "namespace": "archive",
+      "prefix": "z/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "z/deep/"
+    },
+    {
+      "namespace": "archive",
+      "prefix": "z/"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "archive",
+      "prefix": "z/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "a/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "z/"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c65000000030000000761726368697665000000027a2f000000076f626a6563747300000002612f000000076f626a65637473000000027a2f",
+  "sha256": "3f243571c08a759982b496b3c6ba49e34767c012b2ee21ae041187aa4b1f66c5",
+  "comparisons": [
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": ""
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "archive",
+          "prefix": ""
+        },
+        {
+          "namespace": "objects",
+          "prefix": ""
+        }
+      ],
+      "loss": false
+    },
+    {
+      "next": [
+        {
+          "namespace": "archive",
+          "prefix": "z/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "a/"
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "archive",
+          "prefix": "z/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "a/"
+        },
+        {
+          "namespace": "objects",
+          "prefix": "z/"
+        }
+      ],
+      "loss": false
+    }
+  ]
+}

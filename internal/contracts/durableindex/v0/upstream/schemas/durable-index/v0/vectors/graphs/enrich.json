@@ -1,0 +1,204 @@
+{
+  "runner": "graphs",
+  "input": {
+    "projection": "logical-only/v0",
+    "publication": {
+      "id": "publication-2",
+      "ref": "artifact:g2-publication",
+      "sha256": "f8d35d7c99e68d1929e36e4c161a6a05eabed44b3b011865b4e0260cfdfa78de",
+      "byte_length": 917
+    },
+    "store": {
+      "artifact:logical-spec": "# Corpus-only logical projection profile\n\n`example.index-logical/v0` is a test transport, never a production index profile.\nIt stores independently authored logical twins as UTF-8 NDJSON and binds their\nactual bytes in a projected segmented-snapshot graph. The index metadata retains\nthe intended production encoding identifier; this projection deliberately does\nnot exercise that physical encoding. A successful result is labeled\n`logical_projection`, never R2 or a conforming Parquet publication.\n\nThe sole operation is full_verify. Every dependency, row count, member order,\nselection, plan, coverage, parent and logical transition is checked. This fixture\nprofile supports flat exhaustive members, no hidden dependencies, no retention,\nstreaming, durability or export claim. The row schema is the exact pinned\nindex-row schema. The complete field catalog declares every required logical\nfield; nullable object values retain their logical type. All graph content,\nkeys, prefixes, diagnostics and statistics inherit block_export and the most\nrestrictive descriptor/catalog/parent classification. No field-level allow can\noverride that default. Authenticated export release is outside this corpus.\n\nSource enumeration and admission evidence are authored inputs, not assertions\nin the publication or a proof of provider completeness. Observations and\nexpected rows are separately authored. A whole graph is a logical oracle for\nindependently implemented readers, not production writer output.\n",
+      "artifact:logical-profile": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\"\n  ],\n  \"kind\": \"snapshot_profile\",\n  \"profile_id\": \"example.index-logical/v0\",\n  \"semantic_spec\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-spec\",\n    \"sha256\": \"7f2548e4678e06c7eff6132add7c5528d6ddab69501927bc47b844c0ce997395\",\n    \"byte_length\": 1493\n  },\n  \"operations\": [\n    \"full_verify\"\n  ],\n  \"count_relations\": [\n    \"equal\"\n  ],\n  \"physical_orders\": [\n    \"manifest_order\"\n  ],\n  \"empty_snapshots\": true,\n  \"streaming\": \"unsupported\",\n  \"durability_claim\": \"none\",\n  \"retention\": \"unsupported\",\n  \"limits\": {\n    \"max_members\": 16,\n    \"max_metadata_bytes\": 1048576,\n    \"max_member_bytes\": 1048576\n  }\n}\n",
+      "artifact:row-schema": "{\n  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",\n  \"$id\": \"contract:durable-index/v0/index-row.schema.json\",\n  \"title\": \"Object Inventory Logical Row\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"required\": [\n    \"namespace\",\n    \"key\",\n    \"revision\",\n    \"size_bytes\",\n    \"last_modified\",\n    \"storage_class\",\n    \"first_seen\",\n    \"last_seen\",\n    \"last_changed\",\n    \"deleted\",\n    \"enrichments\"\n  ],\n  \"properties\": {\n    \"namespace\": {\n      \"$ref\": \"#/$defs/id\"\n    },\n    \"key\": {\n      \"type\": \"string\",\n      \"maxLength\": 4096,\n      \"minLength\": 1,\n      \"description\": \"Unicode scalar string; maximum 4096 UTF-8 bytes, enforced by semantic validation in addition to the JSON Schema code-point bound.\"\n    },\n    \"revision\": {\n      \"anyOf\": [\n        {\n          \"$ref\": \"#/$defs/revision\"\n        },\n        {\n          \"type\": \"null\"\n        }\n      ]\n    },\n    \"size_bytes\": {\n      \"$ref\": \"#/$defs/count\"\n    },\n    \"last_modified\": {\n      \"anyOf\": [\n        {\n          \"$ref\": \"#/$defs/instant\"\n        },\n        {\n          \"type\": \"null\"\n        }\n      ]\n    },\n    \"storage_class\": {\n      \"anyOf\": [\n        {\n          \"$ref\": \"#/$defs/text\"\n        },\n        {\n          \"type\": \"null\"\n        }\n      ]\n    },\n    \"first_seen\": {\n      \"$ref\": \"#/$defs/stamp\"\n    },\n    \"last_seen\": {\n      \"$ref\": \"#/$defs/stamp\"\n    },\n    \"last_changed\": {\n      \"$ref\": \"#/$defs/stamp\"\n    },\n    \"deleted\": {\n      \"anyOf\": [\n        {\n          \"$ref\": \"#/$defs/stamp\"\n        },\n        {\n          \"type\": \"null\"\n        }\n      ]\n    },\n    \"enrichments\": {\n      \"type\": \"array\",\n      \"maxItems\": 256,\n      \"items\": {\n        \"$ref\": \"#/$defs/enrichment\"\n      }\n    }\n  },\n  \"$defs\": {\n    \"id\": {\n      \"type\": \"string\",\n      \"pattern\": \"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$\"\n    },\n    \"text\": {\n      \"type\": \"string\",\n      \"maxLength\": 4096\n    },\n    \"instant\": {\n      \"type\": \"string\",\n      \"pattern\": \"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\\\.[0-9]{9}Z$\"\n    },\n    \"count\": {\n      \"type\": \"integer\",\n      \"minimum\": 0,\n      \"maximum\": 9007199254740991\n    },\n    \"stamp\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"required\": [\"snapshot_id\", \"at\"],\n      \"properties\": {\n        \"snapshot_id\": {\n          \"$ref\": \"#/$defs/id\"\n        },\n        \"at\": {\n          \"$ref\": \"#/$defs/instant\"\n        }\n      }\n    },\n    \"revision\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"required\": [\"kind\", \"value\"],\n      \"properties\": {\n        \"kind\": {\n          \"type\": \"string\",\n          \"pattern\": \"^[a-z][a-z0-9._-]{0,63}$\"\n        },\n        \"value\": {\n          \"type\": \"string\",\n          \"minLength\": 1,\n          \"maxLength\": 4096\n        }\n      }\n    },\n    \"enrichment\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"required\": [\"name\", \"value\", \"operation\", \"observed_at\", \"against_revision\"],\n      \"properties\": {\n        \"name\": {\n          \"type\": \"string\",\n          \"pattern\": \"^[a-z][a-z0-9._-]{0,127}$\"\n        },\n        \"value\": {\n          \"type\": [\"string\", \"null\"],\n          \"maxLength\": 65536\n        },\n        \"operation\": {\n          \"$ref\": \"#/$defs/id\"\n        },\n        \"observed_at\": {\n          \"$ref\": \"#/$defs/instant\"\n        },\n        \"against_revision\": {\n          \"$ref\": \"#/$defs/revision\"\n        }\n      }\n    }\n  }\n}\n",
+      "artifact:plan": "{\n  \"capabilities\": [\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"index_plan\",\n  \"set_id\": \"set-example\",\n  \"scope_profile\": \"unicode-prefix/v0\",\n  \"scopes\": [\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"alpha/\"\n    },\n    {\n      \"namespace\": \"objects\",\n      \"prefix\": \"beta/\"\n    }\n  ]\n}\n",
+      "artifact:catalog": "{\n  \"id\": \"artifact:index-catalog\",\n  \"grain\": \"objects\",\n  \"fields\": [\n    {\n      \"name\": \"namespace\",\n      \"type\": \"string\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"key\",\n      \"type\": \"string\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"revision\",\n      \"type\": \"object\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"size_bytes\",\n      \"type\": \"integer\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"last_modified\",\n      \"type\": \"datetime\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"storage_class\",\n      \"type\": \"string\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"first_seen\",\n      \"type\": \"object\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"last_seen\",\n      \"type\": \"object\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"last_changed\",\n      \"type\": \"object\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"deleted\",\n      \"type\": \"object\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    },\n    {\n      \"name\": \"enrichments\",\n      \"type\": \"array\",\n      \"required\": true,\n      \"sensitivity\": \"restricted\",\n      \"export_action\": \"block_export\"\n    }\n  ]\n}\n",
+      "artifact:g0-coverage-0": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-0-0\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:b804f91ce7db7e38c0eda8cc5e09a459c811c40d1464a4fa60e62a5c0d805f4d\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-0\"\n  },\n  \"as_of\": \"2026-10-18T00:00:00.000000000Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"alpha/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 1\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n",
+      "artifact:g0-coverage-1": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-0-1\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:b804f91ce7db7e38c0eda8cc5e09a459c811c40d1464a4fa60e62a5c0d805f4d\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-0\"\n  },\n  \"as_of\": \"2026-10-18T00:00:00.000000000Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"beta/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 1\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n",
+      "artifact:g0-metadata": "{\n  \"capabilities\": [\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"index_metadata\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-0\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"row_profile\": \"object-inventory/v0\",\n  \"encoding_profile\": \"parquet-inventory/v0\",\n  \"mode\": \"baseline\",\n  \"generation\": 0,\n  \"parent\": null,\n  \"plan\": {\n    \"id\": \"set-example\",\n    \"ref\": \"artifact:plan\",\n    \"sha256\": \"7556d7f77243c2831e6a47210951d151f4ba945bfa07c010316dca1f9c78e71a\",\n    \"byte_length\": 305\n  },\n  \"plan_digest\": \"78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5\",\n  \"effective_scope_count\": 2,\n  \"coverage\": [\n    {\n      \"id\": \"coverage-0-0\",\n      \"ref\": \"artifact:g0-coverage-0\",\n      \"sha256\": \"3a2553320ff4973ad3f10aee7fabcb54fa7fac41964f2a4dce6200e35f7bf22e\",\n      \"byte_length\": 820\n    },\n    {\n      \"id\": \"coverage-0-1\",\n      \"ref\": \"artifact:g0-coverage-1\",\n      \"sha256\": \"d9f4d264049b4de145153f59a337f24f9e4bf3f761cde73dbc0127f7e46b5abe\",\n      \"byte_length\": 819\n    }\n  ],\n  \"admission\": \"baseline_not_compared\",\n  \"loss_acknowledgment\": null,\n  \"observation_at\": \"2026-10-18T00:00:00.000000000Z\",\n  \"retained_unobserved_rows\": 0\n}\n",
+      "artifact:g0-member-0": "{\"namespace\":\"objects\",\"key\":\"alpha/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[]}\n",
+      "artifact:g0-member-1": "{\"namespace\":\"objects\",\"key\":\"beta/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[]}\n",
+      "artifact:g0-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-0\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:b804f91ce7db7e38c0eda8cc5e09a459c811c40d1464a4fa60e62a5c0d805f4d\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g0-member-0\",\n      \"sha256\": \"7b46dc26edaa64fe6bfa4cb41f445033252bd97c1e5f84b230895ae460d2f8f6\",\n      \"byte_length\": 420,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g0-member-1\",\n      \"sha256\": \"92e6705922108dc729964003fc4470b76705057cd4d555e4b692daf56c369e15\",\n      \"byte_length\": 419,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-0\",\n    \"ref\": \"artifact:g0-metadata\",\n    \"sha256\": \"c67ad776bb1f35f416b128cb11c5e41f252584f7bc4c00e054c769cc8040e13e\",\n    \"byte_length\": 1213\n  }\n}\n",
+      "artifact:g0-descriptor": "{\n  \"capabilities\": [\n    \"contract: data-artifact/v0\"\n  ],\n  \"artifact_id\": \"artifact:example-data\",\n  \"lifecycle\": \"complete\",\n  \"producer\": {\n    \"name\": \"snapshot-fixture\",\n    \"version\": \"1.0.0\",\n    \"profile\": \"example.index-logical/v0\"\n  },\n  \"grains\": [\n    {\n      \"id\": \"objects\",\n      \"kind\": \"record_stream\",\n      \"record_kind\": \"object-inventory/v0\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\"\n    }\n  ],\n  \"representations\": [\n    {\n      \"id\": \"logical-rows\",\n      \"grain\": \"objects\",\n      \"role\": \"audit_stream\",\n      \"format\": \"ndjson\",\n      \"profile\": \"example.index-logical/v0\",\n      \"uri\": \"artifact:g0-manifest\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\",\n      \"read_path\": {\n        \"range_readable\": false,\n        \"sharded\": true,\n        \"appendable\": false,\n        \"scan_capabilities\": [],\n        \"read_path_granularity\": \"artifact\",\n        \"gateable_unit_granularity\": \"artifact\",\n        \"sidecar_required\": true,\n        \"physical_ordering\": \"manifest_order\"\n      },\n      \"protection_enforceable_granularity\": \"artifact\"\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\",\n    \"default_export_class\": \"restricted\",\n    \"profile_ref\": \"profile:logical-projection\"\n  }\n}\n",
+      "artifact:g0-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-0\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-0\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g0-descriptor\",\n    \"sha256\": \"91ad04ef2f94643aef47ec60ce33e845cc229f50f2008ffea8d5065ca51de324\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-0\",\n    \"ref\": \"artifact:g0-manifest\",\n    \"sha256\": \"87a40d37b36bed7994123e0654faf2b22daa195a9e0b6f6c7568a4764ffd404c\",\n    \"byte_length\": 1780\n  }\n}\n",
+      "artifact:g1-coverage-0": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-1-0\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-1\"\n  },\n  \"as_of\": \"2026-10-18T01:00:00.000000001Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"alpha/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 1\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n",
+      "artifact:g1-coverage-1": "{\n  \"capabilities\": [\n    \"contract: coverage-attestation/v0\"\n  ],\n  \"attestation_id\": \"coverage-1-1\",\n  \"subject\": {\n    \"artifact_id\": \"artifact:example-data\",\n    \"grain_id\": \"objects\",\n    \"subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\"\n  },\n  \"emitter\": {\n    \"name\": \"synthetic-producer\",\n    \"relation\": \"producer\",\n    \"run_id\": \"snapshot-1\"\n  },\n  \"as_of\": \"2026-10-18T01:00:00.000000001Z\",\n  \"coverage_state\": \"complete\",\n  \"claims\": [\n    {\n      \"scope\": {\n        \"partition\": {\n          \"namespace\": \"objects\"\n        },\n        \"prefix\": \"beta/\"\n      },\n      \"basis\": \"confirmed\",\n      \"method\": \"enumerated\",\n      \"volume\": {\n        \"unit\": \"objects\",\n        \"observed\": 0\n      }\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\"\n  }\n}\n",
+      "artifact:g1-metadata": "{\n  \"capabilities\": [\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"index_metadata\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-1\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"row_profile\": \"object-inventory/v0\",\n  \"encoding_profile\": \"parquet-inventory/v0\",\n  \"mode\": \"observe\",\n  \"generation\": 1,\n  \"parent\": {\n    \"selection\": {\n      \"namespace_id\": \"set-example\",\n      \"snapshot_id\": \"snapshot-0\",\n      \"artifact_id\": \"artifact:example-data\"\n    },\n    \"publication\": {\n      \"id\": \"publication-0\",\n      \"ref\": \"artifact:g0-publication\",\n      \"sha256\": \"dd1df94b27410a60e32c7e67944f99b4e23e5f92ce92fb864880ef6a18c8f55b\",\n      \"byte_length\": 917\n    }\n  },\n  \"plan\": {\n    \"id\": \"set-example\",\n    \"ref\": \"artifact:plan\",\n    \"sha256\": \"7556d7f77243c2831e6a47210951d151f4ba945bfa07c010316dca1f9c78e71a\",\n    \"byte_length\": 305\n  },\n  \"plan_digest\": \"78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5\",\n  \"effective_scope_count\": 2,\n  \"coverage\": [\n    {\n      \"id\": \"coverage-1-0\",\n      \"ref\": \"artifact:g1-coverage-0\",\n      \"sha256\": \"8292a56014172d834fe751d8c4a56aa4a60f6d05f8b81ea26df77999e6a53d31\",\n      \"byte_length\": 820\n    },\n    {\n      \"id\": \"coverage-1-1\",\n      \"ref\": \"artifact:g1-coverage-1\",\n      \"sha256\": \"b9861d247d0d0c84a6d64cdd0ec95a3861998591d576b014685ade381a212f76\",\n      \"byte_length\": 819\n    }\n  ],\n  \"admission\": \"no_loss\",\n  \"loss_acknowledgment\": null,\n  \"observation_at\": \"2026-10-18T01:00:00.000000001Z\",\n  \"retained_unobserved_rows\": 1\n}\n",
+      "artifact:g1-member-0": "{\"namespace\":\"objects\",\"key\":\"alpha/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[]}\n",
+      "artifact:g1-member-1": "{\"namespace\":\"objects\",\"key\":\"beta/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"deleted\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"enrichments\":[]}\n",
+      "artifact:g1-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-1\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:4859c1e2ee86d0b9274fd63f0d3217c993dba0251a3183afbeff24309cbb283a\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g1-member-0\",\n      \"sha256\": \"cc5d8fd7a25ca334a39371b8ece1e81ac9b63d131161c6003f728e4fe5a0662d\",\n      \"byte_length\": 420,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g1-member-1\",\n      \"sha256\": \"85061f89ec97f767d6b46cea35510b08a9095c11029985e410ccd9e3350569e5\",\n      \"byte_length\": 481,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-1\",\n    \"ref\": \"artifact:g1-metadata\",\n    \"sha256\": \"a324933387755e53f2142518a1691d7b364dc8c91be3e1bd2c8334b6c45221ec\",\n    \"byte_length\": 1547\n  }\n}\n",
+      "artifact:g1-descriptor": "{\n  \"capabilities\": [\n    \"contract: data-artifact/v0\"\n  ],\n  \"artifact_id\": \"artifact:example-data\",\n  \"lifecycle\": \"complete\",\n  \"producer\": {\n    \"name\": \"snapshot-fixture\",\n    \"version\": \"1.0.0\",\n    \"profile\": \"example.index-logical/v0\"\n  },\n  \"grains\": [\n    {\n      \"id\": \"objects\",\n      \"kind\": \"record_stream\",\n      \"record_kind\": \"object-inventory/v0\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\"\n    }\n  ],\n  \"representations\": [\n    {\n      \"id\": \"logical-rows\",\n      \"grain\": \"objects\",\n      \"role\": \"audit_stream\",\n      \"format\": \"ndjson\",\n      \"profile\": \"example.index-logical/v0\",\n      \"uri\": \"artifact:g1-manifest\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\",\n      \"read_path\": {\n        \"range_readable\": false,\n        \"sharded\": true,\n        \"appendable\": false,\n        \"scan_capabilities\": [],\n        \"read_path_granularity\": \"artifact\",\n        \"gateable_unit_granularity\": \"artifact\",\n        \"sidecar_required\": true,\n        \"physical_ordering\": \"manifest_order\"\n      },\n      \"protection_enforceable_granularity\": \"artifact\"\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\",\n    \"default_export_class\": \"restricted\",\n    \"profile_ref\": \"profile:logical-projection\"\n  }\n}\n",
+      "artifact:g1-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-1\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-1\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g1-descriptor\",\n    \"sha256\": \"e3a37fe24ca6b5acc406f32e07954ae51ef7a73bf7a13725fc2d3e2f3c6b38fc\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-1\",\n    \"ref\": \"artifact:g1-manifest\",\n    \"sha256\": \"0ec6c9c8e116531138e514ed0b2474afd91af09cd2a88305ef2ce03034963ca1\",\n    \"byte_length\": 1780\n  }\n}\n",
+      "artifact:g2-metadata": "{\n  \"capabilities\": [\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"index_metadata\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-2\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"row_profile\": \"object-inventory/v0\",\n  \"encoding_profile\": \"parquet-inventory/v0\",\n  \"mode\": \"enrich\",\n  \"generation\": 2,\n  \"parent\": {\n    \"selection\": {\n      \"namespace_id\": \"set-example\",\n      \"snapshot_id\": \"snapshot-1\",\n      \"artifact_id\": \"artifact:example-data\"\n    },\n    \"publication\": {\n      \"id\": \"publication-1\",\n      \"ref\": \"artifact:g1-publication\",\n      \"sha256\": \"ef5fbcb5562c1be9eddf7e99d6afcc69ded30b59ccfed8c7c115ab48d60efcb0\",\n      \"byte_length\": 917\n    }\n  },\n  \"plan\": {\n    \"id\": \"set-example\",\n    \"ref\": \"artifact:plan\",\n    \"sha256\": \"7556d7f77243c2831e6a47210951d151f4ba945bfa07c010316dca1f9c78e71a\",\n    \"byte_length\": 305\n  },\n  \"plan_digest\": \"78df561c81e1c50a5744a7e91d5172320f772c6fce93166cca1cfa5e8c3df4e5\",\n  \"effective_scope_count\": 2,\n  \"coverage\": [\n    {\n      \"id\": \"coverage-1-0\",\n      \"ref\": \"artifact:g1-coverage-0\",\n      \"sha256\": \"8292a56014172d834fe751d8c4a56aa4a60f6d05f8b81ea26df77999e6a53d31\",\n      \"byte_length\": 820\n    },\n    {\n      \"id\": \"coverage-1-1\",\n      \"ref\": \"artifact:g1-coverage-1\",\n      \"sha256\": \"b9861d247d0d0c84a6d64cdd0ec95a3861998591d576b014685ade381a212f76\",\n      \"byte_length\": 819\n    }\n  ],\n  \"admission\": \"inherited\",\n  \"loss_acknowledgment\": null,\n  \"observation_at\": null,\n  \"retained_unobserved_rows\": 2\n}\n",
+      "artifact:g2-member-0": "{\"namespace\":\"objects\",\"key\":\"alpha/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[{\"name\":\"content-type\",\"value\":\"application/xml\",\"operation\":\"head\",\"observed_at\":\"2026-10-18T02:00:00.000000000Z\",\"against_revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"}}]}\n",
+      "artifact:g2-member-1": "{\"namespace\":\"objects\",\"key\":\"beta/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"deleted\":{\"snapshot_id\":\"snapshot-1\",\"at\":\"2026-10-18T01:00:00.000000001Z\"},\"enrichments\":[]}\n",
+      "artifact:g2-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-2\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:8d92e4e088603abb61e675780318e4adc7b875525fad3a893e37546c5f42e21b\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g2-member-0\",\n      \"sha256\": \"b09443a63c366c712b1ec46716845968c9f613a158e5b6823994cda91c53d82e\",\n      \"byte_length\": 590,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g2-member-1\",\n      \"sha256\": \"85061f89ec97f767d6b46cea35510b08a9095c11029985e410ccd9e3350569e5\",\n      \"byte_length\": 481,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-2\",\n    \"ref\": \"artifact:g2-metadata\",\n    \"sha256\": \"5f0bafe2dc6725d30a1f396e5c6946ebf82cedaf2a4ef58eee1bc7e070857163\",\n    \"byte_length\": 1520\n  }\n}\n",
+      "artifact:g2-descriptor": "{\n  \"capabilities\": [\n    \"contract: data-artifact/v0\"\n  ],\n  \"artifact_id\": \"artifact:example-data\",\n  \"lifecycle\": \"complete\",\n  \"producer\": {\n    \"name\": \"snapshot-fixture\",\n    \"version\": \"1.0.0\",\n    \"profile\": \"example.index-logical/v0\"\n  },\n  \"grains\": [\n    {\n      \"id\": \"objects\",\n      \"kind\": \"record_stream\",\n      \"record_kind\": \"object-inventory/v0\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\"\n    }\n  ],\n  \"representations\": [\n    {\n      \"id\": \"logical-rows\",\n      \"grain\": \"objects\",\n      \"role\": \"audit_stream\",\n      \"format\": \"ndjson\",\n      \"profile\": \"example.index-logical/v0\",\n      \"uri\": \"artifact:g2-manifest\",\n      \"row_count\": 2,\n      \"field_catalog_ref\": \"artifact:index-catalog\",\n      \"read_path\": {\n        \"range_readable\": false,\n        \"sharded\": true,\n        \"appendable\": false,\n        \"scan_capabilities\": [],\n        \"read_path_granularity\": \"artifact\",\n        \"gateable_unit_granularity\": \"artifact\",\n        \"sidecar_required\": true,\n        \"physical_ordering\": \"manifest_order\"\n      },\n      \"protection_enforceable_granularity\": \"artifact\"\n    }\n  ],\n  \"protection\": {\n    \"default_action\": \"block_export\",\n    \"default_export_class\": \"restricted\",\n    \"profile_ref\": \"profile:logical-projection\"\n  }\n}\n",
+      "artifact:g2-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-2\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-2\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g2-descriptor\",\n    \"sha256\": \"7f5d9168cfd9fff02c8c5c2ca30741f58635b53063fce77ec73533c20be276a4\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-2\",\n    \"ref\": \"artifact:g2-manifest\",\n    \"sha256\": \"5dbd6de33bfc663ba1b135bf382282720293810822ca7cf138acddb5337efc04\",\n    \"byte_length\": 1780\n  }\n}\n"
+    },
+    "source_evidence": {
+      "snapshot-0": {
+        "observations": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null
+          },
+          {
+            "namespace": "objects",
+            "key": "beta/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null
+          }
+        ],
+        "enumerated": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one"
+          },
+          {
+            "namespace": "objects",
+            "key": "beta/one"
+          }
+        ],
+        "discovery_complete": true,
+        "admitted_parent_sha256": null,
+        "enrichments": []
+      },
+      "snapshot-1": {
+        "observations": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one",
+            "revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            },
+            "size_bytes": 12,
+            "last_modified": null,
+            "storage_class": null
+          }
+        ],
+        "enumerated": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one"
+          }
+        ],
+        "discovery_complete": true,
+        "admitted_parent_sha256": "dd1df94b27410a60e32c7e67944f99b4e23e5f92ce92fb864880ef6a18c8f55b",
+        "enrichments": []
+      },
+      "snapshot-2": {
+        "observations": [],
+        "enumerated": [],
+        "discovery_complete": true,
+        "admitted_parent_sha256": "ef5fbcb5562c1be9eddf7e99d6afcc69ded30b59ccfed8c7c115ab48d60efcb0",
+        "enrichments": [
+          {
+            "namespace": "objects",
+            "key": "alpha/one",
+            "attribute": {
+              "name": "content-type",
+              "value": "application/xml",
+              "operation": "head",
+              "observed_at": "2026-10-18T02:00:00.000000000Z",
+              "against_revision": {
+                "kind": "opaque-etag",
+                "value": "r1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "request_export": false
+  },
+  "expected": {
+    "rows": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "deleted": null,
+        "enrichments": [
+          {
+            "name": "content-type",
+            "value": "application/xml",
+            "operation": "head",
+            "observed_at": "2026-10-18T02:00:00.000000000Z",
+            "against_revision": {
+              "kind": "opaque-etag",
+              "value": "r1"
+            }
+          }
+        ]
+      },
+      {
+        "namespace": "objects",
+        "key": "beta/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": null,
+        "storage_class": null,
+        "first_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_seen": {
+          "snapshot_id": "snapshot-0",
+          "at": "2026-10-18T00:00:00.000000000Z"
+        },
+        "last_changed": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "deleted": {
+          "snapshot_id": "snapshot-1",
+          "at": "2026-10-18T01:00:00.000000001Z"
+        },
+        "enrichments": []
+      }
+    ],
+    "retained_unobserved_rows": 2,
+    "generation": 2,
+    "protection": {
+      "action": "block_export",
+      "class": "restricted"
+    },
+    "evidence_scope": "logical_projection"
+  }
+}

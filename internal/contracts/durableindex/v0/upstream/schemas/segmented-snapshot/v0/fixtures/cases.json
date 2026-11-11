@@ -1,0 +1,206 @@
+{
+  "description": "Each case starts from the exact committed base graph. rebind emits a new byte-consistent test graph before checking the intended semantic fault. Physical-integrity cases deliberately do not rebind.",
+  "cases": [
+    { "name": "row-schema-minimum-accepted", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value", "minimum"], "value": 1 }
+    ] },
+    { "name": "row-schema-minimum-rejected", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value", "minimum"], "value": 3 }
+    ] },
+    { "name": "different-namespace-same-artifact", "expect": "pass", "rebind": true,
+      "selection": { "namespace_id": "other-store", "snapshot_id": "snapshot-1", "artifact_id": "artifact:example-data" },
+      "subject_uri": "snapshot:b001076e0eea9148f64b0c3f1896c88c72ebca7b1e5eaf7a18878daf9799301e", "edits": [] },
+    { "name": "different-snapshot-same-artifact", "expect": "pass", "rebind": true,
+      "selection": { "namespace_id": "example-store", "snapshot_id": "snapshot-2", "artifact_id": "artifact:example-data" },
+      "subject_uri": "snapshot:080668993e4f5b9dd22c1c99f69ba27941fb3f55e4d0c93126788cc7cdbb0829", "edits": [] },
+    { "name": "subject-framing-ab-c", "expect": "pass", "rebind": true,
+      "selection": { "namespace_id": "ab", "snapshot_id": "c", "artifact_id": "artifact:example-data" },
+      "subject_uri": "snapshot:172703ae526967b42aba7ed1cfe87888686db1d12d07c2d4f422a63076f29cdd", "edits": [] },
+    { "name": "subject-framing-a-bc", "expect": "pass", "rebind": true,
+      "selection": { "namespace_id": "a", "snapshot_id": "bc", "artifact_id": "artifact:example-data" },
+      "subject_uri": "snapshot:1e25eae28a24ad59958286372ec14148a64bea6feb96af144804e0386b957038", "edits": [] },
+    { "name": "catalog-identity-distinct-from-reference", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:catalog", "op": "set", "path": ["id"], "value": "catalog:records" },
+      { "target": "artifact:manifest", "op": "set", "path": ["field_catalog", "id"], "value": "catalog:records" },
+      { "target": "artifact:descriptor", "op": "set", "path": ["grains", 0, "field_catalog_ref"], "value": "catalog:records" },
+      { "target": "artifact:descriptor", "op": "set", "path": ["representations", 0, "field_catalog_ref"], "value": "catalog:records" }
+    ] },
+    { "name": "local-row-schema-reference", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["$defs"], "value": { "value": { "type": "integer" } } },
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value"], "value": { "$ref": "#/$defs/value" } }
+    ] },
+    { "name": "inert-ref-in-annotation", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["examples"], "value": [{ "$ref": "https://example.invalid/inert-annotation" }] }
+    ] },
+    { "name": "dangling-local-row-schema-reference", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value"], "value": { "$ref": "#/$defs/missing" } }
+    ] },
+    { "name": "unknown-row-schema-dialect", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["$schema"], "value": "https://example.invalid/unknown-dialect" }
+    ] },
+    { "name": "external-row-schema-reference", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value"], "value": { "$ref": "https://example.invalid/external-schema" } }
+    ] },
+    { "name": "unsupported-recursive-schema-reference", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["$recursiveRef"], "value": "https://example.invalid/external-schema" }
+    ] },
+    { "name": "schema-reference-to-annotation", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["examples"], "value": [{ "type": "integer" }] },
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value"], "value": { "$ref": "#/examples/0" } }
+    ] },
+    { "name": "malformed-row-schema", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:row-schema", "op": "set", "path": ["properties", "value", "type"], "value": "not-a-json-type" }
+    ] },
+    { "name": "hash-consistent-invalid-ndjson", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:member-a", "op": "raw", "value": "not JSON\n" }
+    ] },
+    { "name": "hash-consistent-wrong-field-type", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:member-a", "op": "raw", "value": "{\"key\":\"a\",\"value\":\"wrong\"}\n" }
+    ] },
+    { "name": "hash-consistent-duplicate-row-key", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:member-b", "op": "raw", "value": "{\"key\":\"a\",\"value\":2}\n" }
+    ] },
+    { "name": "hash-consistent-row-order-error", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:member-a", "op": "raw", "value": "{\"key\":\"z\",\"value\":1}\n" }
+    ] },
+    { "name": "hash-consistent-duplicate-json-member", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:member-a", "op": "raw", "value": "{\"key\":\"a\",\"value\":1,\"value\":2}\n" }
+    ] },
+    { "name": "exact-member-limits", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["limits", "max_members"], "value": 2 },
+      { "target": "artifact:profile", "op": "set", "path": ["limits", "max_member_bytes"], "value": 22 }
+    ] },
+    { "name": "exact-metadata-limit", "expect": "pass", "rebind": true, "metadata_limit": 0, "edits": [] },
+    { "name": "one-byte-below-metadata-limit", "expect": "SEM-S08", "rebind": true, "metadata_limit": -1, "edits": [] },
+    { "name": "advertised-provisional-output", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["streaming"], "value": "provisional_until_terminal" },
+      { "target": "artifact:result", "op": "set", "path": ["outcome"], "value": "incomplete_read" },
+      { "target": "artifact:result", "op": "set", "path": ["output_state"], "value": "provisional" }
+    ] },
+    { "name": "retention-spec-bound", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["retention"], "value": "profile_defined" },
+      { "target": "artifact:profile", "op": "set", "path": ["retention_spec"], "value": { "id": "example.retention/v0", "ref": "artifact:retention-spec", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "byte_length": 0 } }
+    ] },
+    { "name": "complete-lifecycle", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:descriptor", "op": "set", "path": ["lifecycle"], "value": "complete" }
+    ] },
+    { "name": "empty-snapshot", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["members"], "value": [] },
+      { "target": "artifact:manifest", "op": "set", "path": ["physical_row_count"], "value": 0 },
+      { "target": "artifact:descriptor", "op": "set", "path": ["grains", 0, "row_count"], "value": 0 },
+      { "target": "artifact:descriptor", "op": "set", "path": ["representations", 0, "row_count"], "value": 0 },
+      { "target": "artifact:result", "op": "set", "path": ["verified_member_ids"], "value": [] },
+      { "target": "artifact:result", "op": "remove", "path": ["coverage_attestation"] }
+    ] },
+    { "name": "subset-count", "expect": "pass", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["count_relations"], "value": ["equal", "subset"] },
+      { "target": "artifact:manifest", "op": "set", "path": ["count_relation"], "value": "subset" },
+      { "target": "artifact:descriptor", "op": "set", "path": ["grains", 0, "row_count"], "value": 3 }
+    ] },
+    { "name": "selective-check-does-not-certify-other-members", "expect": "pass", "edits": [
+      { "target": "request", "op": "set", "path": ["operation"], "value": "selective_verify" },
+      { "target": "request", "op": "set", "path": ["scope"], "value": "selected_members" },
+      { "target": "request", "op": "set", "path": ["member_ids"], "value": ["member-a"] },
+      { "target": "artifact:result", "op": "set", "path": ["operation"], "value": "selective_verify" },
+      { "target": "artifact:result", "op": "set", "path": ["scope"], "value": "selected_members" },
+      { "target": "artifact:result", "op": "set", "path": ["requested_member_ids"], "value": ["member-a"] },
+      { "target": "artifact:result", "op": "set", "path": ["verified_member_ids"], "value": ["member-a"] },
+      { "target": "artifact:member-b", "op": "raw", "value": "corrupted unselected bytes\n" }
+    ] },
+    { "name": "failed-read-with-verified-prefix", "expect": "pass", "edits": [
+      { "target": "artifact:result", "op": "set", "path": ["outcome"], "value": "incomplete_read" },
+      { "target": "artifact:result", "op": "set", "path": ["verified_member_ids"], "value": ["member-a"] },
+      { "target": "artifact:member-b", "op": "omit" }
+    ] },
+    { "name": "wrong-namespace", "expect": "SEM-S01", "edits": [
+      { "target": "request", "op": "set", "path": ["selection", "namespace_id"], "value": "other-store" }
+    ] },
+    { "name": "manifest-selection-substitution", "expect": "SEM-S01", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["selection", "snapshot_id"], "value": "snapshot-2" }
+    ] },
+    { "name": "untrusted-profile-binding", "expect": "SEM-S07", "edits": [
+      { "target": "request", "op": "set", "path": ["profile", "id"], "value": "other.profile/v0" }
+    ] },
+    { "name": "duplicate-member-id", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["members", 1, "id"], "value": "member-a" }
+    ] },
+    { "name": "duplicate-member-reference", "expect": "SEM-S03", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["members", 1, "ref"], "value": "artifact:member-a" }
+    ] },
+    { "name": "missing-required-member", "expect": "SEM-S02", "edits": [
+      { "target": "artifact:member-b", "op": "omit" }
+    ] },
+    { "name": "changed-member-bytes", "expect": "SEM-S02", "edits": [
+      { "target": "artifact:member-a", "op": "raw", "value": "{\"key\":\"a\",\"value\":9}\n" }
+    ] },
+    { "name": "equivalent-manifest-reencoding", "expect": "SEM-S02", "edits": [
+      { "target": "artifact:manifest", "op": "reencode" }
+    ] },
+    { "name": "changed-schema-bytes-same-id", "expect": "SEM-S02", "edits": [
+      { "target": "artifact:row-schema", "op": "reencode" }
+    ] },
+    { "name": "wrong-row-schema-identity", "expect": "SEM-S01", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["row_schema", "schema_id"], "value": "contract:other/v0/rows.schema.json" }
+    ] },
+    { "name": "row-count-mismatch", "expect": "SEM-S04", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["physical_row_count"], "value": 3 }
+    ] },
+    { "name": "publication-of-draft-descriptor", "expect": "SEM-S05", "rebind": true, "edits": [
+      { "target": "artifact:descriptor", "op": "set", "path": ["lifecycle"], "value": "draft" }
+    ] },
+    { "name": "wrong-snapshot-coverage", "expect": "SEM-S06", "rebind": true, "edits": [
+      { "target": "artifact:coverage", "op": "set", "path": ["subject", "subject_uri"], "value": "snapshot:0000000000000000000000000000000000000000000000000000000000000000" }
+    ] },
+    { "name": "wrong-manifest-coverage-subject", "expect": "SEM-S06", "rebind": true, "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["coverage_subject_uri"], "value": "snapshot:0000000000000000000000000000000000000000000000000000000000000000" }
+    ] },
+    { "name": "unsupported-lookup-is-not-empty-success", "expect": "SEM-S07", "edits": [
+      { "target": "request", "op": "set", "path": ["operation"], "value": "key_lookup" }
+    ] },
+    { "name": "member-count-budget", "expect": "SEM-S08", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["limits", "max_members"], "value": 1 }
+    ] },
+    { "name": "metadata-byte-budget", "expect": "SEM-S08", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["limits", "max_metadata_bytes"], "value": 1 }
+    ] },
+    { "name": "member-byte-budget", "expect": "SEM-S08", "rebind": true, "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["limits", "max_member_bytes"], "value": 1 }
+    ] },
+    { "name": "incomplete-verification-claimed-success", "expect": "SEM-S09", "edits": [
+      { "target": "artifact:result", "op": "set", "path": ["verified_member_ids"], "value": ["member-a"] }
+    ] },
+    { "name": "verification-scope-inflation", "expect": "SEM-S09", "edits": [
+      { "target": "request", "op": "set", "path": ["operation"], "value": "selective_verify" },
+      { "target": "request", "op": "set", "path": ["scope"], "value": "selected_members" },
+      { "target": "request", "op": "set", "path": ["member_ids"], "value": ["member-a"] }
+    ] },
+    { "name": "unadvertised-provisional-output", "expect": "SEM-S10", "edits": [
+      { "target": "artifact:result", "op": "set", "path": ["outcome"], "value": "incomplete_read" },
+      { "target": "artifact:result", "op": "set", "path": ["output_state"], "value": "provisional" }
+    ] },
+    { "name": "missing-capability", "expect": "structural_rejection", "structural_target": "artifact:publication", "edits": [
+      { "target": "artifact:publication", "op": "set", "path": ["capabilities"], "value": [] }
+    ] },
+    { "name": "unknown-required-dependency", "expect": "structural_rejection", "structural_target": "artifact:manifest", "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["required_parent"], "value": "snapshot-0" }
+    ] },
+    { "name": "unsafe-physical-reference", "expect": "structural_rejection", "structural_target": "artifact:manifest", "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["members", 0, "ref"], "value": "https://example.invalid/segment" }
+    ] },
+    { "name": "negative-count", "expect": "structural_rejection", "structural_target": "artifact:manifest", "edits": [
+      { "target": "artifact:manifest", "op": "set", "path": ["physical_row_count"], "value": -1 }
+    ] },
+    { "name": "incomplete-publication-shape", "expect": "structural_rejection", "structural_target": "artifact:publication", "edits": [
+      { "target": "artifact:publication", "op": "set", "path": ["state"], "value": "building" }
+    ] },
+    { "name": "retention-without-protocol", "expect": "structural_rejection", "structural_target": "artifact:profile", "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["retention"], "value": "profile_defined" }
+    ] },
+    { "name": "unknown-operation", "expect": "structural_rejection", "structural_target": "artifact:profile", "edits": [
+      { "target": "artifact:profile", "op": "set", "path": ["operations"], "value": ["magic_lookup"] }
+    ] },
+    { "name": "provisional-success", "expect": "structural_rejection", "structural_target": "artifact:result", "edits": [
+      { "target": "artifact:result", "op": "set", "path": ["output_state"], "value": "provisional" }
+    ] }
+  ]
+}

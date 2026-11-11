@@ -1,0 +1,39 @@
+{
+  "capabilities": ["contract: durable-index/v0"],
+  "kind": "index_cutover",
+  "old": {
+    "selection": {
+      "namespace_id": "set-example",
+      "snapshot_id": "snapshot-1",
+      "artifact_id": "artifact:example-data"
+    },
+    "publication": {
+      "id": "publication-old",
+      "ref": "artifact:old-publication",
+      "sha256": "206a8632af4c65451fbed28b2897b8b188d9102ae3bd80c10a37933631e3b649",
+      "byte_length": 900
+    }
+  },
+  "new": {
+    "selection": {
+      "namespace_id": "set-new",
+      "snapshot_id": "snapshot-new",
+      "artifact_id": "artifact:example-data"
+    },
+    "publication": {
+      "id": "publication-new",
+      "ref": "artifact:new-publication",
+      "sha256": "68c5dccc6d4d1f8d195409e3a6b9e10e2386ee6335c9aed04e1a2d3fad6be8fc",
+      "byte_length": 903
+    }
+  },
+  "authorized_by": "operator-example",
+  "accepted_at": "2026-10-18T02:00:00.000000000Z",
+  "rollback": {
+    "id": "publication-old",
+    "ref": "artifact:old-publication",
+    "sha256": "206a8632af4c65451fbed28b2897b8b188d9102ae3bd80c10a37933631e3b649",
+    "byte_length": 900
+  },
+  "extra": true
+}

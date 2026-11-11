@@ -1,0 +1,12 @@
+{
+  "capabilities": ["contract: coverage-attestation/v0"],
+  "attestation_id": "attestation-1",
+  "subject": { "artifact_id": "artifact:example-data", "grain_id": "records", "subject_uri": "snapshot:66b50835bfb9276ed12d774aeceee04c8bd289c8868a798c78b42615f17c62a4" },
+  "emitter": { "name": "fixture-verifier", "version": "1.0.0", "relation": "independent" },
+  "as_of": "2026-09-30T00:00:00Z",
+  "coverage_state": "partial",
+  "claims": [
+    { "scope": { "partition": { "id": "opaque:partition-1" } }, "basis": "confirmed", "method": "enumerated", "volume": { "unit": "records", "observed": 2 } }
+  ],
+  "protection": { "default_action": "block_export" }
+}

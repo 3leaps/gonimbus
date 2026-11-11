@@ -1,0 +1,23 @@
+{
+  "input": {
+    "mode": "baseline",
+    "set_id": "set-example",
+    "snapshot_id": "snapshot-1",
+    "generation": 0,
+    "observation_at": "2026-10-18T01:00:00.000000001Z",
+    "discovery_complete": true,
+    "parent": null,
+    "admitted_parent_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "scopes": [],
+    "acknowledgment": null,
+    "observations": [],
+    "absence_authority": [],
+    "enrichments": []
+  },
+  "expected": {
+    "rows": [],
+    "admission": "baseline_not_compared",
+    "retained_unobserved_rows": 0
+  },
+  "runner": "transitions"
+}

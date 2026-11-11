@@ -1,0 +1,159 @@
+{
+  "cases": [
+    {
+      "name": "bound-metadata",
+      "expect": "pass"
+    },
+    {
+      "name": "missing-metadata",
+      "expect": "SEM-S02",
+      "after_binding": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "omit"
+        }
+      ]
+    },
+    {
+      "name": "changed-metadata-bytes",
+      "expect": "SEM-S02",
+      "after_binding": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "reencode"
+        }
+      ]
+    },
+    {
+      "name": "wrong-metadata-id",
+      "expect": "SEM-S01",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["metadata_id"],
+          "value": "other"
+        }
+      ]
+    },
+    {
+      "name": "wrong-selection",
+      "expect": "SEM-S01",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["selection", "snapshot_id"],
+          "value": "snapshot-2"
+        }
+      ]
+    },
+    {
+      "name": "unsupported-kind",
+      "expect": "SEM-S07",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["kind"],
+          "value": "unrecognized"
+        }
+      ]
+    },
+    {
+      "name": "unknown-dependency",
+      "expect": "SEM-S07",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["dependencies"],
+          "value": []
+        }
+      ]
+    },
+    {
+      "name": "unsupported-profile",
+      "expect": "SEM-S07",
+      "edits": [
+        {
+          "target": "artifact:profile",
+          "op": "set",
+          "path": ["semantic_spec", "id"],
+          "value": "unknown/v0"
+        }
+      ]
+    },
+    {
+      "name": "exact-metadata-budget",
+      "expect": "pass",
+      "metadata_limit": 0
+    },
+    {
+      "name": "one-byte-over-metadata-budget",
+      "expect": "SEM-S08",
+      "metadata_limit": -1
+    },
+    {
+      "name": "required-metadata-edge-omitted",
+      "expect": "SEM-S03",
+      "edits": [
+        {
+          "target": "artifact:manifest",
+          "op": "remove",
+          "path": ["profile_metadata"]
+        }
+      ]
+    },
+    {
+      "name": "metadata-member-alias",
+      "expect": "SEM-S03",
+      "edits": [
+        {
+          "target": "artifact:manifest",
+          "op": "set",
+          "path": ["members", 0, "ref"],
+          "value": "artifact:profile-metadata"
+        }
+      ]
+    },
+    {
+      "name": "undeclared-transitive-dependency",
+      "expect": "SEM-S07",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["dependencies"],
+          "value": [
+            {
+              "ref": "artifact:unknown",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "byte_length": 1,
+              "id": "unknown"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "metadata-self-cycle",
+      "expect": "SEM-S07",
+      "edits": [
+        {
+          "target": "artifact:profile-metadata",
+          "op": "set",
+          "path": ["dependencies"],
+          "value": [
+            {
+              "ref": "artifact:profile-metadata",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "byte_length": 1,
+              "id": "metadata-1"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

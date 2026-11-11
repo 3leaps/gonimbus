@@ -1,0 +1,19 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/ack-retains-omitted-row.json",
+  "replace": {
+    "absence_authority": [
+      {
+        "namespace": "objects",
+        "prefix": "alpha/"
+      },
+      {
+        "namespace": "objects",
+        "prefix": "gamma/"
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "coverage_outside_plan"
+  }
+}

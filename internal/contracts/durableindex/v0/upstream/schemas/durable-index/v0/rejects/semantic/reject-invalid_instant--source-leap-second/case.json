@@ -1,0 +1,22 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/ack-retains-omitted-row.json",
+  "replace": {
+    "observations": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "revision": {
+          "kind": "opaque-etag",
+          "value": "r1"
+        },
+        "size_bytes": 12,
+        "last_modified": "2026-10-18T00:00:60.000000000Z",
+        "storage_class": null
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "invalid_instant"
+  }
+}

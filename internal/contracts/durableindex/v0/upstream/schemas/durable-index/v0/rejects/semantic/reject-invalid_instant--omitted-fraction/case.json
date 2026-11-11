@@ -1,0 +1,10 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/observe-and-tombstone.json",
+  "replace": {
+    "observation_at": "2026-10-18T01:00:00Z"
+  },
+  "expected": {
+    "refusal": "invalid_instant"
+  }
+}

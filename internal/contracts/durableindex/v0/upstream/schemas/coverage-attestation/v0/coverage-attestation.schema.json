@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contract:coverage-attestation/v0/coverage-attestation.schema.json",
+  "title": "Coverage Attestation",
+  "description": "Structural schema companion for contract: coverage-attestation/v0 (PROPOSED — see ADR-0004). An independent, supersedable claim about what an artifact or scoped subject actually covers. Completeness is asserted per scope claim; absence of an attestation is never itself a claim. Behavioral rules (fail-open-but-honest presence, fail-loud malformation, protection of scope boundary values) are enforced by consumers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capabilities",
+    "attestation_id",
+    "subject",
+    "emitter",
+    "as_of",
+    "coverage_state",
+    "claims",
+    "protection"
+  ],
+  "properties": {
+    "capabilities": {
+      "type": "array",
+      "description": "Host-less capability tokens. Must include the exact opaque coverage-attestation contract token.",
+      "items": { "type": "string" },
+      "contains": { "const": "contract: coverage-attestation/v0" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "attestation_id": {
+      "type": "string",
+      "description": "Attestation identity. UUID URNs are recommended for generated attestations.",
+      "minLength": 1
+    },
+    "supersedes": {
+      "type": "string",
+      "description": "attestation_id of a prior attestation over the same subject that this one replaces (late-arrival re-attestation).",
+      "minLength": 1
+    },
+    "subject": {
+      "type": "object",
+      "description": "What is being attested. Prefer artifact_id linkage to a data-artifact/v0 descriptor; subject_uri supports non-descriptor subjects during adoption.",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "grain_id": { "type": "string", "minLength": 1 },
+        "subject_uri": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [{ "required": ["artifact_id"] }, { "required": ["subject_uri"] }]
+    },
+    "emitter": {
+      "type": "object",
+      "description": "Who is making the claim. relation distinguishes a producer self-claim from an independent verifier/reconciler; one designated emitter per subject reconciles rather than re-derives.",
+      "additionalProperties": false,
+      "required": ["name", "relation"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "relation": { "enum": ["producer", "independent"] }
+      }
+    },
+    "as_of": {
+      "type": "string",
+      "description": "When the assessment was made (ISO-8601). Later as_of over the same subject supersedes, in combination with supersedes.",
+      "format": "date-time"
+    },
+    "coverage_state": {
+      "description": "Overall assessment across the claims. unknown is an honest verdict, not a default — a subject with no attestation has NO coverage_state.",
+      "enum": ["complete", "partial", "unknown"]
+    },
+    "claims": {
+      "type": "array",
+      "description": "Per-scope coverage claims. Each claim carries its own basis and method; a single attestation may mix confirmed and inferred scopes.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "basis", "method"],
+        "properties": {
+          "scope": { "$ref": "#/$defs/scope" },
+          "basis": {
+            "description": "confirmed = positively verified against an authoritative enumeration; inferred = derived from indirect evidence. Consumers making destructive decisions MUST distinguish these.",
+            "enum": ["confirmed", "inferred"]
+          },
+          "method": {
+            "enum": ["enumerated", "reconciled", "derived", "declared"]
+          },
+          "volume": {
+            "type": "object",
+            "description": "Quantitative coverage. Presence alone is insufficient — a scope can be present yet volume-deficient.",
+            "additionalProperties": false,
+            "required": ["unit", "observed"],
+            "properties": {
+              "unit": { "type": "string", "minLength": 1 },
+              "observed": { "type": "number", "minimum": 0 },
+              "expected": { "type": "number", "minimum": 0 }
+            }
+          },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Explicitly known-uncovered scopes. Honest gaps here are what keeps fail-open presence trustworthy.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "scope"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable reason for the uncovered scope. Codes are an open vocabulary owned by the emitting profile; consumers may preserve unknown codes but must not infer semantics from note text.",
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+          },
+          "scope": { "$ref": "#/$defs/scope" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "protection": {
+      "type": "object",
+      "description": "Attestations inherit the most-restrictive export class of their subject and start from block_export. Scope boundary values (partition values, prefixes) are export-classed content; publish raw boundary values only when the effective export class permits it, otherwise use opaque scope tokens.",
+      "additionalProperties": false,
+      "required": ["default_action"],
+      "properties": {
+        "default_action": { "const": "block_export" }
+      }
+    }
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "description": "A bounded slice of the subject: partition key/values, a time window, and/or a key prefix. At least one bound is required. Partition and prefix values are content; use opaque tokens unless the effective export class permits raw values.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "partition": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string", "minLength": 1 },
+            "to": { "type": "string", "minLength": 1 }
+          }
+        },
+        "prefix": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

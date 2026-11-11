@@ -1,0 +1,10 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/observe-and-tombstone.json",
+  "replace": {
+    "admitted_parent_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "expected": {
+    "refusal": "stale_parent"
+  }
+}

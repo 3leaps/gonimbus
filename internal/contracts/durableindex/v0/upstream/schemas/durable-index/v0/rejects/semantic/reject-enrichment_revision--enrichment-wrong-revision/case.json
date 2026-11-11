@@ -1,0 +1,25 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/enrichment-only.json",
+  "replace": {
+    "enrichments": [
+      {
+        "namespace": "objects",
+        "key": "alpha/one",
+        "attribute": {
+          "name": "content.type",
+          "value": "text/plain",
+          "operation": "head",
+          "observed_at": "2026-10-18T01:00:00.000000001Z",
+          "against_revision": {
+            "kind": "opaque-etag",
+            "value": "wrong"
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "refusal": "enrichment_revision"
+  }
+}

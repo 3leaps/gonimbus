@@ -1,0 +1,71 @@
+{
+  "capabilities": ["contract: data-artifact/v0"],
+  "artifact_id": "urn:uuid:00000000-0000-7000-8000-000000000203",
+  "lifecycle": "draft",
+  "producer": {
+    "name": "profile-extension-witness",
+    "version": "1.0.0",
+    "profile": "example.profile-extension/v0",
+    "run_id": "00000000-0000-7000-8000-000000000303"
+  },
+  "grains": [
+    {
+      "id": "events",
+      "kind": "example.profile-extension/event_log",
+      "record_kind": "example.event",
+      "row_count": 1,
+      "field_catalog_ref": "fields/events.fields.json"
+    }
+  ],
+  "representations": [
+    {
+      "id": "events_native",
+      "grain": "events",
+      "role": "example.profile-extension/replay_stream",
+      "format": "example.profile-extension/native-jsonl",
+      "profile": "example.profile-extension/v0",
+      "uri": "events/native.jsonl",
+      "row_count": 1,
+      "field_catalog_ref": "fields/events.fields.json",
+      "read_path": {
+        "range_readable": false,
+        "partitioned": false,
+        "sharded": false,
+        "appendable": true,
+        "scan_capabilities": ["random_access"],
+        "read_path_granularity": "artifact",
+        "gateable_unit_granularity": "artifact",
+        "sidecar_required": false,
+        "physical_ordering": "producer_defined"
+      },
+      "protection_enforceable_granularity": "artifact",
+      "format_options": {
+        "example.profile-extension/v0": {
+          "framing": "newline-delimited"
+        }
+      }
+    }
+  ],
+  "field_catalogs": [
+    {
+      "id": "fields/events.fields.json",
+      "grain": "events",
+      "fields": [
+        {
+          "name": "event_type",
+          "type": "string",
+          "required": true,
+          "semantic_role": "category",
+          "sensitivity": "public",
+          "protection_tags": ["safe_to_profile"],
+          "export_action": "allow"
+        }
+      ]
+    }
+  ],
+  "protection": {
+    "default_action": "block_export",
+    "default_export_class": "public",
+    "profile_ref": "profile:example.profile-extension"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "capability": "contract: durable-index/v0",
+  "entry_schema": "index-publication.schema.json",
+  "object_schemas": {
+    "index_plan": "index-plan.schema.json",
+    "index_row": "index-row.schema.json",
+    "index_metadata": "index-metadata.schema.json",
+    "index_cutover": "index-cutover.schema.json"
+  },
+  "status": "proposed"
+}

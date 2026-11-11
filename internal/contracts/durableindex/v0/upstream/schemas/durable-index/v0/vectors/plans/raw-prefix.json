@@ -1,0 +1,58 @@
+{
+  "set_id": "set-example",
+  "input": [
+    {
+      "namespace": "objects",
+      "prefix": "a/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "ab"
+    }
+  ],
+  "canonical": [
+    {
+      "namespace": "objects",
+      "prefix": "a/"
+    },
+    {
+      "namespace": "objects",
+      "prefix": "ab"
+    }
+  ],
+  "bytes_hex": "64757261626c652d696e6465782f76302f706c616e000000000b7365742d6578616d706c6500000002000000076f626a6563747300000002612f000000076f626a65637473000000026162",
+  "sha256": "fffc98418c77f26df50ac733cee2213f525ce690cc12709b97fda5dc28f21e21",
+  "comparisons": [
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "a"
+        }
+      ],
+      "loss": false
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "a/"
+        }
+      ],
+      "loss": true
+    },
+    {
+      "next": [
+        {
+          "namespace": "objects",
+          "prefix": "a/"
+        },
+        {
+          "namespace": "other",
+          "prefix": "ab"
+        }
+      ],
+      "loss": true
+    }
+  ]
+}

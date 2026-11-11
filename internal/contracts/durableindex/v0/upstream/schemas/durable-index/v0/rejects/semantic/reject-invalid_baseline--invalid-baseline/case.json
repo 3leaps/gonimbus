@@ -1,0 +1,10 @@
+{
+  "runner": "transitions",
+  "baseline": "vectors/transitions/explicit-baseline.json",
+  "replace": {
+    "generation": 1
+  },
+  "expected": {
+    "refusal": "invalid_baseline"
+  }
+}

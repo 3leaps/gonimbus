@@ -1,0 +1,65 @@
+{
+  "runner": "rows",
+  "baseline": "vectors/rows/two-members.json",
+  "replace": {
+    "members": [
+      [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": []
+        }
+      ],
+      [
+        {
+          "namespace": "objects",
+          "key": "alpha/one",
+          "revision": {
+            "kind": "opaque-etag",
+            "value": "r1"
+          },
+          "size_bytes": 12,
+          "last_modified": null,
+          "storage_class": null,
+          "first_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_seen": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "last_changed": {
+            "snapshot_id": "snapshot-0",
+            "at": "2026-10-18T00:00:00.000000000Z"
+          },
+          "deleted": null,
+          "enrichments": []
+        }
+      ]
+    ]
+  },
+  "expected": {
+    "refusal": "duplicate_key_row"
+  }
+}

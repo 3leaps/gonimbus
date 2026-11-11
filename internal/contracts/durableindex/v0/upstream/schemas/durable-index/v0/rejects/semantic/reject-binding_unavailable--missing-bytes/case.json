@@ -1,0 +1,9 @@
+{
+  "runner": "bindings",
+  "baseline": "vectors/bindings/baseline.json",
+  "replace": {},
+  "expected": {
+    "refusal": "binding_unavailable"
+  },
+  "omit_refs": ["artifact:plan"]
+}

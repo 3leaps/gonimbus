@@ -1,0 +1,10 @@
+{
+  "kind": "example_profile_metadata",
+  "metadata_id": "metadata-1",
+  "selection": {
+    "namespace_id": "example-store",
+    "snapshot_id": "snapshot-1",
+    "artifact_id": "artifact:example-data"
+  },
+  "label": "Synthetic profile metadata"
+}

@@ -1,0 +1,20 @@
+{
+  "runner": "graphs",
+  "baseline": "vectors/graphs/enrich.json",
+  "replace": {
+    "publication": {
+      "id": "publication-2",
+      "ref": "artifact:g2-publication",
+      "sha256": "08ca7ad6c2f3d36305dc3e54b686f007e4b4504e27dec2a3908d6a3c600491c9",
+      "byte_length": 917
+    }
+  },
+  "expected": {
+    "refusal": "graph_transition"
+  },
+  "store_overlay": {
+    "artifact:g2-member-0": "{\"namespace\":\"objects\",\"key\":\"alpha/one\",\"revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"},\"size_bytes\":12,\"last_modified\":null,\"storage_class\":null,\"first_seen\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"last_seen\":{\"snapshot_id\":\"snapshot-2\",\"at\":\"2026-10-18T02:00:00.000000000Z\"},\"last_changed\":{\"snapshot_id\":\"snapshot-0\",\"at\":\"2026-10-18T00:00:00.000000000Z\"},\"deleted\":null,\"enrichments\":[{\"name\":\"content-type\",\"value\":\"application/xml\",\"operation\":\"head\",\"observed_at\":\"2026-10-18T02:00:00.000000000Z\",\"against_revision\":{\"kind\":\"opaque-etag\",\"value\":\"r1\"}}]}\n",
+    "artifact:g2-manifest": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_manifest\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-2\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"grain_id\": \"objects\",\n  \"representation_id\": \"logical-rows\",\n  \"row_schema\": {\n    \"ref\": \"artifact:row-schema\",\n    \"sha256\": \"204018f6c64666dcb5fad6df9667ed850bbcf6a0d4c77199c82adba9df90269e\",\n    \"byte_length\": 3422,\n    \"schema_id\": \"contract:durable-index/v0/index-row.schema.json\"\n  },\n  \"field_catalog\": {\n    \"id\": \"artifact:index-catalog\",\n    \"ref\": \"artifact:catalog\",\n    \"sha256\": \"e1bd8dc404223d0b51b585f3230bb7fd6ee679257b66b1c82699ba862259789b\",\n    \"byte_length\": 1856\n  },\n  \"physical_row_count\": 2,\n  \"count_relation\": \"equal\",\n  \"physical_order\": \"manifest_order\",\n  \"coverage_subject_uri\": \"snapshot:8d92e4e088603abb61e675780318e4adc7b875525fad3a893e37546c5f42e21b\",\n  \"members\": [\n    {\n      \"id\": \"member-0\",\n      \"ref\": \"artifact:g2-member-0\",\n      \"sha256\": \"692f9263b8a4f967b6c338cb68258724f4a276d6c7bb16c24d460f6f811cb58b\",\n      \"byte_length\": 590,\n      \"row_count\": 1\n    },\n    {\n      \"id\": \"member-1\",\n      \"ref\": \"artifact:g2-member-1\",\n      \"sha256\": \"85061f89ec97f767d6b46cea35510b08a9095c11029985e410ccd9e3350569e5\",\n      \"byte_length\": 481,\n      \"row_count\": 1\n    }\n  ],\n  \"profile_metadata\": {\n    \"id\": \"snapshot-2\",\n    \"ref\": \"artifact:g2-metadata\",\n    \"sha256\": \"5f0bafe2dc6725d30a1f396e5c6946ebf82cedaf2a4ef58eee1bc7e070857163\",\n    \"byte_length\": 1520\n  }\n}\n",
+    "artifact:g2-publication": "{\n  \"capabilities\": [\n    \"contract: segmented-snapshot/v0\",\n    \"contract: durable-index/v0\"\n  ],\n  \"kind\": \"snapshot_publication\",\n  \"publication_id\": \"publication-2\",\n  \"selection\": {\n    \"namespace_id\": \"set-example\",\n    \"snapshot_id\": \"snapshot-2\",\n    \"artifact_id\": \"artifact:example-data\"\n  },\n  \"state\": \"committed\",\n  \"profile\": {\n    \"id\": \"example.index-logical/v0\",\n    \"ref\": \"artifact:logical-profile\",\n    \"sha256\": \"e4a997257c948b6151628e4965b08bfce5fee44115e508715686cdb94766896c\",\n    \"byte_length\": 702\n  },\n  \"descriptor\": {\n    \"id\": \"artifact:example-data\",\n    \"ref\": \"artifact:g2-descriptor\",\n    \"sha256\": \"7f5d9168cfd9fff02c8c5c2ca30741f58635b53063fce77ec73533c20be276a4\",\n    \"byte_length\": 1289\n  },\n  \"manifest\": {\n    \"id\": \"snapshot-2\",\n    \"ref\": \"artifact:g2-manifest\",\n    \"sha256\": \"4378a30c726684d029a8da81f43abafb175948b4f33af150a57134c748930c62\",\n    \"byte_length\": 1780\n  }\n}\n"
+  }
+}
