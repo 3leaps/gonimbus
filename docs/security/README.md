@@ -77,10 +77,12 @@ publication boundary.
 ### Pinned & digest-verified automation installs
 
 - `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` (`gonimbus`) track **latest
-  stable only**. Automation runners that gate execution by verifying the binary
-  SHA-256 against a release's signed `SHA256SUMS` should download the exact
-  tagged raw release asset into a runner-private directory (for example via
-  `sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir <runner-bin>` or
+  stable only** (with the terminal `0.4.x` build preserved as
+  `3leaps/tap/gonimbus@0.4` and `3leaps/gonimbus-0.4`). Automation runners that
+  gate execution by verifying the binary SHA-256 against a release's signed
+  `SHA256SUMS` should download the exact tagged raw release asset into a
+  runner-private directory (for example via
+  `sfetch --repo 3leaps/gonimbus --tag v0.5.0 --dest-dir <runner-bin>` or
   verified GitHub Release download) rather than relying on mutable workstation
   `PATH`, or hold workstation upgrades explicitly with `brew pin gonimbus` /
   `scoop hold gonimbus`.

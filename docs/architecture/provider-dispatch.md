@@ -84,7 +84,7 @@ GCS is the first post-S3 object-store registration through this checklist:
 through `internal/providerdispatch`, and write paths fail closed unless the
 command-requested mutating capability is present.
 
-`transfer reflow` also passes its GON-048 concurrency ceiling into object-store
+`transfer reflow` also passes its resolved concurrency ceiling into object-store
 HTTP transport sizing. For `gs://` destinations it explicitly sets the GCS
 writer chunk size to the SDK's minimum resumable-upload quantum, keeping
 destination writer memory explicit and bounded under the per-copy retry-buffer
