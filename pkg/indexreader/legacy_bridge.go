@@ -281,11 +281,16 @@ type completeV2Evidence struct {
 	Type                        string `json:"type"`
 	IndexSetID                  string `json:"index_set_id"`
 	RunID                       string `json:"run_id"`
+	GonimbusVersion             string `json:"gonimbus_version,omitempty"`
+	GonimbusCommit              string `json:"gonimbus_commit,omitempty"`
+	GonimbusVCSModified         *bool  `json:"gonimbus_vcs_modified,omitempty"`
 	SnapshotCompletedAt         string `json:"snapshot_completed_at"`
 	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics"`
 	ManifestPath                string `json:"manifest_path"`
+	ManifestRelPath             string `json:"manifest_rel_path,omitempty"`
 	ManifestSHA256              string `json:"manifest_sha256"`
 	SegmentDir                  string `json:"segment_dir"`
+	SegmentRelDir               string `json:"segment_rel_dir,omitempty"`
 	Segments                    int    `json:"segments"`
 }
 

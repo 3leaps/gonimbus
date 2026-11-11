@@ -257,6 +257,9 @@ func WriteStreamingSegmentSet(ctx context.Context, config SegmentWriterConfig, s
 			counts.Tombstones++
 		} else {
 			counts.ActiveRows++
+			if HasDotPrefixedSegment(pq.Key) {
+				counts.DotSegmentRows++
+			}
 		}
 		if pq.LastSeen.SnapshotID != "" && pq.LastSeen.SnapshotID != config.RunID {
 			counts.RetainedUnobservedRows++

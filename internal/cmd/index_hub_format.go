@@ -50,8 +50,10 @@ type durableLocalCompleteDoc struct {
 	SnapshotCompletedAt         string `json:"snapshot_completed_at,omitempty"`
 	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
 	ManifestPath                string `json:"manifest_path"`
+	ManifestRelPath             string `json:"manifest_rel_path,omitempty"`
 	ManifestSHA256              string `json:"manifest_sha256"`
 	SegmentDir                  string `json:"segment_dir"`
+	SegmentRelDir               string `json:"segment_rel_dir,omitempty"`
 	Segments                    int    `json:"segments"`
 }
 
@@ -184,11 +186,11 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 	if strings.TrimSpace(complete.ManifestPath) == "" || strings.TrimSpace(complete.SegmentDir) == "" {
 		return durableExportSnapshot{}, fmt.Errorf("local durable complete marker is missing manifest or segment path")
 	}
-	manifestPath, err := resolveLocalDurableCompleteArtifactPath(completePath, complete.ManifestPath, false)
+	manifestPath, err := resolveLocalDurableCompleteArtifactPathWithRel(completePath, complete.ManifestPath, complete.ManifestRelPath, false)
 	if err != nil {
 		return durableExportSnapshot{}, err
 	}
-	segmentDir, err := resolveLocalDurableCompleteArtifactPath(completePath, complete.SegmentDir, true)
+	segmentDir, err := resolveLocalDurableCompleteArtifactPathWithRel(completePath, complete.SegmentDir, complete.SegmentRelDir, true)
 	if err != nil {
 		return durableExportSnapshot{}, err
 	}
@@ -239,6 +241,25 @@ func loadLocalDurableSnapshotForExport(indexSetID, runID string) (durableExportS
 		SnapshotCompletedAt:         snapshotCompletedAt,
 		SnapshotCompletionSemantics: complete.SnapshotCompletionSemantics,
 	}, nil
+}
+
+func resolveLocalDurableCompleteArtifactPathWithRel(completePath, primaryRaw, relRaw string, allowDot bool) (string, error) {
+	primary, err := resolveLocalDurableCompleteArtifactPath(completePath, primaryRaw, allowDot)
+	if err != nil {
+		return "", err
+	}
+	relRaw = strings.TrimSpace(relRaw)
+	if relRaw == "" {
+		return primary, nil
+	}
+	if filepath.IsAbs(relRaw) {
+		return "", fmt.Errorf("local durable complete marker path is not a safe relative path")
+	}
+	relResolved, err := resolveLocalDurableCompleteArtifactPath(completePath, relRaw, allowDot)
+	if err != nil {
+		return "", err
+	}
+	return relResolved, nil
 }
 
 func resolveLocalDurableCompleteArtifactPath(completePath, raw string, allowDot bool) (string, error) {

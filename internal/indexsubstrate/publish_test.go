@@ -475,6 +475,7 @@ func TestReadLatestPublishedRowsRejectsDigestBoundWrongManifestIdentity(t *testi
 	complete, err := readCompleteDocFile(config.CompletePath)
 	require.NoError(t, err)
 	complete.ManifestPath = wrongManifestPath
+	complete.ManifestRelPath = "manifests/wrong-manifest.json"
 	complete.ManifestSHA256 = wrongManifestDigest
 	data, err := marshalIndentedJSON(complete)
 	require.NoError(t, err)
@@ -861,14 +862,29 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 
 	completeDoc, err := readCompleteDocFile(cfg.CompletePath)
 	require.NoError(t, err)
-	require.Equal(t, "manifest.json", completeDoc.ManifestPath)
-	require.Equal(t, ".", completeDoc.SegmentDir)
+	require.Equal(t, filepath.Clean(cfg.ManifestPath), completeDoc.ManifestPath)
+	require.Equal(t, "manifest.json", completeDoc.ManifestRelPath)
+	require.Equal(t, filepath.Clean(cfg.SegmentDir), completeDoc.SegmentDir)
+	require.Equal(t, ".", completeDoc.SegmentRelDir)
 
 	latestRaw, err := os.ReadFile(cfg.LatestPath)
 	require.NoError(t, err)
 	var latestDoc publishedLatestDoc
 	require.NoError(t, json.Unmarshal(latestRaw, &latestDoc))
-	require.Equal(t, "runs/run_portable_1/complete.json", latestDoc.CompletePath)
+	require.Equal(t, filepath.Clean(cfg.CompletePath), latestDoc.CompletePath)
+	require.Equal(t, "runs/run_portable_1/complete.json", latestDoc.CompleteRelPath)
+
+	// Copy the index set directory to a second directory on the same host while
+	// keeping the original directory intact: the copy must resolve its own
+	// relative paths inside copiedSetRoot rather than reading origSetRoot.
+	copiedSetRoot := filepath.Join(parentDir, "copied-bundle", "idx_portable")
+	require.NoError(t, os.CopyFS(copiedSetRoot, os.DirFS(origSetRoot)))
+	copiedLatestPath := filepath.Join(copiedSetRoot, "latest.json")
+	copiedSnap, err := OpenLatestPublishedSnapshot(copiedLatestPath)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(copiedSetRoot, "runs", "run_portable_1", "complete.json"), copiedSnap.CompletePath)
+	require.Equal(t, filepath.Join(copiedSetRoot, "runs", "run_portable_1", "manifest.json"), copiedSnap.ManifestPath)
+	require.Equal(t, filepath.Join(copiedSetRoot, "runs", "run_portable_1"), copiedSnap.SegmentDir)
 
 	// Relocate the entire index set directory to a new parent directory without
 	// editing complete.json, latest.json, or manifest.json.
@@ -889,16 +905,19 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 	require.Len(t, rows, 1)
 	require.Equal(t, "data/portable.xml", rows[0].RelKey)
 
-	// Verify legacy absolute paths in complete.json and latest.json remain readable.
+	// Verify legacy absolute paths in complete.json and latest.json (without *_rel_* fields) remain readable.
 	absComplete := completeDoc
 	absComplete.ManifestPath = snap.ManifestPath
+	absComplete.ManifestRelPath = ""
 	absComplete.SegmentDir = snap.SegmentDir
+	absComplete.SegmentRelDir = ""
 	absCompleteBytes, err := json.MarshalIndent(absComplete, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(snap.CompletePath, append(absCompleteBytes, '\n'), 0o600))
 
 	absLatest := latestDoc
 	absLatest.CompletePath = snap.CompletePath
+	absLatest.CompleteRelPath = ""
 	absLatestBytes, err := json.MarshalIndent(absLatest, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(relocatedLatestPath, append(absLatestBytes, '\n'), 0o600))
@@ -970,7 +989,8 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 	require.NoError(t, err)
 	var mixedLatestDoc publishedLatestDoc
 	require.NoError(t, json.Unmarshal(mixedLatestRaw, &mixedLatestDoc))
-	require.Equal(t, "runs/run_portable_1/complete.json", mixedLatestDoc.CompletePath)
+	require.Equal(t, filepath.Clean(mixedCfg.CompletePath), mixedLatestDoc.CompletePath)
+	require.Equal(t, "runs/run_portable_1/complete.json", mixedLatestDoc.CompleteRelPath)
 
 	mixedSnap, err := OpenLatestPublishedSnapshot(mixedCfg.LatestPath)
 	require.NoError(t, err)

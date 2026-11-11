@@ -59,8 +59,8 @@ func TestMixedHistoryListSelectionTrap(t *testing.T) {
 	require.NotEmpty(t, hashB)
 	require.NotEqual(t, hashA, hashB)
 
-	idA := computeTestIndexSetID(t, mA, hashA)
-	idB := computeTestIndexSetID(t, mB, hashB)
+	idA := computeTestIndexSetIDForFormat(t, mA, hashA, "sqlite")
+	idB := computeTestIndexSetIDForFormat(t, mB, hashB, "durable")
 	require.NotEqual(t, idA, idB)
 
 	restore := withIndexBuildExperimentalEngineTestState(t)
@@ -555,6 +555,14 @@ build:
 
 func computeTestIndexSetID(t *testing.T, m *manifest.IndexManifest, scopeHash string) string {
 	t.Helper()
+	return computeTestIndexSetIDForFormat(t, m, scopeHash, "durable")
+}
+
+func computeTestIndexSetIDForFormat(t *testing.T, m *manifest.IndexManifest, scopeHash, format string) string {
+	t.Helper()
+	oldFormat := indexBuildFormat
+	indexBuildFormat = format
+	defer func() { indexBuildFormat = oldFormat }()
 	identity := buildEffectiveIdentity(m)
 	buildFilters, err := computeIndexBuildFilters(m)
 	require.NoError(t, err)

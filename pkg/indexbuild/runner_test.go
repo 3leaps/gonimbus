@@ -739,3 +739,46 @@ func exportedPackageNames(t *testing.T) []string {
 	}
 	return names
 }
+
+func TestCaptureVerifiedParentFailsClosedOnDanglingLatestPointer(t *testing.T) {
+	dir := t.TempDir()
+	latestPath := filepath.Join(dir, "latest.json")
+	danglingLatest := `{"type":"gonimbus.index.latest.v1","index_set_id":"idx_test","run_id":"run_missing","complete_path":"runs/run_missing/complete.json","manifest_sha256":"` + strings.Repeat("a", 64) + `"}`
+	require.NoError(t, os.WriteFile(latestPath, []byte(danglingLatest), 0o600))
+
+	_, err := captureVerifiedParent(latestPath, "idx_test", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "latest pointer references missing complete marker")
+}
+
+func TestCopiedIndexSetBuildsAndReadsCleanlyWithOriginalPresent(t *testing.T) {
+	ctx := context.Background()
+	parentDir := t.TempDir()
+	setRootA := filepath.Join(parentDir, "dir-a", "idx_cont")
+	setRootB := filepath.Join(parentDir, "dir-b", "idx_cont")
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	_, err := NewRunner(contConfig(setRootA, "run1", []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+	}, base)).Build(ctx)
+	require.NoError(t, err)
+
+	// Copy published index from dir-a to dir-b on the same host while keeping dir-a.
+	require.NoError(t, os.CopyFS(setRootB, os.DirFS(setRootA)))
+
+	// Successive build in dir-b must extend dir-b's run1 without touching dir-a.
+	sumB, err := NewRunner(contConfig(setRootB, "run2", []provider.ObjectSummary{
+		obj("data/a.xml", `"a1"`, 1, base),
+		obj("data/b.xml", `"b1"`, 2, base.Add(time.Hour)),
+	}, base.Add(time.Hour))).Build(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, sumB.Manifest.Rows)
+
+	_, rowsA, err := ReadLatest(filepath.Join(setRootA, "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, rowsA, 1)
+
+	_, rowsB, err := ReadLatest(filepath.Join(setRootB, "latest.json"))
+	require.NoError(t, err)
+	require.Len(t, rowsB, 2)
+}

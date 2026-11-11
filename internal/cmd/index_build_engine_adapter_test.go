@@ -263,6 +263,7 @@ build:
 	prov := &countingIndexBuildProvider{objects: []provider.ObjectSummary{
 		{Key: "data/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
 		{Key: "data/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/.dotfile", Size: 12, ETag: `"d1"`, LastModified: base, StorageClass: "STANDARD"},
 	}}
 	oldSource := newIndexBuildEngineSource
 	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
@@ -291,6 +292,8 @@ build:
 	require.True(t, snap.Manifest.Lineage.Baseline)
 	require.Equal(t, indexsubstrate.LineageBaselineGeneration, snap.Manifest.Lineage.Generation)
 	require.NotNil(t, snap.Manifest.RunStartedAt)
+	require.Equal(t, indexsubstrate.DotSegmentPolicyInclude, snap.Manifest.DotSegmentPolicy)
+	require.Equal(t, 1, snap.Manifest.Counts.DotSegmentRows)
 }
 
 // TestIndexBuildFormatBothSuccessiveScopedRunsFormDurableContinuity proves the
@@ -1571,7 +1574,7 @@ func TestValidateIndexBuildDurableFullBaseMatchNamesIncludeRemedies(t *testing.T
 	}
 }
 
-func TestIndexBuildDurableCarriesForwardSetIDAcrossGonimbusVersionUpgrade(t *testing.T) {
+func TestIndexBuildDurableDotSegmentPolicyAndIdentityTruth(t *testing.T) {
 	resetAppDataRootTestState(t)
 	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
 	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
@@ -1595,9 +1598,16 @@ build:
     progress_every: 100
 `), 0o600))
 
+	objects := []provider.ObjectSummary{
+		{Key: "data/visible.xml", Size: 10, ETag: `"v"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/.dotfile", Size: 11, ETag: `"d1"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/sub/.dotdir/item.xml", Size: 12, ETag: `"d2"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/_SUCCESS", Size: 0, ETag: `"s"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+
 	oldSource := newIndexBuildEngineSource
 	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
-		return indexBuildEngineFakeProvider{objects: indexBuildEngineTestObjects(base)}, nil
+		return indexBuildEngineFakeProvider{objects: objects}, nil
 	}
 	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
 
@@ -1609,6 +1619,7 @@ build:
 	// Run 1 built under version "0.4.7"
 	restore()
 	versionInfo.Version = "0.4.7"
+	versionInfo.Commit = "abc1234def5678"
 	indexBuildJobPath = manifestPath
 	indexBuildFormat = "durable"
 	indexBuildJSON = true
@@ -1621,8 +1632,39 @@ build:
 	var rec1 indexBuildResultRecord
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out1.String())), &rec1))
 	require.NotEmpty(t, rec1.IndexSetID)
+	require.Equal(t, "0.4.7", rec1.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", rec1.GonimbusCommit)
+	require.Equal(t, indexsubstrate.DotSegmentPolicyInclude, rec1.DotSegmentPolicy)
+	require.NotNil(t, rec1.Rows)
+	require.Equal(t, 4, *rec1.Rows)
+	require.NotNil(t, rec1.ActiveRows)
+	require.Equal(t, 4, *rec1.ActiveRows)
+	require.NotNil(t, rec1.DotSegmentRows)
+	require.Equal(t, 2, *rec1.DotSegmentRows, "_SUCCESS is not dot-prefixed; only .dotfile and sub/.dotdir/item.xml count")
 
-	// Run 2 built after upgrading Gonimbus to "0.5.0" must carry forward rec1.IndexSetID verbatim!
+	// Verify identity.json records include_hidden: true truthfully.
+	identityFiles, err := filepath.Glob(filepath.Join(dataRoot, "indexes", "idx_*", "identity.json"))
+	require.NoError(t, err)
+	require.Len(t, identityFiles, 1)
+	localID, err := indexreader.ReadLocalIdentityFile(identityFiles[0], int64(maxHubMarkerBytes))
+	require.NoError(t, err)
+	require.True(t, localID.Payload.Build.IncludeHidden, "durable identity.json must truthfully record include_hidden: true")
+	require.Equal(t, "0.4.7", localID.Payload.Build.GonimbusVersion)
+
+	latestPath1 := filepath.Join(dataRoot, "cache", "segments", rec1.IndexSetID, "latest.json")
+	snap1, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath1)
+	require.NoError(t, err)
+	require.Equal(t, "0.4.7", snap1.Manifest.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", snap1.Manifest.GonimbusCommit)
+	require.Equal(t, indexsubstrate.DotSegmentPolicyInclude, snap1.Manifest.DotSegmentPolicy)
+	require.Equal(t, 2, snap1.Manifest.Counts.DotSegmentRows)
+	require.Equal(t, "0.4.7", snap1.Complete.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", snap1.Complete.GonimbusCommit)
+	require.Equal(t, "manifest.json", snap1.Complete.ManifestRelPath)
+	require.Equal(t, ".", snap1.Complete.SegmentRelDir)
+
+	// Run 2 built after upgrading Gonimbus to "0.5.0" produces a distinct set_id
+	// (no implicit carry-forward across engine versions).
 	restore()
 	versionInfo.Version = "0.5.0"
 	indexBuildJobPath = manifestPath
@@ -1636,13 +1678,8 @@ build:
 
 	var rec2 indexBuildResultRecord
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out2.String())), &rec2))
-	require.Equal(t, rec1.IndexSetID, rec2.IndexSetID, "successor build across Gonimbus version upgrade must carry set_id verbatim")
-
-	latestPath := filepath.Join(dataRoot, "cache", "segments", rec1.IndexSetID, "latest.json")
-	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
-	require.NoError(t, err)
-	require.Equal(t, 2, snap.Manifest.Lineage.Generation)
-	require.Equal(t, rec1.RunID, snap.Manifest.StateParent.RunID)
+	require.NotEqual(t, rec1.IndexSetID, rec2.IndexSetID, "distinct engine version must produce distinct set_id without implicit carry-forward")
+	require.Equal(t, "0.5.0", rec2.GonimbusVersion)
 }
 
 func TestIndexBuildDurableCLIRefusesUnacknowledgedScopeLossAndAcceptsPinnedAcknowledgment(t *testing.T) {

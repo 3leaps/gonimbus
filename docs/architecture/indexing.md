@@ -80,7 +80,21 @@ Index builds separate concerns:
 - `include_hidden`
 - build-time metadata filters (`size`, `modified`, `key_regex`)
 
-These reduce ingest volume and query cost, but do not inherently reduce provider listing cost.
+These reduce ingest volume and query cost on SQLite builds (`--format sqlite`),
+but do not inherently reduce provider listing cost.
+
+For durable builds (`--format durable` and `--format both`), confirmed-complete
+scopes are exact UTF-8 byte-prefix slices over object storage where OS-specific
+"hidden file" conventions do not exist. Durable builds always include keys with
+dot-prefixed path segments automatically (`dot_segment_policy: "include"`, while
+setting non-default `build.match.include_hidden: true` in the manifest remains
+rejected alongside other selector overrides), recording `"include_hidden": true`
+in `identity.json`, `counts.dot_segment_rows` in `manifest.json` and top-level
+`dot_segment_rows` in `gonimbus.index.build_result.v1` (counting active
+non-tombstone rows whose `rel_key` has at least one `/`-separated segment
+starting with `.`), and per-run `gonimbus_version`, `gonimbus_commit`, and
+`gonimbus_vcs_modified` provenance across `manifest.json`, `complete.json`, and
+`gonimbus.index.build_result.v1`.
 
 ### LIST-derived storage class
 

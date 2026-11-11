@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/3leaps/gonimbus/internal/buildinfo"
 )
 
 var (
@@ -49,10 +51,13 @@ type ExpectedParentToken struct {
 }
 
 type PublishConfig struct {
-	IndexSetID        string
-	RunID             string
-	RunStartedAt      time.Time
-	ManifestCreatedAt time.Time
+	IndexSetID          string
+	RunID               string
+	GonimbusVersion     string
+	GonimbusCommit      string
+	GonimbusVCSModified *bool
+	RunStartedAt        time.Time
+	ManifestCreatedAt   time.Time
 	// SnapshotCompletionClock is sampled immediately before the immutable
 	// complete marker commit, after the manifest and referenced segments have
 	// been written and verified. Nil uses the UTC wall clock.
@@ -117,21 +122,27 @@ type publishedCompleteDoc struct {
 	Type                        string `json:"type"`
 	IndexSetID                  string `json:"index_set_id"`
 	RunID                       string `json:"run_id"`
+	GonimbusVersion             string `json:"gonimbus_version,omitempty"`
+	GonimbusCommit              string `json:"gonimbus_commit,omitempty"`
+	GonimbusVCSModified         *bool  `json:"gonimbus_vcs_modified,omitempty"`
 	CompletedAt                 string `json:"completed_at,omitempty"`
 	SnapshotCompletedAt         string `json:"snapshot_completed_at,omitempty"`
 	SnapshotCompletionSemantics string `json:"snapshot_completion_semantics,omitempty"`
 	ManifestPath                string `json:"manifest_path"`
+	ManifestRelPath             string `json:"manifest_rel_path,omitempty"`
 	ManifestSHA256              string `json:"manifest_sha256"`
 	SegmentDir                  string `json:"segment_dir"`
+	SegmentRelDir               string `json:"segment_rel_dir,omitempty"`
 	Segments                    int    `json:"segments"`
 }
 
 type publishedLatestDoc struct {
-	Type         string `json:"type"`
-	IndexSetID   string `json:"index_set_id"`
-	RunID        string `json:"run_id"`
-	UpdatedAt    string `json:"updated_at"`
-	CompletePath string `json:"complete_path"`
+	Type            string `json:"type"`
+	IndexSetID      string `json:"index_set_id"`
+	RunID           string `json:"run_id"`
+	UpdatedAt       string `json:"updated_at"`
+	CompletePath    string `json:"complete_path"`
+	CompleteRelPath string `json:"complete_rel_path,omitempty"`
 }
 
 // PublishSnapshot publishes a durable snapshot with a background context. Prefer
@@ -221,6 +232,9 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		Dir:                    config.SegmentDir,
 		IndexSetID:             config.IndexSetID,
 		RunID:                  config.RunID,
+		GonimbusVersion:        config.GonimbusVersion,
+		GonimbusCommit:         config.GonimbusCommit,
+		GonimbusVCSModified:    config.GonimbusVCSModified,
 		CreatedAt:              config.ManifestCreatedAt,
 		TargetRowsPerSegment:   config.TargetRowsPerSegment,
 		AllowExistingIdentical: true,
@@ -283,11 +297,16 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 			Type:                        CompleteMarkerTypeV2,
 			IndexSetID:                  config.IndexSetID,
 			RunID:                       config.RunID,
+			GonimbusVersion:             config.GonimbusVersion,
+			GonimbusCommit:              config.GonimbusCommit,
+			GonimbusVCSModified:         cloneBoolPtr(config.GonimbusVCSModified),
 			SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
 			SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
-			ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
+			ManifestPath:                config.ManifestPath,
+			ManifestRelPath:             portableRelativeFileRef(config.CompletePath, config.ManifestPath),
 			ManifestSHA256:              manifestDigest,
-			SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
+			SegmentDir:                  config.SegmentDir,
+			SegmentRelDir:               portableRelativeDirRef(config.CompletePath, config.SegmentDir),
 			Segments:                    len(manifest.Segments),
 		}
 	} else {
@@ -314,11 +333,12 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		return result, err
 	}
 	latest := publishedLatestDoc{
-		Type:         "gonimbus.index.latest.v1",
-		IndexSetID:   config.IndexSetID,
-		RunID:        config.RunID,
-		UpdatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
-		CompletePath: portablePublishedFileRef(config.LatestPath, config.CompletePath),
+		Type:            "gonimbus.index.latest.v1",
+		IndexSetID:      config.IndexSetID,
+		RunID:           config.RunID,
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		CompletePath:    config.CompletePath,
+		CompleteRelPath: portableRelativeFileRef(config.LatestPath, config.CompletePath),
 	}
 	if err := writeLatestPointerFile(config.LatestPath, latest); err != nil {
 		return result, fmt.Errorf("advance latest pointer: %w", err)
@@ -345,8 +365,8 @@ func existingSnapshotCompletion(
 		}
 		return publishedCompleteDoc{}, time.Time{}, false, err
 	}
-	resolvedManifestPath, manifestErr := resolvePublishedArtifactPath(config.CompletePath, existing.ManifestPath, "manifest_path")
-	resolvedSegmentDir, segmentErr := resolvePublishedArtifactPath(config.CompletePath, existing.SegmentDir, "segment_dir")
+	resolvedManifestPath, manifestErr := resolvePublishedArtifactWithRel(config.CompletePath, existing.ManifestPath, existing.ManifestRelPath, "manifest_path")
+	resolvedSegmentDir, segmentErr := resolvePublishedArtifactWithRel(config.CompletePath, existing.SegmentDir, existing.SegmentRelDir, "segment_dir")
 	if existing.Type != CompleteMarkerTypeV2 ||
 		existing.IndexSetID != config.IndexSetID ||
 		existing.RunID != config.RunID ||
@@ -461,7 +481,7 @@ func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxMa
 	if strings.TrimSpace(latest.CompletePath) == "" {
 		return PublishedSnapshot{}, fmt.Errorf("latest pointer complete_path is required")
 	}
-	completePath, err := resolvePublishedArtifactPath(latestPath, latest.CompletePath, "complete_path")
+	completePath, err := resolvePublishedArtifactWithRel(latestPath, latest.CompletePath, latest.CompleteRelPath, "complete_path")
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
@@ -592,11 +612,11 @@ func openPublishedCompleteBudgeted(completePath string, maxMarkerBytes, maxManif
 	if err := validatePublishedCompleteType(complete); err != nil {
 		return PublishedSnapshot{}, err
 	}
-	manifestPath, err := resolvePublishedArtifactPath(completePath, complete.ManifestPath, "manifest_path")
+	manifestPath, err := resolvePublishedArtifactWithRel(completePath, complete.ManifestPath, complete.ManifestRelPath, "manifest_path")
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
-	segmentDir, err := resolvePublishedArtifactPath(completePath, complete.SegmentDir, "segment_dir")
+	segmentDir, err := resolvePublishedArtifactWithRel(completePath, complete.SegmentDir, complete.SegmentRelDir, "segment_dir")
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
@@ -641,11 +661,11 @@ func OpenPublishedRunSnapshotMaterial(
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
-	resolvedManifestPath, err := resolvePublishedArtifactPath(completePath, snap.Complete.ManifestPath, "manifest_path")
+	resolvedManifestPath, err := resolvePublishedArtifactWithRel(completePath, snap.Complete.ManifestPath, snap.Complete.ManifestRelPath, "manifest_path")
 	if err != nil || filepath.Clean(resolvedManifestPath) != filepath.Clean(manifestPath) {
 		return PublishedSnapshot{}, errors.Join(fmt.Errorf("complete marker manifest_path disagrees with bound material"), err)
 	}
-	resolvedSegmentDir, err := resolvePublishedArtifactPath(completePath, snap.Complete.SegmentDir, "segment_dir")
+	resolvedSegmentDir, err := resolvePublishedArtifactWithRel(completePath, snap.Complete.SegmentDir, snap.Complete.SegmentRelDir, "segment_dir")
 	if err != nil || filepath.Clean(resolvedSegmentDir) != filepath.Clean(segmentDir) {
 		return PublishedSnapshot{}, errors.Join(fmt.Errorf("complete marker segment_dir disagrees with bound material"), err)
 	}
@@ -730,38 +750,57 @@ func absOrCleanPath(p string) string {
 	return filepath.Clean(trimmed)
 }
 
-func portablePublishedFileRef(anchorFile, targetFile string) string {
+func portableRelativeFileRef(anchorFile, targetFile string) string {
 	anchorAbs := absOrCleanPath(anchorFile)
 	targetAbs := absOrCleanPath(targetFile)
 	if anchorAbs == "" || targetAbs == "" {
-		return targetFile
+		return ""
 	}
 	anchorDir := filepath.Clean(filepath.Dir(anchorAbs))
 	if filepath.IsAbs(anchorDir) != filepath.IsAbs(targetAbs) {
-		return targetAbs
+		return ""
 	}
 	rel, err := filepath.Rel(anchorDir, targetAbs)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return targetAbs
+		return ""
 	}
 	return filepath.ToSlash(rel)
 }
 
-func portablePublishedDirRef(anchorFile, targetDir string) string {
+func portableRelativeDirRef(anchorFile, targetDir string) string {
 	anchorAbs := absOrCleanPath(anchorFile)
 	targetAbs := absOrCleanPath(targetDir)
 	if anchorAbs == "" || targetAbs == "" {
-		return targetDir
+		return ""
 	}
 	anchorDir := filepath.Clean(filepath.Dir(anchorAbs))
 	if filepath.IsAbs(anchorDir) != filepath.IsAbs(targetAbs) {
-		return targetAbs
+		return ""
 	}
 	rel, err := filepath.Rel(anchorDir, targetAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return targetAbs
+		return ""
 	}
 	return filepath.ToSlash(rel)
+}
+
+func resolvePublishedArtifactWithRel(anchorPath, rawPath, rawRelPath, label string) (string, error) {
+	primary, err := resolvePublishedArtifactPath(anchorPath, rawPath, label)
+	if err != nil {
+		return "", err
+	}
+	rawRelPath = strings.TrimSpace(rawRelPath)
+	if rawRelPath == "" {
+		return primary, nil
+	}
+	if filepath.IsAbs(rawRelPath) {
+		return "", fmt.Errorf("complete marker %s is not a safe relative path", label)
+	}
+	relResolved, err := resolvePublishedArtifactPath(anchorPath, rawRelPath, label)
+	if err != nil {
+		return "", err
+	}
+	return relResolved, nil
 }
 
 func resolvePublishedArtifactPath(anchorPath, raw, label string) (string, error) {
@@ -818,6 +857,23 @@ func ReadLatestPublishedRows(latestPath string) (InternalManifest, []CurrentObje
 func normalizePublishConfig(config PublishConfig) PublishConfig {
 	config.IndexSetID = strings.TrimSpace(config.IndexSetID)
 	config.RunID = strings.TrimSpace(config.RunID)
+	config.GonimbusVersion = strings.TrimSpace(config.GonimbusVersion)
+	config.GonimbusCommit = strings.TrimSpace(config.GonimbusCommit)
+	if config.GonimbusCommit == "unknown" {
+		config.GonimbusCommit = ""
+	}
+	defVer, defCommit, defMod := buildinfo.DefaultProvenance()
+	if config.GonimbusVersion == "" {
+		config.GonimbusVersion = defVer
+	}
+	if config.GonimbusCommit == "" {
+		config.GonimbusCommit = defCommit
+	}
+	if config.GonimbusVCSModified == nil {
+		config.GonimbusVCSModified = defMod
+	} else {
+		config.GonimbusVCSModified = cloneBoolPtr(config.GonimbusVCSModified)
+	}
 	config.SegmentDir = strings.TrimSpace(config.SegmentDir)
 	config.ManifestPath = strings.TrimSpace(config.ManifestPath)
 	config.CompletePath = strings.TrimSpace(config.CompletePath)

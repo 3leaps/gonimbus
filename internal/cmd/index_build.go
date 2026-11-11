@@ -21,7 +21,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/3leaps/gonimbus/internal/indexcompare"
-	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
 	"github.com/3leaps/gonimbus/pkg/crawler"
 	"github.com/3leaps/gonimbus/pkg/durableindex"
@@ -440,9 +439,6 @@ func runIndexBuild(cmd *cobra.Command, args []string) (runErr error) {
 	identityResult, err := indexstore.ComputeIndexSetID(params)
 	if err != nil {
 		return fmt.Errorf("compute index identity: %w", err)
-	}
-	if selectedIndexBuildFormat() == "durable" || selectedIndexBuildFormat() == "both" {
-		identityResult, params = resolveExistingDurableSetCarryForward(params, identityResult)
 	}
 
 	// Show plan in dry-run mode. This intentionally does not create/open the
@@ -1821,6 +1817,11 @@ func buildIndexSetParams(m *manifest.IndexManifest, ident effectiveIdentity, fil
 		bp.IncludeHidden = m.Build.Match.IncludeHidden
 		bp.FiltersHash = strings.TrimSpace(filtersHash)
 	}
+	if selectedIndexBuildFormat() == "durable" || selectedIndexBuildFormat() == "both" {
+		// Durable builds always include dot-prefixed segments across the
+		// confirmed-complete byte-prefix scope; record that truth in identity.json.
+		bp.IncludeHidden = true
+	}
 	bp.ScopeHash = strings.TrimSpace(scopeHash)
 
 	// Path date extraction
@@ -1906,7 +1907,11 @@ func showIndexBuildPlan(ctx context.Context, cmd *cobra.Command, m *manifest.Ind
 		if len(m.Build.Match.Excludes) > 0 {
 			_, _ = fmt.Fprintf(os.Stdout, "  excludes: %v\n", m.Build.Match.Excludes)
 		}
-		_, _ = fmt.Fprintf(os.Stdout, "  include_hidden: %v\n", m.Build.Match.IncludeHidden)
+		effectiveIncludeHidden := m.Build.Match.IncludeHidden
+		if selectedIndexBuildFormat() == "durable" || selectedIndexBuildFormat() == "both" {
+			effectiveIncludeHidden = true
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "  include_hidden: %v\n", effectiveIncludeHidden)
 		if buildFilters != nil && buildFilters.Filter != nil {
 			_, _ = fmt.Fprintf(os.Stdout, "  filters: %s\n", buildFilters.Filter.String())
 			_, _ = fmt.Fprintf(os.Stdout, "  filters_hash: %s\n", buildFilters.FiltersHash)
@@ -2368,65 +2373,6 @@ func resolveIndexBuildLossAcknowledgment() (*durableindex.TransitionAcknowledgme
 		AcknowledgedBy: by,
 		AcknowledgedAt: at,
 	}, nil
-}
-
-// resolveExistingDurableSetCarryForward carries forward set_id (idx_) verbatim from an
-// existing verified durable set when the only difference in IndexSetParams is GonimbusVersion
-// (e.g., across a Gonimbus version upgrade).
-func resolveExistingDurableSetCarryForward(params indexstore.IndexSetParams, current *indexstore.IndexSetIdentityResult) (*indexstore.IndexSetIdentityResult, indexstore.IndexSetParams) {
-	if current == nil || strings.TrimSpace(indexBuildDBPath) != "" {
-		return current, params
-	}
-	if segRoot, err := indexSubstrateSegmentCacheDir(current.IndexSetID); err == nil {
-		latestPath := filepath.Join(segRoot, "latest.json")
-		if _, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(latestPath, indexsubstrate.DefaultMaxPublishedMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes); err == nil {
-			return current, params
-		}
-	}
-	dataDir, err := indexDataDir()
-	if err != nil {
-		return current, params
-	}
-	indexesRoot := filepath.Join(dataDir, "indexes")
-	entries, err := os.ReadDir(indexesRoot)
-	if err != nil {
-		return current, params
-	}
-	var matchedResult *indexstore.IndexSetIdentityResult
-	var matchedParams indexstore.IndexSetParams
-	matchCount := 0
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "idx_") {
-			continue
-		}
-		idPath := filepath.Join(indexesRoot, entry.Name(), "identity.json")
-		localID, err := indexreader.ReadLocalIdentityFile(idPath, int64(maxHubMarkerBytes))
-		if err != nil || strings.TrimSpace(localID.IndexSetID) == "" {
-			continue
-		}
-		testParams := params
-		testParams.BuildParams.GonimbusVersion = localID.Payload.Build.GonimbusVersion
-		recomputed, err := indexstore.ComputeIndexSetID(testParams)
-		if err != nil || recomputed.IndexSetID != localID.IndexSetID || recomputed.CanonicalJSON != string(localID.Raw) {
-			continue
-		}
-		segRoot, err := indexSubstrateSegmentCacheDir(localID.IndexSetID)
-		if err != nil {
-			continue
-		}
-		latestPath := filepath.Join(segRoot, "latest.json")
-		snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(latestPath, indexsubstrate.DefaultMaxPublishedMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes)
-		if err != nil || strings.TrimSpace(snap.Manifest.IndexSetID) != localID.IndexSetID {
-			continue
-		}
-		matchedResult = recomputed
-		matchedParams = testParams
-		matchCount++
-	}
-	if matchCount == 1 && matchedResult != nil {
-		return matchedResult, matchedParams
-	}
-	return current, params
 }
 
 func warnSQLiteScopeLossIfReduced(ctx context.Context, db *sql.DB, indexSetID, basePrefix string, crawlPrefixes []string) {

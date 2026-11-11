@@ -431,6 +431,48 @@ Excludes, suffix/non-prefix globs, metadata filters, and non-default
 `include_hidden` are **not** converted by this migration. They remain rejected
 on durable builds. Use `--format sqlite` for these.
 
+### Dot-prefixed segments, `identity.json`, and per-run engine provenance
+
+Object stores have no "hidden file" attribute, and a confirmed-complete durable
+byte-prefix scope cannot silently drop enumerated keys based on OS-specific
+dotfile conventions:
+
+- **Durable builds always include dot-prefixed path segments:** Durable builds
+  (`--format durable` and `--format both`) always index keys whose `rel_key`
+  (relative to `base_uri`) contains a `/`-separated segment starting with `.`
+  automatically (setting non-default `build.match.include_hidden: true` in the
+  job manifest remains rejected alongside other selector overrides), while
+  `--format sqlite` continues to apply `build.match.include_hidden` as a
+  filesystem-style match predicate.
+- **Truthful `identity.json` (`include_hidden: true`):** New durable index sets
+  record `"include_hidden": true` in `identity.json` (without changing the
+  `identity.json` schema or invalidating existing `identity.json` files).
+  Set identity (`idx_...`) is computed deterministically from `identity.json`
+  with no implicit carry-forward across engine versions.
+- **Manifest and receipt visibility (`dot_segment_policy` & `dot_segment_rows`):**
+  Every durable run manifest (`gonimbus.index.manifest.v1`) and build receipt
+  (`gonimbus.index.build_result.v1`) records `dot_segment_policy: "include"` and
+  `dot_segment_rows` (in `manifest.counts.dot_segment_rows` and top-level on the
+  build receipt), counting **active (non-tombstone)** rows whose `rel_key` has
+  at least one `/`-separated segment starting with `.` (marker-style names such
+  as `_SUCCESS` are not dot-prefixed and do not count).
+- **Per-run engine provenance (`gonimbus_version`, `gonimbus_commit`, `gonimbus_vcs_modified`):**
+  Each run records the producing `gonimbus_version` along with `gonimbus_commit`
+  and `gonimbus_vcs_modified` (when VCS build metadata or linker flags are
+  available) in `manifest.json`, `complete.json` (`gonimbus.index.complete.v2`),
+  and the `gonimbus.index.build_result.v1` receipt so multi-run sets and local
+  unreleased builds always identify the exact engine build that produced each
+  snapshot.
+- **Additive relative marker paths (`manifest_rel_path`, `segment_rel_dir`, `complete_rel_path`):**
+  `complete.json` retains `manifest_path` and `segment_dir` while adding
+  `manifest_rel_path` (`"manifest.json"`) and `segment_rel_dir` (`"."`), and
+  `latest.json` retains `complete_path` while adding `complete_rel_path`
+  (`"runs/<run_id>/complete.json"`). Earlier readers (`<= v0.4.7`) continue to
+  read the existing fields in-place, while current readers prefer the relative
+  fields inside the marker's own directory (so both copied and relocated index
+  directories resolve their own local files) and fall back to the absolute
+  fields for legacy markers that predate the relative fields.
+
 ## Temporal durable compare
 
 After you have two durable snapshots for the same index set, compare them
