@@ -329,7 +329,10 @@ func gapScopeContainsRelKeyLocal(scope *indexsubstrate.Scope, relKey string) boo
 }
 
 func cleanCoveragePrefixLocal(prefix string) string {
-	return strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	if strings.TrimSpace(prefix) == "" {
+		return ""
+	}
+	return prefix
 }
 
 func prefixContainsRelKeyLocal(prefix string, relKey string) bool {

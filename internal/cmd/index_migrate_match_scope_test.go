@@ -296,6 +296,66 @@ func TestRunIndexMigrateMatchScope_EmitExclusive(t *testing.T) {
 	}
 }
 
+func TestRunIndexMigrateMatchScope_ProposeDiscoveredScope(t *testing.T) {
+	dir := t.TempDir()
+	job := filepath.Join(dir, "job.yaml")
+	emit := filepath.Join(dir, "out.yaml")
+	content := `version: "1.0"
+connection:
+  provider: s3
+  bucket: example-bucket
+  base_uri: "s3://example-bucket/data/"
+identity:
+  storage_provider: aws_s3
+  cloud_provider: aws
+  region_kind: aws
+  region: us-east-1
+build:
+  source: crawl
+  match:
+    includes:
+      - "tenant=*/table=orders/**"
+`
+	if err := os.WriteFile(job, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		indexMigrateMatchScopeDiscovered = false
+	})
+
+	indexMigrateMatchScopeJob = job
+	indexMigrateMatchScopeEmit = emit
+	indexMigrateMatchScopeJSON = true
+	indexMigrateMatchScopeForce = false
+	indexMigrateMatchScopeDiscovered = true
+	versionInfo.Version = "0.4.1-test"
+
+	stdout, stderr, err := captureStdoutStderr(func() error {
+		return runIndexMigrateMatchScope(&cobra.Command{}, nil)
+	})
+	if err != nil {
+		t.Fatalf("err=%v stderr=%s", err, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %s", stderr)
+	}
+
+	var plan scope.MigrationPlan
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatalf("json: %v\n%s", err, stdout)
+	}
+	if plan.Classification != scope.ClassificationConvertible || plan.ReasonCode != scope.ReasonSegmentsConvertible {
+		t.Fatalf("got %s/%s: %s", plan.Classification, plan.ReasonCode, plan.Detail)
+	}
+	data, err := os.ReadFile(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("type: segments")) {
+		t.Fatalf("emit missing segments scope: %s", data)
+	}
+}
+
 func sampleConvertibleManifest() string {
 	return `version: "1.0"
 connection:

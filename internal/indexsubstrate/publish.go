@@ -260,7 +260,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		return result, fmt.Errorf("hash manifest: %w", err)
 	}
 	result.ManifestSHA256 = manifestDigest
-	snapshotCompletedAt, adopted, err := existingSnapshotCompletion(
+	existingComplete, snapshotCompletedAt, adopted, err := existingSnapshotCompletion(
 		config,
 		manifest,
 		manifestDigest,
@@ -268,6 +268,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 	if err != nil {
 		return result, err
 	}
+	var complete publishedCompleteDoc
 	if !adopted {
 		snapshotCompletedAt = config.SnapshotCompletionClock()
 		if err := ValidateExactSnapshotCompletion(
@@ -278,17 +279,19 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		); err != nil {
 			return result, fmt.Errorf("sample snapshot completion: %w", err)
 		}
-	}
-	complete := publishedCompleteDoc{
-		Type:                        CompleteMarkerTypeV2,
-		IndexSetID:                  config.IndexSetID,
-		RunID:                       config.RunID,
-		SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
-		SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
-		ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
-		ManifestSHA256:              manifestDigest,
-		SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
-		Segments:                    len(manifest.Segments),
+		complete = publishedCompleteDoc{
+			Type:                        CompleteMarkerTypeV2,
+			IndexSetID:                  config.IndexSetID,
+			RunID:                       config.RunID,
+			SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
+			SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
+			ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
+			ManifestSHA256:              manifestDigest,
+			SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
+			Segments:                    len(manifest.Segments),
+		}
+	} else {
+		complete = existingComplete
 	}
 	result.SnapshotCompletedAt = snapshotCompletedAt.UTC()
 	if err := writeJSONImmutableOrEqual(config.CompletePath, complete); err != nil {
@@ -334,13 +337,13 @@ func existingSnapshotCompletion(
 	config PublishConfig,
 	manifest InternalManifest,
 	manifestDigest string,
-) (time.Time, bool, error) {
+) (publishedCompleteDoc, time.Time, bool, error) {
 	existing, err := readCompleteDocFile(config.CompletePath)
 	if err != nil {
 		if errors.Is(err, ErrSnapshotNotPublished) {
-			return time.Time{}, false, nil
+			return publishedCompleteDoc{}, time.Time{}, false, nil
 		}
-		return time.Time{}, false, err
+		return publishedCompleteDoc{}, time.Time{}, false, err
 	}
 	resolvedManifestPath, manifestErr := resolvePublishedArtifactPath(config.CompletePath, existing.ManifestPath, "manifest_path")
 	resolvedSegmentDir, segmentErr := resolvePublishedArtifactPath(config.CompletePath, existing.SegmentDir, "segment_dir")
@@ -349,18 +352,18 @@ func existingSnapshotCompletion(
 		existing.RunID != config.RunID ||
 		manifestErr != nil ||
 		segmentErr != nil ||
-		filepath.Clean(resolvedManifestPath) != filepath.Clean(config.ManifestPath) ||
+		absOrCleanPath(resolvedManifestPath) != absOrCleanPath(config.ManifestPath) ||
 		existing.ManifestSHA256 != manifestDigest ||
-		filepath.Clean(resolvedSegmentDir) != filepath.Clean(config.SegmentDir) ||
+		absOrCleanPath(resolvedSegmentDir) != absOrCleanPath(config.SegmentDir) ||
 		existing.Segments != len(manifest.Segments) {
-		return time.Time{}, false, nil
+		return publishedCompleteDoc{}, time.Time{}, false, nil
 	}
 	snapshot := PublishedSnapshot{Complete: existing, Manifest: manifest}
 	completedAt, err := snapshot.ExactSnapshotCompletedAt()
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("validate existing complete marker: %w", err)
+		return publishedCompleteDoc{}, time.Time{}, false, fmt.Errorf("validate existing complete marker: %w", err)
 	}
-	return completedAt, true, nil
+	return existing, completedAt, true, nil
 }
 
 // PublishedSnapshot is a verified local durable snapshot opened from a latest
@@ -716,28 +719,47 @@ func validatePublishedCompleteType(complete publishedCompleteDoc) error {
 	return fmt.Errorf("complete marker type %q is not supported", complete.Type)
 }
 
+func absOrCleanPath(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(trimmed); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(trimmed)
+}
+
 func portablePublishedFileRef(anchorFile, targetFile string) string {
-	anchorDir := filepath.Clean(filepath.Dir(anchorFile))
-	targetClean := filepath.Clean(targetFile)
-	if anchorDir == "" || targetClean == "" || filepath.IsAbs(anchorDir) != filepath.IsAbs(targetClean) {
+	anchorAbs := absOrCleanPath(anchorFile)
+	targetAbs := absOrCleanPath(targetFile)
+	if anchorAbs == "" || targetAbs == "" {
 		return targetFile
 	}
-	rel, err := filepath.Rel(anchorDir, targetClean)
+	anchorDir := filepath.Clean(filepath.Dir(anchorAbs))
+	if filepath.IsAbs(anchorDir) != filepath.IsAbs(targetAbs) {
+		return targetAbs
+	}
+	rel, err := filepath.Rel(anchorDir, targetAbs)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return targetFile
+		return targetAbs
 	}
 	return filepath.ToSlash(rel)
 }
 
 func portablePublishedDirRef(anchorFile, targetDir string) string {
-	anchorDir := filepath.Clean(filepath.Dir(anchorFile))
-	targetClean := filepath.Clean(targetDir)
-	if anchorDir == "" || targetClean == "" || filepath.IsAbs(anchorDir) != filepath.IsAbs(targetClean) {
+	anchorAbs := absOrCleanPath(anchorFile)
+	targetAbs := absOrCleanPath(targetDir)
+	if anchorAbs == "" || targetAbs == "" {
 		return targetDir
 	}
-	rel, err := filepath.Rel(anchorDir, targetClean)
+	anchorDir := filepath.Clean(filepath.Dir(anchorAbs))
+	if filepath.IsAbs(anchorDir) != filepath.IsAbs(targetAbs) {
+		return targetAbs
+	}
+	rel, err := filepath.Rel(anchorDir, targetAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return targetDir
+		return targetAbs
 	}
 	return filepath.ToSlash(rel)
 }

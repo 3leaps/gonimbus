@@ -1562,7 +1562,7 @@ func TestValidateIndexBuildDurableFullBaseMatchNamesIncludeRemedies(t *testing.T
 		err := validateIndexBuildDurableFullBaseMatch(m, "--format durable")
 		require.ErrorContains(t, err, `--format durable supports only default build.match.includes "**" in this slice`, includes)
 		require.ErrorContains(t, err, "gonimbus index migrate-match-scope", includes)
-		require.ErrorContains(t, err, "date_partitions with discover glob_allow", includes)
+		require.ErrorContains(t, err, "segments, or date_partitions with discover glob_allow", includes)
 		require.ErrorContains(t, err, "--format sqlite", includes)
 	}
 	for _, includes := range [][]string{nil, {"**"}} {

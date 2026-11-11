@@ -401,8 +401,9 @@ func TestBoundCrawlPlanRejectsUnauthenticatedPlan(t *testing.T) {
 func TestBoundCrawlPlanRejectsNonCanonicalJournalPlan(t *testing.T) {
 	dir := t.TempDir()
 	for i, plan := range [][]string{
-		{" data/siteA/"},
-		{"/data/siteA/"},
+		{"data/siteA/ "},
+		{""},
+		{"   "},
 		{"data/siteA/", "data/siteA/"},
 	} {
 		path := filepath.Join(dir, string(rune('a'+i)), "shard-0001.jsonl")
@@ -410,6 +411,24 @@ func TestBoundCrawlPlanRejectsNonCanonicalJournalPlan(t *testing.T) {
 		_, err := boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
 		require.Error(t, err)
 		require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
+	}
+
+	// Leading whitespace or leading '/' on a plan recorded for a non-root base_uri
+	// ("s3://bucket/data/") is rejected by validateCoverageMatchesCrawlPlan during Retry.
+	for i, plan := range [][]string{
+		{" data/siteA/"},
+		{"/data/siteA/"},
+	} {
+		path := filepath.Join(dir, "nonroot-"+string(rune('a'+i)), "shard-0001.jsonl")
+		writeSealedJournalWithPlan(t, path, plan)
+		bound, err := boundCrawlPlanFromJournals([]string{path}, indexsubstrate.DefaultSpillMergeBudget().MaxRecordBytes)
+		require.NoError(t, err)
+		err = validateCoverageMatchesCrawlPlan("s3://bucket/data/", bound, []CoverageAttestation{{
+			Scope:    &Scope{Prefix: "data/siteA/"},
+			Basis:    CoverageBasisConfirmed,
+			Complete: true,
+		}})
+		require.Error(t, err)
 	}
 }
 

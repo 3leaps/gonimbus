@@ -115,6 +115,18 @@ func buildScopeHashPayload(cfg *manifest.IndexScopeConfig) (scopeHashPayload, er
 			return scopeHashPayload{}, err
 		}
 		payload.Date = datePayload
+	case "segments":
+		template, err := CanonicalizeSegmentsTemplate(cfg)
+		if err != nil {
+			return scopeHashPayload{}, err
+		}
+		payload.BasePrefix = normalizePrefixField(cfg.BasePrefix)
+		payload.Delimiter = normalizeDelimiter(cfg.Delimiter)
+		discover, err := buildDiscoverPayload(&manifest.IndexScopeDiscoverConfig{Segments: template})
+		if err != nil {
+			return scopeHashPayload{}, err
+		}
+		payload.Discover = discover
 	default:
 		return scopeHashPayload{}, fmt.Errorf("unsupported scope.type %q", scopeType)
 	}

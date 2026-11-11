@@ -345,7 +345,10 @@ func gapScopeContainsRelKey(scope *Scope, relKey string) bool {
 }
 
 func cleanCoveragePrefix(prefix string) string {
-	return strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	if strings.TrimSpace(prefix) == "" {
+		return ""
+	}
+	return prefix
 }
 
 func prefixContainsRelKey(prefix string, relKey string) bool {

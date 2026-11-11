@@ -36,7 +36,9 @@ func normalizeCoverageForBaseURI(baseURI string, coverage []CoverageAttestation)
 }
 
 func normalizeCoveragePrefix(basePrefix string, prefix string) (string, error) {
-	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	if strings.TrimSpace(prefix) == "" && prefix != "" {
+		return "", fmt.Errorf("coverage prefix %q must not be whitespace-only", prefix)
+	}
 	basePrefix = strings.TrimPrefix(strings.TrimSpace(basePrefix), "/")
 	basePrefix = strings.TrimSuffix(basePrefix, "/")
 	if prefix == indexsubstrate.RelativeRootScopePrefix {
@@ -66,11 +68,13 @@ func normalizeCoveragePrefix(basePrefix string, prefix string) (string, error) {
 }
 
 func normalizeCrawlPlanPrefix(basePrefix string, prefix string) (string, error) {
-	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	if strings.TrimSpace(prefix) == "" && prefix != "" {
+		return "", fmt.Errorf("crawl prefix %q must not be whitespace-only", prefix)
+	}
 	basePrefix = strings.TrimPrefix(strings.TrimSpace(basePrefix), "/")
 	basePrefix = strings.TrimSuffix(basePrefix, "/")
 	if basePrefix == "" {
-		if prefix == "" {
+		if prefix == "" || prefix == indexsubstrate.RelativeRootScopePrefix {
 			return indexsubstrate.RelativeRootScopePrefix, nil
 		}
 		return prefix, nil

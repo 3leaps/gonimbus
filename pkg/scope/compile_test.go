@@ -192,3 +192,213 @@ func TestCompileDatePartitionsRefusesTruncatedDiscovery(t *testing.T) {
 	require.ErrorIs(t, err, provider.ErrIncompleteListing)
 	require.Nil(t, plan)
 }
+
+func TestCompileSegments_DiscoveredAndLiteralTail(t *testing.T) {
+	// ADR-0009 canonical shape: tenant=*/table=orders/**
+	// Level 0 ("tenant=*") performs one delimiter listing; level 1 ("table=orders")
+	// is a literal segment appended directly without an extra listing call.
+	discoverForm := &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, GlobAllow: []string{"tenant=*"}, Deny: []string{"tenant=blocked"}},
+				{Index: 1, Allow: []string{"table=orders"}},
+			},
+		},
+	}
+	lister := &fakePrefixLister{prefixes: map[string][]string{
+		"data/": {
+			"data/tenant=acme/",
+			"data/tenant=blocked/",
+			"data/tenant=globex/",
+			"data/other/",
+		},
+	}}
+
+	require.True(t, RequiresPrefixLister(discoverForm))
+	plan, err := Compile(context.Background(), discoverForm, "data/", lister)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.Equal(t, []string{
+		"data/tenant=acme/table=orders/",
+		"data/tenant=globex/table=orders/",
+	}, plan.Prefixes)
+
+	// Shorthand constraints form compiles to identical prefixes when no deny list is used.
+	constraintsForm := &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+			{Index: 1, Glob: "table=orders"},
+		},
+	}
+	lister2 := &fakePrefixLister{prefixes: map[string][]string{
+		"data/": {
+			"data/tenant=acme/",
+			"data/tenant=globex/",
+		},
+	}}
+	plan2, err := Compile(context.Background(), constraintsForm, "data/", lister2)
+	require.NoError(t, err)
+	require.Equal(t, plan.Prefixes, plan2.Prefixes)
+
+	// Empty discovered segments (e.g., "data//") and discovered prefixes with
+	// leading whitespace (e.g., " tenant=a/") preserve their exact bytes.
+	edgeLister := &fakePrefixLister{prefixes: map[string][]string{
+		"data/": {"data//", "data/ tenant=a/"},
+		"":      {" tenant=a/"},
+	}}
+	emptySegPlan, err := Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "*"},
+			{Index: 1, Glob: "table=orders"},
+		},
+	}, "data/", edgeLister)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"data/ tenant=a/table=orders/",
+		"data//table=orders/",
+	}, emptySegPlan.Prefixes)
+
+	rootWSPlan, err := Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "*"},
+			{Index: 1, Glob: "table=orders"},
+		},
+	}, "", edgeLister)
+	require.NoError(t, err)
+	require.Equal(t, []string{" tenant=a/table=orders/"}, rootWSPlan.Prefixes)
+}
+
+func TestCompileSegments_RefusesInvalidGrammarAndBounds(t *testing.T) {
+	lister := &fakePrefixLister{prefixes: map[string][]string{"data/": {"data/tenant=a/"}}}
+
+	// Missing lister
+	_, err := Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+		},
+	}, "data/", nil)
+	require.ErrorContains(t, err, "requires provider prefix listing")
+
+	// All-literal segments refused (must use prefix_list)
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, Allow: []string{"tenant=acme"}},
+				{Index: 1, Allow: []string{"table=orders"}},
+			},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "requires at least one discovered segment level")
+
+	// Recursive ** inside segment refused
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=**"},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "recursive wildcard ** is not permitted")
+
+	// Non-contiguous index refused
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+			{Index: 2, Glob: "table=orders"},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "missing index 1")
+
+	// Exceeding MaxSegmentsTemplateDepth refused with ErrDiscoveryBudgetExceeded
+	deep := make([]manifest.IndexScopeSegmentConstraint, MaxSegmentsTemplateDepth+1)
+	for i := range deep {
+		deep[i] = manifest.IndexScopeSegmentConstraint{Index: i, Glob: "seg=*"}
+	}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type:        "segments",
+		Constraints: deep,
+	}, "data/", lister)
+	require.ErrorIs(t, err, ErrDiscoveryBudgetExceeded)
+
+	// Truncated pagination refused with provider.ErrIncompleteListing
+	truncLister := &pagedPrefixLister{pages: []*provider.ListCommonPrefixesResult{
+		{Prefixes: []string{"data/tenant=a/"}, IsTruncated: true},
+	}}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+		},
+	}, "data/", truncLister)
+	require.ErrorIs(t, err, provider.ErrIncompleteListing)
+
+	// Cumulative raw-observed prefixes across multiple parent prefixes must
+	// enforce MaxDiscoveredPrefixesPerLevel even when remaining budget hits 0
+	// and earlier prefixes were filtered out.
+	parent1Children := make([]string, MaxDiscoveredPrefixesPerLevel)
+	for i := range parent1Children {
+		parent1Children[i] = "data/region=a/other-" + string(rune('a'+(i%26))) + "/"
+	}
+	multiParentLister := &fakePrefixLister{prefixes: map[string][]string{
+		"data/":          {"data/region=a/", "data/region=b/"},
+		"data/region=a/": parent1Children,
+		"data/region=b/": {"data/region=b/tenant=1/"},
+	}}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "region=*"},
+			{Index: 1, Glob: "tenant=*"},
+		},
+	}, "data/", multiParentLister)
+	require.ErrorIs(t, err, ErrDiscoveryBudgetExceeded)
+
+	// Literal Cartesian expansion exceeding MaxDiscoveredPrefixesPerLevel is
+	// refused before allocating the product slice.
+	manyParents := make([]string, 200)
+	manyLiterals := make([]string, 100)
+	for i := range manyParents {
+		manyParents[i] = "data/tenant=" + string(rune('a'+(i%26))) + string(rune('0'+(i/26))) + "/"
+	}
+	for i := range manyLiterals {
+		manyLiterals[i] = "table=" + string(rune('a'+(i%26))) + string(rune('0'+(i/26)))
+	}
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, GlobAllow: []string{"tenant=*"}},
+				{Index: 1, Allow: manyLiterals},
+			},
+		},
+	}, "data/", &fakePrefixLister{prefixes: map[string][]string{"data/": manyParents}})
+	require.ErrorIs(t, err, ErrDiscoveryBudgetExceeded)
+
+	// Leading/trailing whitespace in segment patterns is refused.
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Constraints: []manifest.IndexScopeSegmentConstraint{
+			{Index: 0, Glob: "tenant=*"},
+			{Index: 1, Glob: " table=orders"},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "leading or trailing whitespace")
+
+	// Leading slash in literal allow/deny values is refused before normalization.
+	_, err = Compile(context.Background(), &manifest.IndexScopeConfig{
+		Type: "segments",
+		Discover: &manifest.IndexScopeDiscoverConfig{
+			Segments: []manifest.IndexScopeDiscoverSegment{
+				{Index: 0, GlobAllow: []string{"tenant=*"}},
+				{Index: 1, Allow: []string{"/table=orders"}},
+			},
+		},
+	}, "data/", lister)
+	require.ErrorContains(t, err, "must not contain path delimiter")
+}

@@ -128,7 +128,7 @@ func projectionFromDurable(row indexsubstrate.CurrentObjectRow) (projectionRow, 
 		lastModified = row.LastModified.UTC().Format(time.RFC3339Nano)
 	}
 	return projectionRow{
-		RelKey:       strings.TrimSpace(row.RelKey),
+		RelKey:       row.RelKey,
 		SizeBytes:    row.SizeBytes,
 		LastModified: lastModified,
 		StorageClass: ptrValue(row.StorageClass),

@@ -366,7 +366,7 @@ func validateIndexBuildDurableFullBaseMatch(m *manifest.IndexManifest, flagName 
 // include gate. Each is an explicit step; none relaxes the gate.
 const durableIncludeRemedies = "for prefix-shaped includes run `gonimbus index migrate-match-scope`; " +
 	"for a wildcard in a middle path segment express the listing as build.scope " +
-	"(prefix_list, or date_partitions with discover glob_allow); " +
+	"(prefix_list, segments, or date_partitions with discover glob_allow); " +
 	"otherwise use --format sqlite"
 
 func isDefaultIndexBuildIncludes(includes []string) bool {
@@ -604,9 +604,13 @@ func validateFaithfulIndexBuildCoverage(basePrefix string, crawlPrefixes []strin
 }
 
 // exactCoveragePrefixKey is the equality key for crawl↔coverage set checks.
-// It trims whitespace only — no parent-prefix collapsing (that would be roll-up).
+// It preserves exact non-empty prefix bytes — no parent-prefix collapsing or
+// whitespace stripping (which would collapse distinct provider prefixes).
 func exactCoveragePrefixKey(prefix string) string {
-	return strings.TrimSpace(prefix)
+	if strings.TrimSpace(prefix) == "" {
+		return ""
+	}
+	return prefix
 }
 
 func indexBuildBothFormatsFailureReport(indexSet *indexstore.IndexSet, run *indexstore.IndexRun, sqliteArtifact indexcompare.Artifact, paths indexbuild.PathConfig, durablePublished bool, comparisonRan bool) *indexcompare.Report {

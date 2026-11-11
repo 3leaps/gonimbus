@@ -22,18 +22,20 @@ import (
 // Pure audit: no provider construction, authority, markers, or publication.
 
 var (
-	indexMigrateMatchScopeJob   string
-	indexMigrateMatchScopeEmit  string
-	indexMigrateMatchScopeJSON  bool
-	indexMigrateMatchScopeForce bool
+	indexMigrateMatchScopeJob        string
+	indexMigrateMatchScopeEmit       string
+	indexMigrateMatchScopeJSON       bool
+	indexMigrateMatchScopeForce      bool
+	indexMigrateMatchScopeDiscovered bool
 )
 
 var indexMigrateMatchScopeCmd = &cobra.Command{
 	Use:   "migrate-match-scope",
-	Short: "Audit/convert prefix-shaped match.includes to build.scope prefix_list",
-	Long: `Classify and convert only proven prefix-shaped build.match.includes
+	Short: "Audit/convert prefix-shaped or discoverable match.includes to build.scope",
+	Long: `Classify and convert proven prefix-shaped build.match.includes
 (literal non-root prefix + terminal /**, no residual predicates) into an
-explicit build.scope type: prefix_list.
+explicit build.scope type: prefix_list, and recognize single mid-path wildcard
+include patterns offline to propose date_partitions or segments scopes.
 
 This is a pure audit/conversion command:
   - no cloud provider construction
@@ -44,6 +46,12 @@ Ambiguous includes, excludes, filters, include_hidden, and existing scope
 (with residual match) fail closed with stable reason codes. Default includes
 ["**"] classify as already_compatible. A previously emitted proposed form
 classifies as already_migrated.
+
+When a single mid-path wildcard include pattern (e.g. region=*/year=2026/month=09/**
+or tenant=*/table=orders/**) is encountered, an offline discovered_scope_proposal
+(date_partitions or segments) is attached automatically. Pass --propose-discovered-scope
+to classify discoverable patterns as convertible and allow --emit-manifest to write the
+proposed discovered-scope manifest.
 
 Cutover after a successful conversion is an operator workflow:
   emit proposed → build new set → compare projections → pin new receipt →
@@ -59,6 +67,7 @@ func init() {
 	indexMigrateMatchScopeCmd.Flags().StringVar(&indexMigrateMatchScopeEmit, "emit-manifest", "", "Write proposed manifest to this new path (exclusive create unless --force)")
 	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeJSON, "json", false, "Emit MigrationPlan JSON on stdout")
 	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeForce, "force", false, "Allow overwriting --emit-manifest destination via atomic replacement")
+	indexMigrateMatchScopeCmd.Flags().BoolVar(&indexMigrateMatchScopeDiscovered, "propose-discovered-scope", false, "Classify single mid-path wildcard includes as convertible to date_partitions or segments")
 	_ = indexMigrateMatchScopeCmd.MarkFlagRequired("job")
 }
 
@@ -80,8 +89,9 @@ func runIndexMigrateMatchScope(cmd *cobra.Command, args []string) error {
 
 	// Refuse before any FS mutation beyond the read above.
 	plan, err := scope.PlanMatchPrefixMigration(raw, scope.PlanOptions{
-		GonimbusVersion: versionInfo.Version,
-		ComputeIdentity: computeMigrationIdentityEvidence,
+		GonimbusVersion:      versionInfo.Version,
+		ComputeIdentity:      computeMigrationIdentityEvidence,
+		AllowDiscoveredScope: indexMigrateMatchScopeDiscovered,
 	})
 	if err != nil {
 		return err
@@ -335,9 +345,26 @@ func printMatchScopeMigrationPlan(plan *scope.MigrationPlan, jobPath, emitPath s
 	if plan.ProposedScope != nil {
 		_, _ = fmt.Fprintf(w, "proposed scope.type: %s\n", plan.ProposedScope.Type)
 		_, _ = fmt.Fprintf(w, "proposed scope_hash: %s\n", plan.ProposedScopeHash)
-		_, _ = fmt.Fprintln(w, "proposed scope.prefixes:")
-		for _, p := range plan.ProposedScope.Prefixes {
-			_, _ = fmt.Fprintf(w, "  - %s\n", p)
+		if len(plan.ProposedScope.Prefixes) > 0 {
+			_, _ = fmt.Fprintln(w, "proposed scope.prefixes:")
+			for _, p := range plan.ProposedScope.Prefixes {
+				_, _ = fmt.Fprintf(w, "  - %s\n", p)
+			}
+		}
+		_, _ = fmt.Fprintln(w)
+	} else if plan.DiscoveredScopeProposal != nil && plan.DiscoveredScopeProposal.ProposedScope != nil {
+		_, _ = fmt.Fprintf(w, "discovered scope candidate (pass --propose-discovered-scope to convert):\n")
+		_, _ = fmt.Fprintf(w, "  candidate reason_code: %s\n", plan.DiscoveredScopeProposal.ReasonCode)
+		_, _ = fmt.Fprintf(w, "  candidate scope.type:  %s\n", plan.DiscoveredScopeProposal.ProposedScope.Type)
+		_, _ = fmt.Fprintf(w, "  candidate scope_hash:  %s\n", plan.DiscoveredScopeProposal.ProposedScopeHash)
+		if plan.DiscoveredScopeProposal.ProposedManifestYAML != "" {
+			_, _ = fmt.Fprintln(w, "  candidate manifest (YAML):")
+			_, _ = fmt.Fprintln(w, "  ---")
+			_, _ = fmt.Fprint(w, plan.DiscoveredScopeProposal.ProposedManifestYAML)
+			if !strings.HasSuffix(plan.DiscoveredScopeProposal.ProposedManifestYAML, "\n") {
+				_, _ = fmt.Fprintln(w)
+			}
+			_, _ = fmt.Fprintln(w, "  ---")
 		}
 		_, _ = fmt.Fprintln(w)
 	}
