@@ -54,6 +54,12 @@ func openDurableReader(opts ResolveOptions, c candidate) (*durableReader, error)
 	if err != nil {
 		return nil, fmt.Errorf("open durable snapshot: %w", err)
 	}
+	if snap.Complete.IndexSetID != snap.Manifest.IndexSetID {
+		return nil, fmt.Errorf("open durable snapshot: complete marker and manifest index_set_id disagree")
+	}
+	if c.meta.IndexSetID != "" && snap.Manifest.IndexSetID != c.meta.IndexSetID {
+		return nil, fmt.Errorf("open durable snapshot: discovered index_set_id %s does not match opened snapshot index_set_id %s", c.meta.IndexSetID, snap.Manifest.IndexSetID)
+	}
 	meta := c.meta
 	meta.Format = FormatDurableV2
 	meta.IndexSetID = snap.Manifest.IndexSetID

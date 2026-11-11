@@ -526,6 +526,9 @@ func candidateFromDurable(opts ResolveOptions, latestPath, identityDir string, i
 		// Allow short identity dir names; require full id match when both full.
 		idHex := strings.TrimPrefix(identity.IndexSetID, "idx_")
 		setHex := strings.TrimPrefix(indexSetID, "idx_")
+		if !strings.HasPrefix(identity.IndexSetID, "idx_") || idHex == "" || !validHexPattern.MatchString(idHex) {
+			return candidate{}, fmt.Errorf("identity and durable snapshot index_set_id disagree")
+		}
 		if len(idHex) == 64 && idHex != setHex {
 			return candidate{}, fmt.Errorf("identity and durable snapshot index_set_id disagree")
 		}

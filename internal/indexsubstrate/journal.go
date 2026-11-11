@@ -88,9 +88,10 @@ type JournalHeader struct {
 	// reader must not be used for forward recovery. Authority still holds in such
 	// a reader: handed one lane it derives only that lane-local plan, so an
 	// omitted lane cannot widen coverage.
-	CrawlPlanMode      string    `json:"crawl_plan_mode,omitempty"`
-	IndexSchemaVersion int       `json:"index_schema_version"`
-	StartedAt          time.Time `json:"started_at"`
+	CrawlPlanMode      string              `json:"crawl_plan_mode,omitempty"`
+	LossAcknowledgment *LossAcknowledgment `json:"loss_acknowledgment,omitempty"`
+	IndexSchemaVersion int                 `json:"index_schema_version"`
+	StartedAt          time.Time           `json:"started_at"`
 }
 
 type ObjectRecord struct {

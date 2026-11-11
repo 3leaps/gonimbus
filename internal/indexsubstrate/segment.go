@@ -116,10 +116,11 @@ type SegmentSizing struct {
 }
 
 type ManifestCounts struct {
-	Rows          int `json:"rows"`
-	ActiveRows    int `json:"active_rows"`
-	Tombstones    int `json:"tombstones"`
-	DistinctETags int `json:"distinct_etags"`
+	Rows                   int `json:"rows"`
+	ActiveRows             int `json:"active_rows"`
+	Tombstones             int `json:"tombstones"`
+	DistinctETags          int `json:"distinct_etags"`
+	RetainedUnobservedRows int `json:"retained_unobserved_rows"`
 }
 
 type SegmentDescriptor struct {
@@ -176,7 +177,7 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 		return InternalManifest{}, err
 	}
 	manifest := newSegmentManifestSkeleton(config, runStartedAt)
-	manifest.Counts = manifestCounts(sortedRows)
+	manifest.Counts = manifestCountsForRun(sortedRows, config.RunID)
 
 	totalSegments := 0
 	if len(sortedRows) > 0 && config.TargetRowsPerSegment > 0 {
@@ -879,13 +880,27 @@ func normalizeAndSortSegmentRows(rows []CurrentObjectRow, indexSetID string) ([]
 	return out, nil
 }
 
-func manifestCounts(rows []CurrentObjectRow) ManifestCounts {
+func manifestCountsForRun(rows []CurrentObjectRow, runID string) ManifestCounts {
 	return ManifestCounts{
-		Rows:          len(rows),
-		ActiveRows:    len(rows) - tombstoneCount(rows),
-		Tombstones:    tombstoneCount(rows),
-		DistinctETags: distinctETagCount(rows),
+		Rows:                   len(rows),
+		ActiveRows:             len(rows) - tombstoneCount(rows),
+		Tombstones:             tombstoneCount(rows),
+		DistinctETags:          distinctETagCount(rows),
+		RetainedUnobservedRows: retainedUnobservedCount(rows, runID),
 	}
+}
+
+func retainedUnobservedCount(rows []CurrentObjectRow, runID string) int {
+	if runID == "" {
+		return 0
+	}
+	count := 0
+	for _, row := range rows {
+		if row.LastSeenRunID != "" && row.LastSeenRunID != runID {
+			count++
+		}
+	}
+	return count
 }
 
 func tombstoneCount(rows []CurrentObjectRow) int {

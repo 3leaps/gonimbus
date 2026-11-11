@@ -420,16 +420,26 @@ func sealScopedJournalForRun(t *testing.T, setRoot, runID string, plan []string,
 	t.Helper()
 	paths := contRunPaths(setRoot, runID)
 	journalPath := filepath.Join(paths.JournalDir, "shard-0001.jsonl")
+	coverage := make([]CoverageAttestation, 0, len(plan))
+	for _, prefix := range plan {
+		coverage = append(coverage, CoverageAttestation{
+			Scope:    &Scope{Prefix: prefix},
+			Basis:    CoverageBasisConfirmed,
+			Complete: true,
+		})
+	}
+	ack := toSubstrateLossAcknowledgment(maybeAcknowledgeScopeLossForTest(paths.LatestPath, "idx_cont", "s3://bucket/data/", coverage, started))
 	jw, err := newJournalWriter(journalWriterConfig{
-		Path:          journalPath,
-		IndexSetID:    "idx_cont",
-		RunID:         runID,
-		StartedAt:     started,
-		BaseURI:       "s3://bucket/data/",
-		BasePrefix:    "data/",
-		CrawlPrefixes: plan,
-		LaneOrdinal:   1,
-		Now:           func() time.Time { return started },
+		Path:               journalPath,
+		IndexSetID:         "idx_cont",
+		RunID:              runID,
+		StartedAt:          started,
+		BaseURI:            "s3://bucket/data/",
+		BasePrefix:         "data/",
+		CrawlPrefixes:      plan,
+		LaneOrdinal:        1,
+		LossAcknowledgment: ack,
+		Now:                func() time.Time { return started },
 	})
 	require.NoError(t, err)
 	for _, o := range objs {

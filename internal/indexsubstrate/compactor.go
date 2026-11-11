@@ -332,10 +332,7 @@ func cleanCoveragePrefix(prefix string) string {
 }
 
 func prefixContainsRelKey(prefix string, relKey string) bool {
-	if strings.HasSuffix(prefix, "/") {
-		return strings.HasPrefix(relKey, prefix)
-	}
-	return relKey == prefix || strings.HasPrefix(relKey, prefix+"/")
+	return strings.HasPrefix(relKey, prefix)
 }
 
 func rowsFromState(state map[string]CurrentObjectRow) []CurrentObjectRow {

@@ -249,6 +249,9 @@ func WriteStreamingSegmentSet(ctx context.Context, config SegmentWriterConfig, s
 		} else {
 			counts.ActiveRows++
 		}
+		if pq.LastSeenRunID != "" && pq.LastSeenRunID != config.RunID {
+			counts.RetainedUnobservedRows++
+		}
 		if pq.ETag != "" {
 			if _, ok := etagSeen[pq.ETag]; !ok {
 				etagSeen[pq.ETag] = struct{}{}

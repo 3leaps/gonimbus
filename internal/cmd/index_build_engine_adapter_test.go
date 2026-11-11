@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/3leaps/gonimbus/internal/indexcompare"
 	"github.com/3leaps/gonimbus/internal/indexsubstrate"
 	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 	"github.com/3leaps/gonimbus/pkg/indexbuild"
 	"github.com/3leaps/gonimbus/pkg/indexreader"
 	"github.com/3leaps/gonimbus/pkg/manifest"
@@ -515,12 +517,18 @@ build:
 	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
 
 	restore := withIndexBuildExperimentalEngineTestState(t)
-	runBothBuild := func() indexBuildResultRecord {
+	runBothBuild := func(ack *durableindex.TransitionAcknowledgment) indexBuildResultRecord {
 		t.Helper()
 		restore()
 		indexBuildJobPath = manifestPath
 		indexBuildFormat = "both"
 		indexBuildJSON = true
+		if ack != nil {
+			indexBuildAckLossParent = ack.ParentSHA256
+			indexBuildAckLossPlan = ack.PlanDigest
+			indexBuildAckLossBy = ack.AcknowledgedBy
+			indexBuildAckLossAt = ack.AcknowledgedAt
+		}
 		cmd := &cobra.Command{Use: "build"}
 		cmd.SetContext(context.Background())
 		var stdout strings.Builder
@@ -545,7 +553,7 @@ build:
 		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a1"`, LastModified: base, StorageClass: "STANDARD"},
 		{Key: "data/site-b/2026-04-01/b.xml", Size: 11, ETag: `"b1"`, LastModified: base, StorageClass: "STANDARD"},
 	}
-	rec1 := runBothBuild()
+	rec1 := runBothBuild(nil)
 	require.EqualValues(t, 2, rec1.Verification.ProjectionRows)
 
 	// Run 2: same manifest identity, but discovery now surfaces only site-a,
@@ -554,7 +562,18 @@ build:
 	prov.objects = []provider.ObjectSummary{
 		{Key: "data/site-a/2026-04-01/a.xml", Size: 20, ETag: `"a2"`, LastModified: base.Add(time.Hour), StorageClass: "STANDARD"},
 	}
-	rec2 := runBothBuild()
+	_, _, reducedDigest, err := durableindex.BuildIndexPlan(rec1.IndexSetID, []durableindex.Scope{
+		{Namespace: durableindex.DefaultObjectNamespace, Prefix: "site-a/2026-04-01/"},
+	})
+	require.NoError(t, err)
+	ackAt, err := durableindex.FormatInstant(base.Add(time.Hour).UTC())
+	require.NoError(t, err)
+	rec2 := runBothBuild(&durableindex.TransitionAcknowledgment{
+		ParentSHA256:   rec1.ManifestSHA256,
+		PlanDigest:     reducedDigest,
+		AcknowledgedBy: "test-both-discovery",
+		AcknowledgedAt: ackAt,
+	})
 	require.Equal(t, rec1.IndexSetID, rec2.IndexSetID, "discovery narrowing must not change identity")
 	require.NotEqual(t, rec1.RunID, rec2.RunID)
 	// The verification projection carries only current-run rows; without the
@@ -1473,6 +1492,10 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 	oldExperimentalEngine := indexBuildExperimentalEngine
 	oldJSON := indexBuildJSON
 	oldIdentityGuardHook := indexBuildAfterIdentityGuard
+	oldAckParent := indexBuildAckLossParent
+	oldAckPlan := indexBuildAckLossPlan
+	oldAckBy := indexBuildAckLossBy
+	oldAckAt := indexBuildAckLossAt
 	t.Cleanup(func() {
 		indexBuildJobPath = oldJobPath
 		indexBuildDBPath = oldDBPath
@@ -1495,6 +1518,10 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildExperimentalEngine = oldExperimentalEngine
 		indexBuildJSON = oldJSON
 		indexBuildAfterIdentityGuard = oldIdentityGuardHook
+		indexBuildAckLossParent = oldAckParent
+		indexBuildAckLossPlan = oldAckPlan
+		indexBuildAckLossBy = oldAckBy
+		indexBuildAckLossAt = oldAckAt
 	})
 	return func() {
 		indexBuildJobPath = ""
@@ -1518,6 +1545,10 @@ func withIndexBuildExperimentalEngineTestState(t *testing.T) func() {
 		indexBuildExperimentalEngine = false
 		indexBuildJSON = false
 		indexBuildAfterIdentityGuard = nil
+		indexBuildAckLossParent = ""
+		indexBuildAckLossPlan = ""
+		indexBuildAckLossBy = ""
+		indexBuildAckLossAt = ""
 	}
 }
 
@@ -1538,4 +1569,271 @@ func TestValidateIndexBuildDurableFullBaseMatchNamesIncludeRemedies(t *testing.T
 		m := &manifest.IndexManifest{Build: &manifest.IndexBuildConfig{Match: &manifest.IndexMatchConfig{Includes: includes}}}
 		require.NoError(t, validateIndexBuildDurableFullBaseMatch(m, "--format durable"), includes)
 	}
+}
+
+func TestIndexBuildDurableCarriesForwardSetIDAcrossGonimbusVersionUpgrade(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+
+	manifestPath := filepath.Join(t.TempDir(), "index.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return indexBuildEngineFakeProvider{objects: indexBuildEngineTestObjects(base)}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	oldVer := versionInfo.Version
+	t.Cleanup(func() { versionInfo.Version = oldVer })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+
+	// Run 1 built under version "0.4.7"
+	restore()
+	versionInfo.Version = "0.4.7"
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	indexBuildJSON = true
+	cmd1 := &cobra.Command{Use: "build"}
+	cmd1.SetContext(context.Background())
+	var out1 strings.Builder
+	cmd1.SetOut(&out1)
+	require.NoError(t, runIndexBuild(cmd1, nil))
+
+	var rec1 indexBuildResultRecord
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out1.String())), &rec1))
+	require.NotEmpty(t, rec1.IndexSetID)
+
+	// Run 2 built after upgrading Gonimbus to "0.5.0" must carry forward rec1.IndexSetID verbatim!
+	restore()
+	versionInfo.Version = "0.5.0"
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	indexBuildJSON = true
+	cmd2 := &cobra.Command{Use: "build"}
+	cmd2.SetContext(context.Background())
+	var out2 strings.Builder
+	cmd2.SetOut(&out2)
+	require.NoError(t, runIndexBuild(cmd2, nil))
+
+	var rec2 indexBuildResultRecord
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out2.String())), &rec2))
+	require.Equal(t, rec1.IndexSetID, rec2.IndexSetID, "successor build across Gonimbus version upgrade must carry set_id verbatim")
+
+	latestPath := filepath.Join(dataRoot, "cache", "segments", rec1.IndexSetID, "latest.json")
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, 2, snap.Manifest.Lineage.Generation)
+	require.Equal(t, rec1.RunID, snap.Manifest.StateParent.RunID)
+}
+
+func TestIndexBuildDurableCLIRefusesUnacknowledgedScopeLossAndAcceptsPinnedAcknowledgment(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	manifestPath := filepath.Join(t.TempDir(), "index-date.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: date_partitions
+    discover:
+      segments:
+        - index: 0
+    date:
+      segment_index: 1
+      format: "2006-01-02"
+      range:
+        after: "2026-04-01"
+        before: "2026-04-02"
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	currentObjects := []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/site-b/2026-04-01/b.xml", Size: 11, ETag: `"b"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return &discoveringIndexBuildProvider{
+			countingIndexBuildProvider: countingIndexBuildProvider{
+				objects: append([]provider.ObjectSummary(nil), currentObjects...),
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+
+	// Run 1: discovers both site-a/2026-04-01/ and site-b/2026-04-01/
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	indexBuildJSON = true
+	cmd1 := &cobra.Command{Use: "build"}
+	cmd1.SetContext(context.Background())
+	var out1 strings.Builder
+	cmd1.SetOut(&out1)
+	require.NoError(t, runIndexBuild(cmd1, nil))
+
+	var rec1 indexBuildResultRecord
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out1.String())), &rec1))
+
+	// Run 2: discovers only site-a/2026-04-01/ -> refuses with scope_loss when unacknowledged
+	currentObjects = []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	cmd2 := &cobra.Command{Use: "build"}
+	cmd2.SetContext(context.Background())
+	err := runIndexBuild(cmd2, nil)
+	require.Error(t, err)
+	reason, ok := durableindex.RefusalReason(err)
+	require.True(t, ok)
+	require.Equal(t, "scope_loss", reason)
+
+	// Run 2 with pinned --acknowledge-scope-loss-* flags succeeds
+	_, _, reducedDigest, err := durableindex.BuildIndexPlan(rec1.IndexSetID, []durableindex.Scope{
+		{Namespace: durableindex.DefaultObjectNamespace, Prefix: "site-a/2026-04-01/"},
+	})
+	require.NoError(t, err)
+	ackAt, err := durableindex.FormatInstant(base.Add(time.Hour).UTC())
+	require.NoError(t, err)
+
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "durable"
+	indexBuildJSON = true
+	indexBuildAckLossParent = rec1.ManifestSHA256
+	indexBuildAckLossPlan = reducedDigest
+	indexBuildAckLossBy = "operator-cli"
+	indexBuildAckLossAt = ackAt
+	cmd3 := &cobra.Command{Use: "build"}
+	cmd3.SetContext(context.Background())
+	var out3 strings.Builder
+	cmd3.SetOut(&out3)
+	require.NoError(t, runIndexBuild(cmd3, nil))
+
+	latestPath := filepath.Join(dataRoot, "cache", "segments", rec1.IndexSetID, "latest.json")
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath)
+	require.NoError(t, err)
+	require.Equal(t, durableindex.AdmissionLossAcknowledged, snap.Manifest.Lineage.Admission)
+	require.Equal(t, 1, snap.Manifest.Counts.RetainedUnobservedRows)
+}
+
+func TestIndexBuildSQLiteWarnsOnScopeLoss(t *testing.T) {
+	resetAppDataRootTestState(t)
+	dataRoot := filepath.Join(t.TempDir(), "gonimbus-data")
+	t.Setenv("GONIMBUS_DATA_DIR", dataRoot)
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	manifestPath := filepath.Join(t.TempDir(), "index-sqlite.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+version: "1.0"
+connection:
+  provider: s3
+  bucket: bucket
+  base_uri: s3://bucket/data/
+identity:
+  storage_provider: aws_s3
+build:
+  source: crawl
+  scope:
+    type: date_partitions
+    discover:
+      segments:
+        - index: 0
+    date:
+      segment_index: 1
+      format: "2006-01-02"
+      range:
+        after: "2026-04-01"
+        before: "2026-04-02"
+  match:
+    includes: ["**"]
+  crawl:
+    concurrency: 1
+    progress_every: 100
+`), 0o600))
+
+	currentObjects := []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a"`, LastModified: base, StorageClass: "STANDARD"},
+		{Key: "data/site-b/2026-04-01/b.xml", Size: 11, ETag: `"b"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	oldSource := newIndexBuildEngineSource
+	newIndexBuildEngineSource = func(context.Context, *uri.ObjectURI, providerdispatch.SourceOptions) (provider.Provider, error) {
+		return &discoveringIndexBuildProvider{
+			countingIndexBuildProvider: countingIndexBuildProvider{
+				objects: append([]provider.ObjectSummary(nil), currentObjects...),
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newIndexBuildEngineSource = oldSource })
+
+	restore := withIndexBuildExperimentalEngineTestState(t)
+
+	// Run 1: SQLite with both partitions
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "sqlite"
+	cmd1 := &cobra.Command{Use: "build"}
+	cmd1.SetContext(context.Background())
+	require.NoError(t, runIndexBuild(cmd1, nil))
+	clearSQLiteQuarantineResidueUnderDataRoot(t, dataRoot)
+
+	// Run 2: SQLite with reduced partition set -> succeeds and emits warning on stderr
+	currentObjects = []provider.ObjectSummary{
+		{Key: "data/site-a/2026-04-01/a.xml", Size: 10, ETag: `"a"`, LastModified: base, StorageClass: "STANDARD"},
+	}
+	restore()
+	indexBuildJobPath = manifestPath
+	indexBuildFormat = "sqlite"
+	cmd2 := &cobra.Command{Use: "build"}
+	cmd2.SetContext(context.Background())
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	runErr := runIndexBuild(cmd2, nil)
+	_ = w.Close()
+	os.Stderr = oldStderr
+	stderrBytes, readErr := io.ReadAll(r)
+	_ = r.Close()
+	require.NoError(t, readErr)
+	require.NoError(t, runErr)
+	require.Contains(t, string(stderrBytes), "warning: scope_loss:")
 }

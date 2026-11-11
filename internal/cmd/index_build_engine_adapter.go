@@ -54,6 +54,10 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 	if identityResult == nil {
 		return out, fmt.Errorf("index identity is required")
 	}
+	lossAck, err := resolveIndexBuildLossAcknowledgment()
+	if err != nil {
+		return out, err
+	}
 	baseBucket, basePrefix, err := parseBaseURIForProvider(m.Connection.BaseURI, m.Connection.Provider)
 	if err != nil {
 		return out, fmt.Errorf("parse base_uri: %w", err)
@@ -127,6 +131,7 @@ func runIndexBuildBothFormats(ctx context.Context, m *manifest.IndexManifest, db
 		ObservationSinks:     []output.Writer{sqliteWriter},
 		Paths:                paths,
 		Coverage:             coverage,
+		LossAcknowledgment:   lossAck,
 		Authority:            authority,
 		RunStartedAt:         run.StartedAt,
 		ManifestCreatedAt:    time.Now().UTC(),
@@ -180,6 +185,10 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 	}
 	if identityResult == nil {
 		return indexbuild.Summary{}, "", fmt.Errorf("index identity is required")
+	}
+	lossAck, err := resolveIndexBuildLossAcknowledgment()
+	if err != nil {
+		return indexbuild.Summary{}, "", err
 	}
 	// Match SQLite/hub run-id contract: run_<digits> (not UUID-with-hyphens).
 	runID := indexstore.NewRunID()
@@ -245,6 +254,7 @@ func runIndexBuildDurable(ctx context.Context, m *manifest.IndexManifest, identi
 		ObservationSinks:     []output.Writer{newStderrProgressWriter(os.Stderr)},
 		Paths:                indexBuildEnginePathConfig(journalDir, runSegmentDir, segmentRoot, runID, resolvedDB.IdentityDir),
 		Coverage:             coverage,
+		LossAcknowledgment:   lossAck,
 		Authority:            authority,
 		RunStartedAt:         now,
 		ManifestCreatedAt:    now,

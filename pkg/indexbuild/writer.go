@@ -31,9 +31,10 @@ type journalWriterConfig struct {
 	// stable journal ID and shard. It is never the lane's completion order: journal
 	// identity orders cross-journal conflict resolution during compaction, so it
 	// must not vary with scheduling.
-	LaneOrdinal int
-	Now         Clock
-	Events      EventSink
+	LaneOrdinal        int
+	LossAcknowledgment *indexsubstrate.LossAcknowledgment
+	Now                Clock
+	Events             EventSink
 }
 
 type journalWriter struct {
@@ -72,6 +73,7 @@ func newJournalWriter(cfg journalWriterConfig) (*journalWriter, error) {
 		Scope:              &indexsubstrate.Scope{Prefix: cfg.BasePrefix},
 		CrawlPrefixes:      append([]string(nil), cfg.CrawlPrefixes...),
 		CrawlPlanMode:      cfg.CrawlPlanMode,
+		LossAcknowledgment: cfg.LossAcknowledgment,
 		IndexSchemaVersion: indexsubstrate.IndexSchemaVersion,
 		StartedAt:          cfg.StartedAt,
 	})
