@@ -1,7 +1,7 @@
 # Minimum tool versions checked by scripts/doctor.sh.
 # Format: <tool> <min_semver>
 go 1.26.0
-goneat 0.6.7
+goneat 0.6.8
 decernor 0.1.9
 limensafe 0.2.0
 minisign 0.11.0

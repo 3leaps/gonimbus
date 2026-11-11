@@ -14,7 +14,7 @@ jobs:
   dependency-security:
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       options: --user 1001
     defaults:
       run:

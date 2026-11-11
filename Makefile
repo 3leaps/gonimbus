@@ -54,7 +54,7 @@ BINDIR_RESOLVE = \
 	fi
 
 # Tooling - minimum versions (won't downgrade existing installs)
-GONEAT_VERSION ?= v0.6.7
+GONEAT_VERSION ?= v0.6.8
 
 SFETCH_RESOLVE = \
 	$(BINDIR_RESOLVE); \
@@ -394,7 +394,10 @@ release-post-tag-selector: ## Verify post-tag ceremony env vars (tag, primary, s
 	@./scripts/release-post-tag-selector.sh
 
 release-record-anchor: release-guard-tag-version ## Verify published tag and record external ceremony anchor
-	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-record-anchor.sh
+	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" \
+		GONIMBUS_EXPECTED_TAG_OBJECT="$${GONIMBUS_EXPECTED_TAG_OBJECT:-$$(git rev-parse "refs/tags/$(GONIMBUS_RELEASE_TAG)" 2>/dev/null || true)}" \
+		GONIMBUS_EXPECTED_COMMIT="$${GONIMBUS_EXPECTED_COMMIT:-$$(git rev-parse "refs/tags/$(GONIMBUS_RELEASE_TAG)^{commit}" 2>/dev/null || true)}" \
+		./scripts/release-record-anchor.sh
 
 release-stage-published: release-guard-tag-name ## Clean-room download and verify the published immutable GitHub release
 	@GONIMBUS_RELEASE_TAG="$(GONIMBUS_RELEASE_TAG)" ./scripts/release-stage-published.sh "$(DIST_PUBLISHED)"

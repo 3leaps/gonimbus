@@ -7,10 +7,10 @@ This document explains the CI/CD setup for this repository.
 This repository uses the **goneat-tools-runner container** for CI jobs. Specifically the **glibc variant** at the current fulmen-toolbox release:
 
 ```
-ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
 ```
 
-That image ships **goneat v0.6.6** (fulmen-toolbox v0.5.14); the local/bootstrap pin is **goneat v0.6.7** (`Makefile` `GONEAT_VERSION` / sfetch).
+That image ships **goneat v0.6.8** (fulmen-toolbox v0.5.15); the local/bootstrap pin is **goneat v0.6.8** (`Makefile` `GONEAT_VERSION` / sfetch).
 
 See [Image variant](#image-variant-musl-default-vs--glibc) below for why gonimbus uses `-glibc` rather than the default musl image.
 
@@ -47,7 +47,7 @@ This template uses `options: --user 1001` for `goneat-tools-runner` container jo
 
 ```yaml
 container:
-  image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+  image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
   options: --user 1001
 ```
 
@@ -67,7 +67,7 @@ The workaround is small but mandatory for every job that runs Go:
 jobs:
   build-test:
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       options: --user 1001
     env:
       GOPATH: ${{ github.workspace }}/../_go
@@ -141,7 +141,7 @@ Pin `CGO_ENABLED=0` at the release job's `env:` block so all release cross-compi
 jobs:
   release:
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       options: --user 1001
     env:
       GOPATH: ${{ github.workspace }}/../_go
@@ -320,7 +320,7 @@ For local development, you have two options:
 
    ```bash
    docker run --rm -v "$(pwd)":/work -w /work --entrypoint "" \
-     ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14 yamlfmt -lint .
+     ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15 yamlfmt -lint .
    ```
 
 2. **Install tools locally via sfetch + goneat**:
@@ -334,7 +334,7 @@ For local development, you have two options:
    sfetch --self-verify
 
    # Install goneat via sfetch
-   sfetch --repo fulmenhq/goneat --tag v0.6.7 --dest-dir "$HOME/.local/bin"
+   sfetch --repo fulmenhq/goneat --tag v0.6.8 --dest-dir "$HOME/.local/bin"
 
    # Install foundation tools via goneat
    goneat doctor tools --scope foundation --install --install-package-managers --yes

@@ -196,8 +196,8 @@ rot_subkey="$(gpg --homedir "$home" --batch --with-colons --with-subkey-fingerpr
 minisign -G -W -f -p "$scratch/rot.pub" -s "$scratch/rot.key" > /dev/null
 rot_pin="$(sed -n 2p "$scratch/rot.pub" | base64 -d | sha_sum 256 | awk '{print $1}')"
 pins=(keys/expected-fingerprints.txt keys/expected-fingerprints.ndjson docs/security/release-signing-keys.asc docs/security/gonimbus-minisign.pub)
-save_pins() { for p in "${pins[@]}"; do cp "$repo/$p" "$scratch/saved-${p//\//_}"; done; }
-restore_pins() { for p in "${pins[@]}"; do cp "$scratch/saved-${p//\//_}" "$repo/$p"; done; }
+save_pins() { for p in ${pins[@]+"${pins[@]}"}; do cp "$repo/$p" "$scratch/saved-${p//\//_}"; done; }
+restore_pins() { for p in ${pins[@]+"${pins[@]}"}; do cp "$scratch/saved-${p//\//_}" "$repo/$p"; done; }
 write_rotated_pins() {
     gpg --homedir "$home" --batch --armor --export "$rot_primary" > "$repo/docs/security/release-signing-keys.asc"
     cp "$scratch/rot.pub" "$repo/docs/security/gonimbus-minisign.pub"
@@ -223,7 +223,7 @@ refuse 'staged minisign key is not the key committed in the tagged commit'
 restore_pins
 # Working-tree pins deleted: the anchored commit still supplies them, and a
 # correctly signed set publishes.
-for p in "${pins[@]}"; do rm "$repo/$p"; done
+for p in ${pins[@]+"${pins[@]}"}; do rm "$repo/$p"; done
 stage
 : > "$FIXTURE_LOG"
 (cd "$repo" && ./scripts/release-publish.sh v1.2.3 "$d") > /dev/null
@@ -232,7 +232,7 @@ restore_pins
 # A later key rotation committed on main, anchor still on the tagged commit: the
 # release must stay bound to the tagged pins. B-signed is refused ...
 write_rotated_pins
-git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid add "${pins[@]}"
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid add ${pins[@]+"${pins[@]}"}
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm 'rotate keys'
 stage_signed_by_rotated
 refuse 'staged minisign key is not the key committed in the tagged commit'

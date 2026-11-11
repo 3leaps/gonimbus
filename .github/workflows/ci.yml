@@ -1,6 +1,6 @@
 # yamllint disable rule:document-start
 # yamllint disable rule:truthy
-# CI workflow — container jobs use goneat-tools-runner-glibc v0.5.14, digest-pinned (see docs/development/ci.md).
+# CI workflow — container jobs use goneat-tools-runner-glibc v0.5.15, digest-pinned (see docs/development/ci.md).
 name: CI
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
   format-check:
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
@@ -51,7 +51,7 @@ jobs:
     needs: [format-check]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       # goneat-tools-runner is a full CI runner image.
       # Use UID 1001 to match GitHub-hosted runner workspace ownership.
       options: --user 1001
@@ -180,11 +180,21 @@ jobs:
           set -euo pipefail
           test -x "${GONIMBUS_DECERNOR_BIN:?GONIMBUS_DECERNOR_BIN required}"
           make release-anchors-check
-      - name: Install minisign and python3-yaml
+      - name: Install checksum-pinned minisign and verify PyYAML
+        env:
+          MINISIGN_VERSION: "0.12"
+          MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
         run: |
           set -euo pipefail
-          sudo apt-get update -q
-          sudo apt-get install -y -q minisign python3-yaml
+          minisign_tmp="$(mktemp -d "${RUNNER_TEMP}/minisign.XXXXXX")"
+          curl --disable --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$minisign_tmp/minisign.tgz" \
+            "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/minisign-${MINISIGN_VERSION}-linux.tar.gz"
+          echo "${MINISIGN_SHA256}  $minisign_tmp/minisign.tgz" | sha256sum -c -
+          tar -xzf "$minisign_tmp/minisign.tgz" -C "$minisign_tmp" "minisign-linux/x86_64/minisign"
+          sudo install -m 0755 "$minisign_tmp/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          rm -rf "$minisign_tmp"
+          minisign -v
+          python3 -c 'import yaml'
       - name: Signed-tag ceremony regression tests
         run: |
           set -euo pipefail
@@ -269,7 +279,7 @@ jobs:
     needs: [build-test]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.14@sha256:2a98d8e9169d0b55f88ef7dbf3d26b05ec4780f1be8fc6672887d64831b60a13
+      image: ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e
       options: --user 1001
     # Force bash for run: steps; see format-check job for rationale.
     defaults:

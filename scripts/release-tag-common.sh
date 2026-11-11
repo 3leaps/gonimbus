@@ -117,17 +117,33 @@ tag_message_file() {
     done
     local canonical
     canonical="$(cd "$GONIMBUS_TAG_MESSAGE_DIR" && pwd -P)"
+    local probe cur
+    for probe in "${GONIMBUS_TAG_MESSAGE_DIR%/}" "$canonical"; do
+        cur="$probe"
+        while true; do
+            if [[ -e "$cur" && "$cur" -ef "$tag_root" ]]; then
+                tag_die 'message directory must be outside repository'
+                return 1
+            fi
+            [[ "$cur" != / ]] || break
+            cur="$(dirname "$cur")"
+        done
+    done
     case "$canonical" in "$tag_root" | "$tag_root"/*)
         tag_die 'message directory must be outside repository'
         return 1
         ;;
     esac
-    local file="${GONIMBUS_TAG_MESSAGE_DIR%/}/message.txt"
+    local file="${GONIMBUS_TAG_MESSAGE_DIR%/}/${GONIMBUS_RELEASE_TAG//\//__}.txt"
+    if [[ ! -e "$file" && ! -L "$file" && ( -e "${GONIMBUS_TAG_MESSAGE_DIR%/}/message.txt" || -L "${GONIMBUS_TAG_MESSAGE_DIR%/}/message.txt" ) ]]; then
+        file="${GONIMBUS_TAG_MESSAGE_DIR%/}/message.txt"
+    fi
     [[ -f "$file" && ! -L "$file" && -s "$file" ]] || {
-        tag_die 'message.txt required'
+        tag_die 'tag message file required'
         return 1
     }
-    "$tag_root/scripts/release-prepare-tag-message.py" --validate-message "$file" || return 1
+    local expected_subject="Release ${GONIMBUS_RELEASE_TAG#v}"
+    "$tag_root/scripts/release-prepare-tag-message.py" --validate-message "$file" "$expected_subject" || return 1
     printf '%s\n' "$file"
 }
 
@@ -210,56 +226,219 @@ tag_fresh_verify_gnupg_home() {
 # slash, ., ..) before comparing to the default homedir; refuse non-0700
 # (do not chmod). Signing uses this home and its existing agent/card setup.
 tag_bind_operator_gnupg_home() {
-    [[ -n "${GONIMBUS_GPG_HOMEDIR:-}" ]] || {
+    local raw_home="${GONIMBUS_GPG_HOMEDIR:-}"
+    [[ ( "$raw_home" == /* || "$raw_home" == [A-Za-z]:/* || "$raw_home" == [A-Za-z]:\\* || "$raw_home" == \\\\* ) && -d "$raw_home" && ! -L "$raw_home" ]] || {
         tag_die 'external GPG home required'
         return 1
     }
-    local canon default_home default_env
-    canon="$(tag_canon_path "$GONIMBUS_GPG_HOMEDIR")" || {
-        tag_die 'GPG home must be an absolute path'
-        return 1
-    }
-    [[ "$canon" == /* ]] || {
-        tag_die 'GPG home must be an absolute path'
-        return 1
-    }
-    [[ ! -L "$GONIMBUS_GPG_HOMEDIR" && ! -L "$canon" ]] || {
-        tag_die 'GPG home must not be a symlink'
-        return 1
-    }
-    [[ -d "$canon" ]] || {
-        tag_die 'external GPG home required'
-        return 1
-    }
-    local component="$canon"
-    while [[ "$component" != / ]]; do
-        [[ ! -L "$component" ]] || {
-            tag_die 'GPG home may not contain symlink ancestors'
-            return 1
-        }
-        component="${component%/*}"
-        [[ -n "$component" ]] || component=/
-    done
-    case "$canon" in "$tag_root" | "$tag_root"/*)
-        tag_die 'GPG home must be outside repository'
-        return 1
-        ;;
-    esac
+    local resolved
+    resolved="$(
+        python3 -I - "$raw_home" "$tag_root" "${HOME:-}" << 'PY'
+import os
+import pathlib
+import subprocess
+import sys
+
+probe = os.fsencode(sys.argv[1])
+seps = (b"/", b"\\") if os.name == "nt" else (b"/",)
+dot_seps = (b"/.", b"\\.") if os.name == "nt" else (b"/.",)
+dotdot_seps = (b"/..", b"\\..") if os.name == "nt" else (b"/..",)
+while True:
+    if len(probe) > 1 and probe.endswith(seps):
+        probe = probe[:-1]
+    elif probe.endswith(dot_seps):
+        probe = probe[:-2] or b"/"
+    else:
+        break
+if probe.endswith(dotdot_seps) or os.path.islink(probe):
+    print("error: GPG home must not be a symlink", file=sys.stderr)
+    sys.exit(1)
+
+def is_win_style(raw: str) -> bool:
+    return (
+        os.name == "nt"
+        or os.path.sep == "\\"
+        or raw.startswith("\\\\")
+        or (len(raw) >= 3 and raw[0].isalpha() and raw[1:3] in (":/", ":\\"))
+    )
+
+def resolve_path(raw: bytes) -> str:
+    s = os.fsdecode(raw)
+    if os.name != "nt" and is_win_style(s):
+        return s
+    return os.fsdecode(os.path.realpath(raw))
+
+def split_parent_raw(raw: bytes) -> bytes:
+    idx = max(raw.rfind(b"/"), raw.rfind(b"\\"))
+    if idx < 0:
+        return b""
+    if idx == 0:
+        return raw[:1]
+    if idx == 2 and len(raw) >= 3 and raw[1:2] == b":":
+        return raw[:3]
+    return raw[:idx]
+
+cur_check = probe
+while cur_check and cur_check not in (b"/", b"\\"):
+    if len(cur_check) == 3 and cur_check[1:2] == b":" and cur_check[2:3] in (b"/", b"\\"):
+        break
+    cur_str = os.fsdecode(cur_check)
+    p_obj = pathlib.Path(cur_str)
+    is_reparse = False
+    if os.name == "nt" and p_obj.exists():
+        try:
+            st = os.lstat(cur_check)
+            is_reparse = bool(getattr(st, "st_reparse_tag", 0)) or bool(
+                getattr(st, "st_file_attributes", 0) & 0x400
+            )
+        except OSError:
+            is_reparse = True
+    if os.path.islink(cur_check) or p_obj.is_symlink() or is_reparse:
+        print("error: GPG home may not contain symlink ancestors", file=sys.stderr)
+        sys.exit(1)
+    nxt = split_parent_raw(cur_check)
+    if nxt == cur_check:
+        break
+    cur_check = nxt
+
+home = pathlib.Path(resolve_path(os.fsencode(sys.argv[1])))
+repo_root = pathlib.Path(resolve_path(os.fsencode(sys.argv[2])))
+env_home = sys.argv[3]
+
+def strip_line_terminator(raw: bytes) -> bytes:
+    if (os.name == "nt" or os.path.sep == "\\") and raw.endswith(b"\r\n"):
+        return raw[:-2]
+    if raw.endswith(b"\r\n") and is_win_style(os.fsdecode(raw[:-2])):
+        return raw[:-2]
+    if raw.endswith(b"\n"):
+        return raw[:-1]
+    return raw
+
+def same_or_within(path: pathlib.Path, target: pathlib.Path) -> bool:
+    p_str = str(path)
+    t_str = str(target)
+    if is_win_style(p_str) or is_win_style(t_str):
+        p_low = p_str.replace("\\", "/").lower().rstrip("/")
+        t_low = t_str.replace("\\", "/").lower().rstrip("/")
+    else:
+        p_low = p_str.lower().rstrip("/")
+        t_low = t_str.lower().rstrip("/")
+    if p_low == t_low or p_low.startswith(t_low + "/"):
+        return True
+    for cur in (path, *path.parents):
+        try:
+            if target.exists() and cur.exists() and os.path.samefile(cur, target):
+                return True
+            if (
+                cur.parent.exists()
+                and target.parent.exists()
+                and os.path.samefile(cur.parent, target.parent)
+                and cur.name.lower() == target.name.lower()
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+repo_roots = {repo_root}
+for cwd_candidate in (os.getcwd(), str(repo_root)):
+    if not (pathlib.Path(cwd_candidate) / ".git").exists():
+        continue
+    try:
+        wt_records = subprocess.run(
+            ["git", "-C", cwd_candidate, "worktree", "list", "--porcelain", "-z"],
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+    except (OSError, subprocess.CalledProcessError):
+        print("error: failed to enumerate repository worktrees", file=sys.stderr)
+        sys.exit(1)
+    found_worktree = False
+    for rec in wt_records:
+        if rec.startswith(b"worktree "):
+            wt_bytes = rec[len(b"worktree ") :]
+            if not wt_bytes:
+                print("error: empty worktree path from git worktree list", file=sys.stderr)
+                sys.exit(1)
+            found_worktree = True
+            repo_roots.add(pathlib.Path(os.fsdecode(os.path.realpath(wt_bytes))))
+    if not found_worktree:
+        print("error: no repository worktrees reported by git worktree list", file=sys.stderr)
+        sys.exit(1)
+    for git_flag in ("--git-dir", "--git-common-dir"):
+        try:
+            git_dir_raw = strip_line_terminator(
+                subprocess.run(
+                    ["git", "-C", cwd_candidate, "rev-parse", "--path-format=absolute", git_flag],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+            )
+        except (OSError, subprocess.CalledProcessError):
+            print(f"error: failed to resolve repository {git_flag}", file=sys.stderr)
+            sys.exit(1)
+        if not git_dir_raw:
+            print(f"error: empty repository {git_flag}", file=sys.stderr)
+            sys.exit(1)
+        repo_roots.add(pathlib.Path(os.fsdecode(os.path.realpath(git_dir_raw))))
+
+for r_root in repo_roots:
+    if same_or_within(home, r_root):
+        print("error: GPG home must be outside repository", file=sys.stderr)
+        sys.exit(1)
+
+candidates = set()
+for home_candidate in (
+    env_home,
+    os.environ.get("USERPROFILE", ""),
+    (os.environ.get("HOMEDRIVE", "") + os.environ.get("HOMEPATH", "")) if os.environ.get("HOMEDRIVE") and os.environ.get("HOMEPATH") else "",
+    os.path.expanduser("~"),
+):
+    if home_candidate and home_candidate != "~":
+        candidates.add(pathlib.Path(os.path.realpath(os.path.expanduser(home_candidate))) / ".gnupg")
+for appdata_candidate in (os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")):
+    if appdata_candidate:
+        candidates.add(pathlib.Path(os.path.realpath(os.path.expanduser(appdata_candidate))) / "gnupg")
+try:
+    import pwd
+
+    acct = pathlib.Path(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+    candidates.add(acct / ".gnupg")
+except (ImportError, AttributeError, KeyError, OSError):
+    pass
+env = {k: v for k, v in os.environ.items() if k != "GNUPGHOME"}
+try:
+    out = strip_line_terminator(
+        subprocess.run(
+            ["gpgconf", "--list-dirs", "homedir"],
+            env=env,
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    out_str = os.fsdecode(out)
+    if is_win_style(out_str) or out.startswith(b"/") or os.path.isabs(out_str):
+        candidates.add(pathlib.Path(resolve_path(out)))
+        candidates.add(pathlib.Path(out_str))
+except (OSError, subprocess.CalledProcessError):
+    pass
+
+for cand in candidates:
+    if same_or_within(home, cand):
+        print("error: GPG home must not be the default homedir", file=sys.stderr)
+        sys.exit(1)
+
+sys.stdout.write(str(home) + "x")
+PY
+    )" || return 1
+    resolved="${resolved%x}"
     local mode
-    mode="$(tag_stat_mode "$canon")"
+    mode="$(tag_stat_mode "$resolved")"
     [[ "$mode" == "700" ]] || {
         tag_die 'GPG home must be mode 0700'
         return 1
     }
-    default_home="$(tag_canon_path "$HOME/.gnupg")" || default_home=""
-    default_env="$(env -u GNUPGHOME gpgconf --list-dirs homedir 2> /dev/null | head -1)" || default_env=""
-    [[ -n "$default_env" ]] && default_env="$(tag_canon_path "$default_env" 2> /dev/null || printf '%s\n' "$default_env")"
-    if [[ -n "$default_home" && "$canon" == "$default_home" ]] ||
-        [[ -n "$default_env" && "$canon" == "$default_env" ]]; then
-        tag_die 'GPG home must not be the default homedir'
-        return 1
-    fi
-    GONIMBUS_GPG_HOMEDIR="$canon"
+    GONIMBUS_GPG_HOMEDIR="$resolved"
 }
 
 # Use the operator's keyring directly: hardware-backed signing subkeys cannot

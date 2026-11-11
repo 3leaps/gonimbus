@@ -27,7 +27,7 @@ shopt -s nullglob
 
 binaries=("${DIR}/gonimbus-"*)
 filtered_binaries=()
-for b in "${binaries[@]}"; do
+for b in ${binaries[@]+"${binaries[@]}"}; do
     case "$b" in
         *.minisig | *.asc | *.sig) ;;
         *)
@@ -54,7 +54,7 @@ provenance=(
 )
 
 final_assets=()
-for f in "${filtered_binaries[@]}" "${provenance[@]}"; do
+for f in ${filtered_binaries[@]+"${filtered_binaries[@]}"} ${provenance[@]+"${provenance[@]}"}; do
     if [[ -f "$f" ]]; then
         final_assets+=("$f")
     fi
@@ -72,6 +72,6 @@ if [[ "${is_draft}" != "true" ]]; then
 fi
 
 echo "→ Uploading ${#final_assets[@]} assets to ${TAG} (clobber enabled)"
-release_gh release upload "${TAG}" "${final_assets[@]}" --clobber
+release_gh release upload "${TAG}" ${final_assets[@]+"${final_assets[@]}"} --clobber
 
 echo "✅ Upload complete"
