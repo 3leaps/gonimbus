@@ -800,12 +800,6 @@ func resolvePublishedArtifactWithRel(anchorPath, rawPath, rawRelPath, label stri
 	if err != nil {
 		return "", err
 	}
-	if filepath.Clean(primary) == filepath.Clean(relResolved) {
-		return primary, nil
-	}
-	if _, statErr := os.Stat(primary); statErr == nil {
-		return primary, nil
-	}
 	return relResolved, nil
 }
 

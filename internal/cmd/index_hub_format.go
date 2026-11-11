@@ -248,15 +248,16 @@ func resolveLocalDurableCompleteArtifactPathWithRel(completePath, primaryRaw, re
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(relRaw) == "" {
+	relRaw = strings.TrimSpace(relRaw)
+	if relRaw == "" {
 		return primary, nil
+	}
+	if filepath.IsAbs(relRaw) {
+		return "", fmt.Errorf("local durable complete marker path is not a safe relative path")
 	}
 	relResolved, err := resolveLocalDurableCompleteArtifactPath(completePath, relRaw, allowDot)
 	if err != nil {
 		return "", err
-	}
-	if _, statErr := os.Stat(primary); statErr == nil {
-		return primary, nil
 	}
 	return relResolved, nil
 }

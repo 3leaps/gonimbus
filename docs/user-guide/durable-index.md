@@ -468,8 +468,10 @@ dotfile conventions:
   `manifest_rel_path` (`"manifest.json"`) and `segment_rel_dir` (`"."`), and
   `latest.json` retains `complete_path` while adding `complete_rel_path`
   (`"runs/<run_id>/complete.json"`). Earlier readers (`<= v0.4.7`) continue to
-  read the existing fields in-place, while current readers fall back to the
-  relative fields when an index set directory is relocated on disk.
+  read the existing fields in-place, while current readers prefer the relative
+  fields inside the marker's own directory (so both copied and relocated index
+  directories resolve their own local files) and fall back to the absolute
+  fields for legacy markers that predate the relative fields.
 
 ## Temporal durable compare
 

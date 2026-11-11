@@ -430,6 +430,9 @@ func TestBuildRefusesOffLayoutCapturedParentPointer(t *testing.T) {
 			var doc map[string]any
 			require.NoError(t, json.Unmarshal(latestOriginal, &doc))
 			doc["complete_path"] = tc.completePath
+			relComplete, err := filepath.Rel(setRoot, tc.completePath)
+			require.NoError(t, err)
+			doc["complete_rel_path"] = filepath.ToSlash(relComplete)
 			tampered, err := json.Marshal(doc)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(latestPath, tampered, 0o600))
