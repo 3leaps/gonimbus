@@ -30,25 +30,27 @@ const (
 // Count fields that apply to a format are always present (including zero).
 // omitempty is reserved for format-specific optional identity fields only.
 type indexBuildResultRecord struct {
-	Type             string                            `json:"type"`
-	SchemaVersion    string                            `json:"schema_version"`
-	Status           string                            `json:"status"`
-	RequestedFormat  string                            `json:"requested_format"`
-	FormatsCommitted []string                          `json:"formats_committed"`
-	IndexSetID       string                            `json:"index_set_id"`
-	RunID            string                            `json:"run_id"`
-	GonimbusVersion  string                            `json:"gonimbus_version,omitempty"`
-	DotSegmentPolicy string                            `json:"dot_segment_policy,omitempty"`
-	ScopeHash        string                            `json:"scope_hash,omitempty"`
-	Rows             *int                              `json:"rows,omitempty"`
-	ActiveRows       *int                              `json:"active_rows,omitempty"`
-	Tombstones       *int                              `json:"tombstones,omitempty"`
-	DotSegmentRows   *int                              `json:"dot_segment_rows,omitempty"`
-	Segments         *int                              `json:"segments,omitempty"`
-	ObjectsObserved  *int64                            `json:"objects_observed,omitempty"`
-	ObjectsIngested  *int64                            `json:"objects_ingested,omitempty"`
-	ManifestSHA256   string                            `json:"manifest_sha256,omitempty"`
-	Verification     *indexBuildBothVerificationRecord `json:"verification,omitempty"`
+	Type                string                            `json:"type"`
+	SchemaVersion       string                            `json:"schema_version"`
+	Status              string                            `json:"status"`
+	RequestedFormat     string                            `json:"requested_format"`
+	FormatsCommitted    []string                          `json:"formats_committed"`
+	IndexSetID          string                            `json:"index_set_id"`
+	RunID               string                            `json:"run_id"`
+	GonimbusVersion     string                            `json:"gonimbus_version,omitempty"`
+	GonimbusCommit      string                            `json:"gonimbus_commit,omitempty"`
+	GonimbusVCSModified *bool                             `json:"gonimbus_vcs_modified,omitempty"`
+	DotSegmentPolicy    string                            `json:"dot_segment_policy,omitempty"`
+	ScopeHash           string                            `json:"scope_hash,omitempty"`
+	Rows                *int                              `json:"rows,omitempty"`
+	ActiveRows          *int                              `json:"active_rows,omitempty"`
+	Tombstones          *int                              `json:"tombstones,omitempty"`
+	DotSegmentRows      *int                              `json:"dot_segment_rows,omitempty"`
+	Segments            *int                              `json:"segments,omitempty"`
+	ObjectsObserved     *int64                            `json:"objects_observed,omitempty"`
+	ObjectsIngested     *int64                            `json:"objects_ingested,omitempty"`
+	ManifestSHA256      string                            `json:"manifest_sha256,omitempty"`
+	Verification        *indexBuildBothVerificationRecord `json:"verification,omitempty"`
 }
 
 // indexBuildBothVerificationRecord reports the run-scoped SQLite
@@ -74,47 +76,61 @@ func intPtr(v int) *int       { return &v }
 func int64Ptr(v int64) *int64 { return &v }
 
 func newDurableBuildResultRecord(summary indexbuild.Summary, scopeHash, requestedFormat string, formats []string) indexBuildResultRecord {
+	fallbackVer, fallbackCommit, fallbackVCSMod := effectiveBuildProvenance()
 	gonimbusVer := strings.TrimSpace(summary.Manifest.GonimbusVersion)
 	if gonimbusVer == "" {
-		gonimbusVer = strings.TrimSpace(versionInfo.Version)
+		gonimbusVer = fallbackVer
+	}
+	gonimbusCommit := strings.TrimSpace(summary.Manifest.GonimbusCommit)
+	if gonimbusCommit == "" {
+		gonimbusCommit = fallbackCommit
+	}
+	gonimbusVCSMod := summary.Manifest.GonimbusVCSModified
+	if gonimbusVCSMod == nil {
+		gonimbusVCSMod = fallbackVCSMod
 	}
 	dotPolicy := strings.TrimSpace(summary.Manifest.DotSegmentPolicy)
 	if dotPolicy == "" {
 		dotPolicy = indexsubstrate.DotSegmentPolicyInclude
 	}
 	return indexBuildResultRecord{
-		Type:             indexBuildResultType,
-		SchemaVersion:    indexBuildResultVersion,
-		Status:           "success",
-		RequestedFormat:  requestedFormat,
-		FormatsCommitted: append([]string(nil), formats...),
-		IndexSetID:       summary.IndexSetID,
-		RunID:            summary.RunID,
-		GonimbusVersion:  gonimbusVer,
-		DotSegmentPolicy: dotPolicy,
-		ScopeHash:        strings.TrimSpace(scopeHash),
-		Rows:             intPtr(summary.Manifest.Rows),
-		ActiveRows:       intPtr(summary.Manifest.ActiveRows),
-		Tombstones:       intPtr(summary.Manifest.Tombstones),
-		DotSegmentRows:   intPtr(summary.Manifest.DotSegmentRows),
-		Segments:         intPtr(len(summary.Manifest.Segments)),
-		ObjectsObserved:  int64Ptr(summary.ObjectsObserved),
-		ManifestSHA256:   summary.ManifestSHA256,
+		Type:                indexBuildResultType,
+		SchemaVersion:       indexBuildResultVersion,
+		Status:              "success",
+		RequestedFormat:     requestedFormat,
+		FormatsCommitted:    append([]string(nil), formats...),
+		IndexSetID:          summary.IndexSetID,
+		RunID:               summary.RunID,
+		GonimbusVersion:     gonimbusVer,
+		GonimbusCommit:      gonimbusCommit,
+		GonimbusVCSModified: gonimbusVCSMod,
+		DotSegmentPolicy:    dotPolicy,
+		ScopeHash:           strings.TrimSpace(scopeHash),
+		Rows:                intPtr(summary.Manifest.Rows),
+		ActiveRows:          intPtr(summary.Manifest.ActiveRows),
+		Tombstones:          intPtr(summary.Manifest.Tombstones),
+		DotSegmentRows:      intPtr(summary.Manifest.DotSegmentRows),
+		Segments:            intPtr(len(summary.Manifest.Segments)),
+		ObjectsObserved:     int64Ptr(summary.ObjectsObserved),
+		ManifestSHA256:      summary.ManifestSHA256,
 	}
 }
 
 func newSQLiteBuildResultRecord(indexSetID, runID, scopeHash, status string, objectsIngested int64) indexBuildResultRecord {
+	gonimbusVer, gonimbusCommit, gonimbusVCSMod := effectiveBuildProvenance()
 	return indexBuildResultRecord{
-		Type:             indexBuildResultType,
-		SchemaVersion:    indexBuildResultVersion,
-		Status:           status,
-		RequestedFormat:  "sqlite",
-		FormatsCommitted: []string{string(indexreader.FormatSQLiteV1)},
-		IndexSetID:       indexSetID,
-		RunID:            runID,
-		GonimbusVersion:  strings.TrimSpace(versionInfo.Version),
-		ScopeHash:        strings.TrimSpace(scopeHash),
-		ObjectsIngested:  int64Ptr(objectsIngested),
+		Type:                indexBuildResultType,
+		SchemaVersion:       indexBuildResultVersion,
+		Status:              status,
+		RequestedFormat:     "sqlite",
+		FormatsCommitted:    []string{string(indexreader.FormatSQLiteV1)},
+		IndexSetID:          indexSetID,
+		RunID:               runID,
+		GonimbusVersion:     gonimbusVer,
+		GonimbusCommit:      gonimbusCommit,
+		GonimbusVCSModified: gonimbusVCSMod,
+		ScopeHash:           strings.TrimSpace(scopeHash),
+		ObjectsIngested:     int64Ptr(objectsIngested),
 	}
 }
 

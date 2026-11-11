@@ -30,6 +30,7 @@ package buildinfo
 import (
 	_ "embed"
 	"runtime/debug"
+	"strconv"
 	"strings"
 )
 
@@ -95,6 +96,35 @@ func Resolve(ldVersion, ldCommit, ldBuildDate string) (version, commit, buildDat
 func DefaultVersion() string {
 	v, _, _ := Resolve("", "", "")
 	return v
+}
+
+// ResolveProvenance returns the effective version, commit (empty when unknown),
+// and vcs_modified state (nil when unknown) for build provenance recording.
+func ResolveProvenance(ldVersion, ldCommit string) (version, commit string, vcsModified *bool) {
+	v, c, _ := Resolve(ldVersion, ldCommit, "")
+	if c == "unknown" {
+		c = ""
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info != nil {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.modified" {
+				if b, err := strconv.ParseBool(s.Value); err == nil {
+					vcsModified = &b
+				}
+			}
+		}
+	}
+	if strings.HasSuffix(c, "-dirty") {
+		b := true
+		vcsModified = &b
+	}
+	return v, c, vcsModified
+}
+
+// DefaultProvenance returns the default resolved engine version, commit, and
+// vcs_modified flag for internal libraries when no explicit override is supplied.
+func DefaultProvenance() (version, commit string, vcsModified *bool) {
+	return ResolveProvenance("", "")
 }
 
 // normalizeModuleVersion strips the leading "v" from a Go module version so

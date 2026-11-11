@@ -92,8 +92,9 @@ rejected alongside other selector overrides), recording `"include_hidden": true`
 in `identity.json`, `counts.dot_segment_rows` in `manifest.json` and top-level
 `dot_segment_rows` in `gonimbus.index.build_result.v1` (counting active
 non-tombstone rows whose `rel_key` has at least one `/`-separated segment
-starting with `.`), and per-run `gonimbus_version` provenance across
-`manifest.json`, `complete.json`, and `gonimbus.index.build_result.v1`.
+starting with `.`), and per-run `gonimbus_version`, `gonimbus_commit`, and
+`gonimbus_vcs_modified` provenance across `manifest.json`, `complete.json`, and
+`gonimbus.index.build_result.v1`.
 
 ### LIST-derived storage class
 

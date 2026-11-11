@@ -30,6 +30,13 @@ const (
 	DefaultTargetRowsPerSegment = 500_000
 	SegmentSizingRationale      = "real-corpus rebaseline for hub export and hydrate artifact counts"
 
+	// LegacyMaxParquetDecompressedBytes is the per-segment uncompressed ceiling
+	// for legacy durable-v2 (segmentParquetRow Snappy) segments written by
+	// <= v0.4.7 (where 250k-row segments are ~164 MiB uncompressed). New
+	// parquet-inventory/v0 segments remain capped at 128 MiB via
+	// durableindex.DefaultMaxParquetDecompressedBytes.
+	LegacyMaxParquetDecompressedBytes int64 = 1 << 30
+
 	ManifestReachabilityModel = "retained_manifests_parent_chain_latest_pointers"
 	SegmentNamespaceShared    = "shared_immutable_segments"
 	RefcountModeDerivedAudit  = "derived_audit_plan_only"
@@ -54,6 +61,8 @@ type SegmentWriterConfig struct {
 	IndexSetID             string
 	RunID                  string
 	GonimbusVersion        string
+	GonimbusCommit         string
+	GonimbusVCSModified    *bool
 	CreatedAt              time.Time
 	TargetRowsPerSegment   int
 	AllowExistingIdentical bool
@@ -75,14 +84,16 @@ type SegmentWriterConfig struct {
 }
 
 type InternalManifest struct {
-	Type               string    `json:"type"`
-	Render             string    `json:"render"`
-	IndexSetID         string    `json:"index_set_id"`
-	RunID              string    `json:"run_id"`
-	GonimbusVersion    string    `json:"gonimbus_version,omitempty"`
-	DotSegmentPolicy   string    `json:"dot_segment_policy,omitempty"`
-	IndexSchemaVersion int       `json:"index_schema_version"`
-	CreatedAt          time.Time `json:"created_at"`
+	Type                string    `json:"type"`
+	Render              string    `json:"render"`
+	IndexSetID          string    `json:"index_set_id"`
+	RunID               string    `json:"run_id"`
+	GonimbusVersion     string    `json:"gonimbus_version,omitempty"`
+	GonimbusCommit      string    `json:"gonimbus_commit,omitempty"`
+	GonimbusVCSModified *bool     `json:"gonimbus_vcs_modified,omitempty"`
+	DotSegmentPolicy    string    `json:"dot_segment_policy,omitempty"`
+	IndexSchemaVersion  int       `json:"index_schema_version"`
+	CreatedAt           time.Time `json:"created_at"`
 	// RunStartedAt is the optional authoritative run start.
 	// Not an alias of CreatedAt, journal start, or complete-marker time.
 	// Omitted on pre-continuity / legacy manifests; never invent from other
@@ -347,20 +358,22 @@ func prepareSegmentWriter(config SegmentWriterConfig) (SegmentWriterConfig, *tim
 
 func newSegmentManifestSkeleton(config SegmentWriterConfig, runStartedAt *time.Time) InternalManifest {
 	return InternalManifest{
-		Type:               ManifestType,
-		Render:             ManifestRenderType,
-		IndexSetID:         config.IndexSetID,
-		RunID:              config.RunID,
-		GonimbusVersion:    config.GonimbusVersion,
-		DotSegmentPolicy:   DotSegmentPolicyInclude,
-		IndexSchemaVersion: IndexSchemaVersion,
-		CreatedAt:          config.CreatedAt,
-		RunStartedAt:       runStartedAt,
-		StateParent:        NormalizeStateParent(config.StateParent),
-		Lineage:            NormalizeLineage(config.Lineage),
-		ParentManifests:    normalizeManifestReferences(config.ParentManifests),
-		Reachability:       DefaultManifestReachability(),
-		Coverage:           copyCoverageAttestations(config.Coverage),
+		Type:                ManifestType,
+		Render:              ManifestRenderType,
+		IndexSetID:          config.IndexSetID,
+		RunID:               config.RunID,
+		GonimbusVersion:     config.GonimbusVersion,
+		GonimbusCommit:      config.GonimbusCommit,
+		GonimbusVCSModified: cloneBoolPtr(config.GonimbusVCSModified),
+		DotSegmentPolicy:    DotSegmentPolicyInclude,
+		IndexSchemaVersion:  IndexSchemaVersion,
+		CreatedAt:           config.CreatedAt,
+		RunStartedAt:        runStartedAt,
+		StateParent:         NormalizeStateParent(config.StateParent),
+		Lineage:             NormalizeLineage(config.Lineage),
+		ParentManifests:     normalizeManifestReferences(config.ParentManifests),
+		Reachability:        DefaultManifestReachability(),
+		Coverage:            copyCoverageAttestations(config.Coverage),
 		SegmentSizing: SegmentSizing{
 			TargetRowsPerSegment: config.TargetRowsPerSegment,
 			Rationale:            SegmentSizingRationale,
@@ -507,7 +520,7 @@ func openSegmentFile(path string) (*os.File, *os.Root, error) {
 }
 
 func openParquetSegmentFile(r io.ReaderAt, size int64) (pf *parquet.File, isDurable bool, err error) {
-	if size < 8 || size > durableindex.DefaultMaxParquetDecompressedBytes {
+	if size < 8 || size > LegacyMaxParquetDecompressedBytes {
 		return nil, false, fmt.Errorf("read segment: invalid parquet segment byte length")
 	}
 	var head [4]byte
@@ -580,7 +593,7 @@ func openParquetSegmentFile(r io.ReaderAt, size int64) (pf *parquet.File, isDura
 			if (col.MetaData.BloomFilterOffset != 0 || col.MetaData.BloomFilterLength != 0) && (col.MetaData.BloomFilterOffset < 4 || col.MetaData.BloomFilterOffset > dataEnd || int64(col.MetaData.BloomFilterLength) > dataEnd-col.MetaData.BloomFilterOffset) {
 				return nil, false, fmt.Errorf("read segment: bloom filter out of bounds")
 			}
-			if totalUncompressed > durableindex.DefaultMaxParquetDecompressedBytes-col.MetaData.TotalUncompressedSize {
+			if totalUncompressed > LegacyMaxParquetDecompressedBytes-col.MetaData.TotalUncompressedSize {
 				return nil, false, fmt.Errorf("read segment: column chunk exceeds decompression ceiling")
 			}
 			totalUncompressed += col.MetaData.TotalUncompressedSize
@@ -1020,13 +1033,34 @@ func safeSegmentPath(dir string, name string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
+func cloneBoolPtr(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
 func normalizeSegmentWriterConfig(config SegmentWriterConfig) SegmentWriterConfig {
 	config.Dir = strings.TrimSpace(config.Dir)
 	config.IndexSetID = strings.TrimSpace(config.IndexSetID)
 	config.RunID = strings.TrimSpace(config.RunID)
 	config.GonimbusVersion = strings.TrimSpace(config.GonimbusVersion)
+	config.GonimbusCommit = strings.TrimSpace(config.GonimbusCommit)
+	if config.GonimbusCommit == "unknown" {
+		config.GonimbusCommit = ""
+	}
+	defVer, defCommit, defMod := buildinfo.DefaultProvenance()
 	if config.GonimbusVersion == "" {
-		config.GonimbusVersion = buildinfo.DefaultVersion()
+		config.GonimbusVersion = defVer
+	}
+	if config.GonimbusCommit == "" {
+		config.GonimbusCommit = defCommit
+	}
+	if config.GonimbusVCSModified == nil {
+		config.GonimbusVCSModified = defMod
+	} else {
+		config.GonimbusVCSModified = cloneBoolPtr(config.GonimbusVCSModified)
 	}
 	if config.CreatedAt.IsZero() {
 		config.CreatedAt = time.Now().UTC()

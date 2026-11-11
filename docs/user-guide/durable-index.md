@@ -456,11 +456,20 @@ dotfile conventions:
   build receipt), counting **active (non-tombstone)** rows whose `rel_key` has
   at least one `/`-separated segment starting with `.` (marker-style names such
   as `_SUCCESS` are not dot-prefixed and do not count).
-- **Per-run `gonimbus_version` provenance:** Each run records the producing
-  `gonimbus_version` in `manifest.json`, `complete.json`
-  (`gonimbus.index.complete.v2`), and the `gonimbus.index.build_result.v1`
-  receipt so multi-run sets always identify which engine version produced each
+- **Per-run engine provenance (`gonimbus_version`, `gonimbus_commit`, `gonimbus_vcs_modified`):**
+  Each run records the producing `gonimbus_version` along with `gonimbus_commit`
+  and `gonimbus_vcs_modified` (when VCS build metadata or linker flags are
+  available) in `manifest.json`, `complete.json` (`gonimbus.index.complete.v2`),
+  and the `gonimbus.index.build_result.v1` receipt so multi-run sets and local
+  unreleased builds always identify the exact engine build that produced each
   snapshot.
+- **Additive relative marker paths (`manifest_rel_path`, `segment_rel_dir`, `complete_rel_path`):**
+  `complete.json` retains `manifest_path` and `segment_dir` while adding
+  `manifest_rel_path` (`"manifest.json"`) and `segment_rel_dir` (`"."`), and
+  `latest.json` retains `complete_path` while adding `complete_rel_path`
+  (`"runs/<run_id>/complete.json"`). Earlier readers (`<= v0.4.7`) continue to
+  read the existing fields in-place, while current readers fall back to the
+  relative fields when an index set directory is relocated on disk.
 
 ## Temporal durable compare
 

@@ -144,6 +144,8 @@ func (r *Runner) Build(ctx context.Context) (summary Summary, buildErr error) {
 		IndexSetID:           cfg.IndexSetID,
 		RunID:                cfg.RunID,
 		GonimbusVersion:      cfg.GonimbusVersion,
+		GonimbusCommit:       cfg.GonimbusCommit,
+		GonimbusVCSModified:  cfg.GonimbusVCSModified,
 		BaseURI:              cfg.BaseURI,
 		Paths:                cfg.Paths,
 		JournalPaths:         crawlResult.journalPaths,
@@ -333,6 +335,8 @@ func retryWithLease(ctx context.Context, cfg RetryConfig, plan *verifiedParentPl
 		IndexSetID:              cfg.IndexSetID,
 		RunID:                   cfg.RunID,
 		GonimbusVersion:         cfg.GonimbusVersion,
+		GonimbusCommit:          cfg.GonimbusCommit,
+		GonimbusVCSModified:     cfg.GonimbusVCSModified,
 		RunStartedAt:            cfg.RunStartedAt,
 		ManifestCreatedAt:       cfg.ManifestCreatedAt,
 		SnapshotCompletionClock: func() time.Time { return cfg.Clock() },
@@ -469,6 +473,12 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 	)
 	if err != nil {
 		if errors.Is(err, indexsubstrate.ErrSnapshotNotPublished) {
+			if _, statErr := os.Stat(latestPath); !os.IsNotExist(statErr) {
+				if statErr != nil {
+					return nil, fmt.Errorf("stat durable latest for parent capture: %w", statErr)
+				}
+				return nil, fmt.Errorf("open durable latest for parent capture: latest pointer references missing complete marker: %w", err)
+			}
 			if provided != nil {
 				return nil, fmt.Errorf("%w: ExpectedParent provided but latest is not published", indexsubstrate.ErrStaleParent)
 			}
@@ -1387,8 +1397,15 @@ func deriveRelKey(baseURI, fullKey string) string {
 }
 
 func manifestSummary(manifest indexsubstrate.InternalManifest) ManifestSummary {
+	var vcsMod *bool
+	if manifest.GonimbusVCSModified != nil {
+		v := *manifest.GonimbusVCSModified
+		vcsMod = &v
+	}
 	out := ManifestSummary{
 		GonimbusVersion:        manifest.GonimbusVersion,
+		GonimbusCommit:         manifest.GonimbusCommit,
+		GonimbusVCSModified:    vcsMod,
 		DotSegmentPolicy:       manifest.DotSegmentPolicy,
 		Rows:                   manifest.Counts.Rows,
 		ActiveRows:             manifest.Counts.ActiveRows,

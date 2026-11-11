@@ -1619,6 +1619,7 @@ build:
 	// Run 1 built under version "0.4.7"
 	restore()
 	versionInfo.Version = "0.4.7"
+	versionInfo.Commit = "abc1234def5678"
 	indexBuildJobPath = manifestPath
 	indexBuildFormat = "durable"
 	indexBuildJSON = true
@@ -1632,6 +1633,7 @@ build:
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out1.String())), &rec1))
 	require.NotEmpty(t, rec1.IndexSetID)
 	require.Equal(t, "0.4.7", rec1.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", rec1.GonimbusCommit)
 	require.Equal(t, indexsubstrate.DotSegmentPolicyInclude, rec1.DotSegmentPolicy)
 	require.NotNil(t, rec1.Rows)
 	require.Equal(t, 4, *rec1.Rows)
@@ -1653,9 +1655,13 @@ build:
 	snap1, err := indexsubstrate.OpenLatestPublishedSnapshot(latestPath1)
 	require.NoError(t, err)
 	require.Equal(t, "0.4.7", snap1.Manifest.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", snap1.Manifest.GonimbusCommit)
 	require.Equal(t, indexsubstrate.DotSegmentPolicyInclude, snap1.Manifest.DotSegmentPolicy)
 	require.Equal(t, 2, snap1.Manifest.Counts.DotSegmentRows)
 	require.Equal(t, "0.4.7", snap1.Complete.GonimbusVersion)
+	require.Equal(t, "abc1234def5678", snap1.Complete.GonimbusCommit)
+	require.Equal(t, "manifest.json", snap1.Complete.ManifestRelPath)
+	require.Equal(t, ".", snap1.Complete.SegmentRelDir)
 
 	// Run 2 built after upgrading Gonimbus to "0.5.0" produces a distinct set_id
 	// (no implicit carry-forward across engine versions).

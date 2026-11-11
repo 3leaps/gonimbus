@@ -773,3 +773,80 @@ func (s *sliceRowSource) Next(_ context.Context) (CurrentObjectRow, error) {
 }
 
 func (s *sliceRowSource) Close() error { return nil }
+
+func TestLegacySegmentAllowsUncompressedColumnChunksAbove128MiB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seg_legacy_large.parquet")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	require.NoError(t, err)
+
+	writer := parquet.NewGenericWriter[segmentParquetRow](
+		f,
+		parquet.Compression(&parquet.Snappy),
+		parquet.PageBufferSize(1024*1024),
+	)
+	// Write a legacy segmentParquetRow segment whose uncompressed column chunks
+	// exceed durableindex.DefaultMaxParquetDecompressedBytes (128 MiB), matching
+	// v0.4.3–v0.4.7 250k-row production segments (~164 MiB uncompressed).
+	bigKeySuffix := strings.Repeat("k", 64*1024)
+	bigETag := `"` + strings.Repeat("e", 64*1024) + `"`
+	const rowCount = 1350 // ~172 MiB uncompressed across RelKey + ETag + metadata columns
+	batch := make([]segmentParquetRow, 0, 150)
+	for i := range rowCount {
+		batch = append(batch, segmentParquetRow{
+			IndexSetID:       "idx_legacy",
+			RelKey:           "data/item_" + string(rune('a'+(i%26))) + "_" + bigKeySuffix,
+			SizeBytes:        int64(i + 1),
+			ETag:             bigETag,
+			FirstSeenRunID:   "run_043",
+			FirstSeenAt:      "2026-04-01T00:00:00Z",
+			LastChangedRunID: "run_043",
+			LastChangedAt:    "2026-04-01T00:00:00Z",
+			LastSeenRunID:    "run_043",
+			LastSeenAt:       "2026-04-01T00:00:00Z",
+		})
+		if len(batch) == 150 {
+			_, err := writer.Write(batch)
+			require.NoError(t, err)
+			batch = batch[:0]
+		}
+	}
+	if len(batch) > 0 {
+		_, err := writer.Write(batch)
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+	require.NoError(t, f.Close())
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	digest, err := sha256HexFile(path)
+	require.NoError(t, err)
+
+	desc := SegmentDescriptor{
+		SegmentID:     "seg_000001",
+		Path:          "seg_legacy_large.parquet",
+		Compression:   "snappy",
+		Rows:          rowCount,
+		Tombstones:    0,
+		DistinctETags: 1,
+		SizeBytes:     info.Size(),
+		Digest:        SegmentDigest{Algorithm: "sha256", Hex: digest},
+	}
+
+	gotRows, err := ReadSegmentFileVerified(dir, desc)
+	require.NoError(t, err)
+	require.Len(t, gotRows, rowCount)
+
+	src := NewPublishedParentRowSource(PublishedSnapshot{
+		SegmentDir: dir,
+		Manifest: InternalManifest{
+			Counts:   ManifestCounts{Rows: rowCount, ActiveRows: rowCount},
+			Segments: []SegmentDescriptor{desc},
+		},
+	})
+	defer func() { _ = src.Close() }()
+	firstRow, err := src.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "idx_legacy", firstRow.IndexSetID)
+}

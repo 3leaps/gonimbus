@@ -739,3 +739,14 @@ func exportedPackageNames(t *testing.T) []string {
 	}
 	return names
 }
+
+func TestCaptureVerifiedParentFailsClosedOnDanglingLatestPointer(t *testing.T) {
+	dir := t.TempDir()
+	latestPath := filepath.Join(dir, "latest.json")
+	danglingLatest := `{"type":"gonimbus.index.latest.v1","index_set_id":"idx_test","run_id":"run_missing","complete_path":"runs/run_missing/complete.json","manifest_sha256":"` + strings.Repeat("a", 64) + `"}`
+	require.NoError(t, os.WriteFile(latestPath, []byte(danglingLatest), 0o600))
+
+	_, err := captureVerifiedParent(latestPath, "idx_test", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "latest pointer references missing complete marker")
+}

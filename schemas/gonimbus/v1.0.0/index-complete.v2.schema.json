@@ -31,6 +31,13 @@
       "type": "string",
       "minLength": 1
     },
+    "gonimbus_commit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gonimbus_vcs_modified": {
+      "type": "boolean"
+    },
     "snapshot_completed_at": {
       "type": "string",
       "format": "date-time",
@@ -43,11 +50,19 @@
       "type": "string",
       "minLength": 1
     },
+    "manifest_rel_path": {
+      "type": "string",
+      "minLength": 1
+    },
     "manifest_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "segment_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "segment_rel_dir": {
       "type": "string",
       "minLength": 1
     },

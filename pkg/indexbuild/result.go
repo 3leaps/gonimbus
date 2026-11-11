@@ -23,6 +23,8 @@ type Summary struct {
 
 type ManifestSummary struct {
 	GonimbusVersion        string
+	GonimbusCommit         string
+	GonimbusVCSModified    *bool
 	DotSegmentPolicy       string
 	Rows                   int
 	ActiveRows             int

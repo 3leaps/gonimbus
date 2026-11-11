@@ -56,6 +56,10 @@ func effectiveVersionInfo() (version, commit, buildDate string) {
 	return buildinfo.Resolve("dev", "unknown", "unknown")
 }
 
+func effectiveBuildProvenance() (version, commit string, vcsModified *bool) {
+	return buildinfo.ResolveProvenance(versionInfo.Version, versionInfo.Commit)
+}
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",

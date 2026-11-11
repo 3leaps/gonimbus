@@ -122,3 +122,16 @@ func TestShortCommit(t *testing.T) {
 		t.Errorf("shortCommit short input: got %q, want %q", got, "abc")
 	}
 }
+
+func TestResolveProvenance(t *testing.T) {
+	v, c, mod := ResolveProvenance("0.5.0-test", "3cb6401-dirty")
+	if v != "0.5.0-test" {
+		t.Fatalf("version: got %q, want %q", v, "0.5.0-test")
+	}
+	if c != "3cb6401-dirty" {
+		t.Fatalf("commit: got %q, want %q", c, "3cb6401-dirty")
+	}
+	if mod == nil || !*mod {
+		t.Fatalf("vcsModified: got %v, want true for -dirty commit", mod)
+	}
+}

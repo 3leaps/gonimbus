@@ -861,14 +861,17 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 
 	completeDoc, err := readCompleteDocFile(cfg.CompletePath)
 	require.NoError(t, err)
-	require.Equal(t, "manifest.json", completeDoc.ManifestPath)
-	require.Equal(t, ".", completeDoc.SegmentDir)
+	require.Equal(t, filepath.Clean(cfg.ManifestPath), completeDoc.ManifestPath)
+	require.Equal(t, "manifest.json", completeDoc.ManifestRelPath)
+	require.Equal(t, filepath.Clean(cfg.SegmentDir), completeDoc.SegmentDir)
+	require.Equal(t, ".", completeDoc.SegmentRelDir)
 
 	latestRaw, err := os.ReadFile(cfg.LatestPath)
 	require.NoError(t, err)
 	var latestDoc publishedLatestDoc
 	require.NoError(t, json.Unmarshal(latestRaw, &latestDoc))
-	require.Equal(t, "runs/run_portable_1/complete.json", latestDoc.CompletePath)
+	require.Equal(t, filepath.Clean(cfg.CompletePath), latestDoc.CompletePath)
+	require.Equal(t, "runs/run_portable_1/complete.json", latestDoc.CompleteRelPath)
 
 	// Relocate the entire index set directory to a new parent directory without
 	// editing complete.json, latest.json, or manifest.json.
@@ -970,7 +973,8 @@ func TestPublishEmitsPortableRelativePathsAndRelocatesDirectoryCleanly(t *testin
 	require.NoError(t, err)
 	var mixedLatestDoc publishedLatestDoc
 	require.NoError(t, json.Unmarshal(mixedLatestRaw, &mixedLatestDoc))
-	require.Equal(t, "runs/run_portable_1/complete.json", mixedLatestDoc.CompletePath)
+	require.Equal(t, filepath.Clean(mixedCfg.CompletePath), mixedLatestDoc.CompletePath)
+	require.Equal(t, "runs/run_portable_1/complete.json", mixedLatestDoc.CompleteRelPath)
 
 	mixedSnap, err := OpenLatestPublishedSnapshot(mixedCfg.LatestPath)
 	require.NoError(t, err)

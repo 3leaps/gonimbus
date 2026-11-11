@@ -155,14 +155,16 @@ type ObjectState struct {
 
 // Config configures a full crawl-to-publish durable index build.
 type Config struct {
-	IndexSetID      string
-	RunID           string
-	GonimbusVersion string
-	BaseURI         string
-	Source          Source
-	Match           MatchConfig
-	Filter          *match.CompositeFilter
-	Crawl           crawler.Config
+	IndexSetID          string
+	RunID               string
+	GonimbusVersion     string
+	GonimbusCommit      string
+	GonimbusVCSModified *bool
+	BaseURI             string
+	Source              Source
+	Match               MatchConfig
+	Filter              *match.CompositeFilter
+	Crawl               crawler.Config
 	// MaxJournalLanes bounds how many journal-writing lanes a build may split its
 	// crawl across. Experimental.
 	//
@@ -293,12 +295,14 @@ func (c Config) GoString() string { return c.String() }
 
 // RetryConfig configures publication retry from already sealed journals.
 type RetryConfig struct {
-	IndexSetID      string
-	RunID           string
-	GonimbusVersion string
-	BaseURI         string
-	Paths           PathConfig
-	JournalPaths    []string
+	IndexSetID          string
+	RunID               string
+	GonimbusVersion     string
+	GonimbusCommit      string
+	GonimbusVCSModified *bool
+	BaseURI             string
+	Paths               PathConfig
+	JournalPaths        []string
 	// Coverage is destructive authority over verified-parent rows: a
 	// confirmed-complete scope tombstones unobserved parent keys under it. Public
 	// Retry does not trust this field on its own — it derives the observation
