@@ -15,6 +15,126 @@ changes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-11
+
+**`durable-index/v0` contract adoption and plan safeguards, `parquet-inventory/v0` ZSTD segments with legacy dual-read and portable relative markers, truthful dot-segment policy and per-run engine provenance, discovered `segments` build scopes and offline `migrate-match-scope`, and Gen-2.1 release ceremony refinements.**
+
+Adopts the `durable-index/v0` contract (`ADR-0017`, `DDR-0004`) across durable
+index planning, segment emission, and verification; enforces fail-closed
+`scope_loss` refusal on successor durable builds unless an explicit pinned
+acknowledgment is supplied; switches durable segment writes to
+`parquet-inventory/v0` with `ZSTD` compression (~3.2× smaller segments) while
+preserving full dual-read compatibility with existing `0.4.x` (`durable-v2`)
+indexes and adding portable relative marker paths; records truthful
+`include_hidden: true` durable set identity, `dot_segment_policy`,
+`dot_segment_rows`, and per-run `gonimbus_version` / `gonimbus_commit` /
+`gonimbus_vcs_modified` provenance; introduces `build.scope.type: segments`
+(`ADR-0009`) and offline discovered-scope proposals in
+`index migrate-match-scope`; and refines the release ceremony to Gen-2.1.
+
+See [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md) for the narrative
+walkthrough.
+
+### Added
+
+- Vendor and pin the `durable-index/v0` upstream contract closure
+  (`segmented-snapshot/v0`, `coverage-attestation/v0`, `data-artifact/v0`, and
+  `durable-index/v0` from `3leaps/crucible` `v0.2.9`) under
+  `internal/contracts/durableindex/v0/upstream/` with `pin.json`, offline JSON
+  Schema compilation, embedded/filesystem SHA-256 inventory verification, and
+  `make contract-fixture-integrity`.
+- `pkg/durableindex` package (Experimental) implementing `durable-index/v0`
+  `unicode-prefix/v0` plan canonicalization, length-framed
+  `durable-index/v0/plan\0` SHA-256 `plan_digest`, parent semantic-containment
+  comparison (`baseline_not_compared`, `no_loss`, `loss_acknowledged`,
+  `scope_loss`), `index_cutover` receipt verification, `parquet-inventory/v0`
+  member writer/reader, physical twin generator, and `R2`/`W1`/`W2`/`W3`
+  physical graph verifier.
+- `index build` scope-loss safeguards (`--acknowledge-scope-loss-parent`,
+  `--acknowledge-scope-loss-plan`, `--acknowledge-scope-loss-by`,
+  `--acknowledge-scope-loss-at`) enforcing fail-closed `scope_loss` refusal on
+  `--format durable` and `--format both` when a successor plan loses effective
+  prefix coverage relative to its verified parent publication (with a structured
+  stderr `scope_loss` warning on standalone `--format sqlite`), and recording
+  `counts.retained_unobserved_rows` in `gonimbus.index.manifest.v1`.
+- `parquet-inventory/v0` ZSTD-compressed segment emission in
+  `internal/indexsubstrate` (`DDR-0004` nested `revision`,
+  `first_seen`/`last_seen`/`last_changed`, optional `deleted`, 3-level
+  revision-bound `enrichments` LIST, and fixed 9-digit `.000000000Z` UTC
+  timestamps) alongside same-FD dual-read compatibility with legacy `0.4.x`
+  (`durable-v2`) flat Snappy segments.
+- Additive slash-normalized relative marker fields (`manifest_rel_path` and
+  `segment_rel_dir` in `complete.json`, where `segment_rel_dir` is `"."` in the
+  CLI run layout or a layout-dependent relative directory; `complete_rel_path`
+  in `latest.json`) alongside primary paths (`manifest_path`, `segment_dir`,
+  `complete_path`) so `v0.5.0+` readers prefer local relative resolution for
+  copied or relocated index directories while `<= v0.4.7` readers continue
+  reading via the primary paths.
+- `dot_segment_policy` (`"include"` | `"exclude"`) and `dot_segment_rows`
+  (active non-tombstone rows whose `rel_key` has at least one `/`-separated
+  segment starting with `.`) in `gonimbus.index.manifest.v1`
+  (`counts.dot_segment_rows`) and `gonimbus.index.build_result.v1`.
+- Per-run `gonimbus_version`, `gonimbus_commit`, and `gonimbus_vcs_modified`
+  build provenance in `gonimbus.index.manifest.v1`, `gonimbus.index.complete.v2`
+  (`index-complete.v2.schema.json`), and `gonimbus.index.build_result.v1` via
+  `internal/buildinfo.ResolveProvenance`.
+- `build.scope.type: segments` compiler (`pkg/scope`, `ADR-0009`) supporting
+  `discover.segments` templates and explicit `constraints` segment lists with
+  bounded discovery depth (`MaxSegmentsTemplateDepth = 16`), per-level prefix
+  (`MaxDiscoveredPrefixesPerLevel = 10,000`), and total compiled prefix
+  (`MaxCompiledScopePrefixes = 65,536`) budgets.
+- Offline `discovered_scope_proposal` audit field and
+  `--propose-discovered-scope` flag on `gonimbus index migrate-match-scope`
+  (`classification` values `convertible`, `already_compatible`,
+  `already_migrated`, and `refused`) for single mid-path wildcard `include`
+  patterns with date-partition or literal segment tails.
+- Gen-2.1 release ceremony refinements (`scripts/release-publish.sh` 1+1
+  verified download pattern, `--staged-prefix` in `verify-pinned-tag.sh` and
+  `release-verify-published-tag.sh`, `set -C` + expected tag-object/commit
+  binding in `release-record-anchor.sh`, `<tag>.txt` + 3-line attribution footer
+  validation in `release-prepare-tag-message.py`, worktree-aware
+  `GONIMBUS_GPG_HOMEDIR` containment, and offline `jq-portability.sh`,
+  `release-write-guards.test.sh`, and `release-promotion-recovery.test.sh` test
+  suites).
+
+### Changed
+
+- Confirmed-complete durable index builds (`--format durable` and
+  `--format both`) now ingest all enumerated keys in scope, including keys with
+  `.`-prefixed path segments (`dot_segment_policy: "include"`), and record
+  `"include_hidden": true` in `identity.json`, producing a distinct `v0.5.0`
+  `index_set_id` (`idx_...`) without implicit cross-version carry-forward from
+  `0.4.x` sets that excluded hidden segments.
+- Pin `goneat` `v0.6.8` and
+  `ghcr.io/fulmenhq/goneat-tools-runner-glibc:v0.5.15@sha256:8c6324556e0e8c951b0ad2225f1cb87fad13445b6dcbc83717ace41c6959608e`,
+  and use direct SHA-256-verified `minisign 0.12` archive installation in CI.
+
+### Fixed
+
+- Apply `durableindex.DefaultMaxParquetDecompressedBytes` (`128 MiB` whole-member
+  uncompressed byte ceiling) strictly to `parquet-inventory/v0` segments and
+  allow `LegacyMaxParquetDecompressedBytes` (`1 GiB` whole-segment uncompressed
+  byte ceiling) for legacy `durable-v2` Snappy segments so existing `0.4.x`
+  250k-row segments (~164 MiB uncompressed total) read without hitting the
+  `parquet-inventory/v0` decompression ceiling.
+- Bind `latest.json` discovery to the finally opened snapshot's `set_id` in
+  `pkg/indexreader`, and fail closed in `captureVerifiedParent` when
+  `latest.json` references a missing `complete.json`.
+- Preserve exact discovered prefix and relative-key bytes across durable build
+  and compaction, and preserve adopted `complete.v2` marker paths during
+  interrupted-publish retry.
+
+### Documentation
+
+- Promote `ADR-0008` (_Storage Strata and Durable-First Bulk State_), `ADR-0009`
+  (_Discovered-Segments Build Scope_), and `DDR-0001` (_Index Semantics and
+  Representation Parity_) to `Accepted`.
+- Update `docs/user-guide/durable-index.md`, `docs/user-guide/index.md`, and
+  `README.md` for `durable-index/v0`, `parquet-inventory/v0`, `segments` scopes,
+  `migrate-match-scope`, `dot_segment_policy` / `dot_segment_rows`, per-run
+  engine provenance, and pinned `gonimbus@0.4` / `gonimbus-0.4` minor-line
+  packages.
+
 ## [0.4.7] - 2026-11-09
 
 **Machine-readable `version --json`, throttled probe retries, Gen-2 release provenance and registry verification, durable storage architecture ratification, and digest-pinned runner contracts.**
@@ -2138,7 +2258,8 @@ Initial public release of Gonimbus - a Go-first library + CLI + server for large
 - ADR-0001: Embedded assets over directory walking
 - ADR-0002: Pathfinder boundary constraints in tests
 
-[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/3leaps/gonimbus/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/3leaps/gonimbus/compare/v0.4.7...v0.5.0
 [0.4.7]: https://github.com/3leaps/gonimbus/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/3leaps/gonimbus/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/3leaps/gonimbus/compare/v0.4.4...v0.4.5

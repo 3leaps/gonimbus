@@ -1,6 +1,6 @@
 # GCS Slice 0 Contract Notes
 
-GON-004 Slice 0 pins the provider contract before the implementation slices.
+Slice 0 pins the GCS provider contract before the implementation slices.
 This note is intentionally generic and contains no bucket names, account ids, or
 credential paths.
 
@@ -71,7 +71,7 @@ size `ChunkSize`; the buffer enables retry/resume for failed upload requests.
 Setting `ChunkSize` to zero disables chunking and reduces memory, but also
 disables retry/resume for that writer.
 
-GCS write slices must account for this in the GON-048 resource model:
+GCS write slices must account for this in the reflow concurrency resource model:
 
 ```text
 active_copy_memory >= effective_ceiling * writer_chunk_size
@@ -94,7 +94,7 @@ through the official storage client in
 - range reads return the expected byte subset
 - pagination drives a continuation token through the SDK pager
 
-The fake server also has upstream coverage for `GenerationMatch`, but GON-004's
-first release deliberately does not expose `IfMatchGeneration`. Real GCS Slice 4
+The fake server also has upstream coverage for `GenerationMatch`, but the
+initial GCS release deliberately does not expose `IfMatchGeneration`. Real GCS Slice 4
 must still pin server behavior for the final provider error mapping and any
 emulator gaps found during implementation.

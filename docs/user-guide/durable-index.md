@@ -29,12 +29,12 @@ hydrate has to move the entire monolith before anything is usable.
 
 Durable-v2 replaces the monolith export shape with:
 
-| Piece                             | Role                                            |
-| --------------------------------- | ----------------------------------------------- |
-| Crawl journals                    | Sealed observation log for the run              |
-| Immutable Snappy-Parquet segments | Row data packed for hub-friendly object sizes   |
-| Internal manifest                 | Segment inventory, digests, reachability roots  |
-| Complete / latest markers         | Hub commit points (`sqlite-v1` or `durable-v2`) |
+| Piece                           | Role                                                                                                |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Crawl journals                  | Sealed observation log for the run                                                                  |
+| Immutable ZSTD-Parquet segments | `parquet-inventory/v0` row data packed for hub-friendly object sizes (`0.4.x` Snappy also readable) |
+| Internal manifest               | Segment inventory, digests, reachability roots                                                      |
+| Complete / latest markers       | Hub commit points (`sqlite-v1` or `durable-v2`)                                                     |
 
 The largest individual hub PUT becomes a **segment** (typically tens of
 megabytes under default packing), not the whole inventory database. Field
@@ -421,9 +421,20 @@ Every durable build compares the compiled `unicode-prefix/v0` `index_plan`
 against the verified parent publication. If discovery stops returning a
 previously covered prefix, the build refuses publication by default
 (`scope_loss`) so silent partial discovery never publishes as a valid successor.
-When a partition is intentionally retired, pass `--acknowledge-scope-loss` with
-`--acknowledged-by <actor>` to record the bound acknowledgment and
-`retained_unobserved_rows` on the published snapshot.
+When a partition is intentionally retired, pass all four
+`--acknowledge-scope-loss-{parent,plan,by,at}` flags (`parent` = parent
+`manifest.json` SHA-256, `plan` = proposed `plan_digest` SHA-256, `by` = actor
+identifier, `at` = 9-digit UTC timestamp `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`) to
+record the bound acknowledgment and `retained_unobserved_rows` on the published
+snapshot:
+
+```bash
+gonimbus index build --job job.yaml \
+  --acknowledge-scope-loss-parent <parent-manifest-sha256> \
+  --acknowledge-scope-loss-plan <proposed-plan-digest-sha256> \
+  --acknowledge-scope-loss-by <actor> \
+  --acknowledge-scope-loss-at 2026-11-11T18:00:00.000000000Z
+```
 
 ### Still open (non-prefix match controls)
 
@@ -626,11 +637,13 @@ a workstation will replace an older digest-pinned binary:
 
 - **Recommended pattern for digest-pinning runners:** Download the exact tagged
   raw release executable into a runner-private directory (for example via
-  `sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir <runner-bin>` or direct
+  `sfetch --repo 3leaps/gonimbus --tag v0.5.0 --dest-dir <runner-bin>` or direct
   GitHub Release download verified against signed `SHA256SUMS`; see
   [Release verification](../security/README.md)) rather than relying on a
   mutable workstation `PATH`. If a workstation package manager is used, hold
-  upgrades explicitly with `brew pin gonimbus` or `scoop hold gonimbus`.
+  upgrades explicitly with `brew pin gonimbus` or `scoop hold gonimbus` (or
+  install the pinned `0.4` minor-line package via
+  `brew install 3leaps/tap/gonimbus@0.4` / `scoop install 3leaps/gonimbus-0.4`).
 - **Windows Scoop shim vs raw executable (critical for SHA-256 verifiers):**
   - On **Homebrew** (macOS/Linux), `$(brew --prefix)/bin/gonimbus` is a symlink
     to the raw release executable in the Cellar, so hashing the resolved `PATH`

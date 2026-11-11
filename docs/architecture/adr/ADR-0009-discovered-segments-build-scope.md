@@ -64,8 +64,8 @@ Enforced contract bounds:
   and its per-scope `coverage_attestation`s. Unexplained loss of effective
   prefix coverage against the verified parent publication refuses publication by
   default (`scope_loss`) unless explicitly acknowledged via
-  `--acknowledge-scope-loss`, which records `retained_unobserved_rows` on the
-  resulting `durable-index/v0` snapshot.
+  `--acknowledge-scope-loss-{parent,plan,by,at}`, which records
+  `retained_unobserved_rows` on the resulting `durable-index/v0` snapshot.
 
 ## Prerequisites (Satisfied)
 

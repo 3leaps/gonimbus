@@ -1,6 +1,6 @@
 # API Stability Gate
 
-GON-039 adds a soft API acknowledgement gate for the Stable embedded library
+The API stability gate enforces a soft acknowledgement requirement for the Stable embedded library
 surface documented in `docs/api-stability.md`.
 
 ## Tooling Choice

@@ -50,12 +50,12 @@ gonimbus version
 **Exact-version / verified binary install (`sfetch` or GitHub Releases):**
 
 ```bash
-sfetch --repo 3leaps/gonimbus --tag v0.4.7 --dest-dir ~/.local/bin
+sfetch --repo 3leaps/gonimbus --tag v0.5.0 --dest-dir ~/.local/bin
 ```
 
 Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`, `windows-amd64`, and `windows-arm64` are attached to each immutable [GitHub release](https://github.com/3leaps/gonimbus/releases), alongside `SHA256SUMS` and `SHA512SUMS` manifests, detached minisign (`.minisig`) and OpenPGP (`.asc`) signatures, the tagged public verification keys (`gonimbus-minisign.pub`, `gonimbus-release-signing-key.asc`), and Decernor fingerprint anchors (`expected-fingerprints.txt`, `expected-fingerprints.ndjson`). See [docs/security/README.md](docs/security/README.md) to verify the signed tag, release assets, and published registries.
 
-**Pinned & digest-verified automation runners:** `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` track the latest stable release. Automation runners that gate execution on an exact release `SHA256SUMS` digest should install the tagged raw release binary into a runner-private directory (via [`sfetch`](https://github.com/3leaps/sfetch) or verified GitHub Release assets) or hold workstation upgrades explicitly (`brew pin gonimbus` / `scoop hold gonimbus`). On Windows Scoop, `~\scoop\shims\gonimbus.exe` on `PATH` is Scoop's generic launcher shim; hash the resolved target of `scoop which gonimbus` (`~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe`) when verifying against `SHA256SUMS`, and use `gonimbus version --json [--extended]` for machine-readable preflight checks. See [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory).
+**Pinned & digest-verified automation runners:** `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` track the latest stable release (with the terminal `0.4.x` build preserved as `3leaps/tap/gonimbus@0.4` and `3leaps/gonimbus-0.4`). Automation runners that gate execution on an exact release `SHA256SUMS` digest should install the tagged raw release binary into a runner-private directory (via [`sfetch`](https://github.com/3leaps/sfetch) or verified GitHub Release assets) or hold workstation upgrades explicitly (`brew pin gonimbus` / `scoop hold gonimbus`). On Windows Scoop, `~\scoop\shims\gonimbus.exe` on `PATH` is Scoop's generic launcher shim; hash the resolved target of `scoop which gonimbus` (`~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe`) when verifying against `SHA256SUMS`, and use `gonimbus version --json [--extended]` for machine-readable preflight checks. See [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory).
 
 **From source (`go install`, requires Go 1.26.10+):**
 
@@ -181,8 +181,17 @@ write, and `content probe` ends with a summary record and exits 60 for a
 completed run with object data errors; see
 [Terminal write receipts](docs/user-guide/reflow.md#terminal-write-receipts) and
 [Probe termination and process result](docs/user-guide/streaming.md#probe-termination-and-process-result).
-**Durable is the default index format** (`index build` publishes durable-v2
-segments + manifest unless you pass `--format sqlite` or `--format both`).
+**Durable is the default index format** (`index build` publishes
+`durable-index/v0` `parquet-inventory/v0` ZSTD segments + manifest unless you
+pass `--format sqlite` or `--format both`, while retaining full dual-read
+compatibility with `0.4.x` `durable-v2` indexes). Durable builds compile
+canonical `unicode-prefix/v0` plans (including `date_partitions` and discovered
+`segments` scopes), refuse unexplained successor prefix coverage reductions
+(`scope_loss`) unless all four `--acknowledge-scope-loss-{parent,plan,by,at}`
+flags are supplied, ingest all enumerated keys in confirmed-complete scopes
+(`dot_segment_policy: "include"`, `dot_segment_rows`), and record per-run
+`gonimbus_version` / `gonimbus_commit` / `gonimbus_vcs_modified` provenance and
+portable relative marker paths.
 A finished durable run can be taken into current hub custody and queried as
 an exact acquired bundle without listing the live object store. Format-aware
 local consumers include `query`, `list`, `stats`, `doctor`,
@@ -196,6 +205,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.5.0 release notes](docs/releases/v0.5.0.md),
 [v0.4.7 release notes](docs/releases/v0.4.7.md),
 [v0.4.6 release notes](docs/releases/v0.4.6.md),
 [v0.4.5 release notes](docs/releases/v0.4.5.md),
