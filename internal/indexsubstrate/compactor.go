@@ -172,6 +172,9 @@ func Compact(input CompactionInput) (CompactionResult, error) {
 				if _, ok := observed[relKey]; !ok && coverageAllowsTombstone(input.Coverage, relKey) {
 					deletedAt := input.RunStartedAt.UTC()
 					row.DeletedAt = &deletedAt
+					row.LastChangedRunID = input.RunID
+					row.LastChangedAt = deletedAt
+					row = clearRowEnrichments(row)
 					state[relKey] = row
 					result.Tombstones = append(result.Tombstones, Tombstone{
 						IndexSetID: input.IndexSetID,
@@ -219,13 +222,18 @@ func applyObserve(existing CurrentObjectRow, input CompactionInput, record Objec
 	isNew := strings.TrimSpace(row.RelKey) == ""
 	wasDeleted := row.DeletedAt != nil
 	changed := isNew || wasDeleted || observeFieldsChanged(row, record)
-	observedAt := record.ObservedAt.UTC()
+	observedAt := input.RunStartedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = record.ObservedAt.UTC()
+	}
 
 	if isNew {
 		row.IndexSetID = input.IndexSetID
 		row.RelKey = record.RelKey
 		row.FirstSeenRunID = input.RunID
 		row.FirstSeenAt = observedAt
+	} else if wasDeleted || row.ETag != record.ETag {
+		row = clearRowEnrichments(row)
 	}
 	if row.FirstSeenRunID == "" {
 		row.FirstSeenRunID = fallbackRunID(row.LastSeenRunID, input.RunID)
@@ -248,6 +256,15 @@ func applyObserve(existing CurrentObjectRow, input CompactionInput, record Objec
 	row.LastSeenRunID = input.RunID
 	row.LastSeenAt = observedAt
 	row.DeletedAt = nil
+	return row
+}
+
+func clearRowEnrichments(row CurrentObjectRow) CurrentObjectRow {
+	row.ArchiveStatus = nil
+	row.RestoreState = nil
+	row.RestoreExpiry = nil
+	row.ContentType = nil
+	row.HeadEnrichedAt = nil
 	return row
 }
 

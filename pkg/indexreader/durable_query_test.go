@@ -147,7 +147,7 @@ func TestDurableQuery_PinnedAncestorDelta(t *testing.T) {
 		{
 			RelKey: "delta/reseen.json", SizeBytes: 30, ETag: "reseen",
 			FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
-			LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(20 * time.Minute),
+			LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(10 * time.Minute),
 			LastSeenRunID: currentRun, LastSeenAt: currentStarted,
 		},
 	}
@@ -1096,6 +1096,8 @@ func TestDurableQuery_PrefixPrunesBeforeAndAfterSegments(t *testing.T) {
 
 	tombstoneBoundary := durableRow("bravo/2026-01-01/00-deleted.json", 15, "etag-del", mod)
 	tombstoneBoundary.DeletedAt = &deletedAt
+	tombstoneBoundary.LastChangedAt = deletedAt
+	tombstoneBoundary.LastChangedRunID = "run_multiseg_del"
 
 	rows := []indexsubstrate.CurrentObjectRow{
 		// Segment 0: wholly before bravo/2026-01-01/
@@ -1114,7 +1116,9 @@ func TestDurableQuery_PrefixPrunesBeforeAndAfterSegments(t *testing.T) {
 	for i := range rows {
 		rows[i].IndexSetID = env.indexSetID
 		rows[i].FirstSeenRunID = runID
-		rows[i].LastChangedRunID = runID
+		if rows[i].DeletedAt == nil {
+			rows[i].LastChangedRunID = runID
+		}
 		rows[i].LastSeenRunID = runID
 	}
 

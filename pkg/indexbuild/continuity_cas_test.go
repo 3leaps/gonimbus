@@ -143,26 +143,26 @@ func TestBuildFirstPublishRefusesWhenLatestAppearsMidCrawl(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 
-	// The winning first publisher lives in a sibling tree for the same index
-	// set; its latest bytes (with a digest chain that verifies from disk) are
-	// what appears at the loser's latest path mid-crawl.
-	winnerRoot := t.TempDir()
-	_, err := NewRunner(contConfig(winnerRoot, "run_winner", []provider.ObjectSummary{
+	// The winning first publisher publishes run_winner in the shared set root;
+	// we stage its latest pointer so it appears mid-crawl while the losing
+	// first publisher is running against an initially absent latest.json.
+	setRoot := t.TempDir()
+	latestPath := contRunPaths(setRoot, "run_winner").LatestPath
+	_, err := NewRunner(contConfig(setRoot, "run_winner", []provider.ObjectSummary{
 		obj("data/w.xml", `"w1"`, 1, base),
 	}, base)).Build(ctx)
 	require.NoError(t, err)
-	winnerLatest, err := os.ReadFile(contRunPaths(winnerRoot, "run_winner").LatestPath)
+	winnerLatest, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
+	require.NoError(t, os.Remove(latestPath))
 
-	loserRoot := t.TempDir()
-	loserLatestPath := contRunPaths(loserRoot, "run_loser").LatestPath
-	loser := contConfig(loserRoot, "run_loser", nil, base.Add(time.Hour))
+	loser := contConfig(setRoot, "run_loser", nil, base.Add(time.Hour))
 	loser.Source = Source{Provider: &interposeOnFirstListProvider{
 		objects: []provider.ObjectSummary{
 			obj("data/l.xml", `"l1"`, 1, base.Add(time.Hour)),
 		},
 		interpose: func() {
-			require.NoError(t, os.WriteFile(loserLatestPath, winnerLatest, 0o600))
+			require.NoError(t, os.WriteFile(latestPath, winnerLatest, 0o600))
 		},
 	}, ProviderName: "s3"}
 
@@ -170,11 +170,11 @@ func TestBuildFirstPublishRefusesWhenLatestAppearsMidCrawl(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, indexsubstrate.ErrStaleParent)
 
-	latestAfter, err := os.ReadFile(loserLatestPath)
+	latestAfter, err := os.ReadFile(latestPath)
 	require.NoError(t, err)
 	require.Equal(t, winnerLatest, latestAfter, "the losing first publisher must not overwrite the winner's latest")
 
-	snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(loserLatestPath,
+	snap, err := indexsubstrate.OpenLatestPublishedSnapshotBounded(latestPath,
 		indexsubstrate.DefaultMaxPublishedMarkerBytes, indexsubstrate.DefaultMaxPublishedManifestBytes)
 	require.NoError(t, err)
 	require.Equal(t, "run_winner", snap.Complete.RunID)

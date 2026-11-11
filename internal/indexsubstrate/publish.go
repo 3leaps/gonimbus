@@ -285,9 +285,9 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		RunID:                       config.RunID,
 		SnapshotCompletedAt:         snapshotCompletedAt.UTC().Format(time.RFC3339Nano),
 		SnapshotCompletionSemantics: SnapshotCompletionSemanticsCompleteMarkerCommit,
-		ManifestPath:                config.ManifestPath,
+		ManifestPath:                portablePublishedFileRef(config.CompletePath, config.ManifestPath),
 		ManifestSHA256:              manifestDigest,
-		SegmentDir:                  config.SegmentDir,
+		SegmentDir:                  portablePublishedDirRef(config.CompletePath, config.SegmentDir),
 		Segments:                    len(manifest.Segments),
 	}
 	result.SnapshotCompletedAt = snapshotCompletedAt.UTC()
@@ -315,7 +315,7 @@ func PublishSnapshotContext(ctx context.Context, config PublishConfig) (PublishR
 		IndexSetID:   config.IndexSetID,
 		RunID:        config.RunID,
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
-		CompletePath: config.CompletePath,
+		CompletePath: portablePublishedFileRef(config.LatestPath, config.CompletePath),
 	}
 	if err := writeLatestPointerFile(config.LatestPath, latest); err != nil {
 		return result, fmt.Errorf("advance latest pointer: %w", err)
@@ -342,12 +342,16 @@ func existingSnapshotCompletion(
 		}
 		return time.Time{}, false, err
 	}
+	resolvedManifestPath, manifestErr := resolvePublishedArtifactPath(config.CompletePath, existing.ManifestPath, "manifest_path")
+	resolvedSegmentDir, segmentErr := resolvePublishedArtifactPath(config.CompletePath, existing.SegmentDir, "segment_dir")
 	if existing.Type != CompleteMarkerTypeV2 ||
 		existing.IndexSetID != config.IndexSetID ||
 		existing.RunID != config.RunID ||
-		existing.ManifestPath != config.ManifestPath ||
+		manifestErr != nil ||
+		segmentErr != nil ||
+		filepath.Clean(resolvedManifestPath) != filepath.Clean(config.ManifestPath) ||
 		existing.ManifestSHA256 != manifestDigest ||
-		existing.SegmentDir != config.SegmentDir ||
+		filepath.Clean(resolvedSegmentDir) != filepath.Clean(config.SegmentDir) ||
 		existing.Segments != len(manifest.Segments) {
 		return time.Time{}, false, nil
 	}
@@ -369,6 +373,7 @@ type PublishedSnapshot struct {
 	// CompleteSHA256 binds the exact complete-marker bytes parsed for this open.
 	CompleteSHA256 string
 	Complete       publishedCompleteDoc
+	ManifestPath   string
 	Manifest       InternalManifest
 	SegmentDir     string
 	// AccountedMarkerBytes / AccountedManifestBytes are the exact on-disk byte
@@ -453,7 +458,11 @@ func OpenLatestPublishedSnapshotBounded(latestPath string, maxMarkerBytes, maxMa
 	if strings.TrimSpace(latest.CompletePath) == "" {
 		return PublishedSnapshot{}, fmt.Errorf("latest pointer complete_path is required")
 	}
-	snap, err := openPublishedCompleteBounded(latest.CompletePath, maxMarkerBytes, maxManifestBytes)
+	completePath, err := resolvePublishedArtifactPath(latestPath, latest.CompletePath, "complete_path")
+	if err != nil {
+		return PublishedSnapshot{}, err
+	}
+	snap, err := openPublishedCompleteBounded(completePath, maxMarkerBytes, maxManifestBytes)
 	if err != nil {
 		return PublishedSnapshot{}, err
 	}
@@ -679,6 +688,7 @@ func openPublishedSnapshotMaterial(
 		CompletePath:           completePath,
 		CompleteSHA256:         sha256HexBytes(completeData),
 		Complete:               complete,
+		ManifestPath:           manifestPath,
 		Manifest:               manifest,
 		SegmentDir:             segmentDir,
 		AccountedMarkerBytes:   int64(len(completeData)),
@@ -706,7 +716,33 @@ func validatePublishedCompleteType(complete publishedCompleteDoc) error {
 	return fmt.Errorf("complete marker type %q is not supported", complete.Type)
 }
 
-func resolvePublishedArtifactPath(completePath, raw, label string) (string, error) {
+func portablePublishedFileRef(anchorFile, targetFile string) string {
+	anchorDir := filepath.Clean(filepath.Dir(anchorFile))
+	targetClean := filepath.Clean(targetFile)
+	if anchorDir == "" || targetClean == "" || filepath.IsAbs(anchorDir) != filepath.IsAbs(targetClean) {
+		return targetFile
+	}
+	rel, err := filepath.Rel(anchorDir, targetClean)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return targetFile
+	}
+	return filepath.ToSlash(rel)
+}
+
+func portablePublishedDirRef(anchorFile, targetDir string) string {
+	anchorDir := filepath.Clean(filepath.Dir(anchorFile))
+	targetClean := filepath.Clean(targetDir)
+	if anchorDir == "" || targetClean == "" || filepath.IsAbs(anchorDir) != filepath.IsAbs(targetClean) {
+		return targetDir
+	}
+	rel, err := filepath.Rel(anchorDir, targetClean)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return targetDir
+	}
+	return filepath.ToSlash(rel)
+}
+
+func resolvePublishedArtifactPath(anchorPath, raw, label string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("complete marker %s is required", label)
@@ -714,12 +750,21 @@ func resolvePublishedArtifactPath(completePath, raw, label string) (string, erro
 	if filepath.IsAbs(raw) {
 		return filepath.Clean(raw), nil
 	}
-	clean := filepath.Clean(raw)
-	if clean != raw || strings.Contains(raw, "\\") ||
-		clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if strings.Contains(raw, "\\") {
 		return "", fmt.Errorf("complete marker %s is not a safe relative path", label)
 	}
-	return filepath.Join(filepath.Dir(completePath), clean), nil
+	fromSlash := filepath.FromSlash(raw)
+	clean := filepath.Clean(fromSlash)
+	if clean == "." {
+		if label == "segment_dir" && raw == "." {
+			return filepath.Clean(filepath.Dir(anchorPath)), nil
+		}
+		return "", fmt.Errorf("complete marker %s is not a safe relative path", label)
+	}
+	if clean != fromSlash || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("complete marker %s is not a safe relative path", label)
+	}
+	return filepath.Join(filepath.Dir(anchorPath), clean), nil
 }
 
 // WalkLatestPublishedRows walks the latest published snapshot with streaming
@@ -915,7 +960,10 @@ func assertExpectedParentCAS(config PublishConfig) error {
 			return fmt.Errorf("%w: latest appeared before first-publish advance", ErrStaleParent)
 		}
 		if errors.Is(err, ErrSnapshotNotPublished) {
-			return nil
+			if _, statErr := os.Stat(config.LatestPath); os.IsNotExist(statErr) {
+				return nil
+			}
+			return fmt.Errorf("%w: latest pointer appeared before first-publish advance", ErrStaleParent)
 		}
 		return fmt.Errorf("re-read latest for absent-parent CAS: %w", err)
 	}

@@ -2,6 +2,7 @@ package indexsubstrate
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,8 +13,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/parquet-go/parquet-go"
+
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 )
 
 const (
@@ -163,6 +167,86 @@ type segmentParquetRow struct {
 	DeletedAt        *string `parquet:"deleted_at,optional"`
 }
 
+// durableParquetRow implements the DDR-0004 parquet-inventory/v0 physical row schema.
+type durableParquetRow struct {
+	Namespace    string                     `parquet:"namespace,dict"`
+	Key          string                     `parquet:"key,plain"`
+	Revision     *durableParquetRevision    `parquet:"revision,optional"`
+	SizeBytes    int64                      `parquet:"size_bytes,int(64),plain"`
+	LastModified *string                    `parquet:"last_modified,optional,plain"`
+	StorageClass *string                    `parquet:"storage_class,optional,dict"`
+	FirstSeen    durableParquetStamp        `parquet:"first_seen"`
+	LastSeen     durableParquetStamp        `parquet:"last_seen"`
+	LastChanged  durableParquetStamp        `parquet:"last_changed"`
+	Deleted      *durableParquetStamp       `parquet:"deleted,optional"`
+	Enrichments  []durableParquetEnrichment `parquet:"enrichments,list"`
+}
+
+type durableParquetRevision struct {
+	Kind  string `parquet:"kind,plain"`
+	Value string `parquet:"value,plain"`
+}
+
+type durableParquetStamp struct {
+	SnapshotID string `parquet:"snapshot_id,dict"`
+	At         string `parquet:"at,dict"`
+}
+
+type durableParquetEnrichment struct {
+	Name            string                 `parquet:"name,dict"`
+	Value           *string                `parquet:"value,optional,plain"`
+	Operation       string                 `parquet:"operation,dict"`
+	ObservedAt      string                 `parquet:"observed_at,dict"`
+	AgainstRevision durableParquetRevision `parquet:"against_revision"`
+}
+
+var durableParquetSchema = parquet.SchemaOf(new(durableParquetRow))
+
+func isDurableParquetSchema(pf *parquet.File) bool {
+	if pf == nil || pf.Schema() == nil {
+		return false
+	}
+	for _, f := range pf.Schema().Fields() {
+		if f.Name() == "namespace" {
+			return true
+		}
+	}
+	return false
+}
+
+// maxSegmentUncompressedPayloadBytes caps the estimated uncompressed byte footprint
+// of a single segment at 64 MiB so the encoded Parquet file (including page headers,
+// definition/repetition levels, and dictionary pages) stays well below the 128 MiB
+// DefaultMaxParquetDecompressedBytes reader ceiling.
+const maxSegmentUncompressedPayloadBytes int64 = 64 * 1024 * 1024
+
+func estimatedDurableParquetRowBytes(pq durableParquetRow) int64 {
+	const fixedPerRowOverhead = 256
+	n := int64(fixedPerRowOverhead + len(pq.Namespace) + len(pq.Key))
+	if pq.Revision != nil {
+		n += int64(len(pq.Revision.Kind) + len(pq.Revision.Value))
+	}
+	if pq.LastModified != nil {
+		n += int64(len(*pq.LastModified))
+	}
+	if pq.StorageClass != nil {
+		n += int64(len(*pq.StorageClass))
+	}
+	n += int64(len(pq.FirstSeen.SnapshotID) + len(pq.FirstSeen.At))
+	n += int64(len(pq.LastSeen.SnapshotID) + len(pq.LastSeen.At))
+	n += int64(len(pq.LastChanged.SnapshotID) + len(pq.LastChanged.At))
+	if pq.Deleted != nil {
+		n += int64(len(pq.Deleted.SnapshotID) + len(pq.Deleted.At))
+	}
+	for _, e := range pq.Enrichments {
+		n += int64(64 + len(e.Name) + len(e.Operation) + len(e.ObservedAt) + len(e.AgainstRevision.Kind) + len(e.AgainstRevision.Value))
+		if e.Value != nil {
+			n += int64(len(*e.Value))
+		}
+	}
+	return n
+}
+
 func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (InternalManifest, error) {
 	config, runStartedAt, err := prepareSegmentWriter(config)
 	if err != nil {
@@ -179,28 +263,44 @@ func WriteSegmentSet(config SegmentWriterConfig, rows []CurrentObjectRow) (Inter
 	manifest := newSegmentManifestSkeleton(config, runStartedAt)
 	manifest.Counts = manifestCountsForRun(sortedRows, config.RunID)
 
-	totalSegments := 0
-	if len(sortedRows) > 0 && config.TargetRowsPerSegment > 0 {
-		totalSegments = (len(sortedRows) + config.TargetRowsPerSegment - 1) / config.TargetRowsPerSegment
-	}
-	rowsDone := 0
-	for start := 0; start < len(sortedRows); start += config.TargetRowsPerSegment {
-		end := start + config.TargetRowsPerSegment
-		if end > len(sortedRows) {
-			end = len(sortedRows)
+	var chunks [][]durableParquetRow
+	var curChunk []durableParquetRow
+	var curBytes int64
+	for _, row := range sortedRows {
+		pq := durableParquetFromCurrentRow(row, config.RunID)
+		rowBytes := estimatedDurableParquetRowBytes(pq)
+		if len(curChunk) > 0 && curBytes+rowBytes > maxSegmentUncompressedPayloadBytes {
+			chunks = append(chunks, curChunk)
+			curChunk = nil
+			curBytes = 0
 		}
-		descriptor, err := writeSegmentFile(config, len(manifest.Segments), sortedRows[start:end])
+		curChunk = append(curChunk, pq)
+		curBytes += rowBytes
+		if len(curChunk) >= config.TargetRowsPerSegment || curBytes >= maxSegmentUncompressedPayloadBytes {
+			chunks = append(chunks, curChunk)
+			curChunk = nil
+			curBytes = 0
+		}
+	}
+	if len(curChunk) > 0 {
+		chunks = append(chunks, curChunk)
+	}
+
+	totalSegments := len(chunks)
+	rowsDone := 0
+	for _, chunk := range chunks {
+		descriptor, _, err := writeParquetSegmentFileTracked(config, len(manifest.Segments), chunk)
 		if err != nil {
 			return InternalManifest{}, err
 		}
 		manifest.Segments = append(manifest.Segments, descriptor)
-		rowsDone += end - start
+		rowsDone += len(chunk)
 		if config.OnSegmentProgress != nil {
 			// Observational only: never treat progress callback outcome as publish failure.
 			config.OnSegmentProgress(SegmentProgress{
 				Segment:  len(manifest.Segments),
 				Total:    totalSegments,
-				Rows:     end - start,
+				Rows:     len(chunk),
 				RowsDone: rowsDone,
 			})
 		}
@@ -372,6 +472,9 @@ func openSegmentFile(path string) (*os.File, *os.Root, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if name == "" || name == "." || name == ".." || filepath.Clean(name) != name || filepath.Base(name) != name || strings.ContainsAny(name, `/\`) {
+		return nil, nil, fmt.Errorf("invalid segment filename")
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open segment directory: %w", err)
@@ -395,8 +498,129 @@ func openSegmentFile(path string) (*os.File, *os.Root, error) {
 	return file, root, nil
 }
 
-func walkSegmentFile(file *os.File, visit func(CurrentObjectRow) error) error {
-	reader := parquet.NewGenericReader[segmentParquetRow](file)
+func openParquetSegmentFile(r io.ReaderAt, size int64) (pf *parquet.File, isDurable bool, err error) {
+	if size < 8 || size > durableindex.DefaultMaxParquetDecompressedBytes {
+		return nil, false, fmt.Errorf("read segment: invalid parquet segment byte length")
+	}
+	var head [4]byte
+	var trailer [8]byte
+	if _, err := r.ReadAt(head[:], 0); err != nil {
+		return nil, false, fmt.Errorf("read segment: %w", err)
+	}
+	if _, err := r.ReadAt(trailer[:], size-8); err != nil {
+		return nil, false, fmt.Errorf("read segment: %w", err)
+	}
+	if string(head[:]) != "PAR1" || string(trailer[4:8]) != "PAR1" {
+		return nil, false, fmt.Errorf("read segment: invalid parquet magic bytes")
+	}
+	footerLen := int64(binary.LittleEndian.Uint32(trailer[:4]))
+	if footerLen <= 0 || footerLen > size-8 || footerLen > durableindex.MaxMetadataBytes {
+		return nil, false, fmt.Errorf("read segment: parquet footer length out of bounds")
+	}
+	dataEnd := size - 8 - footerLen
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			pf = nil
+			isDurable = false
+			err = fmt.Errorf("malformed parquet segment: %v", rec)
+		}
+	}()
+	rawPF, openErr := parquet.OpenFile(r, size, parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
+	if openErr != nil {
+		return nil, false, fmt.Errorf("read segment: %w", openErr)
+	}
+	if isDurableParquetSchema(rawPF) {
+		validatedPF, valErr := durableindex.ValidateParquetInventoryReaderAt(r, size, durableindex.DefaultMaxParquetDecompressedBytes)
+		if valErr != nil {
+			return nil, false, fmt.Errorf("read segment: %w", valErr)
+		}
+		return validatedPF, true, nil
+	}
+	meta := rawPF.Metadata()
+	if meta == nil {
+		return nil, false, fmt.Errorf("read segment: missing parquet metadata")
+	}
+	if meta.EncryptionAlgorithm.Value != nil || len(meta.FooterSigningKeyMetadata) > 0 {
+		return nil, false, fmt.Errorf("read segment: encrypted parquet files are unsupported")
+	}
+	if meta.NumRows < 0 || meta.NumRows > durableindex.MaxExactInteger {
+		return nil, false, fmt.Errorf("read segment: invalid parquet num_rows")
+	}
+	var totalUncompressed int64
+	for _, rg := range meta.RowGroups {
+		if len(rg.Columns) == 0 {
+			return nil, false, fmt.Errorf("read segment: empty row group columns")
+		}
+		for _, col := range rg.Columns {
+			if col.FilePath != "" || col.CryptoMetadata.Value != nil || len(col.EncryptedColumnMetadata) > 0 {
+				return nil, false, fmt.Errorf("read segment: external or encrypted column chunk is unsupported")
+			}
+			if col.MetaData.TotalUncompressedSize < 0 || col.MetaData.TotalCompressedSize < 0 {
+				return nil, false, fmt.Errorf("read segment: negative column chunk size")
+			}
+			if col.ColumnIndexOffset < 0 || col.ColumnIndexLength < 0 || col.OffsetIndexOffset < 0 || col.OffsetIndexLength < 0 ||
+				col.MetaData.BloomFilterOffset < 0 || col.MetaData.BloomFilterLength < 0 {
+				return nil, false, fmt.Errorf("read segment: negative index or bloom filter bounds")
+			}
+			if (col.ColumnIndexOffset != 0 || col.ColumnIndexLength != 0) && (col.ColumnIndexOffset < 4 || col.ColumnIndexOffset > dataEnd || int64(col.ColumnIndexLength) > dataEnd-col.ColumnIndexOffset) {
+				return nil, false, fmt.Errorf("read segment: column index out of bounds")
+			}
+			if (col.OffsetIndexOffset != 0 || col.OffsetIndexLength != 0) && (col.OffsetIndexOffset < 4 || col.OffsetIndexOffset > dataEnd || int64(col.OffsetIndexLength) > dataEnd-col.OffsetIndexOffset) {
+				return nil, false, fmt.Errorf("read segment: offset index out of bounds")
+			}
+			if (col.MetaData.BloomFilterOffset != 0 || col.MetaData.BloomFilterLength != 0) && (col.MetaData.BloomFilterOffset < 4 || col.MetaData.BloomFilterOffset > dataEnd || int64(col.MetaData.BloomFilterLength) > dataEnd-col.MetaData.BloomFilterOffset) {
+				return nil, false, fmt.Errorf("read segment: bloom filter out of bounds")
+			}
+			if totalUncompressed > durableindex.DefaultMaxParquetDecompressedBytes-col.MetaData.TotalUncompressedSize {
+				return nil, false, fmt.Errorf("read segment: column chunk exceeds decompression ceiling")
+			}
+			totalUncompressed += col.MetaData.TotalUncompressedSize
+		}
+	}
+	return rawPF, false, nil
+}
+
+func walkSegmentFile(file *os.File, visit func(CurrentObjectRow) error) (err error) {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat segment: %w", err)
+	}
+	pf, isDurable, err := openParquetSegmentFile(file, info.Size())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("read segment panic: %v", rec)
+		}
+	}()
+	if isDurable {
+		indexSetID, _ := pf.Lookup("gonimbus.index_set_id")
+		reader := parquet.NewGenericReader[durableParquetRow](pf)
+		defer func() { _ = reader.Close() }()
+		rows := make([]durableParquetRow, 64)
+		for {
+			n, err := reader.Read(rows)
+			for _, row := range rows[:n] {
+				current, convErr := currentRowFromDurableParquet(row, indexSetID)
+				if convErr != nil {
+					return convErr
+				}
+				if err := visit(current); err != nil {
+					return err
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("read segment: %w", err)
+			}
+		}
+		return nil
+	}
+	reader := parquet.NewGenericReader[segmentParquetRow](pf)
 	defer func() { _ = reader.Close() }()
 	rows := make([]segmentParquetRow, 64)
 	for {
@@ -545,22 +769,6 @@ func WalkManifestRows(segmentDir string, manifest InternalManifest, visit func(C
 	return nil
 }
 
-func writeSegmentFile(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, error) {
-	desc, _, err := writeSegmentFileTracked(config, ordinal, rows)
-	return desc, err
-}
-
-// writeSegmentFileTracked seals a segment from CurrentObjectRow values.
-// created is true only when this call successfully links a new final dentry.
-// AllowExistingIdentical reuse returns created=false.
-func writeSegmentFileTracked(config SegmentWriterConfig, ordinal int, rows []CurrentObjectRow) (SegmentDescriptor, bool, error) {
-	parquetRows := make([]segmentParquetRow, len(rows))
-	for i, row := range rows {
-		parquetRows[i] = segmentParquetFromCurrentRow(row)
-	}
-	return writeParquetSegmentFileTracked(config, ordinal, parquetRows)
-}
-
 // segmentFileOps are per-invocation filesystem seams for segment seal.
 // Production uses productionSegmentFileOps(); tests pass scoped fakes via
 // SegmentWriterConfig.segmentOps (unexported) so package-global hooks are not required.
@@ -623,7 +831,7 @@ func retireTemp(ops segmentFileOps, tempPath string, primary error) error {
 // so callers can roll back the new dentry; those cleanup/stat failures are
 // returned rather than discarded. Pre-link temps are always retired via
 // checked retireTemp (never a silent deferred Remove).
-func writeParquetSegmentFileTracked(config SegmentWriterConfig, ordinal int, rows []segmentParquetRow) (SegmentDescriptor, bool, error) {
+func writeParquetSegmentFileTracked(config SegmentWriterConfig, ordinal int, rows []durableParquetRow) (SegmentDescriptor, bool, error) {
 	ops := resolveSegmentFileOps(config)
 	temp, err := os.CreateTemp(config.Dir, ".segment-*.parquet.tmp")
 	if err != nil {
@@ -692,14 +900,17 @@ func writeParquetSegmentFileTracked(config SegmentWriterConfig, ordinal int, row
 	return descriptor, true, nil
 }
 
-func writePreparedParquetRows(output io.Writer, config SegmentWriterConfig, parquetRows []segmentParquetRow) error {
-	writer := parquet.NewGenericWriter[segmentParquetRow](output,
-		parquet.Compression(&parquet.Snappy),
+func writePreparedParquetRows(output io.Writer, config SegmentWriterConfig, parquetRows []durableParquetRow) error {
+	writer := parquet.NewGenericWriter[durableParquetRow](output,
+		durableParquetSchema,
+		parquet.Compression(&parquet.Zstd),
+		parquet.DataPageVersion(2),
 		parquet.MaxRowsPerRowGroup(int64(config.TargetRowsPerSegment)),
 		parquet.CreatedBy("gonimbus", "indexsubstrate", "v1"),
 		parquet.KeyValueMetadata("gonimbus.index_set_id", config.IndexSetID),
 		parquet.KeyValueMetadata("gonimbus.run_id", config.RunID),
 		parquet.KeyValueMetadata("gonimbus.segment_format", SegmentFormatParquet),
+		parquet.KeyValueMetadata("gonimbus.encoding_profile", "parquet-inventory/v0"),
 	)
 	if _, err := writer.Write(parquetRows); err != nil {
 		_ = writer.Close()
@@ -711,13 +922,13 @@ func writePreparedParquetRows(output io.Writer, config SegmentWriterConfig, parq
 	return nil
 }
 
-func segmentDescriptorFromParquet(config SegmentWriterConfig, ordinal int, rows []segmentParquetRow, digestHex string) SegmentDescriptor {
+func segmentDescriptorFromParquet(config SegmentWriterConfig, ordinal int, rows []durableParquetRow, digestHex string) SegmentDescriptor {
 	segmentID := fmt.Sprintf("seg_%06d_%s", ordinal, digestHex[:16])
 	descriptor := SegmentDescriptor{
 		SegmentID:     segmentID,
 		Path:          segmentID + ".parquet",
 		Format:        SegmentFormatParquet,
-		Compression:   "snappy",
+		Compression:   "zstd",
 		Rows:          len(rows),
 		Tombstones:    parquetTombstoneCount(rows),
 		DistinctETags: parquetDistinctETagCount(rows),
@@ -727,29 +938,29 @@ func segmentDescriptorFromParquet(config SegmentWriterConfig, ordinal int, rows 
 		},
 	}
 	if len(rows) > 0 {
-		descriptor.MinRelKey = rows[0].RelKey
-		descriptor.MaxRelKey = rows[len(rows)-1].RelKey
+		descriptor.MinRelKey = rows[0].Key
+		descriptor.MaxRelKey = rows[len(rows)-1].Key
 	}
 	return descriptor
 }
 
-func parquetTombstoneCount(rows []segmentParquetRow) int {
+func parquetTombstoneCount(rows []durableParquetRow) int {
 	count := 0
 	for _, row := range rows {
-		if row.DeletedAt != nil {
+		if row.Deleted != nil {
 			count++
 		}
 	}
 	return count
 }
 
-func parquetDistinctETagCount(rows []segmentParquetRow) int {
+func parquetDistinctETagCount(rows []durableParquetRow) int {
 	seen := make(map[string]struct{})
 	for _, row := range rows {
-		if row.ETag == "" {
+		if row.Revision == nil || row.Revision.Value == "" {
 			continue
 		}
-		seen[row.ETag] = struct{}{}
+		seen[row.Revision.Value] = struct{}{}
 	}
 	return len(seen)
 }
@@ -791,11 +1002,11 @@ func sha256HexFile(path string) (string, error) {
 
 func safeSegmentPath(dir string, name string) (string, error) {
 	dir = strings.TrimSpace(dir)
-	name = filepath.Clean(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
 	if dir == "" {
 		return "", fmt.Errorf("segment directory is required")
 	}
-	if name == "" || name == "." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
+	if name == "" || name == "." || name == ".." || filepath.IsAbs(name) || filepath.Clean(name) != name || filepath.Base(name) != name || strings.ContainsAny(name, `/\`) {
 		return "", fmt.Errorf("invalid segment path")
 	}
 	return filepath.Join(dir, name), nil
@@ -859,6 +1070,23 @@ func copyCoverageAttestations(in []CoverageAttestation) []CoverageAttestation {
 	return out
 }
 
+func validateCurrentRowInvariants(row CurrentObjectRow) error {
+	hasAnyAttr := row.ArchiveStatus != nil || row.ContentType != nil || row.RestoreExpiry != nil || row.RestoreState != nil
+	hasEnrichment := row.HeadEnrichedAt != nil || hasAnyAttr
+	if row.DeletedAt != nil {
+		if hasEnrichment {
+			return fmt.Errorf("tombstone row cannot carry head enrichments")
+		}
+		if !row.LastChangedAt.IsZero() && !row.DeletedAt.Equal(row.LastChangedAt) {
+			return fmt.Errorf("tombstone deleted_at must equal last_changed_at")
+		}
+	}
+	if hasEnrichment && strings.TrimSpace(row.ETag) == "" {
+		return fmt.Errorf("enriched row requires non-empty revision etag")
+	}
+	return nil
+}
+
 func normalizeAndSortSegmentRows(rows []CurrentObjectRow, indexSetID string) ([]CurrentObjectRow, error) {
 	out := make([]CurrentObjectRow, 0, len(rows))
 	for _, row := range rows {
@@ -871,6 +1099,9 @@ func normalizeAndSortSegmentRows(rows []CurrentObjectRow, indexSetID string) ([]
 		}
 		if row.IndexSetID != indexSetID {
 			return nil, fmt.Errorf("segment row index_set_id mismatch")
+		}
+		if err := validateCurrentRowInvariants(row); err != nil {
+			return nil, err
 		}
 		out = append(out, row)
 	}
@@ -1034,4 +1265,332 @@ func parseRequiredTime(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse segment timestamp: %w", err)
 	}
 	return parsed.UTC(), nil
+}
+
+const durableInstantLayoutNanoUTC = "2006-01-02T15:04:05.000000000Z"
+
+func durableTimeString(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(durableInstantLayoutNanoUTC)
+}
+
+func durableTimeStringPtr(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	out := durableTimeString(*value)
+	return &out
+}
+
+func durableParquetFromCurrentRow(row CurrentObjectRow, defaultRunID string) durableParquetRow {
+	row = normalizeCurrentObjectRow(row)
+	var rev *durableParquetRevision
+	if row.ETag != "" {
+		rev = &durableParquetRevision{
+			Kind:  "opaque-etag",
+			Value: row.ETag,
+		}
+	}
+	var del *durableParquetStamp
+	if row.DeletedAt != nil {
+		snapID := row.LastChangedRunID
+		if snapID == "" {
+			snapID = defaultRunID
+		}
+		del = &durableParquetStamp{
+			SnapshotID: snapID,
+			At:         durableTimeString(*row.DeletedAt),
+		}
+	}
+	enrichments := []durableParquetEnrichment{}
+	hasAnyAttr := row.ArchiveStatus != nil || row.ContentType != nil || row.RestoreExpiry != nil || row.RestoreState != nil
+	if row.HeadEnrichedAt != nil || hasAnyAttr {
+		var observedAt string
+		operation := "head-object"
+		if row.HeadEnrichedAt != nil {
+			observedAt = durableTimeString(*row.HeadEnrichedAt)
+		} else {
+			operation = "head-object-synthetic"
+			observedAt = durableTimeString(row.LastSeenAt)
+		}
+		against := durableParquetRevision{
+			Kind:  "opaque-etag",
+			Value: row.ETag,
+		}
+		if hasAnyAttr {
+			if row.ArchiveStatus != nil {
+				enrichments = append(enrichments, durableParquetEnrichment{
+					Name:            "archive_status",
+					Value:           stringPtrCopy(row.ArchiveStatus),
+					Operation:       operation,
+					ObservedAt:      observedAt,
+					AgainstRevision: against,
+				})
+			}
+			if row.ContentType != nil {
+				enrichments = append(enrichments, durableParquetEnrichment{
+					Name:            "content_type",
+					Value:           stringPtrCopy(row.ContentType),
+					Operation:       operation,
+					ObservedAt:      observedAt,
+					AgainstRevision: against,
+				})
+			}
+			if row.RestoreExpiry != nil {
+				enrichments = append(enrichments, durableParquetEnrichment{
+					Name:            "restore_expiry",
+					Value:           durableTimeStringPtr(row.RestoreExpiry),
+					Operation:       operation,
+					ObservedAt:      observedAt,
+					AgainstRevision: against,
+				})
+			}
+			if row.RestoreState != nil {
+				enrichments = append(enrichments, durableParquetEnrichment{
+					Name:            "restore_state",
+					Value:           stringPtrCopy(row.RestoreState),
+					Operation:       operation,
+					ObservedAt:      observedAt,
+					AgainstRevision: against,
+				})
+			}
+		} else {
+			enrichments = append(enrichments, durableParquetEnrichment{
+				Name:            "content_type",
+				Value:           nil,
+				Operation:       operation,
+				ObservedAt:      observedAt,
+				AgainstRevision: against,
+			})
+		}
+	}
+	return durableParquetRow{
+		Namespace:    "objects",
+		Key:          row.RelKey,
+		Revision:     rev,
+		SizeBytes:    row.SizeBytes,
+		LastModified: durableTimeStringPtr(row.LastModified),
+		StorageClass: stringPtrCopy(row.StorageClass),
+		FirstSeen: durableParquetStamp{
+			SnapshotID: row.FirstSeenRunID,
+			At:         durableTimeString(row.FirstSeenAt),
+		},
+		LastSeen: durableParquetStamp{
+			SnapshotID: row.LastSeenRunID,
+			At:         durableTimeString(row.LastSeenAt),
+		},
+		LastChanged: durableParquetStamp{
+			SnapshotID: row.LastChangedRunID,
+			At:         durableTimeString(row.LastChangedAt),
+		},
+		Deleted:     del,
+		Enrichments: enrichments,
+	}
+}
+
+func logicalRowFromDurableParquet(row durableParquetRow) durableindex.LogicalRow {
+	var rev *durableindex.Revision
+	if row.Revision != nil {
+		rev = &durableindex.Revision{
+			Kind:  row.Revision.Kind,
+			Value: row.Revision.Value,
+		}
+	}
+	var del *durableindex.Stamp
+	if row.Deleted != nil {
+		del = &durableindex.Stamp{
+			SnapshotID: row.Deleted.SnapshotID,
+			At:         row.Deleted.At,
+		}
+	}
+	enrichments := make([]durableindex.EnrichmentAttribute, len(row.Enrichments))
+	for i, e := range row.Enrichments {
+		enrichments[i] = durableindex.EnrichmentAttribute{
+			Name:            e.Name,
+			Value:           stringPtrCopy(e.Value),
+			Operation:       e.Operation,
+			ObservedAt:      e.ObservedAt,
+			AgainstRevision: durableindex.Revision{Kind: e.AgainstRevision.Kind, Value: e.AgainstRevision.Value},
+		}
+	}
+	return durableindex.LogicalRow{
+		Namespace:    row.Namespace,
+		Key:          row.Key,
+		Revision:     rev,
+		SizeBytes:    row.SizeBytes,
+		LastModified: stringPtrCopy(row.LastModified),
+		StorageClass: stringPtrCopy(row.StorageClass),
+		FirstSeen:    durableindex.Stamp{SnapshotID: row.FirstSeen.SnapshotID, At: row.FirstSeen.At},
+		LastSeen:     durableindex.Stamp{SnapshotID: row.LastSeen.SnapshotID, At: row.LastSeen.At},
+		LastChanged:  durableindex.Stamp{SnapshotID: row.LastChanged.SnapshotID, At: row.LastChanged.At},
+		Deleted:      del,
+		Enrichments:  enrichments,
+	}
+}
+
+func validateDurableParquetRowContract(row durableParquetRow) error {
+	if row.Namespace == "" || !durableindex.ValidateIdentifier(row.Namespace) {
+		return durableindex.NewRefusal("invalid_shape", "invalid durable parquet row namespace")
+	}
+	if row.Key == "" {
+		return durableindex.NewRefusal("invalid_shape", "durable parquet row key is required")
+	}
+	if err := durableindex.ValidateTextUTF8(row.Key); err != nil {
+		return err
+	}
+	if row.SizeBytes < 0 || row.SizeBytes > durableindex.MaxExactInteger {
+		return durableindex.NewRefusal("invalid_shape", "invalid durable parquet row size_bytes")
+	}
+	if row.Revision != nil {
+		if row.Revision.Kind == "" || row.Revision.Value == "" {
+			return durableindex.NewRefusal("invalid_shape", "durable parquet row revision requires non-empty kind and value")
+		}
+		if err := durableindex.ValidateTextUTF8(row.Revision.Kind); err != nil {
+			return err
+		}
+		if err := durableindex.ValidateTextUTF8(row.Revision.Value); err != nil {
+			return err
+		}
+	}
+	if row.StorageClass != nil {
+		if err := durableindex.ValidateTextUTF8(*row.StorageClass); err != nil {
+			return err
+		}
+	}
+	if row.Deleted != nil {
+		if len(row.Enrichments) > 0 {
+			return durableindex.NewRefusal("enrichment_target", "tombstone row cannot carry enrichments")
+		}
+		if row.Deleted.At != row.LastChanged.At || row.Deleted.SnapshotID != row.LastChanged.SnapshotID {
+			return durableindex.NewRefusal("lineage_order", "deleted stamp differs from last_changed")
+		}
+	}
+	for j := 1; j < len(row.Enrichments); j++ {
+		if strings.Compare(row.Enrichments[j-1].Name, row.Enrichments[j].Name) >= 0 {
+			return durableindex.NewRefusal("enrichment_order", "enrichments are unsorted or duplicate")
+		}
+	}
+	for _, e := range row.Enrichments {
+		if e.Name == "" || e.Operation == "" {
+			return durableindex.NewRefusal("invalid_shape", "enrichment name and operation are required")
+		}
+		if err := durableindex.ValidateTextUTF8(e.Name); err != nil {
+			return err
+		}
+		if err := durableindex.ValidateTextUTF8(e.Operation); err != nil {
+			return err
+		}
+		if err := durableindex.ValidateTextUTF8(e.AgainstRevision.Kind); err != nil {
+			return err
+		}
+		if err := durableindex.ValidateTextUTF8(e.AgainstRevision.Value); err != nil {
+			return err
+		}
+		if err := durableindex.ValidateInstant(e.ObservedAt); err != nil {
+			return err
+		}
+		if e.Value != nil {
+			if !utf8.ValidString(*e.Value) {
+				return durableindex.NewRefusal("invalid_unicode", "enrichment value is not valid UTF-8")
+			}
+			if len(*e.Value) > durableindex.MaxEnrichmentBytes {
+				return durableindex.NewRefusal("capacity", "enrichment value exceeds 65536 bytes")
+			}
+		}
+		if row.Revision == nil || row.Revision.Kind != e.AgainstRevision.Kind || row.Revision.Value != e.AgainstRevision.Value {
+			return durableindex.NewRefusal("enrichment_revision", "enrichment against_revision does not match active row revision")
+		}
+	}
+	if row.FirstSeen.SnapshotID != "" && row.FirstSeen.At != "" &&
+		row.LastSeen.SnapshotID != "" && row.LastSeen.At != "" &&
+		row.LastChanged.SnapshotID != "" && row.LastChanged.At != "" {
+		if err := durableindex.ValidateRows([]durableindex.LogicalRow{logicalRowFromDurableParquet(row)}, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func currentRowFromDurableParquet(row durableParquetRow, indexSetID string) (CurrentObjectRow, error) {
+	if err := validateDurableParquetRowContract(row); err != nil {
+		return CurrentObjectRow{}, err
+	}
+	lastModified, err := parseOptionalTime(row.LastModified)
+	if err != nil {
+		return CurrentObjectRow{}, err
+	}
+	firstSeenAt, err := parseRequiredTime(row.FirstSeen.At)
+	if err != nil {
+		return CurrentObjectRow{}, err
+	}
+	lastChangedAt, err := parseRequiredTime(row.LastChanged.At)
+	if err != nil {
+		return CurrentObjectRow{}, err
+	}
+	lastSeenAt, err := parseRequiredTime(row.LastSeen.At)
+	if err != nil {
+		return CurrentObjectRow{}, err
+	}
+	var deletedAt *time.Time
+	if row.Deleted != nil {
+		deletedAt, err = parseOptionalTime(&row.Deleted.At)
+		if err != nil {
+			return CurrentObjectRow{}, err
+		}
+	}
+	var etag string
+	if row.Revision != nil {
+		etag = row.Revision.Value
+	}
+	var (
+		archiveStatus  *string
+		contentType    *string
+		restoreExpiry  *time.Time
+		restoreState   *string
+		headEnrichedAt *time.Time
+	)
+	for _, e := range row.Enrichments {
+		if e.Operation != "head-object-synthetic" && headEnrichedAt == nil && e.ObservedAt != "" {
+			obsAt := e.ObservedAt
+			headEnrichedAt, err = parseOptionalTime(&obsAt)
+			if err != nil {
+				return CurrentObjectRow{}, err
+			}
+		}
+		switch e.Name {
+		case "archive_status":
+			archiveStatus = stringPtrCopy(e.Value)
+		case "content_type":
+			contentType = stringPtrCopy(e.Value)
+		case "restore_expiry":
+			restoreExpiry, err = parseOptionalTime(e.Value)
+			if err != nil {
+				return CurrentObjectRow{}, err
+			}
+		case "restore_state":
+			restoreState = stringPtrCopy(e.Value)
+		}
+	}
+	return normalizeCurrentObjectRow(CurrentObjectRow{
+		IndexSetID:       indexSetID,
+		RelKey:           row.Key,
+		SizeBytes:        row.SizeBytes,
+		LastModified:     lastModified,
+		ETag:             etag,
+		StorageClass:     stringPtrCopy(row.StorageClass),
+		ArchiveStatus:    archiveStatus,
+		RestoreState:     restoreState,
+		RestoreExpiry:    restoreExpiry,
+		ContentType:      contentType,
+		HeadEnrichedAt:   headEnrichedAt,
+		FirstSeenRunID:   row.FirstSeen.SnapshotID,
+		FirstSeenAt:      firstSeenAt,
+		LastChangedRunID: row.LastChanged.SnapshotID,
+		LastChangedAt:    lastChangedAt,
+		LastSeenRunID:    row.LastSeen.SnapshotID,
+		LastSeenAt:       lastSeenAt,
+		DeletedAt:        deletedAt,
+	}), nil
 }

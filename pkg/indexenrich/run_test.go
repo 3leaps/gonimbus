@@ -103,10 +103,18 @@ func seedDurableParent(t *testing.T, root, indexSetID string, rows []indexsubstr
 			prior[i].LastSeenAt = started
 		}
 		if prior[i].LastChangedRunID == "" {
-			prior[i].LastChangedRunID = runID
+			if prior[i].DeletedAt != nil && !prior[i].DeletedAt.Equal(started) {
+				prior[i].LastChangedRunID = runID + "_del"
+			} else {
+				prior[i].LastChangedRunID = runID
+			}
 		}
 		if prior[i].LastChangedAt.IsZero() {
-			prior[i].LastChangedAt = started
+			if prior[i].DeletedAt != nil {
+				prior[i].LastChangedAt = *prior[i].DeletedAt
+			} else {
+				prior[i].LastChangedAt = started
+			}
 		}
 	}
 	for _, row := range prior {
@@ -409,7 +417,7 @@ func TestRunPreservesTombstonesAndNonHeadFields(t *testing.T) {
 	root := t.TempDir()
 	id := "idx_3333333333333333333333333333333333333333333333333333333333333333"
 	standard := "STANDARD"
-	deletedAt := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	deletedAt := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
 	seg, latest := seedDurableParent(t, root, id, []indexsubstrate.CurrentObjectRow{
 		{IndexSetID: id, RelKey: "hot/alive.xml", SizeBytes: 10, ETag: `"alive"`, StorageClass: &standard},
 		{IndexSetID: id, RelKey: "hot/gone.xml", SizeBytes: 20, ETag: `"gone"`, StorageClass: &standard, DeletedAt: &deletedAt},

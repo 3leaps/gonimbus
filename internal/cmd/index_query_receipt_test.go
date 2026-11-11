@@ -772,7 +772,7 @@ func TestIndexQueryReceiptJSONL_PinnedAncestorDelta(t *testing.T) {
 			{
 				RelKey: "delta/reseen.json", SizeBytes: 30, ETag: "reseen",
 				FirstSeenRunID: baselineRun, FirstSeenAt: baselineStarted.Add(10 * time.Minute),
-				LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(20 * time.Minute),
+				LastChangedRunID: baselineRun, LastChangedAt: baselineStarted.Add(10 * time.Minute),
 				LastSeenRunID: currentRun, LastSeenAt: currentStarted,
 			},
 		},

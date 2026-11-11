@@ -511,7 +511,7 @@ func captureVerifiedParent(latestPath, indexSetID string, provided *ParentToken)
 			return nil, err
 		}
 		runDir := filepath.Dir(filepath.Clean(snap.CompletePath))
-		if !pathWithinDir(snap.Complete.ManifestPath, runDir) || !pathWithinDir(snap.SegmentDir, runDir) {
+		if !pathWithinDir(snap.ManifestPath, runDir) || !pathWithinDir(snap.SegmentDir, runDir) {
 			return nil, fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
 		}
 	}
@@ -552,7 +552,7 @@ func (p *verifiedParentPlan) preflightContinuityLayout(runID string, paths PathC
 	snap := p.snapshot
 	if strings.TrimSpace(snap.Complete.RunID) == runID {
 		if filepath.Clean(paths.CompletePath) != filepath.Clean(snap.CompletePath) ||
-			filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.Complete.ManifestPath) ||
+			filepath.Clean(paths.ManifestPath) != filepath.Clean(snap.ManifestPath) ||
 			filepath.Clean(paths.SegmentDir) != filepath.Clean(snap.SegmentDir) {
 			return fmt.Errorf("%w: same run id at a different artifact locus is not a recovery re-publish", indexsubstrate.ErrStaleParent)
 		}
@@ -564,7 +564,7 @@ func (p *verifiedParentPlan) preflightContinuityLayout(runID string, paths PathC
 		return fmt.Errorf("captured parent for continuity edge: %w", err)
 	}
 	parentRunDir := filepath.Dir(filepath.Clean(snap.CompletePath))
-	if !pathWithinDir(snap.Complete.ManifestPath, parentRunDir) || !pathWithinDir(snap.SegmentDir, parentRunDir) {
+	if !pathWithinDir(snap.ManifestPath, parentRunDir) || !pathWithinDir(snap.SegmentDir, parentRunDir) {
 		return fmt.Errorf("%w: captured parent artifacts are not contained in its canonical run directory", indexsubstrate.ErrStaleParent)
 	}
 	// The new continuity-bearing target must itself be canonical.
@@ -1332,10 +1332,13 @@ func basePrefixFromURI(baseURI string) (string, error) {
 }
 
 func buildMatcher(basePrefix string, cfg MatchConfig) (*match.Matcher, error) {
+	// durable-index/v0 A2 (enumerated_key_omitted): confirmed-complete durable
+	// scopes are exact UTF-8 byte-prefix slices and never omit dot-prefixed
+	// segments within an observed scope.
 	matchCfg := match.Config{
 		Includes:      prefixPatterns(basePrefix, cfg.Includes),
 		Excludes:      prefixPatterns(basePrefix, cfg.Excludes),
-		IncludeHidden: cfg.IncludeHidden,
+		IncludeHidden: true,
 	}
 	if len(matchCfg.Includes) == 0 {
 		matchCfg.Includes = []string{basePrefix + "**"}

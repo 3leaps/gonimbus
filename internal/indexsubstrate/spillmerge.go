@@ -1914,6 +1914,9 @@ func (s *CurrentStateSource) nextRow(ctx context.Context) (CurrentObjectRow, err
 			if state.DeletedAt == nil && !observed && coverageAllowsTombstone(s.cfg.Coverage, state.RelKey) {
 				deletedAt := s.cfg.RunStartedAt.UTC()
 				state.DeletedAt = &deletedAt
+				state.LastChangedRunID = s.cfg.RunID
+				state.LastChangedAt = deletedAt
+				state = clearRowEnrichments(state)
 				s.stats.NewTombstones++
 			}
 		}

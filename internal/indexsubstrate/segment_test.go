@@ -1,15 +1,22 @@
 package indexsubstrate
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
 	"github.com/stretchr/testify/require"
+
+	"github.com/3leaps/gonimbus/pkg/durableindex"
 )
 
 func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
@@ -27,6 +34,9 @@ func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
 		segmentTestRow("idx_test", "data/deleted.xml", 40, `"etag-deleted"`, base.Add(4*time.Minute), &storageClass, nil, nil, nil),
 	}
 	rows[3].DeletedAt = &deletedAt
+	rows[3].LastChangedRunID = "run_del"
+	rows[3].LastChangedAt = deletedAt
+	rows[3].HeadEnrichedAt = nil
 
 	manifest, err := WriteSegmentSet(SegmentWriterConfig{
 		Dir:                  dir,
@@ -55,7 +65,7 @@ func TestWriteSegmentSetWritesDigestBoundParquetSegments(t *testing.T) {
 	require.Equal(t, "sha256", first.Digest.Algorithm)
 	require.Len(t, first.Digest.Hex, 64)
 	require.Contains(t, first.Path, first.Digest.Hex[:16])
-	require.Equal(t, "snappy", first.Compression)
+	require.Equal(t, "zstd", first.Compression)
 
 	second := manifest.Segments[1]
 	require.Equal(t, "data/c.xml", second.MinRelKey)
@@ -307,6 +317,379 @@ func TestReadSegmentFileVerifiedRejectsDigestMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "digest mismatch")
 }
 
+func TestParquetInventoryV0ComplianceAndLegacyDualRead(t *testing.T) {
+	dir := t.TempDir()
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
+	lm := t0.Add(-time.Hour)
+	sc := "STANDARD"
+	ct := "application/xml"
+	enrichedAt := t1.Add(30 * time.Second)
+	rows := []CurrentObjectRow{
+		{
+			IndexSetID:       "idx_test",
+			RelKey:           "data/a.xml",
+			SizeBytes:        100,
+			LastModified:     &lm,
+			ETag:             `"etag-a"`,
+			StorageClass:     &sc,
+			ContentType:      &ct,
+			HeadEnrichedAt:   &enrichedAt,
+			FirstSeenRunID:   "snap-0",
+			FirstSeenAt:      t0,
+			LastChangedRunID: "snap-0",
+			LastChangedAt:    t0,
+			LastSeenRunID:    "snap-1",
+			LastSeenAt:       t1,
+		},
+		{
+			IndexSetID:       "idx_test",
+			RelKey:           "data/deleted.xml",
+			SizeBytes:        200,
+			ETag:             `"etag-del"`,
+			FirstSeenRunID:   "snap-0",
+			FirstSeenAt:      t0,
+			LastChangedRunID: "snap-1",
+			LastChangedAt:    t1,
+			LastSeenRunID:    "snap-0",
+			LastSeenAt:       t0,
+			DeletedAt:        &t1,
+		},
+	}
+
+	manifest, err := WriteSegmentSet(SegmentWriterConfig{
+		Dir:                  dir,
+		IndexSetID:           "idx_test",
+		RunID:                "snap-1",
+		CreatedAt:            t1,
+		TargetRowsPerSegment: 10,
+	}, rows)
+	require.NoError(t, err)
+	require.Len(t, manifest.Segments, 1)
+
+	segBytes, err := os.ReadFile(filepath.Join(dir, manifest.Segments[0].Path))
+	require.NoError(t, err)
+	logicalRows, err := durableindex.ReadParquetInventoryMember(segBytes, 0)
+	require.NoError(t, err)
+	require.Len(t, logicalRows, 2)
+	require.Equal(t, "objects", logicalRows[0].Namespace)
+	require.Equal(t, "data/a.xml", logicalRows[0].Key)
+	require.Len(t, logicalRows[0].Enrichments, 1)
+	require.Equal(t, "content_type", logicalRows[0].Enrichments[0].Name)
+	require.Equal(t, "data/deleted.xml", logicalRows[1].Key)
+	require.NotNil(t, logicalRows[1].Deleted)
+
+	// Verify dual-read of legacy durable-v2 (segmentParquetRow Snappy) segments
+	// through both ReadSegmentFileVerified and PublishedParentRowSource.
+	legacyDir := t.TempDir()
+	legacyPath := filepath.Join(legacyDir, "seg_legacy.parquet")
+	legacyFile, err := os.OpenFile(legacyPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	require.NoError(t, err)
+	legacyWriter := parquet.NewGenericWriter[segmentParquetRow](legacyFile, parquet.Compression(&parquet.Snappy))
+	_, err = legacyWriter.Write([]segmentParquetRow{
+		segmentParquetFromCurrentRow(rows[0]),
+		segmentParquetFromCurrentRow(rows[1]),
+	})
+	require.NoError(t, err)
+	require.NoError(t, legacyWriter.Close())
+	require.NoError(t, legacyFile.Close())
+
+	legacyBytes, err := os.ReadFile(legacyPath)
+	require.NoError(t, err)
+	sum := sha256.Sum256(legacyBytes)
+	legacyDesc := SegmentDescriptor{
+		SegmentID:   "seg_legacy",
+		Path:        "seg_legacy.parquet",
+		Format:      SegmentFormatParquet,
+		Compression: "snappy",
+		Rows:        2,
+		Tombstones:  1,
+		SizeBytes:   int64(len(legacyBytes)),
+		Digest: SegmentDigest{
+			Algorithm: "sha256",
+			Hex:       hex.EncodeToString(sum[:]),
+		},
+	}
+
+	gotWalk, err := ReadSegmentFileVerified(legacyDir, legacyDesc)
+	require.NoError(t, err)
+	expected, err := normalizeAndSortSegmentRows(rows, "idx_test")
+	require.NoError(t, err)
+	require.Equal(t, expected, gotWalk)
+
+	parentSnap := PublishedSnapshot{
+		SegmentDir: legacyDir,
+		Manifest: InternalManifest{
+			Counts:   ManifestCounts{Rows: 2, ActiveRows: 1, Tombstones: 1},
+			Segments: []SegmentDescriptor{legacyDesc},
+		},
+	}
+	src := NewPublishedParentRowSource(parentSnap)
+	gotParent := drainParent(t, src)
+	require.NoError(t, src.Close())
+	require.Equal(t, expected, gotParent)
+}
+
+func TestWriteSegmentSetAndStreamingSplitByByteBudgetUnderReaderCeiling(t *testing.T) {
+	base := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	std := "STANDARD"
+	// Each row's estimated uncompressed payload is ~61 KiB (using a 60 KiB enrichment attribute,
+	// which is > 4 KiB and <= 64 KiB MaxEnrichmentBytes). 1,200 rows (~73 MiB) must split into
+	// 2 segments under the 64 MiB uncompressed budget.
+	bigAttr := strings.Repeat("a", 60*1024)
+	rows := make([]CurrentObjectRow, 0, 1200)
+	for i := 0; i < 1200; i++ {
+		r := segmentTestRow("idx_byte_budget", "data/"+pad3(i/100)+"/"+pad3(i%100)+"-"+strings.Repeat("k", 512)+".xml", int64(i+1), `"etag"`, base, &std, &bigAttr, nil, nil)
+		rows = append(rows, r)
+	}
+
+	batchDir := t.TempDir()
+	streamDir := t.TempDir()
+	cfg := SegmentWriterConfig{
+		IndexSetID:           "idx_byte_budget",
+		RunID:                "run_test",
+		CreatedAt:            base,
+		TargetRowsPerSegment: DefaultTargetRowsPerSegment,
+	}
+	cfgBatch := cfg
+	cfgBatch.Dir = batchDir
+	cfgStream := cfg
+	cfgStream.Dir = streamDir
+
+	batchMan, err := WriteSegmentSet(cfgBatch, rows)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(batchMan.Segments), "must split into 2 segments by byte budget despite TargetRowsPerSegment=500000")
+
+	streamMan, err := WriteStreamingSegmentSet(context.Background(), cfgStream, NewSliceOrderedRows(rows))
+	require.NoError(t, err)
+	requireEqualStreamingManifest(t, batchMan, streamMan)
+	requireEqualSegmentFiles(t, batchDir, streamDir, batchMan, streamMan)
+
+	// Verify ReadSegmentFileVerified, PublishedParentRowSource, and durableindex.ReadParquetInventoryMember succeed on every segment.
+	var totalRead int
+	for _, seg := range batchMan.Segments {
+		segRows, err := ReadSegmentFileVerified(batchDir, seg)
+		require.NoError(t, err)
+		totalRead += len(segRows)
+
+		rawBytes, err := os.ReadFile(filepath.Join(batchDir, seg.Path))
+		require.NoError(t, err)
+		logical, err := durableindex.ReadParquetInventoryMember(rawBytes, 0)
+		require.NoError(t, err)
+		require.Len(t, logical, seg.Rows)
+	}
+	require.Equal(t, len(rows), totalRead)
+
+	parentSrc := NewPublishedParentRowSource(PublishedSnapshot{
+		SegmentDir: batchDir,
+		Manifest:   batchMan,
+	})
+	defer func() { _ = parentSrc.Close() }()
+	var parentCount int
+	for {
+		_, err := parentSrc.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		parentCount++
+	}
+	require.Equal(t, len(rows), parentCount)
+}
+
+func TestReadSegmentFileVerifiedAndParentReaderRefuseInvalidEnrichmentProvenance(t *testing.T) {
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	ts := durableTimeString(t0)
+	ct := "application/xml"
+
+	writeTamperedSegment := func(t *testing.T, pqRow durableParquetRow) (string, SegmentDescriptor) {
+		t.Helper()
+		dir := t.TempDir()
+		segPath := filepath.Join(dir, "seg_tampered.parquet")
+		f, err := os.OpenFile(segPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		require.NoError(t, err)
+		cfg := SegmentWriterConfig{
+			Dir:                  dir,
+			IndexSetID:           "idx_test",
+			RunID:                "snap-0",
+			CreatedAt:            t0,
+			TargetRowsPerSegment: 10,
+		}
+		require.NoError(t, writePreparedParquetRows(f, cfg, []durableParquetRow{pqRow}))
+		require.NoError(t, f.Close())
+		raw, err := os.ReadFile(segPath)
+		require.NoError(t, err)
+		sum := sha256.Sum256(raw)
+		desc := SegmentDescriptor{
+			SegmentID:   "seg_tampered",
+			Path:        "seg_tampered.parquet",
+			Format:      SegmentFormatParquet,
+			Compression: "zstd",
+			Rows:        1,
+			SizeBytes:   int64(len(raw)),
+			Digest: SegmentDigest{
+				Algorithm: "sha256",
+				Hex:       hex.EncodeToString(sum[:]),
+			},
+		}
+		return dir, desc
+	}
+
+	cases := []struct {
+		name string
+		row  durableParquetRow
+	}{
+		{
+			name: "against_revision_mismatch",
+			row: durableParquetRow{
+				Namespace:   "objects",
+				Key:         "data/a.xml",
+				Revision:    &durableParquetRevision{Kind: "opaque-etag", Value: `"rev-actual"`},
+				SizeBytes:   10,
+				FirstSeen:   durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastSeen:    durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastChanged: durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				Enrichments: []durableParquetEnrichment{{
+					Name:            "content_type",
+					Value:           &ct,
+					Operation:       "head-object",
+					ObservedAt:      ts,
+					AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-wrong"`},
+				}},
+			},
+		},
+		{
+			name: "tombstone_with_enrichment",
+			row: durableParquetRow{
+				Namespace:   "objects",
+				Key:         "data/del.xml",
+				Revision:    &durableParquetRevision{Kind: "opaque-etag", Value: `"rev-del"`},
+				SizeBytes:   10,
+				FirstSeen:   durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastSeen:    durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastChanged: durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				Deleted:     &durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				Enrichments: []durableParquetEnrichment{{
+					Name:            "content_type",
+					Value:           &ct,
+					Operation:       "head-object",
+					ObservedAt:      ts,
+					AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-del"`},
+				}},
+			},
+		},
+		{
+			name: "unsorted_enrichments",
+			row: durableParquetRow{
+				Namespace:   "objects",
+				Key:         "data/unsorted.xml",
+				Revision:    &durableParquetRevision{Kind: "opaque-etag", Value: `"rev-1"`},
+				SizeBytes:   10,
+				FirstSeen:   durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastSeen:    durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				LastChanged: durableParquetStamp{SnapshotID: "snap-0", At: ts},
+				Enrichments: []durableParquetEnrichment{
+					{
+						Name:            "restore_state",
+						Value:           &ct,
+						Operation:       "head-object",
+						ObservedAt:      ts,
+						AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-1"`},
+					},
+					{
+						Name:            "content_type",
+						Value:           &ct,
+						Operation:       "head-object",
+						ObservedAt:      ts,
+						AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-1"`},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, desc := writeTamperedSegment(t, tc.row)
+			_, err := ReadSegmentFileVerified(dir, desc)
+			require.Error(t, err, "ReadSegmentFileVerified must refuse %s", tc.name)
+
+			src := NewPublishedParentRowSource(PublishedSnapshot{
+				SegmentDir: dir,
+				Manifest: InternalManifest{
+					Counts:   ManifestCounts{Rows: 1, ActiveRows: 1},
+					Segments: []SegmentDescriptor{desc},
+				},
+			})
+			defer func() { _ = src.Close() }()
+			_, err = src.Next(context.Background())
+			require.Error(t, err, "PublishedParentRowSource must refuse %s", tc.name)
+		})
+	}
+
+	t.Run("enrichment_value_5000_bytes_accepted_65537_refused", func(t *testing.T) {
+		val5000 := strings.Repeat("v", 5000)
+		validRow := durableParquetRow{
+			Namespace:   "objects",
+			Key:         "data/valid5k.xml",
+			Revision:    &durableParquetRevision{Kind: "opaque-etag", Value: `"rev-5k"`},
+			SizeBytes:   10,
+			FirstSeen:   durableParquetStamp{SnapshotID: "snap-0", At: ts},
+			LastSeen:    durableParquetStamp{SnapshotID: "snap-0", At: ts},
+			LastChanged: durableParquetStamp{SnapshotID: "snap-0", At: ts},
+			Enrichments: []durableParquetEnrichment{{
+				Name:            "content_type",
+				Value:           &val5000,
+				Operation:       "head-object",
+				ObservedAt:      ts,
+				AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-5k"`},
+			}},
+		}
+		dir, desc := writeTamperedSegment(t, validRow)
+		gotRows, err := ReadSegmentFileVerified(dir, desc)
+		require.NoError(t, err)
+		require.Len(t, gotRows, 1)
+		require.NotNil(t, gotRows[0].ContentType)
+		require.Equal(t, val5000, *gotRows[0].ContentType)
+
+		src := NewPublishedParentRowSource(PublishedSnapshot{
+			SegmentDir: dir,
+			Manifest: InternalManifest{
+				Counts:   ManifestCounts{Rows: 1, ActiveRows: 1},
+				Segments: []SegmentDescriptor{desc},
+			},
+		})
+		defer func() { _ = src.Close() }()
+		gotParent, err := src.Next(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, gotParent.ContentType)
+		require.Equal(t, val5000, *gotParent.ContentType)
+
+		val65537 := strings.Repeat("v", 65537)
+		oversizeRow := validRow
+		oversizeRow.Enrichments = []durableParquetEnrichment{{
+			Name:            "content_type",
+			Value:           &val65537,
+			Operation:       "head-object",
+			ObservedAt:      ts,
+			AgainstRevision: durableParquetRevision{Kind: "opaque-etag", Value: `"rev-5k"`},
+		}}
+		dirOver, descOver := writeTamperedSegment(t, oversizeRow)
+		_, err = ReadSegmentFileVerified(dirOver, descOver)
+		require.Error(t, err)
+		srcOver := NewPublishedParentRowSource(PublishedSnapshot{
+			SegmentDir: dirOver,
+			Manifest: InternalManifest{
+				Counts:   ManifestCounts{Rows: 1, ActiveRows: 1},
+				Segments: []SegmentDescriptor{descOver},
+			},
+		})
+		defer func() { _ = srcOver.Close() }()
+		_, err = srcOver.Next(context.Background())
+		require.Error(t, err)
+	})
+}
+
 func segmentTestRow(indexSetID, relKey string, size int64, etag string, seenAt time.Time, storageClass, contentType, restoreState *string, restoreExpiry *time.Time) CurrentObjectRow {
 	lastModified := seenAt.Add(-time.Hour)
 	headEnrichedAt := seenAt.Add(time.Minute)
@@ -324,7 +707,7 @@ func segmentTestRow(indexSetID, relKey string, size int64, etag string, seenAt t
 		FirstSeenRunID:   "run_old",
 		FirstSeenAt:      seenAt.Add(-24 * time.Hour),
 		LastChangedRunID: "run_old",
-		LastChangedAt:    seenAt.Add(-12 * time.Hour),
+		LastChangedAt:    seenAt.Add(-24 * time.Hour),
 		LastSeenRunID:    "run_test",
 		LastSeenAt:       seenAt,
 	}
