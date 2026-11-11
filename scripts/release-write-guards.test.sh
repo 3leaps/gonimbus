@@ -3,6 +3,7 @@
 # Manifest, signature, and anchor writers refuse to write through an existing
 # entry or planted symlink, leaving link targets untouched.
 set -euo pipefail
+unset CI
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 scratch="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$scratch"' EXIT
