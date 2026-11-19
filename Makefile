@@ -631,7 +631,33 @@ license-save: ## Save third-party license texts
 	@echo "✅ Saved third-party licenses to docs/licenses/third-party"
 
 license-audit: ## Audit for forbidden licenses and cooling policy
-	@set -e; had_sbom=0; before_list=""; if [ -d sbom ]; then had_sbom=1; before_list="$$(mktemp)"; trap 'rm -f "$$before_list"' EXIT; find sbom -maxdepth 1 -type f \( -name 'vuln-*.json' -o -name 'goneat-*.cdx.json' \) | sort > "$$before_list"; fi; echo "Auditing dependency licenses and cooling policy..."; $(GONEAT_RESOLVE); rc=0; $$GONEAT assess --categories dependencies --check --fail-on high || rc=$$?; if [ -d sbom ]; then if [ "$$had_sbom" = "0" ]; then rm -f sbom/vuln-*.json sbom/goneat-*.cdx.json; rmdir sbom 2>/dev/null || true; else for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do [ -e "$$f" ] || continue; if ! grep -Fxq "$$f" "$$before_list"; then rm -f "$$f"; fi; done; fi; fi; exit $$rc
+	@set -e; \
+	if [ -L sbom ]; then echo "❌ sbom must not be a symlink" >&2; exit 1; fi; \
+	had_sbom=0; before_list=""; \
+	if [ -d sbom ]; then \
+		had_sbom=1; \
+		before_list="$$(mktemp)"; \
+		trap 'rm -f "$$before_list"' EXIT; \
+		for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+			if [ -e "$$f" ] || [ -L "$$f" ]; then printf '%s\n' "$$f"; fi; \
+		done > "$$before_list"; \
+	fi; \
+	echo "Auditing dependency licenses and cooling policy..."; \
+	$(GONEAT_RESOLVE); \
+	rc=0; $$GONEAT assess --categories dependencies --check --fail-on high || rc=$$?; \
+	if [ -d sbom ] && [ ! -L sbom ]; then \
+		if [ "$$had_sbom" = "0" ]; then \
+			for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+				if [ -f "$$f" ] && [ ! -L "$$f" ]; then rm -f "$$f"; fi; \
+			done; \
+			rmdir sbom 2>/dev/null || true; \
+		else \
+			for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+				if [ -f "$$f" ] && [ ! -L "$$f" ] && ! grep -Fxq "$$f" "$$before_list"; then rm -f "$$f"; fi; \
+			done; \
+		fi; \
+	fi; \
+	exit $$rc
 	@echo "✅ License audit passed"
 
 update-licenses: license-inventory license-save ## Update license inventory and texts
