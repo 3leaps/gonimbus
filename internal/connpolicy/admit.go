@@ -1,4 +1,4 @@
-// Package connpolicy holds unexported construction helpers for GON-065 admitted-N
+// Package connpolicy holds unexported construction helpers for admitted-N
 // formulas used when sizing HTTP connection pools. It is internal: not a Stable
 // library surface. Helpers refuse overflow rather than wrapping to a smaller
 // positive MaxConns under a parallel(N) claim.

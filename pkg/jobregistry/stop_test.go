@@ -69,7 +69,8 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 	t.Cleanup(func() {
 		if cmd.ProcessState == nil {
 			_ = cmd.Process.Kill()
-			<-done
+			err := <-done
+			_ = err
 		}
 	})
 
@@ -92,7 +93,8 @@ func TestStoreStopKillsRunningJob(t *testing.T) {
 	require.Equal(t, string(JobStateStopped), result.State)
 
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err
 	case <-time.After(5 * time.Second):
 		t.Fatal("process did not exit after kill")
 	}

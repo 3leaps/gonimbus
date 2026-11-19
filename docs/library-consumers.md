@@ -506,8 +506,7 @@ The supported storage-free public package set is:
 
 These packages are expected to stay outside the index-store compile graph.
 CI runs `go list -deps ./internal/embeddingtest` and fails if this surface pulls
-in `pkg/indexstore`, `pkg/reflowstate`, `github.com/tursodatabase/go-libsql`,
-or `modernc.org/sqlite`.
+in `pkg/indexstore`, `pkg/reflowstate`, or `modernc.org/sqlite`.
 
 Storageful public packages are:
 
@@ -525,12 +524,14 @@ recommended lightweight storage-free surface, and it has its own dependency
 boundary tests so it can remain free of CLI, provider-dispatch, and concrete
 provider SDK dependencies while the embeddable engine matures.
 
-### Libsql Build Tag
+### SQLite Driver and Remote Libsql
 
-The default build uses the pure-Go `modernc.org/sqlite` driver for local index
-databases, regardless of `CGO_ENABLED`. Remote libsql/Turso URLs are opt-in:
-build gonimbus with `-tags gonimbus_libsql` when you need that driver.
+All builds use the pure-Go `modernc.org/sqlite` driver for local index
+databases, regardless of `CGO_ENABLED`. The opt-in `-tags gonimbus_libsql` build
+tag and its cgo `github.com/tursodatabase/go-libsql` dependency were retired
+when moving to Go 1.26.11 (which rejects precompiled LTO bitcode archives in
+`#cgo LDFLAGS`).
 
-Default builds fail remote libsql URLs with a clear rebuild diagnostic instead
-of silently falling back to a local database. The libsql flavor keeps the
-current remote-DB behavior, but it requires a CGO-capable build environment.
+Remote libsql/Turso URLs (`libsql://`, `https://`) fail closed with a
+`"remote libsql is not supported in this release"` diagnostic instead of
+silently falling back to a local database.

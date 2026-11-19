@@ -369,8 +369,8 @@ def validate_workflow_text(text: str) -> None:
         "build checkout must set persist-credentials: false and fetch-depth: 0",
     )
     check_error(
-        build_steps[1].get("with") == {"go-version": "1.26.10", "cache": False},
-        "build setup-go must set go-version: 1.26.10 and cache: false",
+        build_steps[1].get("with") == {"go-version": "1.26.11", "cache": False},
+        "build setup-go must set go-version: 1.26.11 and cache: false",
     )
     guard_step = build_steps[2]
     check_error(

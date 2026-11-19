@@ -1,4 +1,4 @@
-//go:build windows && !gonimbus_libsql
+//go:build windows
 
 package indexstore
 

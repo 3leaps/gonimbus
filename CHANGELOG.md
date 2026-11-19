@@ -15,6 +15,10 @@ changes.
 
 ## [Unreleased]
 
+### Removed
+
+- **Opt-in `-tags gonimbus_libsql` build tag and `github.com/tursodatabase/go-libsql` dependency:** retired because Go `1.26.11` rejects precompiled LTO bitcode sections in `#cgo LDFLAGS` static archives. All builds use pure-Go `modernc.org/sqlite` for local index stores; remote `libsql://` and `https://` index URLs fail closed with `"remote libsql is not supported in this release"`.
+
 ## [0.5.0] - 2026-11-11
 
 **`durable-index/v0` contract adoption and plan safeguards, `parquet-inventory/v0` ZSTD segments with legacy dual-read and portable relative markers, truthful dot-segment policy and per-run engine provenance, discovered `segments` build scopes and offline `migrate-match-scope`, and Gen-2.1 release ceremony refinements.**

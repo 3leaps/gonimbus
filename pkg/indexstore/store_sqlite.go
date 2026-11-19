@@ -1,5 +1,3 @@
-//go:build !gonimbus_libsql
-
 package indexstore
 
 import (
@@ -14,8 +12,20 @@ import (
 
 const driverLibsql = "libsql"
 
+var errRemoteLibsqlUnsupported = errors.New("remote libsql is not supported in this release")
+
 func init() {
 	sql.Register(driverLibsql, &sqlite.Driver{})
+}
+
+func isRemoteLibsqlDSN(dsn string) bool {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	for _, prefix := range []string{"libsql://", "libsql:", "https://", "http://", "wss://", "ws://"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Open opens (and creates if needed) a pure-Go SQLite-backed index database.
@@ -23,7 +33,7 @@ func init() {
 // Notes:
 // - Local file paths are created if parent directories do not exist.
 // - For local DBs, WAL and busy_timeout are applied for predictable CLI behavior.
-// - Remote libsql URLs require rebuilding with -tags gonimbus_libsql.
+// - Remote libsql URLs are not supported and fail closed.
 func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -33,8 +43,8 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(dsn, "libsql://") || strings.HasPrefix(dsn, "https://") {
-		return nil, errors.New("remote libsql URLs require rebuilding with -tags gonimbus_libsql")
+	if isRemoteLibsqlDSN(dsn) {
+		return nil, errRemoteLibsqlUnsupported
 	}
 
 	db, err := sql.Open(driverLibsql, dsn)

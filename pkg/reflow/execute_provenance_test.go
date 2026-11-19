@@ -841,7 +841,8 @@ func TestEngineProvenanceCancellationWindow(t *testing.T) {
 	cancel()
 
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return after cancellation")
 	}

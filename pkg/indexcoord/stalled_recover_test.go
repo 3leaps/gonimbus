@@ -205,7 +205,8 @@ func TestRecoverManagedStalled_PositiveEndToEndChild(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err
 	case <-time.After(10 * time.Second):
 		_ = auth.Release()
 		t.Fatal("child did not exit after recover-stalled")

@@ -22,7 +22,7 @@ type ConnectionPoolPolicy struct {
 // up to admittedN concurrent provider operations that each need at most one
 // simultaneous HTTP connection on this client.
 //
-// Semantics (locked GON-065 S0):
+// Semantics:
 //   - admittedN < 0 → error
 //   - admittedN 0 or 1 → zero policy (SDK / transport defaults)
 //   - admittedN >= 2 → both fields equal admittedN (pass-through, including large N)
