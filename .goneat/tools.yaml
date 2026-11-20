@@ -46,7 +46,7 @@ tools:
       type: link
       source: sfetch
       repo: fulmenhq/goneat
-      tag: v0.6.7
+      tag: v0.6.8
       bin_name: goneat
       dest: ~/.local/bin
   decernor:

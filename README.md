@@ -24,8 +24,8 @@ Gonimbus is a Go-first **library + CLI + server** for large-scale inspection and
 
 ### Prerequisites
 
-- Go 1.26.10 or newer ([install](https://go.dev/doc/install)), the minimum supported
-  toolchain to ensure secure operation; the module selects toolchain go1.26.10 by default
+- Go 1.26.11 or newer ([install](https://go.dev/doc/install)), the minimum supported
+  toolchain to ensure secure operation; the module selects toolchain go1.26.11 by default
 - golangci-lint ([install](https://golangci-lint.run/welcome/install/))
 
 ### Install
@@ -57,7 +57,7 @@ Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`
 
 **Pinned & digest-verified automation runners:** `3leaps/tap/gonimbus` and `3leaps/scoop-bucket` track the latest stable release (with the terminal `0.4.x` build preserved as `3leaps/tap/gonimbus@0.4` and `3leaps/gonimbus-0.4`). Automation runners that gate execution on an exact release `SHA256SUMS` digest should install the tagged raw release binary into a runner-private directory (via [`sfetch`](https://github.com/3leaps/sfetch) or verified GitHub Release assets) or hold workstation upgrades explicitly (`brew pin gonimbus` / `scoop hold gonimbus`). On Windows Scoop, `~\scoop\shims\gonimbus.exe` on `PATH` is Scoop's generic launcher shim; hash the resolved target of `scoop which gonimbus` (`~\scoop\apps\gonimbus\current\gonimbus-windows-<arch>.exe`) when verifying against `SHA256SUMS`, and use `gonimbus version --json [--extended]` for machine-readable preflight checks. See [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory).
 
-**From source (`go install`, requires Go 1.26.10+):**
+**From source (`go install`, requires Go 1.26.11+):**
 
 ```bash
 go install github.com/3leaps/gonimbus/cmd/gonimbus@latest

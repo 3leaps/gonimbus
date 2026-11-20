@@ -141,8 +141,8 @@ func TestLimiterCopyGateDualDomainAllowsSourceAndDestUnderCeilingOne(t *testing.
 		})
 	}()
 	select {
-	case <-doneD:
-		t.Fatal("second source-read must wait while first holds the source domain under ceiling 1")
+	case err := <-doneD:
+		t.Fatalf("second source-read must wait while first holds the source domain under ceiling 1 (err=%v)", err)
 	case <-time.After(50 * time.Millisecond):
 		// expected: still waiting
 	}

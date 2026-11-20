@@ -221,8 +221,8 @@ func TestRequestRateReservationIsOrderedWithClockRead(t *testing.T) {
 	second := make(chan error, 1)
 	go func() { second <- lease.waitForRequest(context.Background()) }()
 	select {
-	case <-second:
-		t.Fatal("a second caller reserved while the first was between its clock read and its reservation")
+	case err := <-second:
+		t.Fatalf("a second caller reserved while the first was between its clock read and its reservation (err=%v)", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	require.Equal(t, int32(1), hookCalls.Load(), "the second caller read the clock before the first reserved")

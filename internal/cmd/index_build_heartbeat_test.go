@@ -45,7 +45,10 @@ func TestManagedHeartbeatStopReturnsPromptly(t *testing.T) {
 	}
 
 	select {
-	case <-fatal:
+	case err, ok := <-fatal:
+		if ok || err != nil {
+			t.Fatalf("expected closed fatal channel on clean stop, got err=%v ok=%t", err, ok)
+		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("fatal channel must close on stop")
 	}

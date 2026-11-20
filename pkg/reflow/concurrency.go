@@ -50,7 +50,7 @@ type ResourceProbe struct {
 	FDSoftLimit      func() (int64, error)
 }
 
-// ConcurrencyConfig is the resolved GON-048 concurrency contract. RequestedCeiling
+// ConcurrencyConfig is the resolved adaptive concurrency contract. RequestedCeiling
 // is the user/operator ceiling; EffectiveCeiling is the resource-safe hard cap.
 //
 // The Memory* fields record the arithmetic behind a memory-derived ceiling:
@@ -78,8 +78,8 @@ type ConcurrencyConfig struct {
 	RetryBufferCapBytes int64
 
 	// DestDomainMultiplier scales adaptive `current` for the destination
-	// domain only (GON-067 PR2 dest-biased admission). Zero or one = symmetric
-	// with source (pre-PR2). Product default is 2 after clamp.
+	// domain only (dest-biased admission). Zero or one = symmetric
+	// with source. Product default is 2 after clamp.
 	DestDomainMultiplier int
 	// DestDomainCeilingEffective is the hard dest-domain cap after clamp:
 	// DestDomainMultiplier * EffectiveCeiling, never silent over-admit.
@@ -125,7 +125,7 @@ type ConcurrencyStats struct {
 	MemoryReservationWaits  int64 `json:"memory_reservation_waits,omitempty"`
 	MemoryReservationWaitMS int64 `json:"memory_reservation_wait_ms,omitempty"`
 
-	// Dest-domain admission (GON-067 PR2). Multiplier and resolved ceiling are
+	// Dest-domain admission. Multiplier and resolved ceiling are
 	// static for the run; per-domain peaks prove capacity was used.
 	DestDomainMultiplier       int `json:"dest_domain_multiplier,omitempty"`
 	DestDomainCeilingEffective int `json:"dest_domain_ceiling_effective,omitempty"`
@@ -138,10 +138,10 @@ type ConcurrencyStats struct {
 // resource-derived effective ceiling.
 //
 // Domain permits (source vs dest) are independent so a sequential Get-then-Put
-// copy path does not couple both endpoints on one global token (GON-067 PR1).
+// copy path does not couple both endpoints on one global token.
 // Source and probe domains are each capped at adaptive `current`; the dest
 // domain is capped at min(current*DestDomainMultiplier, DestDomainCeilingEffective)
-// (GON-067 PR2 dest-biased residual). Occupancy sums all domains.
+// (dest-biased admission). Occupancy sums all domains.
 type ConcurrencyLimiter struct {
 	mu sync.Mutex
 
@@ -643,7 +643,7 @@ func (l *ConcurrencyLimiter) ObserveConnectionError() {
 	l.connectionFreezes++
 }
 
-// ObserveProviderResult maps provider outcomes onto the GON-048 signal model.
+// ObserveProviderResult maps provider outcomes onto the adaptive concurrency signal model.
 func (l *ConcurrencyLimiter) ObserveProviderResult(err error) {
 	switch {
 	case err == nil:

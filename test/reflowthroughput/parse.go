@@ -50,7 +50,7 @@ type ParsedReflowOutput struct {
 	SummaryFinal     int
 	SummaryAdaptive  bool
 
-	// Dest-domain policy (GON-067 PR2): static for the run; run and summary must
+	// Dest-domain policy: static for the run; run and summary must
 	// agree. Used by CheckHonesty so the gate asserts resolved output, not an
 	// assumed default multiplier.
 	RunDestDomainMultiplier           int

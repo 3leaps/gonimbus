@@ -269,8 +269,12 @@ func TestWriterStatsRefusalVsFatalSeparate(t *testing.T) {
 	if ok := c.serveBatch(refused); !ok {
 		t.Fatal("refusal must not fail the writer")
 	}
-	<-refused.done
-	<-accepted.done
+	if err := <-refused.done; !errors.Is(err, refusal) {
+		t.Fatalf("refused.done = %v, want %v", err, refusal)
+	}
+	if err := <-accepted.done; err != nil {
+		t.Fatalf("accepted.done = %v, want nil", err)
+	}
 
 	st := c.statsSnapshot()
 	if st.RequestRefusals != 1 {

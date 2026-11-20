@@ -1,4 +1,4 @@
-.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo test-libsql build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
+.PHONY: all help bootstrap bootstrap-force hooks-ensure tools sync dependencies verify-dependencies version-bump lint test test-nocgo build build-all clean fmt version api-stability check-all precommit prepush verify-app-version run install test-cov
 .PHONY: license-inventory license-save license-audit update-licenses
 .PHONY: sync-embedded-identity verify-embedded-identity validate-roles contract-fixture-integrity lint-cross-os
 .PHONY: test-cloud test-cloud-real test-reflow-throughput test-stalled-evidence moto-start moto-stop moto-status
@@ -73,7 +73,7 @@ GONEAT_RESOLVE = \
 all: fmt test
 
 help:  ## Show this help message
-	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  test-libsql     - Run tests with the libsql build tag' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  api-stability   - Verify library API stability manifest and soft diff gate' '  validate-roles  - Meta-validate the role schema, then validate role prompts' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, api-stability, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run scoped pre-push hooks' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
+	@printf '%s\n' '$(BINARY_NAME) - Available Make Targets' '' 'Required targets (Makefile Standard):' '  help            - Show this help message' '  bootstrap       - Install external tools (sfetch, goneat) and dependencies' '  bootstrap-force - Force reinstall external tools' '  tools           - Verify external tools are available' '  dependencies    - Generate SBOM for supply-chain security' '  lint            - Run lint/format/style checks' '  test            - Run all tests' '  test-nocgo      - Run tests with CGO disabled' '  build           - Build distributable artifacts' '  build-all       - Build multi-platform binaries' '  clean           - Remove build artifacts and caches' '  fmt             - Format code' '  version         - Print current version' '  api-stability   - Verify library API stability manifest and soft diff gate' '  validate-roles  - Meta-validate the role schema, then validate role prompts' '  version-set     - Set version to specific value' '  version-bump-major - Bump major version' '  version-bump-minor - Bump minor version' '  version-bump-patch - Bump patch version' '  release-check   - Run release checklist validation' '  release-prepare - Prepare for release' '  release-build   - Build release artifacts' '  check-all       - Run all quality checks (fmt, lint, api-stability, test)' '  precommit       - Run pre-commit hooks (check-all)' '  prepush         - Run scoped pre-push hooks' '' 'Additional targets:' '  run             - Run server in development mode' '  test-cov        - Run tests with coverage report' ''
 
 bootstrap:  ## Install external tools (sfetch, goneat) and dependencies
 	@echo "Installing external tools..."
@@ -432,10 +432,6 @@ test-nocgo: sync-embedded-identity ## Run tests with CGO disabled
 	@echo "Running test suite with CGO disabled..."
 	CGO_ENABLED=0 $(GOTEST) ./... -v
 
-test-libsql: sync-embedded-identity ## Run tests with the libsql build tag
-	@echo "Running test suite with the gonimbus_libsql build tag..."
-	$(GOTEST) ./... -v -tags gonimbus_libsql
-
 test-cov:  ## Run tests with coverage
 	@echo "Running tests with coverage..."
 	$(GOTEST) ./... -coverprofile=coverage.out
@@ -585,7 +581,7 @@ api-stability: ## Verify library API stability manifest and soft diff gate
 	@go run ./internal/tools/apistability --base-tag "$${GONIMBUS_API_BASE_TAG:-}"
 	@echo "✅ API stability checks passed"
 
-pr-final: verify-embedded-identity verify-app-version api-stability contract-fixture-integrity release-provenance-check surface-scan lint lint-cross-os validate-roles test test-nocgo test-libsql license-audit build-all ## Final non-mutating gate (identity, API, contracts, provenance, surface-scan, lint, tests, licenses, multi-platform build)
+pr-final: verify-embedded-identity verify-app-version api-stability contract-fixture-integrity release-provenance-check surface-scan lint lint-cross-os validate-roles test test-nocgo license-audit build-all ## Final non-mutating gate (identity, API, contracts, provenance, surface-scan, lint, tests, licenses, multi-platform build)
 	@echo "✅ pr-final gate passed"
 
 release-provenance-check: release-workflow-check release-anchors-check ## Check workflow pins, read-only release workflow, and committed release anchors
@@ -594,11 +590,13 @@ release-workflow-check: ## Check workflow pins and the read-only release workflo
 	@python3 -B -E ./scripts/release-workflow-pin.py check
 	@./scripts/release-workflow-permissions.test.sh
 
-release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, GONIMBUS_DECERNOR_BIN)
-	@./scripts/release-verify-committed-anchors.sh
+release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, decernor or GONIMBUS_DECERNOR_BIN)
+	@DECERNOR_PATH="$${GONIMBUS_DECERNOR_BIN:-}"; \
+	if [ -z "$$DECERNOR_PATH" ] && [ -z "$${CI:-}" ]; then DECERNOR_PATH="$$(command -v decernor 2>/dev/null || true)"; fi; \
+	GONIMBUS_DECERNOR_BIN="$$DECERNOR_PATH" ./scripts/release-verify-committed-anchors.sh
 	@./scripts/validate-release-anchors.sh
 
-check-all: fmt verify-embedded-identity api-stability contract-fixture-integrity release-provenance-check surface-scan lint validate-roles test test-nocgo test-libsql  ## Run all quality checks (ensures fmt, API stability, contracts, provenance, surface-scan, lint, test)
+check-all: fmt verify-embedded-identity api-stability contract-fixture-integrity release-provenance-check surface-scan lint validate-roles test test-nocgo  ## Run all quality checks (ensures fmt, API stability, contracts, provenance, surface-scan, lint, test)
 	@echo "✅ All quality checks passed"
 
 precommit:  ## Run pre-commit hooks
@@ -633,7 +631,33 @@ license-save: ## Save third-party license texts
 	@echo "✅ Saved third-party licenses to docs/licenses/third-party"
 
 license-audit: ## Audit for forbidden licenses and cooling policy
-	@echo "Auditing dependency licenses and cooling policy..."; $(GONEAT_RESOLVE); $$GONEAT assess --categories dependencies --check --fail-on high
+	@set -e; \
+	if [ -L sbom ]; then echo "❌ sbom must not be a symlink" >&2; exit 1; fi; \
+	had_sbom=0; before_list=""; \
+	if [ -d sbom ]; then \
+		had_sbom=1; \
+		before_list="$$(mktemp)"; \
+		trap 'rm -f "$$before_list"' EXIT; \
+		for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+			if [ -e "$$f" ] || [ -L "$$f" ]; then printf '%s\n' "$$f"; fi; \
+		done > "$$before_list"; \
+	fi; \
+	echo "Auditing dependency licenses and cooling policy..."; \
+	$(GONEAT_RESOLVE); \
+	rc=0; $$GONEAT assess --categories dependencies --check --fail-on high || rc=$$?; \
+	if [ -d sbom ] && [ ! -L sbom ]; then \
+		if [ "$$had_sbom" = "0" ]; then \
+			for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+				if [ -f "$$f" ] && [ ! -L "$$f" ]; then rm -f "$$f"; fi; \
+			done; \
+			rmdir sbom 2>/dev/null || true; \
+		else \
+			for f in sbom/vuln-*.json sbom/goneat-*.cdx.json; do \
+				if [ -f "$$f" ] && [ ! -L "$$f" ] && ! grep -Fxq "$$f" "$$before_list"; then rm -f "$$f"; fi; \
+			done; \
+		fi; \
+	fi; \
+	exit $$rc
 	@echo "✅ License audit passed"
 
 update-licenses: license-inventory license-save ## Update license inventory and texts

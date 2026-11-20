@@ -12,7 +12,7 @@ import (
 // one reflow run. Safe for concurrent workers. Counts and nanoseconds only —
 // no keys, URIs, paths, or provider identifiers.
 //
-// Measure-first attribution for GON-067: not product throughput marketing.
+// Measure-first attribution for internal stage breakdown: not product throughput marketing.
 type StageStats struct {
 	permitWaits              atomic.Int64
 	permitWaitNanos          atomic.Int64

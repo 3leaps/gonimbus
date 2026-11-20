@@ -364,7 +364,7 @@ func (m *memCheckpoint) itemStatuses() map[string]int {
 // TestRunnerRecordStreamPoolMaxInFlight is the engine half of the dual-path
 // behavioral gate: the record-stream runner must fan copies out to the resolved
 // concurrency ceiling, proven by observed max in-flight — the assertion the
-// pre-GON-058 serial loop fails.
+// legacy serial loop fails.
 func TestRunnerRecordStreamPoolMaxInFlight(t *testing.T) {
 	const (
 		objects      = 32

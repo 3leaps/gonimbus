@@ -232,6 +232,9 @@ func ValidateCurrentSchemaReadOnly(ctx context.Context, db *sql.DB) error {
 
 func buildDSN(cfg Config) (string, error) {
 	if u := strings.TrimSpace(cfg.URL); u != "" {
+		if isRemoteLibsqlDSN(u) {
+			return "", errRemoteLibsqlUnsupported
+		}
 		return addAuthToken(u, cfg.AuthToken)
 	}
 
@@ -239,19 +242,20 @@ func buildDSN(cfg Config) (string, error) {
 	if path == "" {
 		return "", errors.New("index store path or url is required")
 	}
+	if isRemoteLibsqlDSN(path) {
+		return "", errRemoteLibsqlUnsupported
+	}
 	if path == ":memory:" {
 		return path, nil
 	}
 
-	if strings.HasPrefix(path, "file:") || strings.HasPrefix(path, "libsql:") {
-		if strings.HasPrefix(path, "file:") {
-			localPath, err := extractFilePath(path)
-			if err != nil {
-				return "", err
-			}
-			if err := ensureStoreDir(localPath); err != nil {
-				return "", err
-			}
+	if strings.HasPrefix(path, "file:") {
+		localPath, err := extractFilePath(path)
+		if err != nil {
+			return "", err
+		}
+		if err := ensureStoreDir(localPath); err != nil {
+			return "", err
 		}
 		return path, nil
 	}
