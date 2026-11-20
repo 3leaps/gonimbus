@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"strconv"
@@ -238,6 +240,132 @@ func (p *Provider) GetObjectVersioned(ctx context.Context, key string) (io.ReadC
 	return reader, *objectMetaFromAttrs(attrs), nil
 }
 
+// HeadRevision returns metadata for exactly the admitted generation or ETag
+// without falling back to an unversioned HEAD of the current object.
+func (p *Provider) HeadRevision(ctx context.Context, key string, revision provider.SourceRevision) (*provider.ObjectMeta, error) {
+	if err := revision.Validate(); err != nil {
+		return nil, err
+	}
+	obj := p.client.Bucket(p.bucket).Object(key)
+	switch revision.Kind {
+	case provider.RevisionNative:
+		parsed, err := strconv.ParseInt(revision.Value, 10, 64)
+		if err != nil || parsed == 0 {
+			return nil, fmt.Errorf("%w: invalid GCS generation", provider.ErrReplayUnverifiable)
+		}
+		attrs, err := obj.Generation(parsed).Attrs(ctx)
+		if err != nil {
+			wrapped := p.wrapError("HeadRevision", key, err)
+			if provider.IsNotFound(wrapped) {
+				if _, liveErr := obj.Attrs(ctx); liveErr != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					if provider.IsNotFound(p.wrapError("HeadRevision", key, liveErr)) {
+						return nil, wrapped
+					}
+				}
+				return nil, &provider.ProviderError{
+					Op:       "HeadRevision",
+					Provider: provider.ProviderGCS,
+					Bucket:   p.bucket,
+					Key:      key,
+					Err:      provider.ErrSourceChanged,
+				}
+			}
+			return nil, wrapped
+		}
+		meta := objectMetaFromAttrs(attrs)
+		if meta.Version != revision.Value {
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		return meta, nil
+	case provider.RevisionETag:
+		attrs, err := obj.Attrs(ctx)
+		if err != nil {
+			return nil, p.wrapError("HeadRevision", key, err)
+		}
+		if strings.Trim(strings.TrimSpace(attrs.Etag), "\"") != strings.Trim(strings.TrimSpace(revision.Value), "\"") {
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		return objectMetaFromAttrs(attrs), nil
+	default:
+		return nil, provider.ErrReplayUnverifiable
+	}
+}
+
+var gcsCRC32CTable = crc32.MakeTable(crc32.Castagnoli)
+
+// verifyingGCSReader verifies the downloaded media stream against the pinned
+// object's expected size and Castagnoli CRC32C so a media endpoint that ignores
+// the generation query parameter and serves different bytes fails closed with
+// provider.ErrSourceChanged before the caller commits a destination write.
+type verifyingGCSReader struct {
+	inner        io.ReadCloser
+	bucket       string
+	key          string
+	expectedSize int64
+	checkSize    bool
+	expectedCRC  uint32
+	checkCRC     bool
+	hasher       hash.Hash32
+	readBytes    int64
+}
+
+func (r *verifyingGCSReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	if n > 0 {
+		r.readBytes += int64(n)
+		if r.checkCRC {
+			_, _ = r.hasher.Write(p[:n])
+		}
+		if r.checkSize && r.readBytes > r.expectedSize {
+			return n, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   r.bucket,
+				Key:      r.key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		if r.checkSize && r.readBytes != r.expectedSize {
+			return n, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   r.bucket,
+				Key:      r.key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		if r.checkCRC && r.hasher.Sum32() != r.expectedCRC {
+			return n, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   r.bucket,
+				Key:      r.key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+	}
+	return n, err
+}
+
+func (r *verifyingGCSReader) Close() error { return r.inner.Close() }
+
 // GetObjectRevision downloads exactly the admitted generation or ETag.
 func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision provider.SourceRevision) (io.ReadCloser, provider.ObjectMeta, error) {
 	if err := revision.Validate(); err != nil {
@@ -295,6 +423,16 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		}
 		return nil, provider.ObjectMeta{}, wrapped
 	}
+	meta := *objectMetaFromAttrs(attrs)
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderGCS,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
 	reader, err := versioned.NewReader(ctx)
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
@@ -319,8 +457,31 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		}
 		return nil, provider.ObjectMeta{}, wrapped
 	}
-	meta := *objectMetaFromAttrs(attrs)
-	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+	// Validate authoritative media-response attributes against the pinned
+	// generation's metadata before exposing the body stream.
+	if !reader.Attrs.Decompressed {
+		if reader.Attrs.Size >= 0 && attrs.Size >= 0 && reader.Attrs.Size != attrs.Size {
+			_ = reader.Close()
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		if reader.Attrs.CRC32C != 0 && attrs.CRC32C != 0 && reader.Attrs.CRC32C != attrs.CRC32C {
+			_ = reader.Close()
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+	}
+	if reader.Attrs.Metageneration > 0 && attrs.Metageneration > 0 && reader.Attrs.Metageneration != attrs.Metageneration {
 		_ = reader.Close()
 		return nil, provider.ObjectMeta{}, &provider.ProviderError{
 			Op:       "GetObjectRevision",
@@ -329,6 +490,21 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 			Key:      key,
 			Err:      provider.ErrSourceChanged,
 		}
+	}
+	if !reader.Attrs.Decompressed && (attrs.Size >= 0 || attrs.CRC32C != 0) {
+		vr := &verifyingGCSReader{
+			inner:        reader,
+			bucket:       p.bucket,
+			key:          key,
+			expectedSize: attrs.Size,
+			checkSize:    attrs.Size >= 0,
+			expectedCRC:  attrs.CRC32C,
+			checkCRC:     attrs.CRC32C != 0,
+		}
+		if vr.checkCRC {
+			vr.hasher = crc32.New(gcsCRC32CTable)
+		}
+		return vr, meta, nil
 	}
 	return reader, meta, nil
 }

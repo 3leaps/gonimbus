@@ -1635,12 +1635,36 @@ func TestGetObjectRevisionNativeVersionSemantics(t *testing.T) {
 
 		switch r.Method {
 		case http.MethodHead:
+			vid := r.URL.Query().Get("versionId")
+			if vid != "" {
+				if vid == "ver-spoofed" {
+					ver := versions[key]["ver-2"]
+					w.Header().Set("ETag", ver.etag)
+					w.Header().Set("x-amz-version-id", "ver-2")
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				ver, ok := versions[key][vid]
+				if !ok {
+					// Real S3 HEAD returns empty-body 404 without XML error code.
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("ETag", ver.etag)
+				w.Header().Set("x-amz-version-id", vid)
+				w.Header().Set("x-amz-meta-ver", vid)
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			cur, ok := latest[key]
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			w.Header().Set("ETag", cur.etag)
+			w.Header().Set("x-amz-meta-ver", "latest")
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cur.body)))
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
@@ -1714,4 +1738,30 @@ func TestGetObjectRevisionNativeVersionSemantics(t *testing.T) {
 	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
 	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
 	require.False(t, provider.IsSourceChanged(err))
+
+	// HeadRevision(RevisionNative) resolves historical version metadata even when
+	// the current key is deleted (delete marker), refuses "null" and spoofed
+	// versions, and splits empty-body 404 HEAD into ErrNotFound vs ErrSourceChanged.
+	headMeta, err := p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-1"})
+	require.NoError(t, err)
+	require.Equal(t, "ver-1", headMeta.Version)
+	require.Equal(t, "etag-v1", headMeta.ETag)
+	require.Equal(t, "ver-1", headMeta.Metadata["ver"])
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "null"})
+	require.True(t, provider.IsReplayUnverifiable(err))
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-spoofed"})
+	require.True(t, provider.IsSourceChanged(err))
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsNotFound(err), "missing version on deleted key HEAD must report ErrNotFound")
+	require.False(t, provider.IsSourceChanged(err))
+
+	mu.Lock()
+	latest["obj.bin"] = versionEntry{body: "payload-v2", etag: `"etag-v2"`}
+	mu.Unlock()
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsSourceChanged(err), "missing version on existing key HEAD must report ErrSourceChanged")
+	require.False(t, provider.IsNotFound(err))
 }

@@ -2,9 +2,15 @@ package gcs
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -13,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
@@ -457,4 +464,78 @@ func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
 	})
 	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
 	require.False(t, provider.IsSourceChanged(err))
+}
+
+func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	v1Body := []byte("alpha")
+	v2Body := []byte("bravo") // same length (5 bytes), different content
+	v1CRC := crc32.Checksum(v1Body, gcsCRC32CTable)
+	v2CRC := crc32.Checksum(v2Body, gcsCRC32CTable)
+	encodeCRC := func(c uint32) string {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], c)
+		return base64.StdEncoding.EncodeToString(buf[:])
+	}
+
+	for _, withMediaHeaders := range []bool{true, false} {
+		name := "headers-omitted-stream-crc-check"
+		if withMediaHeaders {
+			name = "headers-present-attr-check"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("alt") == "media" || strings.HasPrefix(r.URL.Path, "/download/") {
+					// Broken media endpoint ignores generation=101 and serves v2 bytes!
+					if withMediaHeaders {
+						w.Header().Set("X-Goog-Generation", "202")
+						w.Header().Set("X-Goog-Metageneration", "2")
+						w.Header().Set("X-Goog-Hash", "crc32c="+encodeCRC(v2CRC))
+					}
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(v2Body)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(v2Body)
+					return
+				}
+				// Metadata lookup honors generation=101 and returns v1 attrs.
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"bucket":         "bucket",
+					"name":           "doc.txt",
+					"generation":     "101",
+					"metageneration": "1",
+					"size":           fmt.Sprintf("%d", len(v1Body)),
+					"etag":           "etag-v1",
+					"crc32c":         encodeCRC(v1CRC),
+				})
+			}))
+			defer srv.Close()
+
+			client, err := storage.NewClient(ctx,
+				option.WithEndpoint(srv.URL+"/storage/v1/"),
+				option.WithHTTPClient(srv.Client()),
+				option.WithoutAuthentication(),
+			)
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			p := &Provider{client: client, bucket: "bucket", maxKeys: DefaultMaxKeys}
+
+			// HeadRevision honors generation 101.
+			headMeta, err := p.HeadRevision(ctx, "doc.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "101"})
+			require.NoError(t, err)
+			require.Equal(t, "101", headMeta.Version)
+			require.Equal(t, "etag-v1", headMeta.ETag)
+
+			// GetObjectRevision must fail closed with ErrSourceChanged when media serves v2 bytes.
+			body, _, err := p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "101"})
+			if err == nil {
+				_, readErr := io.ReadAll(body)
+				_ = body.Close()
+				err = readErr
+			}
+			require.Error(t, err)
+			require.True(t, provider.IsSourceChanged(err), "media serving unpinned v2 bytes must fail closed with ErrSourceChanged, got %v", err)
+		})
+	}
 }

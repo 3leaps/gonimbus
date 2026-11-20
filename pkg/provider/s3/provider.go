@@ -328,6 +328,105 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 	return meta, nil
 }
 
+// HeadRevision returns metadata for exactly the admitted native version or ETag
+// without falling back to an unversioned HEAD of the current object.
+func (p *Provider) HeadRevision(ctx context.Context, key string, revision provider.SourceRevision) (*provider.ObjectMeta, error) {
+	if err := revision.Validate(); err != nil {
+		return nil, err
+	}
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(p.bucket),
+		Key:    aws.String(key),
+	}
+	switch revision.Kind {
+	case provider.RevisionNative:
+		if strings.TrimSpace(revision.Value) == "null" {
+			return nil, fmt.Errorf("%w: S3 null version ID is not an immutable revision", provider.ErrReplayUnverifiable)
+		}
+		input.VersionId = aws.String(revision.Value)
+	case provider.RevisionETag:
+		input.IfMatch = aws.String(conditionETag(revision.Value))
+	default:
+		return nil, provider.ErrReplayUnverifiable
+	}
+
+	output, err := p.client.HeadObject(ctx, input)
+	if err != nil {
+		wrapped := p.wrapError("HeadRevision", key, err)
+		if isPreconditionFailure(err) {
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		// HTTP HEAD responses have no XML body, so S3/MinIO report a missing
+		// versionId as HTTP 404 (NotFound) as well as NoSuchVersion on some endpoints.
+		if revision.Kind == provider.RevisionNative && (isNoSuchVersion(err) || provider.IsNotFound(wrapped)) {
+			if _, headErr := p.Head(ctx, key); headErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if provider.IsNotFound(headErr) {
+					return nil, &provider.ProviderError{
+						Op:       "HeadRevision",
+						Provider: provider.ProviderS3,
+						Bucket:   p.bucket,
+						Key:      key,
+						Err:      provider.ErrNotFound,
+					}
+				}
+			}
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		return nil, wrapped
+	}
+
+	meta := &provider.ObjectMeta{
+		ObjectSummary: provider.ObjectSummary{
+			Key:          key,
+			Size:         aws.ToInt64(output.ContentLength),
+			ETag:         cleanETag(aws.ToString(output.ETag)),
+			Revision:     aws.ToString(output.VersionId),
+			LastModified: aws.ToTime(output.LastModified),
+		},
+		Version:       aws.ToString(output.VersionId),
+		ContentType:   aws.ToString(output.ContentType),
+		Metadata:      output.Metadata,
+		StorageClass:  normalizeStorageClassString(string(output.StorageClass)),
+		ArchiveStatus: string(output.ArchiveStatus),
+		RestoreState:  parseRestoreState(aws.ToString(output.Restore), time.Now().UTC()),
+		RestoreExpiry: parseRestoreExpiry(aws.ToString(output.Restore)),
+	}
+	if revision.Kind == provider.RevisionETag && meta.ETag != cleanETag(revision.Value) {
+		return nil, &provider.ProviderError{
+			Op:       "HeadRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+		return nil, &provider.ProviderError{
+			Op:       "HeadRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	return meta, nil
+}
+
 // GetObject downloads an object as a stream.
 //
 // Caller must close the returned body.

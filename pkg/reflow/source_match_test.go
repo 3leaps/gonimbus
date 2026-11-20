@@ -92,7 +92,7 @@ func (p *sourceMatchStubProvider) put(key, body, etag, version string, lastMod t
 		},
 		Version:     version,
 		ContentType: "application/octet-stream",
-		Metadata:    map[string]string{"owner": "team"},
+		Metadata:    map[string]string{"owner": "team", "version": version},
 	}
 	p.objects[key] = []byte(body)
 	p.meta[key] = m
@@ -144,6 +144,11 @@ func (p *sourceMatchStubProvider) GetObjectRevision(_ context.Context, key strin
 	if err := revision.Validate(); err != nil {
 		return nil, provider.ObjectMeta{}, err
 	}
+	if revision.Kind == provider.RevisionNative {
+		if ver, vok := p.versions[key][revision.Value]; vok {
+			return io.NopCloser(bytes.NewReader(ver.body)), ver.meta, nil
+		}
+	}
 	body, ok := p.objects[key]
 	if !ok {
 		return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
@@ -172,7 +177,41 @@ func (p *sourceMatchStubProvider) GetObjectRevision(_ context.Context, key strin
 }
 func (p *sourceMatchStubProvider) Close() error { return nil }
 
-var _ provider.RevisionGetter = (*sourceMatchStubProvider)(nil)
+func (p *sourceMatchStubProvider) HeadRevision(_ context.Context, key string, revision provider.SourceRevision) (*provider.ObjectMeta, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := revision.Validate(); err != nil {
+		return nil, err
+	}
+	switch revision.Kind {
+	case provider.RevisionNative:
+		if ver, ok := p.versions[key][revision.Value]; ok {
+			cp := ver.meta
+			return &cp, nil
+		}
+		if _, exists := p.objects[key]; !exists {
+			return nil, &provider.ProviderError{Op: "HeadRevision", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
+		}
+		return nil, &provider.ProviderError{Op: "HeadRevision", Provider: p.providerType, Key: key, Err: provider.ErrSourceChanged}
+	case provider.RevisionETag:
+		meta, ok := p.meta[key]
+		if !ok {
+			return nil, &provider.ProviderError{Op: "HeadRevision", Provider: p.providerType, Key: key, Err: provider.ErrNotFound}
+		}
+		if NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(revision.Value) {
+			return nil, &provider.ProviderError{Op: "HeadRevision", Provider: p.providerType, Key: key, Err: provider.ErrSourceChanged}
+		}
+		cp := meta
+		return &cp, nil
+	default:
+		return nil, provider.ErrReplayUnverifiable
+	}
+}
+
+var (
+	_ provider.RevisionGetter = (*sourceMatchStubProvider)(nil)
+	_ provider.RevisionHeader = (*sourceMatchStubProvider)(nil)
+)
 
 func streamSourceFor(src provider.Provider, lines string) RecordStreamSource {
 	return RecordStreamSource{
@@ -948,5 +987,110 @@ func TestSourceVersionIDPinningEngine(t *testing.T) {
 		require.Equal(t, "wrong-etag", terminal.SourceMatch.ExpectedETag)
 		require.Equal(t, "etag-v1", terminal.SourceMatch.ObservedETag)
 		require.Equal(t, "ver-1", terminal.SourceMatch.ObservedVersionID)
+	})
+
+	t.Run("whitespace-only source_version_id fails closed instead of falling back", func(t *testing.T) {
+		for _, requireMatch := range []bool{true, false} {
+			for _, rawVer := range []string{"   ", ""} {
+				src := newSourceMatchStubProvider()
+				src.put("doc.xml", "live-bytes", "etag-live", "ver-live", now)
+				dst := newCopyMemoryProvider()
+				sink := &collectSink{}
+				cfg := copyConfig(dst, sink)
+				cfg.RequireSourceMatch = requireMatch
+				runner, err := NewRunner(cfg)
+				require.NoError(t, err)
+
+				line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/doc.xml","source_key":"doc.xml","source_etag":"etag-live","source_version_id":%q,"source_size_bytes":10,"dest_rel_key":"doc.xml"}}`, rawVer)
+				_, err = runner.Run(context.Background(), streamSourceFor(src, line))
+				require.Error(t, err)
+				require.Zero(t, src.getCalls, "blank source_version_id must never fall back to unpinned GetObject")
+				require.Zero(t, src.revCalls, "blank source_version_id must fail before GetObjectRevision")
+				require.Equal(t, 0, dst.writeCount("data/doc.xml"))
+				if requireMatch {
+					require.ErrorIs(t, err, provider.ErrReplayUnverifiable)
+					require.Empty(t, dst.preconditions())
+				} else {
+					terminal := terminalRecord(t, sink.records, "doc.xml")
+					require.Equal(t, "failed", terminal.Status)
+					require.Equal(t, "replay_unverifiable", terminal.Reason)
+				}
+			}
+		}
+	})
+
+	t.Run("mandatory HEAD on version-pinned item uses HeadRevision and never leaks live v2 metadata or timestamp", func(t *testing.T) {
+		t1 := now
+		t2 := now.Add(time.Hour)
+		t3 := now.Add(2 * time.Hour)
+
+		// Scenario A: overwrite-if-source-newer with dest at t2 (between v1@t1 and v2@t3)
+		// must resolve v1's t1 via HeadRevision and SKIP rather than rolling back dest.
+		src := newSourceMatchStubProvider()
+		src.put("doc.xml", "older-v1", "etag-v1", "ver-1", t1)
+		src.put("doc.xml", "newer-v2", "etag-v2", "ver-2", t3)
+		dst := newCopyMemoryProvider()
+		dst.putFixtureAt("data/doc.xml", "dest-at-t2", "dest-etag", t2)
+
+		sink := &collectSink{}
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		cfg.Collision.Mode = CollisionOverwriteIfSourceNewer
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/doc.xml","source_key":"doc.xml","source_etag":"etag-v1","source_version_id":"ver-1","source_size_bytes":8,"dest_rel_key":"doc.xml"}}`
+		_, err = runner.Run(context.Background(), streamSourceFor(src, line))
+		require.NoError(t, err)
+		require.Zero(t, src.headCalls, "version-pinned mandatory metadata must use HeadRevision, never unversioned Head")
+		require.Equal(t, "dest-at-t2", string(dst.objects["data/doc.xml"]), "dest at t2 must not be rolled back by older v1@t1")
+		terminal := terminalRecord(t, sink.records, "doc.xml")
+		require.Equal(t, "skipped", terminal.Status)
+		require.Equal(t, "collision.skipped_src_older", terminal.Reason)
+
+		// Scenario B: latest deleted (delete marker) while historical v1 still exists
+		// with metadata-policy=preserve must still succeed and stamp v1's metadata.
+		srcDel := newSourceMatchStubProvider()
+		srcDel.put("doc.xml", "older-v1", "etag-v1", "ver-1", t1)
+		delete(srcDel.objects, "doc.xml") // simulate latest delete marker
+		delete(srcDel.meta, "doc.xml")
+		dstDel := newCopyMemoryProvider()
+		sinkDel := &collectSink{}
+		cfgDel := copyConfig(dstDel, sinkDel)
+		cfgDel.RequireSourceMatch = true
+		cfgDel.Metadata.Policy = MetadataPolicyPreserve
+		runnerDel, err := NewRunner(cfgDel)
+		require.NoError(t, err)
+
+		_, err = runnerDel.Run(context.Background(), streamSourceFor(srcDel, line))
+		require.NoError(t, err)
+		require.Equal(t, "older-v1", string(dstDel.objects["data/doc.xml"]))
+		require.Equal(t, "ver-1", dstDel.meta["data/doc.xml"].Metadata["version"])
+	})
+
+	t.Run("multi-record stream refuses later null or blank source_version_id per item", func(t *testing.T) {
+		src := newSourceMatchStubProvider()
+		src.put("ok.xml", "hello", "etag-ok", "ver-1", now)
+		src.put("bad-null.xml", "nope1", "etag-n", "ver-n", now)
+		src.put("bad-blank.xml", "nope2", "etag-b", "ver-b", now)
+		dst := newCopyMemoryProvider()
+		sink := &collectSink{}
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		stream := strings.Join([]string{
+			`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/ok.xml","source_key":"ok.xml","source_etag":"etag-ok","source_version_id":"ver-1","source_size_bytes":5,"dest_rel_key":"ok.xml"}}`,
+			`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/bad-null.xml","source_key":"bad-null.xml","source_etag":"etag-n","source_version_id":"null","source_size_bytes":5,"dest_rel_key":"bad-null.xml"}}`,
+			`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/bad-blank.xml","source_key":"bad-blank.xml","source_etag":"etag-b","source_version_id":"   ","source_size_bytes":5,"dest_rel_key":"bad-blank.xml"}}`,
+		}, "\n") + "\n"
+		_, err = runner.Run(context.Background(), streamSourceFor(src, stream))
+		require.Error(t, err)
+		require.Equal(t, "hello", string(dst.objects["data/ok.xml"]))
+		require.Equal(t, 0, dst.writeCount("data/bad-null.xml"))
+		require.Equal(t, 0, dst.writeCount("data/bad-blank.xml"))
+		require.Equal(t, "replay_unverifiable", terminalRecord(t, sink.records, "bad-null.xml").Reason)
+		require.Equal(t, "replay_unverifiable", terminalRecord(t, sink.records, "bad-blank.xml").Reason)
 	})
 }

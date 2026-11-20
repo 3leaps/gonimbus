@@ -103,6 +103,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 	var prefetched bytes.Buffer
 	var firstURI string
 	var firstProvider string
+	var firstVersionPresent bool
 	var firstVersionID string
 
 	for {
@@ -125,7 +126,8 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 				if in, parseErr := parseReflowInputLine(trimmed); parseErr == nil && in.SourceURI != "" {
 					firstURI = in.SourceURI
 					firstProvider = in.SourceProvider
-					firstVersionID = strings.TrimSpace(in.SourceVersionID)
+					firstVersionPresent = in.SourceVersionIDPresent || in.SourceVersionID != ""
+					firstVersionID = in.SourceVersionID
 					break
 				}
 			}
@@ -140,7 +142,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 	if firstURI == "" {
 		return out, nil
 	}
-	if firstVersionID != "" && (firstVersionID == "null" || !ProviderSupportsNativeVersion(firstProvider)) {
+	if firstVersionPresent && (strings.TrimSpace(firstVersionID) == "" || firstVersionID == "null" || !ProviderSupportsNativeVersion(firstProvider)) {
 		return RecordStreamSource{}, &ReplayUnverifiableError{Provider: firstProvider, Err: provider.ErrReplayUnverifiable}
 	}
 	prov, err := src.Resolve(ctx, firstURI)
@@ -1340,11 +1342,11 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 
 	bindingRequired := r.cfg.RequireSourceMatch
 	expectedETag := NormalizeETagForCompare(in.SourceETag)
-	expectedVersionID := strings.TrimSpace(in.SourceVersionID)
-	hasVersionPin := expectedVersionID != ""
+	expectedVersionID := in.SourceVersionID
+	hasVersionPin := in.SourceVersionIDPresent || expectedVersionID != ""
 	bindingApplied := bindingRequired || hasVersionPin
 	if hasVersionPin {
-		if expectedVersionID == "null" || !ProviderSupportsNativeVersion(in.SourceProvider) {
+		if strings.TrimSpace(expectedVersionID) == "" || expectedVersionID == "null" || !ProviderSupportsNativeVersion(in.SourceProvider) {
 			return r.recordObjectErrorWithMatch(ctx, stats, in, destURI, destKey, "source provider does not support native source_version_id", provider.ErrReplayUnverifiable, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, nil)
 		}
 		in.SourceRevision = provider.SourceRevision{Kind: provider.RevisionNative, Value: expectedVersionID}
@@ -1370,15 +1372,55 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	// mandatory; one probed only to recover an absent etag/size is optional and
 	// tolerates failure (the copy proceeds with the input's values, an unknown
 	// size reserving the conservative memory cap). Mirrors the CLI pool.
-	// When source_version_id pins a historical version, skip optional unversioned
-	// HEAD probes and never overwrite expected ETag/size with current-version HEAD.
+	// When source_version_id pins a historical version, never issue an unversioned
+	// HEAD of the current object: skip optional HEADs and resolve mandatory
+	// metadata/timestamps strictly from the pinned version via RevisionHeader.
 	mandatorySourceHead := r.cfg.Metadata.NeedsSourceHead() || needsSourceHeadForCollision
-	if mandatorySourceHead || (!hasVersionPin && (sourceETag == "" || sourceSize == 0)) {
+	if hasVersionPin {
+		if mandatorySourceHead {
+			meta, err := limitedHeadRevision(ctx, limiter, stages, sourceProvider, in.SourceKey, in.SourceRevision)
+			switch {
+			case err == nil:
+				sourceMeta = meta
+				if expectedETag != "" && meta.ETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedETag) {
+					match := &SourceMatchInfo{
+						ExpectedETag:      SafeReceiptHandle(expectedETag),
+						ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
+						ObservedETag:      SafeReceiptHandle(meta.ETag),
+						ObservedVersionID: SafeSourceVersionID(meta.Version),
+					}
+					return r.recordObjectErrorWithMatch(ctx, stats, in.withSourceMeta(expectedETag, sourceSize), destURI, destKey, "source changed before copy", provider.ErrSourceChanged, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, match)
+				}
+				sourceSize = meta.Size
+				sourceSizeKnown = true
+				if !meta.LastModified.IsZero() {
+					sourceLastMod = meta.LastModified
+				}
+			case ctx.Err() != nil:
+				return nil
+			case isFatalSourceHeadError(err):
+				return err
+			default:
+				var sourceMatch *SourceMatchInfo
+				if provider.IsSourceChanged(err) {
+					sourceMatch = &SourceMatchInfo{
+						ExpectedETag:      SafeReceiptHandle(expectedETag),
+						ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
+					}
+					if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
+						sourceMatch.ObservedETag = SafeReceiptHandle(headMeta.ETag)
+						sourceMatch.ObservedVersionID = SafeSourceVersionID(headMeta.Version)
+					}
+				}
+				return r.recordObjectErrorWithMatch(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "source metadata read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, sourceMatch)
+			}
+		}
+	} else if mandatorySourceHead || sourceETag == "" || sourceSize == 0 {
 		meta, err := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey)
 		switch {
 		case err == nil:
 			sourceMeta = meta
-			if bindingRequired && !hasVersionPin && expectedETag != "" && meta.ETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedETag) {
+			if bindingRequired && expectedETag != "" && meta.ETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedETag) {
 				match := &SourceMatchInfo{
 					ExpectedETag:      SafeReceiptHandle(expectedETag),
 					ObservedETag:      SafeReceiptHandle(meta.ETag),
@@ -1389,10 +1431,8 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			if !bindingApplied {
 				sourceETag = meta.ETag
 			}
-			if !hasVersionPin {
-				sourceSize = meta.Size
-				sourceSizeKnown = true // a successful HEAD measures the size
-			}
+			sourceSize = meta.Size
+			sourceSizeKnown = true // a successful HEAD measures the size
 			if !meta.LastModified.IsZero() {
 				sourceLastMod = meta.LastModified
 			}
@@ -1904,6 +1944,19 @@ func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, stages *Stage
 	start := time.Now()
 	meta, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
 		return p.Head(ctx, key)
+	})
+	stages.recordCollisionProbe(time.Since(start))
+	return meta, err
+}
+
+func limitedHeadRevision(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, p provider.Provider, key string, revision provider.SourceRevision) (*provider.ObjectMeta, error) {
+	header, ok := p.(provider.RevisionHeader)
+	if !ok {
+		return nil, provider.ErrReplayUnverifiable
+	}
+	start := time.Now()
+	meta, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
+		return header.HeadRevision(ctx, key, revision)
 	})
 	stages.recordCollisionProbe(time.Since(start))
 	return meta, err

@@ -122,11 +122,18 @@ func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
 
 		switch r.Method {
 		case http.MethodHead:
+			versionID := r.URL.Query().Get("versionId")
 			fs.mu.Lock()
 			fs.headCalls++
 			call := fs.headCalls
 			hook := fs.onHead
-			entry, ok := fs.objects[key]
+			var entry fakeS3Entry
+			var ok bool
+			if versionID != "" {
+				entry, ok = fs.versions[key][versionID]
+			} else {
+				entry, ok = fs.objects[key]
+			}
 			fs.mu.Unlock()
 			if hook != nil {
 				hook(key, call)
@@ -138,6 +145,7 @@ func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
 			w.Header().Set("ETag", `"`+entry.etag+`"`)
 			if entry.versionID != "" {
 				w.Header().Set("x-amz-version-id", entry.versionID)
+				w.Header().Set("x-amz-meta-version", entry.versionID)
 			}
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.body)))
 			w.Header().Set("Last-Modified", entry.modTime.UTC().Format(http.TimeFormat))
@@ -1464,4 +1472,210 @@ func TestTransferReflowSourceVersionIDFileRefusal(t *testing.T) {
 		require.Equal(t, "failed", terminal.Status)
 		require.Equal(t, "replay_unverifiable", terminal.Reason)
 	})
+
+	t.Run("multi-record stream refuses later file source_version_id per-line", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		okPath := filepath.Join(srcRoot, "ok.txt")
+		require.NoError(t, os.WriteFile(okPath, []byte("alpha"), 0o600))
+		fileProv, err := providerfile.New(providerfile.Config{BaseDir: srcRoot})
+		require.NoError(t, err)
+		defer func() { _ = fileProv.Close() }()
+		okMeta, err := fileProv.Head(context.Background(), "ok.txt")
+		require.NoError(t, err)
+
+		dstProv := newReflowMemoryProvider()
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) { return dstProv, nil },
+		})
+
+		stream := strings.Join([]string{
+			fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":%q,"source_key":"ok.txt","source_etag":%q,"source_size_bytes":5,"dest_rel_key":"ok.txt"}}`, fileURI(okPath), okMeta.ETag),
+			strings.TrimSpace(line),
+		}, "\n") + "\n"
+		stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(stream),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+			"--require-source-match",
+		)
+		require.Error(t, execErr)
+		require.Equal(t, "alpha", string(dstProv.mustObject("data/ok.txt")))
+		require.False(t, dstProv.hasObject("data/doc.txt"))
+
+		byDest := map[string]reflowpkg.Record{}
+		for _, rec := range parseTypedReflowRecords(t, stdout) {
+			if rec.Status != "in_progress" {
+				byDest[rec.DestKey] = rec
+			}
+		}
+		require.Equal(t, "complete", byDest["data/ok.txt"].Status)
+		require.Equal(t, "failed", byDest["data/doc.txt"].Status)
+		require.Equal(t, "replay_unverifiable", byDest["data/doc.txt"].Reason)
+	})
+}
+
+func TestTransferReflowSourceVersionIDHardeningDualPath(t *testing.T) {
+	t1 := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	t3 := t2.Add(time.Hour)
+
+	paths := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+
+	for _, tc := range paths {
+		t.Run(tc.name+"/whitespace-source-version-id-refused", func(t *testing.T) {
+			for _, requireMatch := range []bool{true, false} {
+				withTransferReflowTestState(t)
+				s3Srv := newFakeS3HTTPServer(t)
+				s3Srv.put("a/doc.xml", "live-body", "etag-live", "ver-live", t1)
+				srcProv, err := s3.New(context.Background(), s3.Config{
+					Bucket: "source-bucket", Region: "us-east-1", Endpoint: s3Srv.server.URL, ForcePathStyle: true, Anonymous: true,
+				})
+				require.NoError(t, err)
+				dstProv := newReflowMemoryProvider()
+				useTransferReflowProviderFactories(t, providerdispatch.Factories{
+					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+						if cfg.Bucket == "source-bucket" {
+							return srcProv, nil
+						}
+						return dstProv, nil
+					},
+				})
+
+				line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/doc.xml","source_key":"a/doc.xml","source_etag":"etag-live","source_version_id":"   ","source_size_bytes":9,"dest_rel_key":"a/doc.xml"}}` + "\n"
+				args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1", "--checkpoint", filepath.Join(t.TempDir(), "state.db")}
+				if requireMatch {
+					args = append(args, "--require-source-match")
+				}
+				args = append(args, tc.extra...)
+				stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+				require.Error(t, execErr)
+				require.False(t, dstProv.hasObject("data/a/doc.xml"))
+				if requireMatch {
+					require.Contains(t, execErr.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
+					require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
+					require.Empty(t, dstProv.conditionalPutCallsSnapshot())
+				} else {
+					recs := parseTypedReflowRecords(t, stdout)
+					var terminal reflowpkg.Record
+					for _, rec := range recs {
+						if rec.Status != "in_progress" {
+							terminal = rec
+						}
+					}
+					require.Equal(t, "failed", terminal.Status)
+					require.Equal(t, "replay_unverifiable", terminal.Reason)
+				}
+			}
+		})
+
+		t.Run(tc.name+"/head-revision-prevents-rollback-and-preserves-v1-metadata", func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			// v1 at t1, overwritten by v2 at t3; dest already holds newer object at t2.
+			s3Srv.put("a/rollback.xml", "older-v1", "etag-v1", "ver-1", t1)
+			s3Srv.put("a/rollback.xml", "newer-v2", "etag-v2", "ver-2", t3)
+			// Key whose latest version is deleted (delete marker) while historical v1 exists.
+			s3Srv.put("a/delmarker.xml", "hist-v1", "etag-h1", "ver-h1", t1)
+			s3Srv.del("a/delmarker.xml")
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket: "source-bucket", Region: "us-east-1", Endpoint: s3Srv.server.URL, ForcePathStyle: true, Anonymous: true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			dstProv.putFixture("data/a/rollback.xml", "dest-t2", "dest-etag", t2)
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			input := strings.Join([]string{
+				`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/rollback.xml","source_key":"a/rollback.xml","source_etag":"etag-v1","source_version_id":"ver-1","source_size_bytes":8,"dest_rel_key":"a/rollback.xml"}}`,
+				`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/delmarker.xml","source_key":"a/delmarker.xml","source_etag":"etag-h1","source_version_id":"ver-h1","source_size_bytes":7,"dest_rel_key":"a/delmarker.xml"}}`,
+			}, "\n") + "\n"
+			args := append([]string{
+				"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1",
+				"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+				"--on-collision", "overwrite-if-source-newer",
+				"--metadata-policy", "preserve",
+				"--require-source-match",
+			}, tc.extra...)
+			stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(input), args...)
+			require.NoError(t, execErr)
+
+			byDest := map[string]reflowpkg.Record{}
+			for _, rec := range parseTypedReflowRecords(t, stdout) {
+				if rec.Status != "in_progress" {
+					byDest[rec.DestKey] = rec
+				}
+			}
+			// Rollback prevented: v1@t1 < dest@t2 -> skipped_src_older.
+			require.Equal(t, "skipped", byDest["data/a/rollback.xml"].Status)
+			require.Equal(t, "collision.skipped_src_older", byDest["data/a/rollback.xml"].Reason)
+			require.Equal(t, "dest-t2", string(dstProv.mustObject("data/a/rollback.xml")))
+
+			// Delete-marker latest still copies historical v1 and preserves v1's metadata.
+			require.Equal(t, "complete", byDest["data/a/delmarker.xml"].Status)
+			require.Equal(t, "hist-v1", string(dstProv.mustObject("data/a/delmarker.xml")))
+			dstMeta, headErr := dstProv.Head(context.Background(), "data/a/delmarker.xml")
+			require.NoError(t, headErr)
+			require.Equal(t, "ver-h1", dstMeta.Metadata["version"])
+		})
+
+		t.Run(tc.name+"/equal-timestamp-unknown-size-refuses-tie-breaker", func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			s3Srv.put("a/tie.xml", "AAAAA", "etag-v1", "ver-1", t1)
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket: "source-bucket", Region: "us-east-1", Endpoint: s3Srv.server.URL, ForcePathStyle: true, Anonymous: true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			dstProv.putFixture("data/a/tie.xml", "BBBBB", "dest-etag", t1) // same timestamp t1, same size 5
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			// Omit source_size_bytes while providing source_last_modified == t1:
+			// optional HEAD is skipped for version-pinned input, so size is unknown.
+			// Equal-timestamp conflict must fail closed (collision.source_size_unavailable)
+			// instead of treating unknown 0 != 5 as a size difference.
+			line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/tie.xml","source_key":"a/tie.xml","source_etag":"etag-v1","source_version_id":"ver-1","source_last_modified":%q,"dest_rel_key":"a/tie.xml"}}`+"\n", t1.Format(time.RFC3339))
+			args := append([]string{
+				"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1",
+				"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+				"--on-collision", "overwrite-if-source-newer",
+				"--require-source-match",
+			}, tc.extra...)
+			stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, execErr)
+			require.Equal(t, "BBBBB", string(dstProv.mustObject("data/a/tie.xml")), "unknown size must never authorize destructive overwrite")
+			recs := parseTypedReflowRecords(t, stdout)
+			var terminal reflowpkg.Record
+			for _, rec := range recs {
+				if rec.Status != "in_progress" {
+					terminal = rec
+				}
+			}
+			require.Equal(t, "failed", terminal.Status)
+			require.Equal(t, "collision.source_size_unavailable", terminal.Reason)
+		})
+	}
 }

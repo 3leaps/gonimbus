@@ -29,15 +29,16 @@ const ErrCodeInvalidInput = "INVALID_INPUT"
 // FileTreeSource, so a file:// record is out of this contract and surfaces as
 // invalid input rather than being planned here.
 type reflowInput struct {
-	SourceProvider  string
-	SourceBucket    string
-	SourceURI       string
-	SourceKey       string
-	SourceETag      string
-	SourceVersionID string
-	SourceSize      int64
-	SourceRevision  provider.SourceRevision
-	UnitKey         string
+	SourceProvider         string
+	SourceBucket           string
+	SourceURI              string
+	SourceKey              string
+	SourceETag             string
+	SourceVersionID        string
+	SourceVersionIDPresent bool
+	SourceSize             int64
+	SourceRevision         provider.SourceRevision
+	UnitKey                string
 	// AdmissionError is a recoverable producer refusal. It is dispatched so the
 	// normal worker accounting emits one failed object record and summary, but it
 	// must never create a checkpoint for a revision that was not admitted.
@@ -98,7 +99,7 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		SourceURI        string            `json:"source_uri"`
 		SourceKey        string            `json:"source_key"`
 		SourceETag       string            `json:"source_etag"`
-		SourceVersionID  string            `json:"source_version_id"`
+		SourceVersionID  *string           `json:"source_version_id"`
 		SourceSize       *int64            `json:"source_size_bytes"`
 		SourceLastMod    time.Time         `json:"source_last_modified"`
 		Vars             map[string]string `json:"vars"`
@@ -148,21 +149,27 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 	if sk := strings.TrimPrefix(strings.TrimSpace(data.SourceKey), "/"); sk != "" {
 		key = sk
 	}
+	sourceVersionIDPresent := data.SourceVersionID != nil
+	var sourceVersionID string
+	if data.SourceVersionID != nil {
+		sourceVersionID = *data.SourceVersionID
+	}
 	return reflowInput{
-		SourceProvider:   u.Provider,
-		SourceBucket:     u.Bucket,
-		SourceURI:        fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key),
-		SourceKey:        key,
-		SourceETag:       data.SourceETag,
-		SourceVersionID:  strings.TrimSpace(data.SourceVersionID),
-		SourceSize:       sourceSize,
-		SourceSizeKnown:  sourceSizeKnown,
-		SourceLastMod:    data.SourceLastMod,
-		Vars:             data.Vars,
-		DestRelKey:       strings.Trim(strings.TrimSpace(data.DestRelKey), "/"),
-		RoutingClass:     routingClass,
-		QuarantinePrefix: quarantinePrefix,
-		Probe:            data.Probe,
+		SourceProvider:         u.Provider,
+		SourceBucket:           u.Bucket,
+		SourceURI:              fmt.Sprintf("%s://%s/%s", u.Provider, u.Bucket, key),
+		SourceKey:              key,
+		SourceETag:             data.SourceETag,
+		SourceVersionID:        sourceVersionID,
+		SourceVersionIDPresent: sourceVersionIDPresent,
+		SourceSize:             sourceSize,
+		SourceSizeKnown:        sourceSizeKnown,
+		SourceLastMod:          data.SourceLastMod,
+		Vars:                   data.Vars,
+		DestRelKey:             strings.Trim(strings.TrimSpace(data.DestRelKey), "/"),
+		RoutingClass:           routingClass,
+		QuarantinePrefix:       quarantinePrefix,
+		Probe:                  data.Probe,
 	}, nil
 }
 
