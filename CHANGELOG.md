@@ -15,6 +15,10 @@ changes.
 
 ## [Unreleased]
 
+### Library API
+
+- Additive: `provider.RevisionHeader` optional interface (`HeadRevision(ctx, key, revision)`) implemented by `pkg/provider/s3` (`(*Provider).HeadRevision`) and `pkg/provider/gcs` (`(*Provider).HeadRevision`) for revision-pinned source metadata lookups without falling back to unversioned `Head`.
+
 ### Removed
 
 - **Opt-in `-tags gonimbus_libsql` build tag and `github.com/tursodatabase/go-libsql` dependency:** retired because Go `1.26.11` rejects precompiled LTO bitcode sections in `#cgo LDFLAGS` static archives. All builds use pure-Go `modernc.org/sqlite` for local index stores; remote `libsql://` and `https://` index URLs fail closed with `"remote libsql is not supported in this release"`.

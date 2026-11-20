@@ -20,7 +20,13 @@
       "type": "string"
     },
     "source_etag": {
-      "type": "string"
+      "type": "string",
+      "description": "Source object ETag. Under source-read binding (--require-source-match or input source_version_id), records the ETag returned by the pinned read that supplied the copied bytes on complete/quarantined terminals; otherwise carries the input/HEAD observation."
+    },
+    "source_version_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque provider-native source version id or generation returned by the pinned read that supplied the copied bytes; omitted when unpinned, unknown, null-version, or on providers without native versions."
     },
     "source_size_bytes": {
       "type": "integer",
@@ -30,6 +36,10 @@
       "type": "string",
       "format": "date-time",
       "description": "Known source observation; not a revision binding or receipt time."
+    },
+    "source_match": {
+      "$ref": "#/$defs/source_match",
+      "description": "Expected and observed source revision tokens; emitted only when source-read binding applied."
     },
     "dest_sha256": {
       "type": "string",
@@ -105,6 +115,32 @@
     }
   },
   "$defs": {
+    "source_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_etag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Expected opaque source ETag supplied on input."
+        },
+        "expected_version_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Expected provider-native source version id or generation supplied on input."
+        },
+        "observed_etag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Observed opaque source ETag from the pinned read (on success) or best-effort HEAD (on mismatch); may be absent if a follow-up HEAD fails."
+        },
+        "observed_version_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Observed provider-native source version id or generation from the pinned read or best-effort HEAD; may be absent if unavailable or if a follow-up HEAD fails."
+        }
+      }
+    },
     "collision": {
       "type": "object",
       "required": [

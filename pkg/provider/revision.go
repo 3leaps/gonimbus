@@ -52,6 +52,12 @@ type RevisionGetter interface {
 	GetObjectRevision(ctx context.Context, key string, revision SourceRevision) (body io.ReadCloser, meta ObjectMeta, err error)
 }
 
+// RevisionHeader retrieves metadata for a specific admitted source revision
+// without falling back to the current/latest object version.
+type RevisionHeader interface {
+	HeadRevision(ctx context.Context, key string, revision SourceRevision) (*ObjectMeta, error)
+}
+
 // IsSourceChanged reports whether a revision-bound read observed source drift.
 func IsSourceChanged(err error) bool { return errors.Is(err, ErrSourceChanged) }
 

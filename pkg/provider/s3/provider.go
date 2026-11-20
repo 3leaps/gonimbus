@@ -313,8 +313,10 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 			Key:          key,
 			Size:         aws.ToInt64(output.ContentLength),
 			ETag:         cleanETag(aws.ToString(output.ETag)),
+			Revision:     aws.ToString(output.VersionId),
 			LastModified: aws.ToTime(output.LastModified),
 		},
+		Version:       aws.ToString(output.VersionId),
 		ContentType:   aws.ToString(output.ContentType),
 		Metadata:      output.Metadata,
 		StorageClass:  normalizeStorageClassString(string(output.StorageClass)),
@@ -324,6 +326,116 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 	}
 
 	return meta, nil
+}
+
+// HeadRevision returns metadata for exactly the admitted native version or ETag
+// without falling back to an unversioned HEAD of the current object.
+func (p *Provider) HeadRevision(ctx context.Context, key string, revision provider.SourceRevision) (*provider.ObjectMeta, error) {
+	if err := revision.Validate(); err != nil {
+		return nil, err
+	}
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(p.bucket),
+		Key:    aws.String(key),
+	}
+	switch revision.Kind {
+	case provider.RevisionNative:
+		if strings.TrimSpace(revision.Value) == "null" {
+			return nil, fmt.Errorf("%w: S3 null version ID is not an immutable revision", provider.ErrReplayUnverifiable)
+		}
+		input.VersionId = aws.String(revision.Value)
+	case provider.RevisionETag:
+		input.IfMatch = aws.String(conditionETag(revision.Value))
+	default:
+		return nil, provider.ErrReplayUnverifiable
+	}
+
+	output, err := p.client.HeadObject(ctx, input)
+	if err != nil {
+		wrapped := p.wrapError("HeadRevision", key, err)
+		if isPreconditionFailure(err) {
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		// HTTP HEAD responses have no XML body, so S3/MinIO report a missing
+		// versionId as HTTP 404 (NotFound) as well as NoSuchVersion on some endpoints.
+		if revision.Kind == provider.RevisionNative && (isNoSuchVersion(err) || provider.IsNotFound(wrapped)) {
+			if _, headErr := p.Head(ctx, key); headErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if provider.IsNotFound(headErr) {
+					return nil, &provider.ProviderError{
+						Op:       "HeadRevision",
+						Provider: provider.ProviderS3,
+						Bucket:   p.bucket,
+						Key:      key,
+						Err:      provider.ErrNotFound,
+					}
+				}
+			}
+			return nil, &provider.ProviderError{
+				Op:       "HeadRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		return nil, wrapped
+	}
+
+	meta := &provider.ObjectMeta{
+		ObjectSummary: provider.ObjectSummary{
+			Key:          key,
+			Size:         aws.ToInt64(output.ContentLength),
+			ETag:         cleanETag(aws.ToString(output.ETag)),
+			Revision:     aws.ToString(output.VersionId),
+			LastModified: aws.ToTime(output.LastModified),
+		},
+		Version:       aws.ToString(output.VersionId),
+		ContentType:   aws.ToString(output.ContentType),
+		Metadata:      output.Metadata,
+		StorageClass:  normalizeStorageClassString(string(output.StorageClass)),
+		ArchiveStatus: string(output.ArchiveStatus),
+		RestoreState:  parseRestoreState(aws.ToString(output.Restore), time.Now().UTC()),
+		RestoreExpiry: parseRestoreExpiry(aws.ToString(output.Restore)),
+	}
+	if revision.Kind == provider.RevisionETag && meta.ETag != cleanETag(revision.Value) {
+		return nil, &provider.ProviderError{
+			Op:       "HeadRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+		return nil, &provider.ProviderError{
+			Op:       "HeadRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
+		}
+	}
+	return meta, nil
+}
+
+type observedSourceRevisionError struct {
+	etag    string
+	version string
+}
+
+func (e observedSourceRevisionError) Error() string { return provider.ErrSourceChanged.Error() }
+func (e observedSourceRevisionError) Unwrap() error { return provider.ErrSourceChanged }
+func (e observedSourceRevisionError) ObservedSourceRevision() (string, string) {
+	return e.etag, e.version
 }
 
 // GetObject downloads an object as a stream.
@@ -367,16 +479,42 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	input := &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)}
 	switch revision.Kind {
 	case provider.RevisionNative:
+		if strings.TrimSpace(revision.Value) == "null" {
+			return nil, provider.ObjectMeta{}, fmt.Errorf("%w: S3 null version ID is not an immutable revision", provider.ErrReplayUnverifiable)
+		}
 		input.VersionId = aws.String(revision.Value)
 	case provider.RevisionETag:
-		input.IfMatch = aws.String(revision.Value)
+		input.IfMatch = aws.String(conditionETag(revision.Value))
 	default:
 		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
 	}
 	out, err := p.client.GetObject(ctx, input)
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
-		if isPreconditionFailure(err) || provider.IsNotFound(wrapped) {
+		if isPreconditionFailure(err) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		if revision.Kind == provider.RevisionNative && isNoSuchVersion(err) {
+			if _, headErr := p.Head(ctx, key); headErr != nil {
+				if ctx.Err() != nil {
+					return nil, provider.ObjectMeta{}, ctx.Err()
+				}
+				if provider.IsNotFound(headErr) {
+					return nil, provider.ObjectMeta{}, &provider.ProviderError{
+						Op:       "GetObjectRevision",
+						Provider: provider.ProviderS3,
+						Bucket:   p.bucket,
+						Key:      key,
+						Err:      provider.ErrNotFound,
+					}
+				}
+			}
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderS3,
@@ -408,6 +546,16 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 			Bucket:   p.bucket,
 			Key:      key,
 			Err:      provider.ErrSourceChanged,
+		}
+	}
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+		_ = out.Body.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
 		}
 	}
 	return out.Body, meta, nil
@@ -824,6 +972,14 @@ func isPreconditionFailure(err error) bool {
 	}
 	errMsg := err.Error()
 	return strings.Contains(errMsg, "PreconditionFailed") || strings.Contains(errMsg, "status code: 412") || strings.Contains(errMsg, "StatusCode: 412")
+}
+
+func isNoSuchVersion(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchVersion" {
+		return true
+	}
+	return strings.Contains(err.Error(), "NoSuchVersion")
 }
 
 // cleanETag removes surrounding quotes from an ETag value.

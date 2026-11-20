@@ -27,7 +27,14 @@ func emitReflowConfigError(ctx context.Context, w output.Writer, msg string, err
 }
 
 func emitReflowError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
-	return emitReflowErrorWithCode(ctx, w, reflowErrCode(err), key, msg, err, details)
+	code := reflowErrCode(err)
+	if details == nil {
+		details = map[string]any{}
+	}
+	if _, ok := details["reason"]; !ok {
+		details["reason"] = reflowReasonForErr(err, code)
+	}
+	return emitReflowErrorWithCode(ctx, w, code, key, msg, err, details)
 }
 
 func emitReflowInputError(ctx context.Context, w output.Writer, key, msg string, err error, details map[string]any) error {
@@ -70,6 +77,8 @@ func reflowErrCode(err error) string {
 	switch {
 	case errors.As(err, &budgetErr):
 		return output.ErrCodeInvalidInput
+	case errors.Is(err, reflowpkg.ErrSourceTokenMissing), provider.IsSourceChanged(err), provider.IsReplayUnverifiable(err):
+		return output.ErrCodeInvalidInput
 	case provider.IsNotFound(err):
 		return output.ErrCodeNotFound
 	case provider.IsAccessDenied(err):
@@ -82,6 +91,19 @@ func reflowErrCode(err error) string {
 		return output.ErrCodeTransient
 	default:
 		return output.ErrCodeInternal
+	}
+}
+
+func reflowReasonForErr(err error, code string) string {
+	switch {
+	case errors.Is(err, reflowpkg.ErrSourceTokenMissing):
+		return "source_token_missing"
+	case provider.IsSourceChanged(err):
+		return "source_changed"
+	case provider.IsReplayUnverifiable(err):
+		return "replay_unverifiable"
+	default:
+		return reflowReasonForErrCode(code)
 	}
 }
 

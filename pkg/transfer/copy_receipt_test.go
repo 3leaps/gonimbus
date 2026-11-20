@@ -20,7 +20,7 @@ type receiptSource struct {
 
 func (p *receiptSource) GetObjectVersioned(context.Context, string) (io.ReadCloser, provider.ObjectMeta, error) {
 	p.reads++
-	return io.NopCloser(strings.NewReader("abcdefgh")), provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Size: 8, LastModified: p.lastModified}}, nil
+	return io.NopCloser(strings.NewReader("abcdefgh")), provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{Size: 8, ETag: "src-etag-v1", LastModified: p.lastModified}, Version: "src-ver-1"}, nil
 }
 
 func (p *receiptSource) GetObject(context.Context, string) (io.ReadCloser, int64, error) {
@@ -98,4 +98,37 @@ func TestCopyReceiptRejectsMismatchBeforeWrite(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, CopyReceipt{}, result)
 	require.Nil(t, dst.payload)
+}
+
+func TestCopyReceiptDualTokenExpectedSourceETag(t *testing.T) {
+	rev := &provider.SourceRevision{Kind: provider.RevisionNative, Value: "src-ver-1"}
+
+	// Matching ETag (quoted or unquoted) succeeds and populates source receipt fields.
+	srcOK := &receiptSource{}
+	dstOK := &receiptDestination{}
+	receipt, err := CopyObjectWithReceipt(context.Background(), srcOK, dstOK, "source", "dest", 8, CopyReceiptOptions{
+		Revision:           rev,
+		ExpectedSourceETag: `"src-etag-v1"`,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "abcdefgh", string(dstOK.payload))
+	require.Equal(t, "src-etag-v1", receipt.SourceETag)
+	require.Equal(t, "src-ver-1", receipt.SourceVersion)
+
+	// Mismatched ETag fails closed with SourceETagMismatchError before any destination write.
+	srcBad := &receiptSource{}
+	dstBad := &receiptDestination{}
+	receipt, err = CopyObjectWithReceipt(context.Background(), srcBad, dstBad, "source", "dest", 8, CopyReceiptOptions{
+		Revision:           rev,
+		ExpectedSourceETag: "expected-other-etag",
+	})
+	require.Error(t, err)
+	require.True(t, provider.IsSourceChanged(err))
+	var mismatch *SourceETagMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, "expected-other-etag", mismatch.ExpectedETag)
+	require.Equal(t, "src-etag-v1", mismatch.ObservedETag)
+	require.Equal(t, "src-ver-1", mismatch.ObservedVersion)
+	require.Equal(t, CopyReceipt{}, receipt)
+	require.Nil(t, dstBad.payload, "mismatched dual-token ETag must write zero bytes to destination")
 }

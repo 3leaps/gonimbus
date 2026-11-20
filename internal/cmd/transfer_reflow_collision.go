@@ -11,6 +11,7 @@ import (
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
 func reflowActionForTask(task reflowTask) string {
@@ -24,7 +25,7 @@ func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath s
 	info := &reflowpkg.CollisionInfo{Kind: kind, DecisionPath: decisionPath}
 	if destMeta != nil {
 		size := destMeta.Size
-		info.DestETagObserved = destMeta.ETag
+		info.DestETagObserved = reflowpkg.SafeReceiptHandle(destMeta.ETag)
 		info.DestSizeObserved = &size
 	}
 	return info
@@ -53,6 +54,9 @@ func recordWithCollision(rec reflowpkg.Record, collision *reflowpkg.CollisionInf
 }
 
 func isConditionalExists(err error) bool {
+	if provider.IsSourceChanged(err) {
+		return false
+	}
 	return provider.IsAlreadyExists(err) || provider.IsPreconditionFailed(err)
 }
 
@@ -97,27 +101,65 @@ func canCompareObjectBodies(src provider.Provider, dst provider.Provider) bool {
 	return srcOK && dstOK
 }
 
-func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, sourceProvider string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) (bool, error) {
-	if isDuplicateCollision(sourceProvider, destProvider, srcETag, srcSize, dstMeta) {
+func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, sourceProvider string, destProvider string, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta, revision *provider.SourceRevision, expectedSourceETag string) (bool, error) {
+	if (revision == nil || revision.Kind != provider.RevisionNative) && isDuplicateCollision(sourceProvider, destProvider, srcETag, srcSize, dstMeta) {
 		return true, nil
 	}
-	if dstMeta == nil || srcSize != dstMeta.Size || !canCompareObjectBodies(src, dst) {
+	if dstMeta == nil {
 		return false, nil
 	}
-	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey)
+	if revision == nil || revision.Kind != provider.RevisionNative {
+		if srcSize != dstMeta.Size {
+			return false, nil
+		}
+	} else if srcSize > 0 && srcSize != dstMeta.Size {
+		return false, nil
+	}
+	if revision == nil && !canCompareObjectBodies(src, dst) {
+		return false, nil
+	}
+	if revision != nil {
+		if _, dstOK := dst.(provider.ObjectGetter); !dstOK {
+			return false, nil
+		}
+	}
+	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey, revision, expectedSourceETag)
 }
 
-func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string) (bool, error) {
-	srcGetter, ok := src.(provider.ObjectGetter)
-	if !ok {
-		return false, fmt.Errorf("source provider does not support GetObject")
-	}
+func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey string, dstKey string, revision *provider.SourceRevision, expectedSourceETag string) (bool, error) {
 	dstGetter, ok := dst.(provider.ObjectGetter)
 	if !ok {
 		return false, fmt.Errorf("destination provider does not support GetObject")
 	}
 
-	srcBody, _, err := srcGetter.GetObject(ctx, srcKey)
+	var srcBody io.ReadCloser
+	var err error
+	if revision != nil {
+		if err := revision.Validate(); err != nil {
+			return false, err
+		}
+		revGetter, ok := src.(provider.RevisionGetter)
+		if !ok {
+			return false, provider.ErrReplayUnverifiable
+		}
+		var meta provider.ObjectMeta
+		srcBody, meta, err = revGetter.GetObjectRevision(ctx, srcKey, *revision)
+		if err == nil && expectedSourceETag != "" && reflowpkg.NormalizeETagForCompare(meta.ETag) != reflowpkg.NormalizeETagForCompare(expectedSourceETag) {
+			_ = srcBody.Close()
+			return false, &transfer.SourceETagMismatchError{
+				Key:             srcKey,
+				ExpectedETag:    reflowpkg.NormalizeETagForCompare(expectedSourceETag),
+				ObservedETag:    meta.ETag,
+				ObservedVersion: meta.Version,
+			}
+		}
+	} else {
+		srcGetter, ok := src.(provider.ObjectGetter)
+		if !ok {
+			return false, fmt.Errorf("source provider does not support GetObject")
+		}
+		srcBody, _, err = srcGetter.GetObject(ctx, srcKey)
+	}
 	if err != nil {
 		return false, err
 	}

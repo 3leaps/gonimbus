@@ -248,12 +248,12 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	f, st, err := p.openReadPath(key)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderFile, Key: key, Err: provider.ErrSourceChanged}
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderFile, Key: key, Err: provider.ErrNotFound}
 		}
 		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
 	}
 	token := fileVersionToken(st)
-	if token != revision.Value {
+	if token != strings.Trim(strings.TrimSpace(revision.Value), "\"") {
 		_ = f.Close()
 		return nil, provider.ObjectMeta{}, &provider.ProviderError{Op: "GetObjectRevision", Provider: provider.ProviderFile, Key: key, Err: provider.ErrSourceChanged}
 	}

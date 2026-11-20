@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -891,7 +892,7 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("ell"))
 		case r.Method == "GET" && r.Header.Get("If-Match") != "":
-			require.Equal(t, "read-etag", r.Header.Get("If-Match"))
+			require.Equal(t, `"read-etag"`, r.Header.Get("If-Match"))
 			w.Header().Set("Content-Length", "5")
 			w.Header().Set("ETag", `"read-etag"`)
 			_, _ = w.Write([]byte("hello"))
@@ -1512,4 +1513,255 @@ func TestListAcceptsTruncatedPageWithAdvancingToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.IsTruncated)
 	assert.Equal(t, "next", res.ContinuationToken)
+}
+
+func TestGetObjectRevisionETagContract(t *testing.T) {
+	ctx := context.Background()
+	type serverState struct {
+		etag        string
+		versionID   string
+		body        string
+		missing     bool
+		ignoreMatch bool
+	}
+	state := &serverState{
+		etag:      `"d41d8cd98f00b204e9800998ecf8427e-3"`,
+		versionID: "v-42",
+		body:      "payload-v1",
+	}
+	var lastIfMatch atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		ifMatch := r.Header.Get("If-Match")
+		lastIfMatch.Store(ifMatch)
+		if state.missing {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+			return
+		}
+		if !state.ignoreMatch && ifMatch != "" && cleanETag(ifMatch) != cleanETag(state.etag) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`))
+			return
+		}
+		w.Header().Set("ETag", state.etag)
+		if state.versionID != "" {
+			w.Header().Set("x-amz-version-id", state.versionID)
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(state.body)))
+		_, _ = w.Write([]byte(state.body))
+	}))
+	defer server.Close()
+
+	p, err := New(ctx, Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Anonymous:      true,
+	})
+	require.NoError(t, err)
+
+	// Matching multipart ETag succeeds and sends quoted If-Match.
+	body, meta, err := p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "payload-v1", string(got))
+	require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e-3", meta.ETag)
+	require.Equal(t, "v-42", meta.Version)
+	require.Equal(t, `"d41d8cd98f00b204e9800998ecf8427e-3"`, lastIfMatch.Load())
+
+	// Replaced object (412 PreconditionFailed) returns ErrSourceChanged, NOT ErrNotFound.
+	state.etag = `"opaque-kms-etag-v2"`
+	state.body = "payload-v2"
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Broken endpoint that ignores If-Match and returns mismatched ETag still fails closed.
+	state.ignoreMatch = true
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	state.ignoreMatch = false
+
+	// Deleted object (404 NoSuchKey) returns ErrNotFound, NOT ErrSourceChanged.
+	state.missing = true
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err))
+}
+
+func TestGetObjectRevisionNativeVersionSemantics(t *testing.T) {
+	ctx := context.Background()
+	type versionEntry struct {
+		body string
+		etag string
+	}
+	var (
+		mu       sync.Mutex
+		latest   = map[string]versionEntry{"obj.bin": {body: "payload-v2", etag: `"etag-v2"`}}
+		versions = map[string]map[string]versionEntry{
+			"obj.bin": {
+				"ver-1": {body: "payload-v1", etag: `"etag-v1"`},
+				"ver-2": {body: "payload-v2", etag: `"etag-v2"`},
+			},
+		}
+		requests atomic.Int32
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		key := strings.TrimPrefix(r.URL.Path, "/test-bucket/")
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch r.Method {
+		case http.MethodHead:
+			vid := r.URL.Query().Get("versionId")
+			if vid != "" {
+				if vid == "ver-spoofed" {
+					ver := versions[key]["ver-2"]
+					w.Header().Set("ETag", ver.etag)
+					w.Header().Set("x-amz-version-id", "ver-2")
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				ver, ok := versions[key][vid]
+				if !ok {
+					// Real S3 HEAD returns empty-body 404 without XML error code.
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("ETag", ver.etag)
+				w.Header().Set("x-amz-version-id", vid)
+				w.Header().Set("x-amz-meta-ver", vid)
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			cur, ok := latest[key]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("ETag", cur.etag)
+			w.Header().Set("x-amz-meta-ver", "latest")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cur.body)))
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			vid := r.URL.Query().Get("versionId")
+			if vid == "ver-spoofed" {
+				// Broken server ignores versionId and returns ver-2 instead.
+				ver := versions[key]["ver-2"]
+				w.Header().Set("ETag", ver.etag)
+				w.Header().Set("x-amz-version-id", "ver-2")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(ver.body))
+				return
+			}
+			ver, ok := versions[key][vid]
+			if !ok {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`<Error><Code>NoSuchVersion</Code><Message>The specified version does not exist.</Message></Error>`))
+				return
+			}
+			w.Header().Set("ETag", ver.etag)
+			w.Header().Set("x-amz-version-id", vid)
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(ver.body)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(ver.body))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	p, err := New(ctx, Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Anonymous:      true,
+	})
+	require.NoError(t, err)
+
+	// Sentinel "null" version ID is refused before any HTTP call.
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "null"})
+	require.True(t, provider.IsReplayUnverifiable(err), "expected ErrReplayUnverifiable, got %v", err)
+	require.Zero(t, requests.Load())
+
+	// Historical version ver-1 succeeds even after key was overwritten with ver-2.
+	body, meta, err := p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-1"})
+	require.NoError(t, err)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "payload-v1", string(got))
+	require.Equal(t, "etag-v1", meta.ETag)
+	require.Equal(t, "ver-1", meta.Version)
+
+	// Broken endpoint that ignores versionId and returns another version fails closed.
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-spoofed"})
+	require.True(t, provider.IsSourceChanged(err), "expected ErrSourceChanged on mismatched response VersionId, got %v", err)
+	require.False(t, provider.IsNotFound(err))
+
+	// Missing version on an existing key returns ErrSourceChanged (not ErrNotFound).
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsSourceChanged(err), "expected ErrSourceChanged, got %v", err)
+	require.False(t, provider.IsNotFound(err))
+
+	// Missing version on a deleted key returns ErrNotFound (not ErrSourceChanged).
+	mu.Lock()
+	delete(latest, "obj.bin")
+	mu.Unlock()
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err))
+
+	// HeadRevision(RevisionNative) resolves historical version metadata even when
+	// the current key is deleted (delete marker), refuses "null" and spoofed
+	// versions, and splits empty-body 404 HEAD into ErrNotFound vs ErrSourceChanged.
+	headMeta, err := p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-1"})
+	require.NoError(t, err)
+	require.Equal(t, "ver-1", headMeta.Version)
+	require.Equal(t, "etag-v1", headMeta.ETag)
+	require.Equal(t, "ver-1", headMeta.Metadata["ver"])
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "null"})
+	require.True(t, provider.IsReplayUnverifiable(err))
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-spoofed"})
+	require.True(t, provider.IsSourceChanged(err))
+
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsNotFound(err), "missing version on deleted key HEAD must report ErrNotFound")
+	require.False(t, provider.IsSourceChanged(err))
+
+	mu.Lock()
+	latest["obj.bin"] = versionEntry{body: "payload-v2", etag: `"etag-v2"`}
+	mu.Unlock()
+	_, err = p.HeadRevision(ctx, "obj.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "ver-missing"})
+	require.True(t, provider.IsSourceChanged(err), "missing version on existing key HEAD must report ErrSourceChanged")
+	require.False(t, provider.IsNotFound(err))
 }

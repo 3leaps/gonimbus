@@ -32,27 +32,38 @@ const (
 	SourceBucketFile = "local"
 )
 
+// SourceMatchInfo records expected and observed source tokens when source-read
+// binding applied to an object copy.
+type SourceMatchInfo struct {
+	ExpectedETag      string `json:"expected_etag,omitempty"`
+	ExpectedVersionID string `json:"expected_version_id,omitempty"`
+	ObservedETag      string `json:"observed_etag,omitempty"`
+	ObservedVersionID string `json:"observed_version_id,omitempty"`
+}
+
 // Record is the payload for gonimbus.reflow.v1 JSONL records.
 type Record struct {
-	SourceURI          string         `json:"source_uri"`
-	SourceBucket       string         `json:"source_bucket,omitempty"`
-	SourceRoot         string         `json:"source_root,omitempty"`
-	SourceKey          string         `json:"source_key"`
-	SourceETag         string         `json:"source_etag,omitempty"`
-	SourceSize         int64          `json:"source_size_bytes,omitempty"`
-	SourceLastModified string         `json:"source_last_modified,omitempty"`
-	DestSHA256         string         `json:"dest_sha256,omitempty"`
-	DestVersionID      string         `json:"dest_version_id,omitempty"`
-	DestETag           string         `json:"dest_etag,omitempty"`
-	DestURI            string         `json:"dest_uri"`
-	DestKey            string         `json:"dest_key"`
-	Bytes              int64          `json:"bytes,omitempty"`
-	Status             string         `json:"status"`
-	Reason             string         `json:"reason,omitempty"`
-	RoutingClass       string         `json:"routing_class,omitempty"`
-	Collision          *CollisionInfo `json:"collision,omitempty"`
-	Provenance         *ProvenanceRef `json:"provenance,omitempty"`
-	Details            map[string]any `json:"details,omitempty"`
+	SourceURI          string           `json:"source_uri"`
+	SourceBucket       string           `json:"source_bucket,omitempty"`
+	SourceRoot         string           `json:"source_root,omitempty"`
+	SourceKey          string           `json:"source_key"`
+	SourceETag         string           `json:"source_etag,omitempty"`
+	SourceVersionID    string           `json:"source_version_id,omitempty"`
+	SourceSize         int64            `json:"source_size_bytes,omitempty"`
+	SourceLastModified string           `json:"source_last_modified,omitempty"`
+	SourceMatch        *SourceMatchInfo `json:"source_match,omitempty"`
+	DestSHA256         string           `json:"dest_sha256,omitempty"`
+	DestVersionID      string           `json:"dest_version_id,omitempty"`
+	DestETag           string           `json:"dest_etag,omitempty"`
+	DestURI            string           `json:"dest_uri"`
+	DestKey            string           `json:"dest_key"`
+	Bytes              int64            `json:"bytes,omitempty"`
+	Status             string           `json:"status"`
+	Reason             string           `json:"reason,omitempty"`
+	RoutingClass       string           `json:"routing_class,omitempty"`
+	Collision          *CollisionInfo   `json:"collision,omitempty"`
+	Provenance         *ProvenanceRef   `json:"provenance,omitempty"`
+	Details            map[string]any   `json:"details,omitempty"`
 }
 
 func (r Record) MarshalJSON() ([]byte, error) {

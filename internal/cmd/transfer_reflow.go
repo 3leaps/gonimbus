@@ -113,6 +113,7 @@ var (
 	reflowMemoryBudget        string
 	reflowResourceProbeForRun = reflowpkg.DefaultResourceProbe()
 	reflowDryRun              bool
+	reflowRequireSourceMatch  bool
 	reflowResume              bool
 	reflowResumeRun           string
 	reflowRunID               string
@@ -166,6 +167,7 @@ func init() {
 	transferReflowCmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "Disable adaptive concurrency and run fixed at the resource-capped --parallel ceiling")
 	transferReflowCmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "Memory budget governing transfer retry buffering and concurrency sizing — not total process or provider-SDK memory (e.g. 8GiB; min 64MiB, max 4TiB; values above the detected memory limit are clamped to it; omitted: 25% of the detected limit)")
 	transferReflowCmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "Emit planned mappings without writing")
+	transferReflowCmd.Flags().BoolVar(&reflowRequireSourceMatch, "require-source-match", false, "Bind every source read to the expected input revision token via conditional/pinned read; refuse if the source provider lacks RevisionGetter or if an input line lacks a token")
 	transferReflowCmd.Flags().BoolVar(&reflowResume, "resume", false, "Resume an item-checkpoint run: re-supply the full original invocation plus the same --checkpoint path (do not combine with --resume-run)")
 	transferReflowCmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "Resume by operation run id from a resumable failure hint: restores checkpointed config and rejects foreground flags such as --checkpoint, --dest, or source args (use --resume + --checkpoint for an explicit DB path)")
 	transferReflowCmd.Flags().StringVar(&reflowRunID, "run-id", "", "Use a specific run id for a new run (default: a generated id). Must be a single safe identifier segment (letters, digits, '.', '-', '_'; no path separators or '..'). Provenance run.run_id and the checkpoint key derive from it; reusing an id targets that run's existing checkpoint")
@@ -397,10 +399,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	}
 	checkpointCfg := transferReflowCheckpointConfigFromEffective(args, checkpointPath, collCfg, metaCfg, srcCfg, provCfg, memoryBudgetBytes)
 
-	state, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
+	rawState, err := newReflowStateStore(ctx, reflowstate.Config{Path: checkpointPath})
 	if err != nil {
 		return exitError(foundry.ExitFileWriteError, "Failed to open checkpoint", err)
 	}
+	state := reflowStateStore(&sanitizingReflowStateStore{reflowStateStore: rawState})
 	defer func() { _ = state.Close() }()
 
 	var (
@@ -462,6 +465,56 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		// Sterile checkpoint-writer diagnostics after engine summary (checkpoint measure).
 		emitCheckpointWriterStatsIfPresent(context.Background(), w, state)
 		return engineErr
+	}
+	if reflowRequireSourceMatch && !reflowDryRun {
+		var preflightURI *uri.ObjectURI
+		var preflightVersionPresent bool
+		var preflightVersionID string
+		if !reflowStdin && len(args) > 0 {
+			parsed, parseErr := uri.ParseURI(args[0])
+			if parseErr != nil {
+				return emitReflowConfigError(ctx, w, "Invalid source URI", parseErr, map[string]any{
+					"reason": "invalid_source_uri",
+				})
+			}
+			preflightURI = parsed
+		} else if reflowStdin && reflowInput != nil {
+			var peekErr error
+			preflightURI, preflightVersionPresent, preflightVersionID, reflowInput, peekErr = peekCLIReflowFirstSourceURI(reflowInput)
+			if peekErr != nil {
+				if provider.IsReplayUnverifiable(peekErr) {
+					return emitReflowConfigError(ctx, w, "source preflight failed for --require-source-match", peekErr, map[string]any{
+						"reason":             "replay_unverifiable",
+						"missing_capability": "RevisionGetter",
+					})
+				}
+				return exitError(foundry.ExitInvalidArgument, "Failed to read reflow input", peekErr)
+			}
+		}
+		if preflightURI != nil {
+			if (preflightVersionPresent || preflightVersionID != "") && (strings.TrimSpace(preflightVersionID) == "" || preflightVersionID == "null" || !reflowpkg.ProviderSupportsNativeVersion(preflightURI.Provider)) {
+				replayErr := &reflowpkg.ReplayUnverifiableError{Provider: preflightURI.Provider, Err: provider.ErrReplayUnverifiable}
+				return emitReflowConfigError(ctx, w, "source provider does not support native source_version_id", replayErr, map[string]any{
+					"reason":   "replay_unverifiable",
+					"provider": preflightURI.Provider,
+				})
+			}
+			pNew, pErr := newSourceProvider(ctx, preflightURI, concurrencyCfg)
+			if pErr != nil {
+				return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to source provider", pErr)
+			}
+			if _, ok := pNew.(provider.RevisionGetter); !ok {
+				_ = pNew.Close()
+				replayErr := &reflowpkg.ReplayUnverifiableError{Provider: preflightURI.Provider, Err: provider.ErrReplayUnverifiable}
+				return emitReflowConfigError(ctx, w, "source provider does not support --require-source-match", replayErr, map[string]any{
+					"reason":             "replay_unverifiable",
+					"missing_capability": "RevisionGetter",
+					"provider":           preflightURI.Provider,
+				})
+			}
+			srcProv = pNew
+			srcProviderIdentity = reflowSourceIdentity(preflightURI)
+		}
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)
 	if err := emitIfAbsentFallbackWarning(ctx, w, collCfg, destSpec, ifAbsentCapability); err != nil {
@@ -531,6 +584,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			if err != nil {
 				return nil, nil, nil, err
 			}
+			if reflowRequireSourceMatch && !reflowDryRun {
+				if _, ok := pNew.(provider.RevisionGetter); !ok {
+					_ = pNew.Close()
+					return nil, nil, nil, &reflowpkg.ReplayUnverifiableError{Provider: srcURI.Provider, Err: provider.ErrReplayUnverifiable}
+				}
+			}
 			srcProv = pNew
 			srcProviderIdentity = identity
 		} else if srcProviderIdentity != "" && identity != "" && srcProviderIdentity != identity {
@@ -555,7 +614,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		_ = w.WriteAny(ctx, reflowpkg.RecordType, rec)
 	}
 	stageStats := reflowpkg.NewStageStats()
-	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, error) {
+	copyObjectWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, opts provider.PutOptions, revision *provider.SourceRevision, expectedSourceETag string, receipt *transfer.CopyReceipt) (int64, error) {
 		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
 		if err != nil {
 			return 0, err
@@ -565,18 +624,18 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		// object B can overlap Put of object A (same ceiling; ADR-0006 parity
 		// with pkg/reflow limitedCopy).
 		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
-		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), PutOptions: opts}, Gate: gate})
+		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), PutOptions: opts}, Revision: revision, ExpectedSourceETag: expectedSourceETag, Gate: gate})
 		concurrencyLimiter.ObserveProviderResult(err)
 		return receipt.Bytes, err
 	}
-	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, provider.PutResult, error) {
+	copyObjectConditionalWithOptions := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, expectedSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision *provider.SourceRevision, expectedSourceETag string, receipt *transfer.CopyReceipt) (int64, provider.PutResult, error) {
 		releaseMem, err := concurrencyLimiter.ReserveCopyMemory(ctx, expectedSize)
 		if err != nil {
 			return 0, provider.PutResult{}, err
 		}
 		defer releaseMem()
 		gate := reflowpkg.NewLimiterCopyGate(concurrencyLimiter, stageStats)
-		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), Precondition: precond, PutOptions: opts}, Gate: gate})
+		*receipt, err = transfer.CopyObjectWithReceipt(ctx, src, dst, srcKey, dstKey, expectedSize, transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: concurrencyLimiter.RetryBufferCap(), Precondition: precond, PutOptions: opts}, Revision: revision, ExpectedSourceETag: expectedSourceETag, Gate: gate})
 		concurrencyLimiter.ObserveProviderResult(err)
 		return receipt.Bytes, provider.PutResult{ETag: receipt.ETag, Version: receipt.Version}, err
 	}
@@ -587,9 +646,46 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			return p.Head(ctx, key)
 		})
 	}
-	retryProbeCompare := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceProvider, destProvider, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta) (bool, error) {
+	retryProbeHeadRevision := func(ctx context.Context, p provider.Provider, key string, rev provider.SourceRevision) (*provider.ObjectMeta, error) {
+		header, ok := p.(provider.RevisionHeader)
+		if !ok {
+			return nil, provider.ErrReplayUnverifiable
+		}
+		return reflowprobe.Run(ctx, concurrencyLimiter, func(ctx context.Context) (*provider.ObjectMeta, error) {
+			return header.HeadRevision(ctx, key, rev)
+		})
+	}
+	buildSourceMatchOnError := func(ctx context.Context, src provider.Provider, key, expectedETag, expectedVersionID string, bindingApplied bool, copyErr error) *reflowpkg.SourceMatchInfo {
+		if !bindingApplied || !provider.IsSourceChanged(copyErr) {
+			return nil
+		}
+		match := &reflowpkg.SourceMatchInfo{
+			ExpectedETag:      reflowpkg.SafeReceiptHandle(expectedETag),
+			ExpectedVersionID: reflowpkg.SafeSourceVersionID(expectedVersionID),
+		}
+		var etagMismatch *transfer.SourceETagMismatchError
+		var providerObs interface {
+			ObservedSourceRevision() (string, string)
+		}
+		switch {
+		case errors.As(copyErr, &etagMismatch):
+			match.ObservedETag = reflowpkg.SafeReceiptHandle(etagMismatch.ObservedETag)
+			match.ObservedVersionID = reflowpkg.SafeSourceVersionID(etagMismatch.ObservedVersion)
+		case errors.As(copyErr, &providerObs):
+			obsETag, obsVer := providerObs.ObservedSourceRevision()
+			match.ObservedETag = reflowpkg.SafeReceiptHandle(obsETag)
+			match.ObservedVersionID = reflowpkg.SafeSourceVersionID(obsVer)
+		case expectedVersionID == "":
+			if headMeta, headErr := retryProbeHead(ctx, src, key); headErr == nil && headMeta != nil {
+				match.ObservedETag = reflowpkg.SafeReceiptHandle(headMeta.ETag)
+				match.ObservedVersionID = reflowpkg.SafeSourceVersionID(headMeta.Version)
+			}
+		}
+		return match
+	}
+	retryProbeCompare := func(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceProvider, destProvider, srcETag string, srcSize int64, dstMeta *provider.ObjectMeta, revision *provider.SourceRevision, expectedSourceETag string) (bool, error) {
 		return reflowprobe.Run(ctx, concurrencyLimiter, func(ctx context.Context) (bool, error) {
-			return isDuplicateCollisionForReflow(ctx, src, dst, srcKey, dstKey, sourceProvider, destProvider, srcETag, srcSize, dstMeta)
+			return isDuplicateCollisionForReflow(ctx, src, dst, srcKey, dstKey, sourceProvider, destProvider, srcETag, srcSize, dstMeta, revision, expectedSourceETag)
 		})
 	}
 	recordFatalReflowError := func(err error) bool {
@@ -729,11 +825,45 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					continue
 				}
 
+				expectedETag := reflowpkg.NormalizeETagForCompare(task.SourceETag)
+				expectedVersionID := task.SourceVersionID
+				hasVersionPin := task.SourceVersionIDPresent || expectedVersionID != ""
+				bindingApplied := reflowRequireSourceMatch || hasVersionPin
+				var sourceRevision *provider.SourceRevision
+				var expectedSourceETag string
+				if hasVersionPin {
+					if strings.TrimSpace(expectedVersionID) == "" || expectedVersionID == "null" || !reflowpkg.ProviderSupportsNativeVersion(task.SourceProvider) {
+						errorCount.Add(1)
+						replayErr := &reflowpkg.ReplayUnverifiableError{Provider: task.SourceProvider, Err: provider.ErrReplayUnverifiable}
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source provider does not support native source_version_id", replayErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "replay_unverifiable"})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", Reason: "replay_unverifiable", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: replayErr.Error()}); werr != nil {
+							checkpointWriteFailed(werr)
+						}
+						rec := task.reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = "replay_unverifiable"
+						writeReflowRecord(ctx, rec)
+						continue
+					}
+					sourceRevision = &provider.SourceRevision{Kind: provider.RevisionNative, Value: expectedVersionID}
+					expectedSourceETag = expectedETag
+				}
+
 				if task.RejectSymlinkPath {
 					sourcePath := filepath.Join(task.SourceRoot, filepath.FromSlash(task.SourceKey))
 					hasSymlink, err := filePathContainsSymlink(sourcePath)
 					if err != nil {
 						errorCount.Add(1)
+						if errors.Is(err, os.ErrNotExist) {
+							notFoundErr := &provider.ProviderError{Op: "GetObject", Provider: provider.ProviderFile, Key: task.SourceKey, Err: provider.ErrNotFound}
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "source object not found", notFoundErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "not_found"})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", Reason: "not_found", ErrorCode: output.ErrCodeNotFound, ErrorMessage: notFoundErr.Error()}); werr != nil {
+								checkpointWriteFailed(werr)
+							}
+							rec := task.reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = "not_found"
+							writeReflowRecord(ctx, rec)
+							continue
+						}
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source path validation failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
 							checkpointWriteFailed(werr)
@@ -759,24 +889,115 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 				writeReflowRecord(ctx, task.reflowRecord(dstURI, dstKey, "in_progress"))
 
+				if !hasVersionPin && reflowRequireSourceMatch {
+					if expectedETag == "" {
+						errorCount.Add(1)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source revision token missing", reflowpkg.ErrSourceTokenMissing, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "source_token_missing"})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", Reason: "source_token_missing", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: reflowpkg.ErrSourceTokenMissing.Error()}); werr != nil {
+							checkpointWriteFailed(werr)
+						}
+						rec := task.reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = "source_token_missing"
+						writeReflowRecord(ctx, rec)
+						continue
+					}
+					sourceRevision = &provider.SourceRevision{Kind: provider.RevisionETag, Value: expectedETag}
+				}
+
 				srcETag := task.SourceETag
 				srcSize := task.SourceSize
+				srcSizeKnown := task.SourceSizeKnown
 				var sourceMeta *provider.ObjectMeta
 				needsSourceHeadForCollision := collCfg.Mode == reflowCollisionSrcNew && task.SourceLastMod.IsZero()
-				if metaCfg.NeedsSourceHead() || srcETag == "" || srcSize == 0 || needsSourceHeadForCollision {
+				mandatorySourceHead := metaCfg.NeedsSourceHead() || needsSourceHeadForCollision
+				if hasVersionPin {
+					if mandatorySourceHead {
+						meta, err := retryProbeHeadRevision(ctx, src, task.SourceKey, *sourceRevision)
+						if err == nil {
+							sourceMeta = meta
+							if expectedETag != "" && meta.ETag != "" && reflowpkg.NormalizeETagForCompare(meta.ETag) != reflowpkg.NormalizeETagForCompare(expectedETag) {
+								errorCount.Add(1)
+								match := &reflowpkg.SourceMatchInfo{
+									ExpectedETag:      reflowpkg.SafeReceiptHandle(expectedETag),
+									ExpectedVersionID: reflowpkg.SafeSourceVersionID(expectedVersionID),
+									ObservedETag:      reflowpkg.SafeReceiptHandle(meta.ETag),
+									ObservedVersionID: reflowpkg.SafeSourceVersionID(meta.Version),
+								}
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "source changed before copy", provider.ErrSourceChanged, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "source_changed"})
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: expectedETag, SourceSize: srcSize, Status: "failed", Reason: "source_changed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: provider.ErrSourceChanged.Error()}); werr != nil {
+									checkpointWriteFailed(werr)
+								}
+								rec := task.withSourceMeta(expectedETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+								rec.Reason = "source_changed"
+								rec.SourceMatch = match
+								writeReflowRecord(ctx, rec)
+								continue
+							}
+							srcSize = meta.Size
+							srcSizeKnown = true
+							if !meta.LastModified.IsZero() {
+								task.SourceLastMod = meta.LastModified
+							}
+						} else if recordFatalReflowError(err) {
+							continue
+						} else {
+							errorCount.Add(1)
+							code := reflowErrCode(err)
+							reason := reflowReasonForErr(err, code)
+							sourceMatch := buildSourceMatchOnError(ctx, src, task.SourceKey, expectedETag, expectedVersionID, bindingApplied, err)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": reason})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: reason, ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+								checkpointWriteFailed(werr)
+							}
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = reason
+							rec.SourceMatch = sourceMatch
+							writeReflowRecord(ctx, rec)
+							continue
+						}
+					}
+				} else if mandatorySourceHead || srcETag == "" || srcSize == 0 {
 					meta, err := retryProbeHead(ctx, src, task.SourceKey)
 					if err == nil {
 						sourceMeta = meta
-						srcETag = meta.ETag
+						if reflowRequireSourceMatch && expectedETag != "" && meta.ETag != "" && reflowpkg.NormalizeETagForCompare(meta.ETag) != reflowpkg.NormalizeETagForCompare(expectedETag) {
+							errorCount.Add(1)
+							match := &reflowpkg.SourceMatchInfo{
+								ExpectedETag:      reflowpkg.SafeReceiptHandle(expectedETag),
+								ObservedETag:      reflowpkg.SafeReceiptHandle(meta.ETag),
+								ObservedVersionID: reflowpkg.SafeSourceVersionID(meta.Version),
+							}
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "source changed before copy", provider.ErrSourceChanged, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "source_changed"})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: expectedETag, SourceSize: srcSize, Status: "failed", Reason: "source_changed", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: provider.ErrSourceChanged.Error()}); werr != nil {
+								checkpointWriteFailed(werr)
+							}
+							rec := task.withSourceMeta(expectedETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = "source_changed"
+							rec.SourceMatch = match
+							writeReflowRecord(ctx, rec)
+							continue
+						}
+						if !bindingApplied {
+							srcETag = meta.ETag
+						}
 						srcSize = meta.Size
+						srcSizeKnown = true
 						if !meta.LastModified.IsZero() {
 							task.SourceLastMod = meta.LastModified
 						}
 					} else if recordFatalReflowError(err) {
 						continue
-					} else if metaCfg.NeedsSourceHead() || needsSourceHeadForCollision {
+					} else if mandatorySourceHead {
 						errorCount.Add(1)
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI})
+						code := reflowErrCode(err)
+						reason := reflowReasonForErr(err, code)
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata read failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": reason})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: reason, ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+							checkpointWriteFailed(werr)
+						}
+						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = reason
+						writeReflowRecord(ctx, rec)
 						continue
 					}
 				}
@@ -810,20 +1031,28 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 						quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
 						quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
-						bytes, qerr := copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, provider.PutOptions{}, &receipt)
+						bytes, qerr := copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, provider.PutOptions{}, sourceRevision, expectedSourceETag, &receipt)
 						if qerr != nil {
 							if recordFatalReflowError(qerr) {
 								continue
 							}
 							errorCount.Add(1)
 							code := reflowErrCode(qerr)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI})
-							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
+							sourceMatch := buildSourceMatchOnError(ctx, src, task.SourceKey, expectedETag, expectedVersionID, bindingApplied, qerr)
+							qReason := "metadata.quarantine_copy_failed"
+							if provider.IsSourceChanged(qerr) {
+								qReason = "source_changed"
+							} else if provider.IsNotFound(qerr) {
+								qReason = "not_found"
+							}
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "metadata quarantine copy failed", qerr, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "reason": qReason})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: qReason, ErrorCode: code, ErrorMessage: qerr.Error()}); werr != nil {
 								checkpointWriteFailed(werr)
 							}
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
-							rec.Reason = "metadata.quarantine_copy_failed"
+							rec.Reason = qReason
 							rec.RoutingClass = "quarantine"
+							rec.SourceMatch = sourceMatch
 							writeReflowRecord(ctx, rec)
 							continue
 						}
@@ -863,6 +1092,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 						rec.Reason = "metadata.derivation.quarantined"
 						rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
+						if bindingApplied {
+							rec = reflowpkg.RecordWithSourceBinding(rec, receipt, expectedETag, expectedVersionID)
+						}
 						rec.Bytes = bytes
 						rec.RoutingClass = "quarantine"
 						rec.Provenance = sidecarRef
@@ -898,7 +1130,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 						continue
 					}
-					bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, &receipt)
+					bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, sourceRevision, expectedSourceETag, &receipt)
 				} else {
 					gate, releaseGate := destArbiter.acquire(dstKey)
 					// Keep active mutexes bounded to in-flight keys; durable per-run
@@ -927,12 +1159,12 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 								case headErr == nil:
 									err = &provider.ProviderError{Op: "Head", Provider: provider.ProviderType(destSpec.Provider), Key: dstKey, Err: provider.ErrAlreadyExists}
 								case provider.IsNotFound(headErr):
-									bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, &receipt)
+									bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, putOptions, sourceRevision, expectedSourceETag, &receipt)
 								default:
 									err = headErr
 								}
 							} else {
-								bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfAbsent: true}, putOptions, &receipt)
+								bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfAbsent: true}, putOptions, sourceRevision, expectedSourceETag, &receipt)
 							}
 							if err == nil || isConditionalExists(err) {
 								gate.observed = true
@@ -965,13 +1197,23 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination head failed after collision", headErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
 							continue
 						}
-						dup, dupErr := retryProbeCompare(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta)
+						dup, dupErr := retryProbeCompare(ctx, src, dst, task.SourceKey, dstKey, task.SourceProvider, destSpec.Provider, srcETag, srcSize, dstMeta, sourceRevision, expectedSourceETag)
 						if dupErr != nil {
 							if recordFatalReflowError(dupErr) {
 								continue
 							}
 							errorCount.Add(1)
-							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
+							code := reflowErrCode(dupErr)
+							reason := reflowReasonForErr(dupErr, code)
+							sourceMatch := buildSourceMatchOnError(ctx, src, task.SourceKey, expectedETag, expectedVersionID, bindingApplied, dupErr)
+							_ = emitReflowError(context.Background(), w, task.SourceKey, "destination duplicate comparison failed", dupErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": reason})
+							if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: reason, ErrorCode: code, ErrorMessage: dupErr.Error()}); werr != nil {
+								checkpointWriteFailed(werr)
+							}
+							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+							rec.Reason = reason
+							rec.SourceMatch = sourceMatch
+							writeReflowRecord(ctx, rec)
 							continue
 						}
 						if dup {
@@ -1042,9 +1284,23 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							if task.SourceLastMod.After(dstMeta.LastModified) {
 								decisionReason = reasonSrcNewer
 								shouldOverwrite = true
-							} else if task.SourceLastMod.Equal(dstMeta.LastModified) && srcSize != dstMeta.Size {
-								decisionReason = reasonEqualSizeDiffers
-								shouldOverwrite = true
+							} else if task.SourceLastMod.Equal(dstMeta.LastModified) {
+								if !srcSizeKnown {
+									errorCount.Add(1)
+									err := fmt.Errorf("source size is required to resolve an equal-timestamp conflict for --on-collision=%s: %s", reflowCollisionSrcNew, dstKey)
+									_ = emitReflowError(context.Background(), w, task.SourceKey, "source metadata unavailable", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "collision.source_size_unavailable"})
+									if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: "collision.source_size_unavailable", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: err.Error()}); werr != nil {
+										checkpointWriteFailed(werr)
+									}
+									rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
+									rec.Reason = "collision.source_size_unavailable"
+									writeReflowRecord(ctx, rec)
+									continue
+								}
+								if srcSize != dstMeta.Size {
+									decisionReason = reasonEqualSizeDiffers
+									shouldOverwrite = true
+								}
 							}
 							if !shouldOverwrite {
 								collision = newSourceNewerCollisionInfo(collisionSrcOlder, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
@@ -1071,7 +1327,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							}
 
 							collision = newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, decisionReason)
-							bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions, &receipt)
+							bytes, putResult, err = copyObjectConditionalWithOptions(ctx, src, dst, task.SourceKey, dstKey, srcSize, provider.PutPrecondition{IfMatchETag: &dstMeta.ETag}, putOptions, sourceRevision, expectedSourceETag, &receipt)
 							if err != nil && isConditionalExists(err) {
 								collision = newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, task.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
 								if werr := state.NoteCollision(context.Background(), dstKey, reflowstate.CollisionConflict, srcCheckpointURI, srcETag, srcSize, dstMeta.ETag, dstMeta.Size); werr != nil {
@@ -1111,20 +1367,28 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							quarantineDestRel := buildQuarantineDestRel(collCfg.QuarantinePrefix, task.SourceKey)
 							quarantineDstKey := buildReflowDestKey(destSpec, quarantineDestRel)
 							quarantineDstURI := buildReflowDestURI(destSpec, quarantineDstKey)
-							bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, putOptions, &receipt)
+							bytes, err = copyObjectWithOptions(ctx, src, dst, task.SourceKey, quarantineDstKey, srcSize, putOptions, sourceRevision, expectedSourceETag, &receipt)
 							if err != nil {
 								if recordFatalReflowError(err) {
 									continue
 								}
 								errorCount.Add(1)
 								code := reflowErrCode(err)
-								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision})
-								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+								sourceMatch := buildSourceMatchOnError(ctx, src, task.SourceKey, expectedETag, expectedVersionID, bindingApplied, err)
+								qReason := "collision.quarantine_copy_failed"
+								if provider.IsSourceChanged(err) {
+									qReason = "source_changed"
+								} else if provider.IsNotFound(err) {
+									qReason = "not_found"
+								}
+								_ = emitReflowError(context.Background(), w, task.SourceKey, "quarantine copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": quarantineDstURI, "original_dest_uri": dstURI, "collision": collision, "reason": qReason})
+								if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: quarantineDstURI, SourceKey: task.SourceKey, DestKey: quarantineDstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: qReason, ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
 									checkpointWriteFailed(werr)
 								}
 								rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "failed")
-								rec.Reason = "collision.quarantine_copy_failed"
+								rec.Reason = qReason
 								rec.RoutingClass = "quarantine"
+								rec.SourceMatch = sourceMatch
 								writeReflowRecord(ctx, recordWithCollision(rec, collision))
 								continue
 							}
@@ -1164,6 +1428,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 							rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(quarantineDstURI, quarantineDstKey, "quarantined")
 							rec.Reason = "collision.conflict.quarantined"
 							rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
+							if bindingApplied {
+								rec = reflowpkg.RecordWithSourceBinding(rec, receipt, expectedETag, expectedVersionID)
+							}
 							rec.Bytes = bytes
 							rec.RoutingClass = "quarantine"
 							rec.Provenance = sidecarRef
@@ -1197,12 +1464,15 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					}
 					errorCount.Add(1)
 					code := reflowErrCode(err)
-					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI})
-					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
+					reason := reflowReasonForErr(err, code)
+					sourceMatch := buildSourceMatchOnError(ctx, src, task.SourceKey, expectedETag, expectedVersionID, bindingApplied, err)
+					_ = emitReflowError(context.Background(), w, task.SourceKey, "copy failed", err, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": reason})
+					if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: srcETag, SourceSize: srcSize, Status: "failed", Reason: reason, ErrorCode: code, ErrorMessage: err.Error()}); werr != nil {
 						checkpointWriteFailed(werr)
 					}
 					rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "failed")
-					rec.Reason = reflowReasonForErrCode(code)
+					rec.Reason = reason
+					rec.SourceMatch = sourceMatch
 					writeReflowRecord(ctx, rec)
 					continue
 				}
@@ -1251,6 +1521,9 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 				}
 				rec := task.withSourceMeta(srcETag, srcSize).reflowRecord(dstURI, dstKey, "complete")
 				rec = reflowpkg.RecordWithReceipt(rec, receipt, destSpec.Provider)
+				if bindingApplied {
+					rec = reflowpkg.RecordWithSourceBinding(rec, receipt, expectedETag, expectedVersionID)
+				}
 				rec.Bytes = bytes
 				rec.Provenance = sidecarRef
 				writeReflowRecord(ctx, recordWithCollision(rec, collision))
@@ -1260,6 +1533,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 	// Feed tasks from stdin / positional.
 	var inputErr error
+	var preflightReplayErr *reflowpkg.ReplayUnverifiableError
 	srcIdentity := ""
 	if reflowStdin {
 		advisoryWarnings := reflowpkg.NewAdvisoryWarningTracker()
@@ -1275,6 +1549,11 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			}
 			srcIdentity, inputErr = enqueueReflowLineWithWarnings(ctx, line, srcIdentity, srcCfg, getInputProviders, tasks, advisoryWarnings, emitAdvisoryWarning)
 			if inputErr != nil {
+				if errors.As(inputErr, &preflightReplayErr) {
+					cancelWork()
+					inputErr = nil
+					break
+				}
 				if recordFatalReflowError(inputErr) {
 					inputErr = nil
 					break
@@ -1293,12 +1572,28 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 		}
 	} else {
 		_, inputErr = enqueueReflowLine(ctx, args[0], srcIdentity, srcCfg, getInputProviders, tasks)
-		if inputErr != nil && recordFatalReflowError(inputErr) {
-			inputErr = nil
+		if inputErr != nil {
+			if errors.As(inputErr, &preflightReplayErr) {
+				cancelWork()
+				inputErr = nil
+			} else if recordFatalReflowError(inputErr) {
+				inputErr = nil
+			}
 		}
 	}
 	close(tasks)
 	wg.Wait()
+	if preflightReplayErr != nil {
+		details := map[string]any{
+			"reason":             "replay_unverifiable",
+			"missing_capability": "RevisionGetter",
+			"flag":               "--require-source-match",
+		}
+		if preflightReplayErr.Provider != "" {
+			details["provider"] = preflightReplayErr.Provider
+		}
+		return emitReflowConfigError(context.Background(), w, "Source provider does not support pinned revision reads", preflightReplayErr, details)
+	}
 	_ = w.WriteAny(context.Background(), reflowpkg.SummaryRecordType, stats.summary(destURI, reflowDryRun, collCfg, ifAbsentCapability, concurrencyLimiter.Snapshot(), invalidCount.Load(), errorCount.Load()))
 	// Sterile object-path stage attribution (permit wait / source read / dest write).
 	stageStats.AttachLimiterPeaks(concurrencyLimiter)

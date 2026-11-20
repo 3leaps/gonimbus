@@ -125,16 +125,51 @@ func TestGetObjectRevisionRefusesChangedLocalFile(t *testing.T) {
 	baseDir := t.TempDir()
 	p, err := New(Config{BaseDir: baseDir})
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "object.txt"), []byte("first"), 0o600))
+	filePath := filepath.Join(baseDir, "object.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("first"), 0o600))
 
 	objects, err := p.List(ctx, provider.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, objects.Objects, 1)
 	revision := provider.SourceRevision{Kind: provider.RevisionNative, Value: objects.Objects[0].Revision}
 
-	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "object.txt"), []byte("changed-size"), 0o600))
+	// Quoted RevisionETag matching current file succeeds.
+	body, meta, err := p.GetObjectRevision(ctx, "object.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: `"` + objects.Objects[0].ETag + `"`,
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "first", string(got))
+	require.Equal(t, objects.Objects[0].ETag, meta.ETag)
+
+	// Same-size replacement with updated mtime returns ErrSourceChanged.
+	require.NoError(t, os.WriteFile(filePath, []byte("other"), 0o600))
+	newer := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(filePath, newer, newer))
+	_, _, err = p.GetObjectRevision(ctx, "object.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: objects.Objects[0].ETag,
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Different-size replacement returns ErrSourceChanged.
+	require.NoError(t, os.WriteFile(filePath, []byte("changed-size"), 0o600))
 	_, _, err = p.GetObjectRevision(ctx, "object.txt", revision)
 	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Deleted file returns ErrNotFound, NOT ErrSourceChanged.
+	require.NoError(t, os.Remove(filePath))
+	_, _, err = p.GetObjectRevision(ctx, "object.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: objects.Objects[0].ETag,
+	})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err), "deleted file must not be classified as ErrSourceChanged")
 }
 
 func TestListSkipsSymlinksByDefault(t *testing.T) {

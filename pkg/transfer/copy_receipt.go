@@ -3,25 +3,53 @@ package transfer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
 )
+
+// SourceETagMismatchError reports that a pinned source read returned an ETag
+// differing from ExpectedSourceETag before any destination write was attempted.
+type SourceETagMismatchError struct {
+	Key             string
+	ExpectedETag    string
+	ObservedETag    string
+	ObservedVersion string
+}
+
+func (e *SourceETagMismatchError) Error() string {
+	return fmt.Sprintf("source object %s ETag mismatch for pinned revision: %s", e.Key, provider.ErrSourceChanged.Error())
+}
+
+func (e *SourceETagMismatchError) Unwrap() error { return provider.ErrSourceChanged }
+
+func normalizeReceiptETag(etag string) string {
+	trimmed := strings.TrimSpace(etag)
+	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+		return trimmed[1 : len(trimmed)-1]
+	}
+	return trimmed
+}
 
 // CopyReceipt describes an acknowledged streamed write, not independent
 // destination read-back verification. Unknown provider handles remain empty.
 type CopyReceipt struct {
 	UploadResult
 	SourceLastModified time.Time
+	SourceETag         string
+	SourceVersion      string
 }
 
 // CopyReceiptOptions preserves revision admission, write preconditions and
 // phase budgets while requesting the write's payload receipt.
 type CopyReceiptOptions struct {
-	Upload   UploadOptions
-	Revision *provider.SourceRevision
-	Gate     CopyGate
+	Upload             UploadOptions
+	Revision           *provider.SourceRevision
+	ExpectedSourceETag string
+	Gate               CopyGate
 }
 
 // CopyObjectWithReceipt streams an object using the same bounded upload and
@@ -44,11 +72,22 @@ func CopyObjectWithReceipt(ctx context.Context, src, dst provider.Provider, srcK
 		if err != nil {
 			return nil, provider.ObjectMeta{}, err
 		}
+		if opts.ExpectedSourceETag != "" && normalizeReceiptETag(meta.ETag) != normalizeReceiptETag(opts.ExpectedSourceETag) {
+			_ = body.Close()
+			return nil, provider.ObjectMeta{}, &SourceETagMismatchError{
+				Key:             srcKey,
+				ExpectedETag:    normalizeReceiptETag(opts.ExpectedSourceETag),
+				ObservedETag:    meta.ETag,
+				ObservedVersion: meta.Version,
+			}
+		}
 		if expectedSize > 0 && meta.Size >= 0 && expectedSize != meta.Size {
 			_ = body.Close()
 			return nil, provider.ObjectMeta{}, &SizeMismatchError{Key: srcKey, Expected: expectedSize, Got: meta.Size}
 		}
 		receipt.SourceLastModified = meta.LastModified
+		receipt.SourceETag = meta.ETag
+		receipt.SourceVersion = meta.Version
 		return body, meta, nil
 	}
 	if expectedSize > 0 && shouldUseMultipart(expectedSize, uploadOpts.MultipartThreshold, putter) {
