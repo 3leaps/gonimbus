@@ -15,13 +15,36 @@ changes.
 
 ## [Unreleased]
 
-### Library API
+## [0.5.1] - 2026-11-20
 
-- Additive: `provider.RevisionHeader` optional interface (`HeadRevision(ctx, key, revision)`) implemented by `pkg/provider/s3` (`(*Provider).HeadRevision`) and `pkg/provider/gcs` (`(*Provider).HeadRevision`) for revision-pinned source metadata lookups without falling back to unversioned `Head`.
+**Opt-in `--require-source-match` source-read binding and input `source_version_id` native version pinning for `transfer reflow`, additive `provider.RevisionHeader` (`HeadRevision`) interface, Go `1.26.11` toolchain and dependency security updates, and retirement of opt-in `-tags gonimbus_libsql`.**
+
+Adds strict source-read binding (`--require-source-match` / `reflow.Config.RequireSourceMatch`) and input-side native version pinning (`source_version_id` on `gonimbus.reflow.input.v1`) across both the `pkg/reflow` library engine and CLI worker pool so copied bytes are bound to the admitted source revision before destination writes; introduces the additive `provider.RevisionHeader` optional interface (`HeadRevision`) on S3 and GCS providers for revision-pinned metadata and timestamp resolution; updates the Go toolchain pin to `go1.26.11` (`GO-2026-6859`) along with cooled Go module dependencies; and retires the opt-in `-tags gonimbus_libsql` build tag and `github.com/tursodatabase/go-libsql` dependency.
+
+See [`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md) for the narrative walkthrough.
+
+### Added
+
+- Opt-in `--require-source-match` CLI flag and `reflow.Config.RequireSourceMatch` across both the `pkg/reflow` engine and CLI worker pool to bind source reads to the admitted revision via `provider.RevisionGetter` (`GetObjectRevision`) across copy, conditional copy, quarantine copy, and duplicate body comparisons. Refuses non-`RevisionGetter` sources at preflight (`foundry.ExitInvalidArgument`, exit code `40`, `reason: "replay_unverifiable"`) with a bounded 1 MiB sniff before destination probing, fails closed on missing source tokens (`reason: "source_token_missing"`), and distinguishes `source_changed` from `not_found` without misclassifying source `412` responses as destination collisions.
+- Optional `source_version_id` field (`minLength: 1`, `pattern: "\\S"`) on `gonimbus.reflow.input.v1` (`schemas/gonimbus/v1.0.0/reflow-input.v1.schema.json`) honored via native version-pinned reads (`RevisionNative`: S3 `VersionId`, GCS generation number) whenever present, with dual-token ETag verification before writing destination bytes and fail-closed rejection (`reason: "replay_unverifiable"`) on blank/whitespace values, JSON `null`, S3 `"null"` sentinel version IDs, non-positive GCS generations, and non-versioned providers (`file://`).
+  - **Compatibility guard:** If you rely on source binding, including `source_version_id`, pass `--require-source-match`. gonimbus 0.5.0 and earlier reject the flag, so the run fails closed. Without the flag, 0.5.0 ignores `source_version_id` and copies the current object.
+- Read-bound `source_etag`, optional `source_version_id`, and `source_match` (`expected_etag`, `expected_version_id`, `observed_etag`, `observed_version_id`) on pinned `gonimbus.reflow.v1` terminal records (`schemas/gonimbus/v1.0.0/reflow.v1.schema.json`), while preserving byte-identical unpinned output when neither `--require-source-match` nor `source_version_id` is set.
+- `SourceSizeKnown` tracking on CLI reflow tasks so equal-timestamp `overwrite-if-source-newer` tie-breakers refuse unknown source size (`collision.source_size_unavailable`) with full parity between the CLI pool and `pkg/reflow`.
+
+### Changed
+
+- Pin Go toolchain to `go1.26.11` (keeping `go 1.26.0` module directive) across `go.mod`, CI/security/release workflows, release workflow pin checks, and source-install documentation (addresses `GO-2026-6859`).
+- Refresh cooled Go module dependencies (`aws-sdk-go-v2` family, `smithy-go`, `cloud.google.com/go/storage v1.70.0`, `google.golang.org/api v0.313.0`, `modernc.org/libc v1.81.0`, `modernc.org/sqlite v1.62.0`, `github.com/bmatcuk/doublestar/v4 v4.10.4`, `github.com/go-chi/chi/v5 v5.5.0`, `github.com/spf13/pflag v1.1.0`, `golang.org/x/crypto v0.59.0`, `golang.org/x/oauth2 v0.38.0`, `golang.org/x/sync v0.25.0`, `golang.org/x/sys v0.50.0`, `golang.org/x/text v0.44.0`, `google.golang.org/grpc v1.85.0`).
+- Harden provider revision reads and receipt-handle sanitization: quote S3 `If-Match` headers per RFC 9110, populate S3 `Head` `VersionId`, split missing-version `404`/`NoSuchVersion` into `source_changed` vs `not_found`, refuse transparently decompressed GCS responses, verify GCS stream length and Castagnoli CRC32C (including valid zero checksums and SDK CRC read errors), and sanitize receipt handles in linear time across JSONL records, SQLite checkpoints, collision observations, and provenance sidecars.
+- Align `.goneat/tools.yaml` `goneat` tag to `v0.6.8`, bump CI `golangci-lint` to `v2.15.0`, harden `Makefile` `license-audit` ephemeral `sbom` cleanup against symlinks, and resolve local non-CI `decernor` via `GONIMBUS_DECERNOR_BIN`, `DECERNOR_BIN`, then `PATH` in `make release-anchors-check`.
 
 ### Removed
 
 - **Opt-in `-tags gonimbus_libsql` build tag and `github.com/tursodatabase/go-libsql` dependency:** retired because Go `1.26.11` rejects precompiled LTO bitcode sections in `#cgo LDFLAGS` static archives. All builds use pure-Go `modernc.org/sqlite` for local index stores; remote `libsql://` and `https://` index URLs fail closed with `"remote libsql is not supported in this release"`.
+
+### Library API
+
+- Additive: `provider.RevisionHeader` optional interface (`HeadRevision(ctx, key, revision)`) implemented by `pkg/provider/s3` (`(*Provider).HeadRevision`) and `pkg/provider/gcs` (`(*Provider).HeadRevision`) for revision-pinned source metadata lookups without falling back to unversioned `Head`. No breaking changes to the Stable embedded library API.
 
 ## [0.5.0] - 2026-11-11
 

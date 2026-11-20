@@ -4,6 +4,29 @@ This file contains release notes for up to the three most recent releases in rev
 
 ---
 
+## [0.5.1] - 2026-11-20
+
+**Opt-in `--require-source-match` source-read binding and input `source_version_id` native version pinning for `transfer reflow`, additive `provider.RevisionHeader` (`HeadRevision`), Go `1.26.11` security and dependency updates, and retirement of `-tags gonimbus_libsql`**
+
+v0.5.1 adds opt-in strict source-read binding (`--require-source-match`) and input-side native version pinning (`source_version_id`) for `transfer reflow` across both `pkg/reflow` and the CLI pool so copied bytes match the admitted source revision before destination writes, adds `provider.RevisionHeader` (`HeadRevision`) on S3 and GCS providers, updates the Go toolchain pin to `go1.26.11` (`GO-2026-6859`) with cooled Go module refreshes, and retires the opt-in `-tags gonimbus_libsql` build tag.
+
+- **Strict source-read binding (`--require-source-match`).** Binds `transfer reflow` source reads to the admitted ETag or native object version via `provider.RevisionGetter` across copy, conditional copy, quarantine copy, and duplicate body comparisons. Refuses non-`RevisionGetter` sources at preflight (exit code `40`, `reason: "replay_unverifiable"`), fails closed on missing expected tokens (`reason: "source_token_missing"`), separates `source_changed` from `not_found` without misclassifying source `412` responses as destination collisions, and records read-bound `source_etag`, optional `source_version_id`, and `source_match` on pinned terminal records while preserving byte-identical unpinned output.
+- **Native input version pinning (`source_version_id`) and `provider.RevisionHeader`.** Honors optional `source_version_id` on `gonimbus.reflow.input.v1` via S3 `VersionId` and GCS generation-pinned reads (including historical versions after overwrite or behind S3 delete markers), performs dual-token ETag verification before writing destination bytes, routes mandatory metadata and `overwrite-if-source-newer` timestamp lookups through `HeadRevision` rather than unversioned `Head`, and fails closed (`replay_unverifiable`) on blank/null tokens, S3 `"null"`, non-positive GCS generations, and non-versioned (`file://`) providers.
+  - **Compatibility guard:** If you rely on source binding, including `source_version_id`, pass `--require-source-match`. gonimbus 0.5.0 and earlier reject the flag, so the run fails closed. Without the flag, 0.5.0 ignores `source_version_id` and copies the current object.
+- **Go `1.26.11` toolchain (`GO-2026-6859`) and cooled dependency updates.** Updates the Go toolchain pin to `go1.26.11` (keeping the `go 1.26.0` directive), refreshes cooled Go module dependencies (`aws-sdk-go-v2`, `cloud.google.com/go/storage`, `google.golang.org/api`, `modernc.org/sqlite`, `doublestar`, `chi`, `pflag`, `golang.org/x/*`, `grpc`), and bumps CI `golangci-lint` to `v2.15.0`.
+- **Retirement of opt-in `-tags gonimbus_libsql`.** Removes the opt-in `-tags gonimbus_libsql` build tag and `github.com/tursodatabase/go-libsql` dependency because Go `1.26.11` rejects precompiled LTO bitcode sections in `#cgo LDFLAGS` static archives. Local SQLite indexes continue using pure-Go `modernc.org/sqlite`; remote `libsql://` and `https://` index URLs fail closed with `"remote libsql is not supported in this release"`.
+
+### Upgrade
+
+```bash
+brew install 3leaps/tap/gonimbus
+go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.5.1
+```
+
+See [docs/releases/v0.5.1.md](docs/releases/v0.5.1.md) for the complete release notes.
+
+---
+
 ## [0.5.0] - 2026-11-11
 
 **`durable-index/v0` contract adoption and plan safeguards, `parquet-inventory/v0` ZSTD segments with legacy dual-read and portable relative markers, truthful dot-segment policy and per-run engine provenance, discovered `segments` build scopes and offline `migrate-match-scope`, and Gen-2.1 release ceremony refinements**
@@ -144,54 +167,4 @@ go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.7
 ```
 
 See [docs/releases/v0.4.7.md](docs/releases/v0.4.7.md) for the complete
-release notes.
-
----
-
-## [0.4.6] - 2026-11-08
-
-**Advisory control-record marker, faster durable prefix queries, look-alike flag hints, and release provenance hardening**
-
-v0.4.6 adds a forward-compatible `"advisory": true` envelope marker for future
-control records in `transfer reflow` pipelines, prunes trailing segments during
-durable `index query --pattern` prefix scans, appends actionable hints for
-look-alike unknown CLI flags, and tightens release provenance and dependency
-hygiene.
-
-- **Advisory control-record envelope marker.** `transfer reflow` skips
-  unrecognized future control records marked with top-level `"advisory": true`
-  (outside recognized work, integrity, and error record families) without
-  incrementing `invalid_inputs`, emits at most one `gonimbus.warning.v1`
-  (`REFLOW_ADVISORY_RECORD_SKIPPED`) per distinct type (up to 16 types, with a
-  single `REFLOW_ADVISORY_WARNING_CAP_REACHED` warning record if exceeded), and
-  continues without aborting the batch. `content probe` stamps `"advisory":
-true` on `gonimbus.content.probe.summary.v1`.
-- **Durable prefix segment pruning.** `index query --pattern <glob>` stops
-  opening and hashing segments once a segment's `MinRelKey` sorts strictly
-  after the pattern's literal prefix (while still reading segments with
-  inverted bounds).
-- **Look-alike CLI flag hints.** Unknown `--profile`/`-p`, `--json` and
-  `--count` flags on subcommands with different flag names or invocation shapes
-  append a targeted hint before the usage block, and `inspect` documents its
-  default 100-object `--limit` cap.
-- **Release provenance and immutable publication.** Release publication stages
-  tagged public verification keys as release assets, verifies Decernor's
-  SHA-256 before execution, uses an isolated `GNUPGHOME` for tag and anchor
-  verification, and verifies GitHub release immutability on publish.
-- **Security and dependency updates.** Updates `github.com/andybalholm/brotli`
-  to v1.2.7 (`GO-2026-6888`), `github.com/klauspost/compress` to v1.20.2
-  (`GO-2026-6865`), `github.com/go-chi/chi/v5` to v5.4.0,
-  `github.com/go-jose/go-jose/v4` to v4.1.6, `golang.org/x/net` to v0.62.0,
-  `golang.org/x/crypto` to `v0.58.1-0.20261009181718-2f1f834330b2` (cooled
-  2026-10-09 commit), `golang.org/x/sys` to v0.49.0, `golang.org/x/sync` to
-  v0.24.0, and `golang.org/x/text` to v0.43.0, and canonicalizes top-level
-  `LICENSE` and `NOTICE`.
-
-### Upgrade
-
-```bash
-go install github.com/3leaps/gonimbus/cmd/gonimbus@v0.4.6
-```
-
-See [docs/releases/v0.4.6.md](docs/releases/v0.4.6.md) for the complete
 release notes.

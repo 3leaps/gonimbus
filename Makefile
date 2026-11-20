@@ -592,7 +592,7 @@ release-workflow-check: ## Check workflow pins and the read-only release workflo
 
 release-anchors-check: ## Check the committed public keys against both fingerprint anchors (needs gpg, decernor or GONIMBUS_DECERNOR_BIN)
 	@DECERNOR_PATH="$${GONIMBUS_DECERNOR_BIN:-}"; \
-	if [ -z "$$DECERNOR_PATH" ] && [ -z "$${CI:-}" ]; then DECERNOR_PATH="$$(command -v decernor 2>/dev/null || true)"; fi; \
+	if [ -z "$$DECERNOR_PATH" ] && [ -z "$${CI:-}" ]; then DECERNOR_PATH="$${DECERNOR_BIN:-$$(command -v decernor 2>/dev/null || true)}"; fi; \
 	GONIMBUS_DECERNOR_BIN="$$DECERNOR_PATH" ./scripts/release-verify-committed-anchors.sh
 	@./scripts/validate-release-anchors.sh
 

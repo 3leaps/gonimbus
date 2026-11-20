@@ -50,7 +50,7 @@ gonimbus version
 **Exact-version / verified binary install (`sfetch` or GitHub Releases):**
 
 ```bash
-sfetch --repo 3leaps/gonimbus --tag v0.5.0 --dest-dir ~/.local/bin
+sfetch --repo 3leaps/gonimbus --tag v0.5.1 --dest-dir ~/.local/bin
 ```
 
 Prebuilt standalone executables for `darwin-arm64`, `linux-amd64`, `linux-arm64`, `windows-amd64`, and `windows-arm64` are attached to each immutable [GitHub release](https://github.com/3leaps/gonimbus/releases), alongside `SHA256SUMS` and `SHA512SUMS` manifests, detached minisign (`.minisig`) and OpenPGP (`.asc`) signatures, the tagged public verification keys (`gonimbus-minisign.pub`, `gonimbus-release-signing-key.asc`), and Decernor fingerprint anchors (`expected-fingerprints.txt`, `expected-fingerprints.ndjson`). See [docs/security/README.md](docs/security/README.md) to verify the signed tag, release assets, and published registries.
@@ -177,9 +177,13 @@ Adaptive `transfer reflow --parallel` behavior and throughput tuning are
 documented in [docs/user-guide/reflow.md](docs/user-guide/reflow.md) and
 [docs/user-guide/concurrency-and-throughput.md](docs/user-guide/concurrency-and-throughput.md).
 Terminal reflow records can carry what the destination acknowledged for each
-write, and `content probe` ends with a summary record and exits 60 for a
-completed run with object data errors; see
-[Terminal write receipts](docs/user-guide/reflow.md#terminal-write-receipts) and
+write, `transfer reflow --require-source-match` (and optional input
+`source_version_id`) bind source reads to the admitted ETag or native object
+version before writing destination bytes, and `content probe` ends with a
+summary record and exits 60 for a completed run with object data errors; see
+[Source-Read Binding](docs/user-guide/transfer.md#source-read-binding---require-source-match),
+[Terminal write receipts](docs/user-guide/reflow.md#terminal-write-receipts),
+and
 [Probe termination and process result](docs/user-guide/streaming.md#probe-termination-and-process-result).
 **Durable is the default index format** (`index build` publishes
 `durable-index/v0` `parquet-inventory/v0` ZSTD segments + manifest unless you
@@ -205,6 +209,7 @@ flag > env > config > default). See
 [Durable Index Format](docs/user-guide/durable-index.md),
 [Reuse a finished inventory](docs/user-guide/durable-index.md#reuse-a-finished-inventory-do-not-list-the-bucket-again),
 [Version-gated downstream inventory](docs/user-guide/durable-index.md#version-gated-downstream-inventory),
+[v0.5.1 release notes](docs/releases/v0.5.1.md),
 [v0.5.0 release notes](docs/releases/v0.5.0.md),
 [v0.4.7 release notes](docs/releases/v0.4.7.md),
 [v0.4.6 release notes](docs/releases/v0.4.6.md),
@@ -284,6 +289,7 @@ gonimbus stream put <uri>      # Upload raw/framed stdin, multipart for large ob
 # Operations
 gonimbus transfer --job <path> # Copy/move objects between buckets
 gonimbus transfer reflow <source> --dest <uri> # Copy objects to a new key layout
+gonimbus transfer reflow --stdin --dest <uri> --require-source-match # Strict revision-bound reflow
 gonimbus inspect-pair --from-reflow <path> --expected-dest-prefix <uri> # Verify reflow writes
 gonimbus preflight --job <path> # Verify permissions before transfer
 gonimbus doctor                # Environment/auth checks
