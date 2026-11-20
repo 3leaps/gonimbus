@@ -379,7 +379,7 @@ func summaryKeys(objects []provider.ObjectSummary) []string {
 func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
 	ctx := context.Background()
 	p := newFakeProvider(t, []fakestorage.Object{
-		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("alpha")},
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("first")},
 	})
 
 	head, err := p.Head(ctx, "doc.txt")
@@ -396,12 +396,12 @@ func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
 	raw, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.NoError(t, body.Close())
-	require.Equal(t, "alpha", string(raw))
+	require.Equal(t, "first", string(raw))
 	require.Equal(t, head.ETag, meta.ETag)
 	require.Equal(t, head.Version, meta.Version)
 
 	// Same-size replacement returns ErrSourceChanged (not ErrNotFound).
-	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("bravo"), 5))
+	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("after"), 5))
 	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
 		Kind:  provider.RevisionETag,
 		Value: head.ETag,
@@ -410,7 +410,7 @@ func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
 	require.False(t, provider.IsNotFound(err))
 
 	// Different-size replacement returns ErrSourceChanged.
-	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("charlie-longer"), int64(len("charlie-longer"))))
+	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("longer-payload"), int64(len("longer-payload"))))
 	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
 		Kind:  provider.RevisionETag,
 		Value: head.ETag,
@@ -431,7 +431,7 @@ func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
 func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
 	ctx := context.Background()
 	p := newFakeProvider(t, []fakestorage.Object{
-		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("alpha")},
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("first")},
 	})
 
 	head, err := p.Head(ctx, "doc.txt")
@@ -447,7 +447,7 @@ func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
 	raw, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.NoError(t, body.Close())
-	require.Equal(t, "alpha", string(raw))
+	require.Equal(t, "first", string(raw))
 	require.Equal(t, head.Version, meta.Version)
 
 	// Negative and zero generations are refused before any GCS request.
@@ -476,8 +476,8 @@ func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
 
 func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	v1Body := []byte("alpha")
-	v2Body := []byte("bravo") // same length (5 bytes), different content
+	v1Body := []byte("first")
+	v2Body := []byte("after") // same length (5 bytes), different content
 	v1CRC := crc32.Checksum(v1Body, gcsCRC32CTable)
 	v2CRC := crc32.Checksum(v2Body, gcsCRC32CTable)
 	encodeCRC := func(c uint32) string {
