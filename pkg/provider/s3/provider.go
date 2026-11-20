@@ -421,10 +421,21 @@ func (p *Provider) HeadRevision(ctx context.Context, key string, revision provid
 			Provider: provider.ProviderS3,
 			Bucket:   p.bucket,
 			Key:      key,
-			Err:      provider.ErrSourceChanged,
+			Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
 		}
 	}
 	return meta, nil
+}
+
+type observedSourceRevisionError struct {
+	etag    string
+	version string
+}
+
+func (e observedSourceRevisionError) Error() string { return provider.ErrSourceChanged.Error() }
+func (e observedSourceRevisionError) Unwrap() error { return provider.ErrSourceChanged }
+func (e observedSourceRevisionError) ObservedSourceRevision() (string, string) {
+	return e.etag, e.version
 }
 
 // GetObject downloads an object as a stream.
@@ -544,7 +555,7 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 			Provider: provider.ProviderS3,
 			Bucket:   p.bucket,
 			Key:      key,
-			Err:      provider.ErrSourceChanged,
+			Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
 		}
 	}
 	return out.Body, meta, nil

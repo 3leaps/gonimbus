@@ -1,6 +1,7 @@
 package reflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,7 +100,7 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 		SourceURI        string            `json:"source_uri"`
 		SourceKey        string            `json:"source_key"`
 		SourceETag       string            `json:"source_etag"`
-		SourceVersionID  *string           `json:"source_version_id"`
+		SourceVersionID  json.RawMessage   `json:"source_version_id"`
 		SourceSize       *int64            `json:"source_size_bytes"`
 		SourceLastMod    time.Time         `json:"source_last_modified"`
 		Vars             map[string]string `json:"vars"`
@@ -149,10 +150,15 @@ func parseReflowInputData(raw json.RawMessage) (reflowInput, error) {
 	if sk := strings.TrimPrefix(strings.TrimSpace(data.SourceKey), "/"); sk != "" {
 		key = sk
 	}
-	sourceVersionIDPresent := data.SourceVersionID != nil
+	var sourceVersionIDPresent bool
 	var sourceVersionID string
-	if data.SourceVersionID != nil {
-		sourceVersionID = *data.SourceVersionID
+	if rawVer := bytes.TrimSpace(data.SourceVersionID); len(rawVer) > 0 {
+		sourceVersionIDPresent = true
+		if string(rawVer) != "null" {
+			if err := json.Unmarshal(rawVer, &sourceVersionID); err != nil {
+				return reflowInput{}, fmt.Errorf("invalid source_version_id: %w", err)
+			}
+		}
 	}
 	return reflowInput{
 		SourceProvider:         u.Provider,

@@ -989,9 +989,9 @@ func TestSourceVersionIDPinningEngine(t *testing.T) {
 		require.Equal(t, "ver-1", terminal.SourceMatch.ObservedVersionID)
 	})
 
-	t.Run("whitespace-only source_version_id fails closed instead of falling back", func(t *testing.T) {
+	t.Run("whitespace-only or JSON null source_version_id fails closed instead of falling back", func(t *testing.T) {
 		for _, requireMatch := range []bool{true, false} {
-			for _, rawVer := range []string{"   ", ""} {
+			for _, rawJSONVal := range []string{`"   "`, `""`, `null`} {
 				src := newSourceMatchStubProvider()
 				src.put("doc.xml", "live-bytes", "etag-live", "ver-live", now)
 				dst := newCopyMemoryProvider()
@@ -1001,7 +1001,7 @@ func TestSourceVersionIDPinningEngine(t *testing.T) {
 				runner, err := NewRunner(cfg)
 				require.NoError(t, err)
 
-				line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/doc.xml","source_key":"doc.xml","source_etag":"etag-live","source_version_id":%q,"source_size_bytes":10,"dest_rel_key":"doc.xml"}}`, rawVer)
+				line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/doc.xml","source_key":"doc.xml","source_etag":"etag-live","source_version_id":%s,"source_size_bytes":10,"dest_rel_key":"doc.xml"}}`, rawJSONVal)
 				_, err = runner.Run(context.Background(), streamSourceFor(src, line))
 				require.Error(t, err)
 				require.Zero(t, src.getCalls, "blank source_version_id must never fall back to unpinned GetObject")

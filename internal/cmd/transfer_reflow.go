@@ -664,12 +664,22 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 			ExpectedVersionID: reflowpkg.SafeSourceVersionID(expectedVersionID),
 		}
 		var etagMismatch *transfer.SourceETagMismatchError
-		if errors.As(copyErr, &etagMismatch) {
+		var providerObs interface {
+			ObservedSourceRevision() (string, string)
+		}
+		switch {
+		case errors.As(copyErr, &etagMismatch):
 			match.ObservedETag = reflowpkg.SafeReceiptHandle(etagMismatch.ObservedETag)
 			match.ObservedVersionID = reflowpkg.SafeSourceVersionID(etagMismatch.ObservedVersion)
-		} else if headMeta, headErr := retryProbeHead(ctx, src, key); headErr == nil && headMeta != nil {
-			match.ObservedETag = reflowpkg.SafeReceiptHandle(headMeta.ETag)
-			match.ObservedVersionID = reflowpkg.SafeSourceVersionID(headMeta.Version)
+		case errors.As(copyErr, &providerObs):
+			obsETag, obsVer := providerObs.ObservedSourceRevision()
+			match.ObservedETag = reflowpkg.SafeReceiptHandle(obsETag)
+			match.ObservedVersionID = reflowpkg.SafeSourceVersionID(obsVer)
+		case expectedVersionID == "":
+			if headMeta, headErr := retryProbeHead(ctx, src, key); headErr == nil && headMeta != nil {
+				match.ObservedETag = reflowpkg.SafeReceiptHandle(headMeta.ETag)
+				match.ObservedVersionID = reflowpkg.SafeSourceVersionID(headMeta.Version)
+			}
 		}
 		return match
 	}

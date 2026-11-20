@@ -1395,14 +1395,14 @@ func TestTransferReflowSourceVersionIDS3DualPath(t *testing.T) {
 				require.Equal(t, "etag-v1", mismatch.SourceMatch.ObservedETag)
 				require.Equal(t, "ver-1", mismatch.SourceMatch.ObservedVersionID)
 
-				// 3. NoSuchVersion on existing key reports source_changed with live observed version.
+				// 3. NoSuchVersion on existing key reports source_changed without conflating live version via unversioned HEAD.
 				wrongver := byDest["data/a/wrongver.xml"]
 				require.Equal(t, "failed", wrongver.Status)
 				require.Equal(t, "source_changed", wrongver.Reason)
 				require.False(t, dstProv.hasObject("data/a/wrongver.xml"))
 				require.NotNil(t, wrongver.SourceMatch)
 				require.Equal(t, "ver-deleted", wrongver.SourceMatch.ExpectedVersionID)
-				require.Equal(t, "ver-live", wrongver.SourceMatch.ObservedVersionID)
+				require.Empty(t, wrongver.SourceMatch.ObservedVersionID, "version-pinned source_changed must not issue unversioned HEAD to report live version")
 
 				// 4. NoSuchVersion on deleted key reports not_found.
 				missing := byDest["data/a/missing.xml"]
@@ -1530,48 +1530,50 @@ func TestTransferReflowSourceVersionIDHardeningDualPath(t *testing.T) {
 	}
 
 	for _, tc := range paths {
-		t.Run(tc.name+"/whitespace-source-version-id-refused", func(t *testing.T) {
+		t.Run(tc.name+"/whitespace-and-json-null-source-version-id-refused", func(t *testing.T) {
 			for _, requireMatch := range []bool{true, false} {
-				withTransferReflowTestState(t)
-				s3Srv := newFakeS3HTTPServer(t)
-				s3Srv.put("a/doc.xml", "live-body", "etag-live", "ver-live", t1)
-				srcProv, err := s3.New(context.Background(), s3.Config{
-					Bucket: "source-bucket", Region: "us-east-1", Endpoint: s3Srv.server.URL, ForcePathStyle: true, Anonymous: true,
-				})
-				require.NoError(t, err)
-				dstProv := newReflowMemoryProvider()
-				useTransferReflowProviderFactories(t, providerdispatch.Factories{
-					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-						if cfg.Bucket == "source-bucket" {
-							return srcProv, nil
-						}
-						return dstProv, nil
-					},
-				})
+				for _, rawJSONVal := range []string{`"   "`, `null`} {
+					withTransferReflowTestState(t)
+					s3Srv := newFakeS3HTTPServer(t)
+					s3Srv.put("a/doc.xml", "live-body", "etag-live", "ver-live", t1)
+					srcProv, err := s3.New(context.Background(), s3.Config{
+						Bucket: "source-bucket", Region: "us-east-1", Endpoint: s3Srv.server.URL, ForcePathStyle: true, Anonymous: true,
+					})
+					require.NoError(t, err)
+					dstProv := newReflowMemoryProvider()
+					useTransferReflowProviderFactories(t, providerdispatch.Factories{
+						S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+							if cfg.Bucket == "source-bucket" {
+								return srcProv, nil
+							}
+							return dstProv, nil
+						},
+					})
 
-				line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/doc.xml","source_key":"a/doc.xml","source_etag":"etag-live","source_version_id":"   ","source_size_bytes":9,"dest_rel_key":"a/doc.xml"}}` + "\n"
-				args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1", "--checkpoint", filepath.Join(t.TempDir(), "state.db")}
-				if requireMatch {
-					args = append(args, "--require-source-match")
-				}
-				args = append(args, tc.extra...)
-				stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
-				require.Error(t, execErr)
-				require.False(t, dstProv.hasObject("data/a/doc.xml"))
-				if requireMatch {
-					require.Contains(t, execErr.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
-					require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
-					require.Empty(t, dstProv.conditionalPutCallsSnapshot())
-				} else {
-					recs := parseTypedReflowRecords(t, stdout)
-					var terminal reflowpkg.Record
-					for _, rec := range recs {
-						if rec.Status != "in_progress" {
-							terminal = rec
-						}
+					line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/doc.xml","source_key":"a/doc.xml","source_etag":"etag-live","source_version_id":%s,"source_size_bytes":9,"dest_rel_key":"a/doc.xml"}}`+"\n", rawJSONVal)
+					args := []string{"--stdin", "--dest", "s3://dest-bucket/data/", "--parallel", "1", "--checkpoint", filepath.Join(t.TempDir(), "state.db")}
+					if requireMatch {
+						args = append(args, "--require-source-match")
 					}
-					require.Equal(t, "failed", terminal.Status)
-					require.Equal(t, "replay_unverifiable", terminal.Reason)
+					args = append(args, tc.extra...)
+					stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+					require.Error(t, execErr)
+					require.False(t, dstProv.hasObject("data/a/doc.xml"))
+					if requireMatch {
+						require.Contains(t, execErr.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
+						require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
+						require.Empty(t, dstProv.conditionalPutCallsSnapshot())
+					} else {
+						recs := parseTypedReflowRecords(t, stdout)
+						var terminal reflowpkg.Record
+						for _, rec := range recs {
+							if rec.Status != "in_progress" {
+								terminal = rec
+							}
+						}
+						require.Equal(t, "failed", terminal.Status)
+						require.Equal(t, "replay_unverifiable", terminal.Reason)
+					}
 				}
 			}
 		})

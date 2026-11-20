@@ -1,6 +1,8 @@
 package gcs
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -448,6 +450,12 @@ func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
 	require.Equal(t, "alpha", string(raw))
 	require.Equal(t, head.Version, meta.Version)
 
+	// Negative and zero generations are refused before any GCS request.
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "-1"})
+	require.True(t, provider.IsReplayUnverifiable(err), "negative generation must fail closed with ErrReplayUnverifiable, got %v", err)
+	_, err = p.HeadRevision(ctx, "doc.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "-1"})
+	require.True(t, provider.IsReplayUnverifiable(err), "negative generation HeadRevision must fail closed with ErrReplayUnverifiable, got %v", err)
+
 	// Non-existent generation while live object exists reports ErrSourceChanged.
 	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
 		Kind:  provider.RevisionNative,
@@ -485,7 +493,8 @@ func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("alt") == "media" || strings.HasPrefix(r.URL.Path, "/download/") {
+				isMetadata := strings.HasPrefix(r.URL.Path, "/storage/v1/") && r.URL.Query().Get("alt") != "media"
+				if !isMetadata {
 					// Broken media endpoint ignores generation=101 and serves v2 bytes!
 					if withMediaHeaders {
 						w.Header().Set("X-Goog-Generation", "202")
@@ -538,4 +547,97 @@ func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
 			require.True(t, provider.IsSourceChanged(err), "media serving unpinned v2 bytes must fail closed with ErrSourceChanged, got %v", err)
 		})
 	}
+
+	t.Run("valid-zero-crc32c-object-rejects-different-same-length-body", func(t *testing.T) {
+		zeroCRCBytes := []byte{0xab, 0x9b, 0xe0, 0x9b}
+		require.Equal(t, uint32(0), crc32.Checksum(zeroCRCBytes, gcsCRC32CTable), "sanity: fixture must have Castagnoli CRC32C 0x00000000")
+		wrongBody := []byte{0x01, 0x02, 0x03, 0x04}
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isMetadata := strings.HasPrefix(r.URL.Path, "/storage/v1/") && r.URL.Query().Get("alt") != "media"
+			if !isMetadata {
+				// Media endpoint omits X-Goog-Hash and serves different 4-byte body.
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wrongBody)))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(wrongBody)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bucket":         "bucket",
+				"name":           "zero.bin",
+				"generation":     "303",
+				"metageneration": "1",
+				"size":           fmt.Sprintf("%d", len(zeroCRCBytes)),
+				"etag":           "etag-zero",
+				"crc32c":         encodeCRC(0),
+			})
+		}))
+		defer srv.Close()
+
+		client, err := storage.NewClient(ctx,
+			option.WithEndpoint(srv.URL+"/storage/v1/"),
+			option.WithHTTPClient(srv.Client()),
+			option.WithoutAuthentication(),
+		)
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+
+		p := &Provider{client: client, bucket: "bucket", maxKeys: DefaultMaxKeys}
+		body, _, err := p.GetObjectRevision(ctx, "zero.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "303"})
+		if err == nil {
+			_, readErr := io.ReadAll(body)
+			_ = body.Close()
+			err = readErr
+		}
+		require.Error(t, err)
+		require.True(t, provider.IsSourceChanged(err), "valid zero CRC32C object must reject wrong body, got %v", err)
+	})
+
+	t.Run("transparently-decompressed-response-refused-as-unverifiable", func(t *testing.T) {
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		_, err := gz.Write([]byte("plain-payload"))
+		require.NoError(t, err)
+		require.NoError(t, gz.Close())
+		storedBytes := gzBuf.Bytes()
+		storedCRC := crc32.Checksum(storedBytes, gcsCRC32CTable)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isMetadata := strings.HasPrefix(r.URL.Path, "/storage/v1/") && r.URL.Query().Get("alt") != "media"
+			if !isMetadata {
+				// Simulate GCS server-side transparent decompression (transcoding):
+				// stored as gzip, served uncompressed without Content-Encoding.
+				w.Header().Set("X-Goog-Stored-Content-Encoding", "gzip")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("plain-payload"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bucket":          "bucket",
+				"name":            "compressed.txt",
+				"generation":      "404",
+				"metageneration":  "1",
+				"contentEncoding": "gzip",
+				"size":            fmt.Sprintf("%d", len(storedBytes)),
+				"etag":            "etag-gz",
+				"crc32c":          encodeCRC(storedCRC),
+			})
+		}))
+		defer srv.Close()
+
+		client, err := storage.NewClient(ctx,
+			option.WithEndpoint(srv.URL+"/storage/v1/"),
+			option.WithHTTPClient(srv.Client()),
+			option.WithoutAuthentication(),
+		)
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+
+		p := &Provider{client: client, bucket: "bucket", maxKeys: DefaultMaxKeys}
+		_, _, err = p.GetObjectRevision(ctx, "compressed.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "404"})
+		require.Error(t, err)
+		require.True(t, provider.IsReplayUnverifiable(err), "transparently decompressed response must fail closed with ErrReplayUnverifiable, got %v", err)
+	})
 }

@@ -250,7 +250,7 @@ func (p *Provider) HeadRevision(ctx context.Context, key string, revision provid
 	switch revision.Kind {
 	case provider.RevisionNative:
 		parsed, err := strconv.ParseInt(revision.Value, 10, 64)
-		if err != nil || parsed == 0 {
+		if err != nil || parsed <= 0 {
 			return nil, fmt.Errorf("%w: invalid GCS generation", provider.ErrReplayUnverifiable)
 		}
 		attrs, err := obj.Generation(parsed).Attrs(ctx)
@@ -282,7 +282,7 @@ func (p *Provider) HeadRevision(ctx context.Context, key string, revision provid
 				Provider: provider.ProviderGCS,
 				Bucket:   p.bucket,
 				Key:      key,
-				Err:      provider.ErrSourceChanged,
+				Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
 			}
 		}
 		return meta, nil
@@ -307,6 +307,17 @@ func (p *Provider) HeadRevision(ctx context.Context, key string, revision provid
 }
 
 var gcsCRC32CTable = crc32.MakeTable(crc32.Castagnoli)
+
+type observedSourceRevisionError struct {
+	etag    string
+	version string
+}
+
+func (e observedSourceRevisionError) Error() string { return provider.ErrSourceChanged.Error() }
+func (e observedSourceRevisionError) Unwrap() error { return provider.ErrSourceChanged }
+func (e observedSourceRevisionError) ObservedSourceRevision() (string, string) {
+	return e.etag, e.version
+}
 
 // verifyingGCSReader verifies the downloaded media stream against the pinned
 // object's expected size and Castagnoli CRC32C so a media endpoint that ignores
@@ -376,7 +387,7 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	switch revision.Kind {
 	case provider.RevisionNative:
 		parsed, err := strconv.ParseInt(revision.Value, 10, 64)
-		if err != nil || parsed == 0 {
+		if err != nil || parsed <= 0 {
 			return nil, provider.ObjectMeta{}, fmt.Errorf("%w: invalid GCS generation", provider.ErrReplayUnverifiable)
 		}
 		generation = parsed
@@ -430,7 +441,7 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 			Provider: provider.ProviderGCS,
 			Bucket:   p.bucket,
 			Key:      key,
-			Err:      provider.ErrSourceChanged,
+			Err:      observedSourceRevisionError{etag: meta.ETag, version: meta.Version},
 		}
 	}
 	reader, err := versioned.NewReader(ctx)
@@ -457,28 +468,33 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		}
 		return nil, provider.ObjectMeta{}, wrapped
 	}
+	// Refuse transparently decompressed responses on pinned revision reads:
+	// GCS does not supply a verifiable stored-object checksum or byte length
+	// for transcoded media streams, so accepting them would bypass pinning.
+	if reader.Attrs.Decompressed {
+		_ = reader.Close()
+		return nil, provider.ObjectMeta{}, fmt.Errorf("%w: transparently decompressed GCS response cannot be verified against stored revision checksum", provider.ErrReplayUnverifiable)
+	}
 	// Validate authoritative media-response attributes against the pinned
 	// generation's metadata before exposing the body stream.
-	if !reader.Attrs.Decompressed {
-		if reader.Attrs.Size >= 0 && attrs.Size >= 0 && reader.Attrs.Size != attrs.Size {
-			_ = reader.Close()
-			return nil, provider.ObjectMeta{}, &provider.ProviderError{
-				Op:       "GetObjectRevision",
-				Provider: provider.ProviderGCS,
-				Bucket:   p.bucket,
-				Key:      key,
-				Err:      provider.ErrSourceChanged,
-			}
+	if reader.Attrs.Size >= 0 && attrs.Size >= 0 && reader.Attrs.Size != attrs.Size {
+		_ = reader.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderGCS,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
 		}
-		if reader.Attrs.CRC32C != 0 && attrs.CRC32C != 0 && reader.Attrs.CRC32C != attrs.CRC32C {
-			_ = reader.Close()
-			return nil, provider.ObjectMeta{}, &provider.ProviderError{
-				Op:       "GetObjectRevision",
-				Provider: provider.ProviderGCS,
-				Bucket:   p.bucket,
-				Key:      key,
-				Err:      provider.ErrSourceChanged,
-			}
+	}
+	if reader.Attrs.CRC32C != 0 && reader.Attrs.CRC32C != attrs.CRC32C {
+		_ = reader.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderGCS,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
 		}
 	}
 	if reader.Attrs.Metageneration > 0 && attrs.Metageneration > 0 && reader.Attrs.Metageneration != attrs.Metageneration {
@@ -491,22 +507,20 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 			Err:      provider.ErrSourceChanged,
 		}
 	}
-	if !reader.Attrs.Decompressed && (attrs.Size >= 0 || attrs.CRC32C != 0) {
-		vr := &verifyingGCSReader{
-			inner:        reader,
-			bucket:       p.bucket,
-			key:          key,
-			expectedSize: attrs.Size,
-			checkSize:    attrs.Size >= 0,
-			expectedCRC:  attrs.CRC32C,
-			checkCRC:     attrs.CRC32C != 0,
-		}
-		if vr.checkCRC {
-			vr.hasher = crc32.New(gcsCRC32CTable)
-		}
-		return vr, meta, nil
+	// Always verify streamed byte count and Castagnoli CRC32C against the pinned
+	// generation's authoritative metadata — including valid zero CRC32C values
+	// (such as empty objects or payloads like 0xab9be09b whose CRC32C is 0).
+	vr := &verifyingGCSReader{
+		inner:        reader,
+		bucket:       p.bucket,
+		key:          key,
+		expectedSize: attrs.Size,
+		checkSize:    attrs.Size >= 0,
+		expectedCRC:  attrs.CRC32C,
+		checkCRC:     true,
+		hasher:       crc32.New(gcsCRC32CTable),
 	}
-	return reader, meta, nil
+	return vr, meta, nil
 }
 
 // GetRange downloads a byte range as a stream.

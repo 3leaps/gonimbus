@@ -440,7 +440,7 @@ func enqueueReflowLineWithWarnings(
 				SourceURI        string            `json:"source_uri"`
 				SourceKey        string            `json:"source_key"`
 				SourceETag       string            `json:"source_etag"`
-				SourceVersionID  *string           `json:"source_version_id"`
+				SourceVersionID  json.RawMessage   `json:"source_version_id"`
 				SourceSize       *int64            `json:"source_size_bytes"`
 				SourceLastMod    time.Time         `json:"source_last_modified"`
 				Vars             map[string]string `json:"vars"`
@@ -464,10 +464,15 @@ func enqueueReflowLineWithWarnings(
 				inputSize = *data.SourceSize
 				inputSizeKnown = true
 			}
-			sourceVersionIDPresent := data.SourceVersionID != nil
+			var sourceVersionIDPresent bool
 			var sourceVersionID string
-			if data.SourceVersionID != nil {
-				sourceVersionID = *data.SourceVersionID
+			if rawVer := bytes.TrimSpace(data.SourceVersionID); len(rawVer) > 0 {
+				sourceVersionIDPresent = true
+				if string(rawVer) != "null" {
+					if err := json.Unmarshal(rawVer, &sourceVersionID); err != nil {
+						return srcIdentity, fmt.Errorf("invalid source_version_id: %w", err)
+					}
+				}
 			}
 			u, err := uri.ParseURI(data.SourceURI)
 			if err != nil {
@@ -919,9 +924,9 @@ func parseReflowPreflightSourceURI(trimmed string) (*uri.ObjectURI, bool, string
 		switch env.Type {
 		case reflowpkg.ReflowInputRecordType:
 			var data struct {
-				SourceURI       string  `json:"source_uri"`
-				SourceKey       string  `json:"source_key"`
-				SourceVersionID *string `json:"source_version_id"`
+				SourceURI       string          `json:"source_uri"`
+				SourceKey       string          `json:"source_key"`
+				SourceVersionID json.RawMessage `json:"source_version_id"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil || strings.TrimSpace(data.SourceURI) == "" {
 				return nil, false, ""
@@ -930,10 +935,13 @@ func parseReflowPreflightSourceURI(trimmed string) (*uri.ObjectURI, bool, string
 			if err != nil {
 				return nil, false, ""
 			}
-			verPresent := data.SourceVersionID != nil
-			ver := ""
-			if data.SourceVersionID != nil {
-				ver = *data.SourceVersionID
+			var verPresent bool
+			var ver string
+			if rawVer := bytes.TrimSpace(data.SourceVersionID); len(rawVer) > 0 {
+				verPresent = true
+				if string(rawVer) != "null" {
+					_ = json.Unmarshal(rawVer, &ver)
+				}
 			}
 			if u.Provider == string(provider.ProviderFile) {
 				root, _, err := fileReflowInputRootAndKey(u.Key, data.SourceKey)

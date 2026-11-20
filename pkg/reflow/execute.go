@@ -1407,9 +1407,9 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 						ExpectedETag:      SafeReceiptHandle(expectedETag),
 						ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
 					}
-					if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
-						sourceMatch.ObservedETag = SafeReceiptHandle(headMeta.ETag)
-						sourceMatch.ObservedVersionID = SafeSourceVersionID(headMeta.Version)
+					if obsETag, obsVer, ok := observedSourceRevisionFromError(err); ok {
+						sourceMatch.ObservedETag = SafeReceiptHandle(obsETag)
+						sourceMatch.ObservedVersionID = SafeSourceVersionID(obsVer)
 					}
 				}
 				return r.recordObjectErrorWithMatch(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, "source metadata read failed", err, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, sourceMatch)
@@ -1508,13 +1508,14 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 				ExpectedETag:      SafeReceiptHandle(expectedETag),
 				ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
 			}
-			var etagMismatch *transfer.SourceETagMismatchError
-			if errors.As(err, &etagMismatch) {
-				sourceMatch.ObservedETag = SafeReceiptHandle(etagMismatch.ObservedETag)
-				sourceMatch.ObservedVersionID = SafeSourceVersionID(etagMismatch.ObservedVersion)
-			} else if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
-				sourceMatch.ObservedETag = SafeReceiptHandle(headMeta.ETag)
-				sourceMatch.ObservedVersionID = SafeSourceVersionID(headMeta.Version)
+			if obsETag, obsVer, ok := observedSourceRevisionFromError(err); ok {
+				sourceMatch.ObservedETag = SafeReceiptHandle(obsETag)
+				sourceMatch.ObservedVersionID = SafeSourceVersionID(obsVer)
+			} else if !hasVersionPin {
+				if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
+					sourceMatch.ObservedETag = SafeReceiptHandle(headMeta.ETag)
+					sourceMatch.ObservedVersionID = SafeSourceVersionID(headMeta.Version)
+				}
 			}
 		}
 		return r.recordObjectErrorWithMatch(ctx, stats, in.withSourceMeta(sourceETag, sourceSize), destURI, destKey, msg, err, details, collision, sourceMatch)
@@ -1966,6 +1967,23 @@ func limitedHeadRevision(ctx context.Context, limiter *ConcurrencyLimiter, stage
 // immutable native version identifiers (S3 VersionId or GCS generation).
 func ProviderSupportsNativeVersion(providerID string) bool {
 	return providerID == string(provider.ProviderS3) || providerID == string(provider.ProviderGCS)
+}
+
+// observedSourceRevisionFromError extracts observed ETag/version facts reported
+// directly by a pinned source read/head error without issuing an unversioned HEAD.
+func observedSourceRevisionFromError(err error) (etag, version string, ok bool) {
+	var etagMismatch *transfer.SourceETagMismatchError
+	if errors.As(err, &etagMismatch) {
+		return etagMismatch.ObservedETag, etagMismatch.ObservedVersion, true
+	}
+	var providerObs interface {
+		ObservedSourceRevision() (string, string)
+	}
+	if errors.As(err, &providerObs) {
+		e, v := providerObs.ObservedSourceRevision()
+		return e, v, true
+	}
+	return "", "", false
 }
 
 func dualExpectedSourceETag(in reflowInput) string {
