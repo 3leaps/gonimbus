@@ -244,7 +244,7 @@ func writeProvenanceSidecar(ctx context.Context, w *output.JSONLWriter, sidecarD
 	sidecarURI := buildProvenanceSidecarURI(cfg, destSpec, sidecarKey)
 	in := reflowpkg.ProvenanceSidecarInput{
 		SourceURI:        task.auditSourceURI(),
-		SourceETag:       task.SourceETag,
+		SourceETag:       reflowpkg.SafeReceiptHandle(task.SourceETag),
 		SourceSize:       task.SourceSize,
 		SourceLastMod:    task.SourceLastMod,
 		DestURI:          destURI,

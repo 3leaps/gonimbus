@@ -20,18 +20,28 @@ func receiptTimestamp(t time.Time) string {
 // SafeReceiptHandle preserves an opaque write identifier exactly or omits it.
 // Redacting part of an identifier would falsely identify a different write.
 func SafeReceiptHandle(value string) string {
+	if isUnsafeReceiptHandle(value) {
+		return ""
+	}
+	if unquoted := NormalizeETagForCompare(value); unquoted != value && isUnsafeReceiptHandle(unquoted) {
+		return ""
+	}
+	return value
+}
+
+func isUnsafeReceiptHandle(value string) bool {
 	if !utf8.ValidString(value) || strings.TrimSpace(value) != value ||
 		strings.HasPrefix(strings.ToLower(value), "bearer ") ||
 		strings.Contains(value, "://") || operationCauseContainsCredentialMaterial(value) ||
 		operationCauseKeyValuePattern.MatchString(value) || operationCauseBearerPattern.MatchString(value) {
-		return ""
+		return true
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) {
-			return ""
+			return true
 		}
 	}
-	return value
+	return false
 }
 
 // SafeReceiptSHA256 accepts only the canonical full-object digest encoding.

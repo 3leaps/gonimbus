@@ -469,27 +469,42 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 	if reflowRequireSourceMatch && !reflowDryRun {
 		var preflightURI *uri.ObjectURI
 		if !reflowStdin && len(args) > 0 {
-			if parsed, parseErr := uri.ParseURI(args[0]); parseErr == nil {
-				preflightURI = parsed
+			parsed, parseErr := uri.ParseURI(args[0])
+			if parseErr != nil {
+				return emitReflowConfigError(ctx, w, "Invalid source URI", parseErr, map[string]any{
+					"reason": "invalid_source_uri",
+				})
 			}
+			preflightURI = parsed
 		} else if reflowStdin && reflowInput != nil {
-			preflightURI, reflowInput = peekCLIReflowFirstSourceURI(reflowInput)
+			var peekErr error
+			preflightURI, reflowInput, peekErr = peekCLIReflowFirstSourceURI(reflowInput)
+			if peekErr != nil {
+				if provider.IsReplayUnverifiable(peekErr) {
+					return emitReflowConfigError(ctx, w, "source preflight failed for --require-source-match", peekErr, map[string]any{
+						"reason":             "replay_unverifiable",
+						"missing_capability": "RevisionGetter",
+					})
+				}
+				return exitError(foundry.ExitInvalidArgument, "Failed to read reflow input", peekErr)
+			}
 		}
 		if preflightURI != nil {
 			pNew, pErr := newSourceProvider(ctx, preflightURI, concurrencyCfg)
-			if pErr == nil {
-				if _, ok := pNew.(provider.RevisionGetter); !ok {
-					_ = pNew.Close()
-					replayErr := &reflowpkg.ReplayUnverifiableError{Provider: preflightURI.Provider, Err: provider.ErrReplayUnverifiable}
-					return emitReflowConfigError(ctx, w, "source provider does not support --require-source-match", replayErr, map[string]any{
-						"reason":             "replay_unverifiable",
-						"missing_capability": "RevisionGetter",
-						"provider":           preflightURI.Provider,
-					})
-				}
-				srcProv = pNew
-				srcProviderIdentity = reflowSourceIdentity(preflightURI)
+			if pErr != nil {
+				return exitError(foundry.ExitExternalServiceUnavailable, "Failed to connect to source provider", pErr)
 			}
+			if _, ok := pNew.(provider.RevisionGetter); !ok {
+				_ = pNew.Close()
+				replayErr := &reflowpkg.ReplayUnverifiableError{Provider: preflightURI.Provider, Err: provider.ErrReplayUnverifiable}
+				return emitReflowConfigError(ctx, w, "source provider does not support --require-source-match", replayErr, map[string]any{
+					"reason":             "replay_unverifiable",
+					"missing_capability": "RevisionGetter",
+					"provider":           preflightURI.Provider,
+				})
+			}
+			srcProv = pNew
+			srcProviderIdentity = reflowSourceIdentity(preflightURI)
 		}
 	}
 	ifAbsentCapability := detectReflowIfAbsentCapability(ctx, dstProv, destSpec, collCfg, reflowDryRun)

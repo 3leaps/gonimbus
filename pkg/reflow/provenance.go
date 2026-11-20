@@ -115,13 +115,13 @@ func BuildProvenanceSidecar(runID, toolVersion, ts string, in ProvenanceSidecarI
 		SchemaVersion: ProvenanceSchemaVersion,
 		Source: provenanceSourceBlock{
 			URI:          in.SourceURI,
-			ETag:         in.SourceETag,
+			ETag:         SafeReceiptHandle(in.SourceETag),
 			Size:         in.SourceSize,
 			LastModified: lastModified,
 		},
 		Destination: provenanceDestBlock{
 			URI:  in.DestURI,
-			ETag: in.DestETag,
+			ETag: SafeReceiptHandle(in.DestETag),
 			Size: in.DestSize,
 		},
 		Run: provenanceRunBlock{

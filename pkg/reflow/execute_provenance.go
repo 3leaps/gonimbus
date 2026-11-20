@@ -97,7 +97,7 @@ func (r *Runner) writeItemProvenanceSidecar(ctx context.Context, in reflowInput,
 
 	sidecarInput := ProvenanceSidecarInput{
 		SourceURI:        in.SourceURI,
-		SourceETag:       in.SourceETag,
+		SourceETag:       SafeReceiptHandle(in.SourceETag),
 		SourceSize:       in.SourceSize,
 		SourceLastMod:    in.SourceLastMod,
 		DestURI:          destURI,

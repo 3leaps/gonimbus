@@ -92,20 +92,33 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 
 // preflightRecordStreamRevisionGetter peeks the first resolvable input record
 // before prepareRun so a non-RevisionGetter source provider is refused before
-// any destination IfAbsent write-probe mutates the destination. The peeked
-// prefix is replayed verbatim via io.MultiReader and the resolved provider is
-// reused for that URI so Resolve is not invoked twice for the first item.
+// any destination IfAbsent write-probe mutates the destination. The read is
+// strictly bounded by maxPreflightSniffBytes (including individual oversized
+// lines), non-EOF read errors propagate immediately, unresolved/failed source
+// resolution fails closed before destination probing, and the peeked prefix is
+// replayed verbatim via io.MultiReader with the resolved provider cached.
 func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSource) (RecordStreamSource, error) {
+	const maxPreflightSniffBytes = 1 << 20
 	reader := bufio.NewReaderSize(src.Records, 64*1024)
 	var prefetched bytes.Buffer
 	var firstURI string
 	var firstProvider string
 
-	const maxPreflightSniffBytes = 1 << 20
-	for prefetched.Len() < maxPreflightSniffBytes {
-		line, err := reader.ReadBytes('\n')
+	for {
+		remaining := maxPreflightSniffBytes - prefetched.Len()
+		line, exceeded, readErr := readBoundedPreflightLine(reader, remaining)
 		if len(line) > 0 {
 			prefetched.Write(line)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return RecordStreamSource{}, readErr
+		}
+		if exceeded {
+			return RecordStreamSource{}, &ReplayUnverifiableError{
+				Err: fmt.Errorf("%w: unable to resolve source provider within %d-byte preflight sniff limit", provider.ErrReplayUnverifiable, maxPreflightSniffBytes),
+			}
+		}
+		if len(line) > 0 {
 			trimmed := strings.TrimSpace(string(line))
 			if trimmed != "" {
 				if in, parseErr := parseReflowInputLine(trimmed); parseErr == nil && in.SourceURI != "" {
@@ -115,7 +128,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 				}
 			}
 		}
-		if err != nil {
+		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
@@ -127,8 +140,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 	}
 	prov, err := src.Resolve(ctx, firstURI)
 	if err != nil {
-		// Let the normal stream loop report connection failures per-item.
-		return out, nil
+		return RecordStreamSource{}, fmt.Errorf("source preflight connect failed: %w", err)
 	}
 	if _, ok := prov.(provider.RevisionGetter); !ok {
 		return RecordStreamSource{}, &ReplayUnverifiableError{Provider: firstProvider, Err: provider.ErrReplayUnverifiable}
@@ -143,6 +155,45 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 		return origResolve(ctx, u)
 	}
 	return out, nil
+}
+
+// readBoundedPreflightLine reads at most limit bytes until '\n' or EOF without
+// allocating an unbounded line buffer. If more than limit bytes appear without
+// finding '\n', exceeded is true.
+func readBoundedPreflightLine(r *bufio.Reader, limit int) (line []byte, exceeded bool, err error) {
+	if limit <= 0 {
+		return nil, true, nil
+	}
+	for len(line) < limit {
+		frag, sliceErr := r.ReadSlice('\n')
+		if len(frag) > 0 {
+			take := len(frag)
+			if len(line)+take > limit {
+				take = limit - len(line)
+				line = append(line, frag[:take]...)
+				if sliceErr != nil && !errors.Is(sliceErr, bufio.ErrBufferFull) && !errors.Is(sliceErr, io.EOF) {
+					return line, true, sliceErr
+				}
+				return line, true, nil
+			}
+			line = append(line, frag...)
+		}
+		if sliceErr == nil {
+			return line, false, nil
+		}
+		if errors.Is(sliceErr, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, false, sliceErr
+	}
+	// Filled exact limit without seeing '\n': check if the stream is already at EOF.
+	if _, peekErr := r.Peek(1); peekErr != nil {
+		if errors.Is(peekErr, io.EOF) {
+			return line, false, io.EOF
+		}
+		return line, false, peekErr
+	}
+	return line, true, nil
 }
 
 // finishRun emits the terminal summary and maps it to the run's error, shared by

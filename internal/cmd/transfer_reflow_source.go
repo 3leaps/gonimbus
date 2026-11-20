@@ -803,26 +803,73 @@ func pathWithinRoot(root string, path string) bool {
 // peekCLIReflowFirstSourceURI peeks the first parseable source provider URI
 // from a stdin stream without consuming it so the CLI pool can enforce
 // --require-source-match RevisionGetter preflight before running destination
-// IfAbsent probes.
-func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader) {
+// IfAbsent probes. Reads are strictly bounded by maxReflowFirstRecordSniffBytes
+// (including oversized individual lines) and non-EOF read errors are returned.
+func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader, error) {
 	reader := bufio.NewReaderSize(in, 64*1024)
 	var prefetched bytes.Buffer
 	var found *uri.ObjectURI
 
-	for prefetched.Len() < maxReflowFirstRecordSniffBytes {
-		line, err := reader.ReadBytes('\n')
+	for {
+		remaining := maxReflowFirstRecordSniffBytes - prefetched.Len()
+		line, exceeded, readErr := readBoundedCLILine(reader, remaining)
 		if len(line) > 0 {
 			prefetched.Write(line)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, nil, readErr
+		}
+		if exceeded {
+			return nil, nil, &reflowpkg.ReplayUnverifiableError{
+				Err: fmt.Errorf("%w: unable to resolve source provider within %d-byte preflight sniff limit", provider.ErrReplayUnverifiable, maxReflowFirstRecordSniffBytes),
+			}
+		}
+		if len(line) > 0 {
 			if parsed := parseReflowPreflightSourceURI(strings.TrimSpace(string(line))); parsed != nil {
 				found = parsed
 				break
 			}
 		}
-		if err != nil {
+		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
-	return found, io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader)
+	return found, io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), nil
+}
+
+func readBoundedCLILine(r *bufio.Reader, limit int) (line []byte, exceeded bool, err error) {
+	if limit <= 0 {
+		return nil, true, nil
+	}
+	for len(line) < limit {
+		frag, sliceErr := r.ReadSlice('\n')
+		if len(frag) > 0 {
+			take := len(frag)
+			if len(line)+take > limit {
+				take = limit - len(line)
+				line = append(line, frag[:take]...)
+				if sliceErr != nil && !errors.Is(sliceErr, bufio.ErrBufferFull) && !errors.Is(sliceErr, io.EOF) {
+					return line, true, sliceErr
+				}
+				return line, true, nil
+			}
+			line = append(line, frag...)
+		}
+		if sliceErr == nil {
+			return line, false, nil
+		}
+		if errors.Is(sliceErr, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, false, sliceErr
+	}
+	if _, peekErr := r.Peek(1); peekErr != nil {
+		if errors.Is(peekErr, io.EOF) {
+			return line, false, io.EOF
+		}
+		return line, false, peekErr
+	}
+	return line, true, nil
 }
 
 func parseReflowPreflightSourceURI(trimmed string) *uri.ObjectURI {

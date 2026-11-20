@@ -437,60 +437,65 @@ func TestTransferReflowRequireSourceMatchPreflightNonRevisionGetterDualPath(t *t
 
 func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	const unsafeETag = "Bearer top-secret-etag-token"
+	unsafeETags := []string{
+		"Bearer top-secret-etag-token",
+		`"Bearer quoted-secret-etag-token"`,
+	}
 
-	for _, tc := range []struct {
-		name     string
-		extra    []string
-		wantPath string
-	}{
-		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
-		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			withTransferReflowTestState(t)
-			s3Srv := newFakeS3HTTPServer(t)
-			s3Srv.put("a/item.bin", "BBBBB", "etag-v2", "", now)
-			srcProv, err := s3.New(context.Background(), s3.Config{
-				Bucket:         "source-bucket",
-				Region:         "us-east-1",
-				Endpoint:       s3Srv.server.URL,
-				ForcePathStyle: true,
-				Anonymous:      true,
+	for _, unsafeETag := range unsafeETags {
+		for _, tc := range []struct {
+			name     string
+			extra    []string
+			wantPath string
+		}{
+			{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+			{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+		} {
+			t.Run(tc.name+"/"+unsafeETag, func(t *testing.T) {
+				withTransferReflowTestState(t)
+				s3Srv := newFakeS3HTTPServer(t)
+				s3Srv.put("a/item.bin", "BBBBB", "etag-v2", "", now)
+				srcProv, err := s3.New(context.Background(), s3.Config{
+					Bucket:         "source-bucket",
+					Region:         "us-east-1",
+					Endpoint:       s3Srv.server.URL,
+					ForcePathStyle: true,
+					Anonymous:      true,
+				})
+				require.NoError(t, err)
+				dstProv := newReflowMemoryProvider()
+				checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+				useTransferReflowProviderFactories(t, providerdispatch.Factories{
+					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+						if cfg.Bucket == "source-bucket" {
+							return srcProv, nil
+						}
+						return dstProv, nil
+					},
+				})
+
+				line := reflowInputLine("a/item.bin", unsafeETag, 5, "", "") + "\n"
+				args := []string{
+					"--stdin",
+					"--dest", "s3://dest-bucket/data/",
+					"--parallel", "1",
+					"--checkpoint", checkpointPath,
+					"--require-source-match",
+				}
+				args = append(args, tc.extra...)
+				stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+				require.Error(t, err)
+				require.NotContains(t, stdout, "secret-etag-token", "unsafe source_etag must never appear in stdout JSONL")
+
+				db, dbErr := sql.Open("sqlite", checkpointPath)
+				require.NoError(t, dbErr)
+				defer func() { _ = db.Close() }()
+				var storedETag string
+				require.NoError(t, db.QueryRow(`SELECT COALESCE(source_etag, '') FROM reflow_items WHERE source_key = ?`, "a/item.bin").Scan(&storedETag))
+				require.Empty(t, storedETag, "unsafe source_etag must never persist into checkpoint DB")
 			})
-			require.NoError(t, err)
-			dstProv := newReflowMemoryProvider()
-			checkpointPath := filepath.Join(t.TempDir(), "state.db")
-
-			useTransferReflowProviderFactories(t, providerdispatch.Factories{
-				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
-					if cfg.Bucket == "source-bucket" {
-						return srcProv, nil
-					}
-					return dstProv, nil
-				},
-			})
-
-			line := reflowInputLine("a/item.bin", unsafeETag, 5, "", "") + "\n"
-			args := []string{
-				"--stdin",
-				"--dest", "s3://dest-bucket/data/",
-				"--parallel", "1",
-				"--checkpoint", checkpointPath,
-				"--require-source-match",
-			}
-			args = append(args, tc.extra...)
-			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
-			require.Error(t, err)
-			require.NotContains(t, stdout, "top-secret-etag-token", "unsafe source_etag must never appear in stdout JSONL")
-
-			db, dbErr := sql.Open("sqlite", checkpointPath)
-			require.NoError(t, dbErr)
-			defer func() { _ = db.Close() }()
-			var storedETag string
-			require.NoError(t, db.QueryRow(`SELECT COALESCE(source_etag, '') FROM reflow_items WHERE source_key = ?`, "a/item.bin").Scan(&storedETag))
-			require.Empty(t, storedETag, "unsafe source_etag must never persist into checkpoint DB")
-		})
+		}
 	}
 }
 
@@ -689,6 +694,7 @@ func TestTransferReflowRequireSourceMatchGCSFakeServerLibrary(t *testing.T) {
 }
 
 func TestTransferReflowRequireSourceMatchOffByteIdenticalDualPath(t *testing.T) {
+	const wantExactV050 = `{"source_uri":"s3://source-bucket/source/file.xml","source_bucket":"source-bucket","source_key":"source/file.xml","source_etag":"src-etag","source_size_bytes":7,"source_last_modified":"2026-01-15T20:53:44Z","dest_sha256":"239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5","dest_etag":"dest-data/source/file.xml","dest_uri":"s3://dest-bucket/data/source/file.xml","dest_key":"data/source/file.xml","bytes":7,"status":"complete"}`
 	for _, tc := range []struct {
 		name     string
 		extra    []string
@@ -702,10 +708,102 @@ func TestTransferReflowRequireSourceMatchOffByteIdenticalDualPath(t *testing.T) 
 			stdout, err := env.run(t, tc.extra...)
 			requireProbeComplete(t, stdout, err, tc.wantPath)
 			rec := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
-			require.NotContains(t, string(rec.Data), `"source_match"`)
-			require.NotContains(t, string(rec.Data), `"source_version_id"`)
+			require.Equal(t, wantExactV050, string(rec.Data), "flag-off complete receipt must remain byte-identical to v0.5.0")
 		})
 	}
+}
+
+type cliFailingReader struct {
+	chunks [][]byte
+	err    error
+	idx    int
+}
+
+func (r *cliFailingReader) Read(p []byte) (int, error) {
+	if r.idx < len(r.chunks) {
+		n := copy(p, r.chunks[r.idx])
+		r.idx++
+		if r.idx == len(r.chunks) {
+			return n, r.err
+		}
+		return n, nil
+	}
+	return 0, io.EOF
+}
+
+func TestTransferReflowRequireSourceMatchCLIPoolPreflightHardening(t *testing.T) {
+	advisoryLine := `{"type":"gonimbus.custom.heartbeat.v1","advisory":true,"data":{}}` + "\n"
+	validLine := reflowInputLine("source/file.xml", "src-etag", 7, "", "")
+
+	t.Run("failing reader after advisory prefix propagates error without copying or probing", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		src := newReflowMemoryProvider()
+		src.putFixture("source/file.xml", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		dst := newReflowMemoryProvider()
+		checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				if cfg.Bucket == "source-bucket" {
+					return src, nil
+				}
+				return dst, nil
+			},
+		})
+
+		in := &cliFailingReader{
+			chunks: [][]byte{[]byte(advisoryLine), []byte(validLine)},
+			err:    io.ErrUnexpectedEOF,
+		}
+		var stdout, stderr bytes.Buffer
+		cmd := newTransferReflowTestCommand()
+		cmd.SetIn(in)
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(append([]string{
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", checkpointPath,
+			"--require-source-match",
+		}, poolRoute...))
+		err := cmd.ExecuteContext(context.Background())
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+		require.Empty(t, dst.conditionalPutCallsSnapshot(), "failing stream must refuse before destination probe")
+		require.False(t, dst.hasObject("data/source/file.xml"))
+	})
+
+	t.Run("blank preamble after advisory prefix exceeding sniff cap refuses before destination probe", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		inner := newReflowMemoryProvider()
+		inner.putFixture("source/file.xml", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+		src := &cmdNonRevisionProvider{inner: inner}
+		dst := newReflowMemoryProvider()
+		checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				if cfg.Bucket == "source-bucket" {
+					return src, nil
+				}
+				return dst, nil
+			},
+		})
+
+		stream := advisoryLine + strings.Repeat("\n", (1<<20)+64) + validLine + "\n"
+		args := append([]string{
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", checkpointPath,
+			"--require-source-match",
+		}, poolRoute...)
+		stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(stream), args...)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
+		require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
+		require.Empty(t, dst.conditionalPutCallsSnapshot(), "budget exhaustion must refuse before destination probe")
+	})
 }
 
 type testJSONLSink struct {

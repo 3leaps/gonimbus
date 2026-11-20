@@ -199,6 +199,7 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	unsafeETags := []string{
 		"Bearer super-secret-token",
+		`"Bearer quoted-secret-token"`,
 		"https://example.test/bucket/key?X-Amz-Signature=deadbeef",
 		"token=secret-value",
 		"bad\nnewline",
@@ -241,6 +242,16 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 			for _, item := range checkpoint.items {
 				require.Empty(t, item.SourceETag, "unsafe source_etag must never persist into checkpoint")
 			}
+
+			sidecar := BuildProvenanceSidecar("run-1", "0.5.1", "2026-11-19T00:00:00Z", ProvenanceSidecarInput{
+				SourceURI:  "s3://source-bucket/a.txt",
+				SourceETag: unsafeETag,
+				DestURI:    "s3://dest-bucket/data/a.txt",
+				DestETag:   unsafeETag,
+				Action:     "copied",
+			})
+			require.Empty(t, sidecar.Source.ETag, "unsafe source_etag must never persist into provenance sidecar")
+			require.Empty(t, sidecar.Destination.ETag, "unsafe dest_etag must never persist into provenance sidecar")
 		})
 	}
 }
@@ -537,8 +548,124 @@ func TestRequireSourceMatchOffPreservesV050RecordShape(t *testing.T) {
 	terminal := sink.records[len(sink.records)-1]
 	raw, err := json.Marshal(terminal)
 	require.NoError(t, err)
-	require.NotContains(t, string(raw), `"source_match"`)
-	require.NotContains(t, string(raw), `"source_version_id"`)
+	const wantExactV050 = `{"source_uri":"s3://source-bucket/legacy.bin","source_bucket":"source-bucket","source_key":"legacy.bin","source_etag":"etag-1","source_size_bytes":5,"dest_sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","dest_etag":"dest-data/legacy.bin","dest_uri":"s3://dest-bucket/data/legacy.bin","dest_key":"data/legacy.bin","bytes":5,"status":"complete"}`
+	require.Equal(t, wantExactV050, string(raw), "flag-off complete receipt must remain byte-identical to v0.5.0")
+}
+
+type failingFinalLineReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *failingFinalLineReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, r.err
+}
+
+type countingOversizedReader struct {
+	remaining int
+	bytesRead int
+}
+
+func (r *countingOversizedReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'a'
+	}
+	r.remaining -= n
+	r.bytesRead += n
+	return n, nil
+}
+
+func TestRequireSourceMatchPreflightHardening(t *testing.T) {
+	validLine := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a.txt","source_key":"a.txt","source_etag":"etag-1","source_size_bytes":5,"dest_rel_key":"a.txt"}}`
+
+	t.Run("non-EOF reader error alongside valid final record propagates without copying", func(t *testing.T) {
+		src := newSourceMatchStubProvider()
+		src.put("a.txt", "hello", "etag-1", "", time.Now().UTC())
+		dst := newCopyMemoryProvider()
+		sink := &collectSink{}
+
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		r := &failingFinalLineReader{data: []byte(validLine), err: io.ErrUnexpectedEOF}
+		_, err = runner.Run(context.Background(), RecordStreamSource{
+			Records: r,
+			Resolve: func(context.Context, string) (provider.Provider, error) { return src, nil },
+		})
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+		require.Empty(t, dst.preconditions(), "failing stream must refuse before destination probe")
+		require.Empty(t, dst.writeCounts)
+	})
+
+	t.Run("blank preamble exceeding 1MiB before non-RevisionGetter refuses before destination probe", func(t *testing.T) {
+		inner := newCopyMemoryProvider()
+		inner.putFixture("a.txt", "hello", "etag-1")
+		src := &nonRevisionSourceProvider{inner: inner}
+		dst := newCopyMemoryProvider()
+		sink := &collectSink{}
+
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		stream := strings.Repeat("\n", (1<<20)+64) + validLine + "\n"
+		_, err = runner.Run(context.Background(), streamSourceFor(src, stream))
+		require.ErrorIs(t, err, provider.ErrReplayUnverifiable)
+		require.Empty(t, dst.preconditions(), "sniff budget exhaustion must refuse before destination probe")
+		require.Empty(t, dst.writeCounts)
+	})
+
+	t.Run("oversized unterminated first line is bounded during read", func(t *testing.T) {
+		dst := newCopyMemoryProvider()
+		sink := &collectSink{}
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		r := &countingOversizedReader{remaining: 4 << 20}
+		_, err = runner.Run(context.Background(), RecordStreamSource{
+			Records: r,
+			Resolve: func(context.Context, string) (provider.Provider, error) { return newSourceMatchStubProvider(), nil },
+		})
+		require.ErrorIs(t, err, provider.ErrReplayUnverifiable)
+		require.LessOrEqual(t, r.bytesRead, (1<<20)+(128<<10), "preflight peek must bound reads instead of reading the full 4MiB line")
+		require.Empty(t, dst.preconditions())
+	})
+
+	t.Run("initial source Resolve error refuses before destination probe", func(t *testing.T) {
+		dst := newCopyMemoryProvider()
+		sink := &collectSink{}
+		cfg := copyConfig(dst, sink)
+		cfg.RequireSourceMatch = true
+		runner, err := NewRunner(cfg)
+		require.NoError(t, err)
+
+		resolveErr := errors.New("synthetic source connect failure")
+		_, err = runner.Run(context.Background(), RecordStreamSource{
+			Records: strings.NewReader(validLine + "\n"),
+			Resolve: func(context.Context, string) (provider.Provider, error) { return nil, resolveErr },
+		})
+		require.ErrorIs(t, err, resolveErr)
+		require.Empty(t, dst.preconditions(), "source preflight connection failure must refuse before destination probe")
+		require.Empty(t, dst.writeCounts)
+	})
 }
 
 func TestPinnedSourceRevisionNeverFallsBackOnNonRevisionGetter(t *testing.T) {
