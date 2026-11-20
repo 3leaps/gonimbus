@@ -441,6 +441,8 @@ func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *te
 		"Bearer top-secret-etag-token",
 		`"Bearer quoted-secret-etag-token"`,
 		`W/"Bearer weak-secret-etag-token"`,
+		`W/"Bearer unmatched-weak-secret-etag-token`,
+		`w/"Bearer lower-unmatched-secret-etag-token`,
 	}
 
 	for _, unsafeETag := range unsafeETags {
@@ -500,6 +502,75 @@ func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *te
 				require.Empty(t, coll.DestETagObserved, "CLI newCollisionInfo must sanitize dest_etag_observed")
 			})
 		}
+	}
+
+	// End-to-end S3 HTTP regression: an S3 server returning a weak-tag bearer
+	// ETag (W/"Bearer s3-http-secret") is normalized by S3 cleanETag into the
+	// unmatched-quote form W/"Bearer s3-http-secret. Verify it never leaks into
+	// JSONL records, observed_etag, collision metadata, checkpoints, or sidecars.
+	for _, tc := range []struct {
+		name  string
+		extra []string
+	}{
+		{name: "engine-s3-http-weak-tag"},
+		{name: "cli-pool-s3-http-weak-tag", extra: poolRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			weakServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.Header().Set("ETag", `W/"Bearer s3-http-secret"`)
+					w.Header().Set("Content-Length", "5")
+					w.Header().Set("Last-Modified", now.UTC().Format(http.TimeFormat))
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`<Error><Code>PreconditionFailed</Code><Message>mismatch</Message></Error>`))
+			}))
+			defer weakServer.Close()
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       weakServer.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/item.bin", "etag-v1", 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+			require.NotContains(t, stdout, "s3-http-secret", "S3 weak-tag bearer ETag must never leak into JSONL stdout")
+
+			db, dbErr := sql.Open("sqlite", checkpointPath)
+			require.NoError(t, dbErr)
+			defer func() { _ = db.Close() }()
+			var storedETag string
+			require.NoError(t, db.QueryRow(`SELECT COALESCE(source_etag, '') FROM reflow_items WHERE source_key = ?`, "a/item.bin").Scan(&storedETag))
+			require.NotContains(t, storedETag, "s3-http-secret")
+		})
 	}
 }
 

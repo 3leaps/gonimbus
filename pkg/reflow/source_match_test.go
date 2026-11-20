@@ -202,6 +202,9 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 		`"Bearer quoted-secret-token"`,
 		`W/"Bearer weak-secret-token"`,
 		`w/"Bearer lower-weak-secret-token"`,
+		`W/"Bearer unmatched-weak-secret`,
+		`w/"Bearer lower-unmatched-weak-secret`,
+		"Bearer\u00a0nbsp-secret-token",
 		"https://example.test/bucket/key?X-Amz-Signature=deadbeef",
 		"token=secret-value",
 		"bad\nnewline",
@@ -262,6 +265,20 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 			require.Empty(t, coll.DestETagObserved, "newCollisionInfo must sanitize dest_etag_observed")
 		})
 	}
+
+	t.Run("adversarial repeated weak-tag prefix scales linearly", func(t *testing.T) {
+		// 262,144 repeated W/ prefixes (~512 KiB) must complete in linear time
+		// rather than triggering quadratic wrapper peeling.
+		repeatedSafe := strings.Repeat("W/", 262144) + "x"
+		start := time.Now()
+		require.Equal(t, repeatedSafe, SafeReceiptHandle(repeatedSafe))
+		require.Less(t, time.Since(start), 2*time.Second, "SafeReceiptHandle must scale linearly on repeated weak-tag prefixes")
+
+		repeatedUnsafe := strings.Repeat("W/", 262144) + `"Bearer linear-secret`
+		start = time.Now()
+		require.Empty(t, SafeReceiptHandle(repeatedUnsafe))
+		require.Less(t, time.Since(start), 2*time.Second, "SafeReceiptHandle must reject adversarial weak-tag bearer in linear time")
+	})
 }
 
 func TestRequireSourceMatchMissingTokenFailsItem(t *testing.T) {

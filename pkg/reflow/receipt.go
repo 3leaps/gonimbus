@@ -1,6 +1,7 @@
 package reflow
 
 import (
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -9,6 +10,12 @@ import (
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/3leaps/gonimbus/pkg/transfer"
 )
+
+// receiptHandleBearerPattern matches any bearer credential token in an opaque
+// receipt handle regardless of HTTP weak-tag (W/, w/), balanced or unmatched
+// DQUOTE wrappers, surrounding prefix text, or Unicode space separators, in a
+// single linear-time RE2 pass.
+var receiptHandleBearerPattern = regexp.MustCompile(`(?i)\bbearer[\s\pZ]+\S`)
 
 func receiptTimestamp(t time.Time) string {
 	if t.IsZero() {
@@ -20,50 +27,18 @@ func receiptTimestamp(t time.Time) string {
 // SafeReceiptHandle preserves an opaque write identifier exactly or omits it.
 // Redacting part of an identifier would falsely identify a different write.
 func SafeReceiptHandle(value string) string {
-	if isUnsafeReceiptHandle(value) {
-		return ""
-	}
-	candidate := value
-	for {
-		next := stripReceiptHandleWrapper(candidate)
-		if next == candidate {
-			break
-		}
-		if isUnsafeReceiptHandle(next) {
-			return ""
-		}
-		candidate = next
-	}
-	return value
-}
-
-// stripReceiptHandleWrapper peels one RFC 9110 weak-tag prefix (W/ or w/) or
-// enclosing DQUOTE pair so credential-shaped payloads wrapped as W/"Bearer …"
-// or "Bearer …" cannot bypass handle sanitization.
-func stripReceiptHandleWrapper(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if len(trimmed) >= 2 && (trimmed[0] == 'W' || trimmed[0] == 'w') && trimmed[1] == '/' {
-		return strings.TrimSpace(trimmed[2:])
-	}
-	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
-		return strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-	}
-	return trimmed
-}
-
-func isUnsafeReceiptHandle(value string) bool {
 	if !utf8.ValidString(value) || strings.TrimSpace(value) != value ||
-		strings.HasPrefix(strings.ToLower(value), "bearer ") ||
 		strings.Contains(value, "://") || operationCauseContainsCredentialMaterial(value) ||
-		operationCauseKeyValuePattern.MatchString(value) || operationCauseBearerPattern.MatchString(value) {
-		return true
+		operationCauseKeyValuePattern.MatchString(value) || operationCauseBearerPattern.MatchString(value) ||
+		receiptHandleBearerPattern.MatchString(value) {
+		return ""
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) {
-			return true
+			return ""
 		}
 	}
-	return false
+	return value
 }
 
 // SafeReceiptSHA256 accepts only the canonical full-object digest encoding.
