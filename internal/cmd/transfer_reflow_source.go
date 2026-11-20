@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	pathpkg "path"
@@ -85,7 +88,7 @@ func (t reflowTask) reflowRecord(destURI, destKey, status string) reflowpkg.Reco
 	rec := reflowpkg.Record{
 		SourceURI:  t.auditSourceURI(),
 		SourceKey:  t.SourceKey,
-		SourceETag: t.SourceETag,
+		SourceETag: reflowpkg.SafeReceiptHandle(t.SourceETag),
 		SourceSize: t.SourceSize,
 		DestURI:    destURI,
 		DestKey:    destKey,
@@ -795,4 +798,91 @@ func pathWithinRoot(root string, path string) bool {
 	}
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// peekCLIReflowFirstSourceURI peeks the first parseable source provider URI
+// from a stdin stream without consuming it so the CLI pool can enforce
+// --require-source-match RevisionGetter preflight before running destination
+// IfAbsent probes.
+func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader) {
+	reader := bufio.NewReaderSize(in, 64*1024)
+	var prefetched bytes.Buffer
+	var found *uri.ObjectURI
+
+	for prefetched.Len() < maxReflowFirstRecordSniffBytes {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			prefetched.Write(line)
+			if parsed := parseReflowPreflightSourceURI(strings.TrimSpace(string(line))); parsed != nil {
+				found = parsed
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return found, io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader)
+}
+
+func parseReflowPreflightSourceURI(trimmed string) *uri.ObjectURI {
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		var env struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+			return nil
+		}
+		switch env.Type {
+		case reflowpkg.ReflowInputRecordType:
+			var data struct {
+				SourceURI string `json:"source_uri"`
+				SourceKey string `json:"source_key"`
+			}
+			if err := json.Unmarshal(env.Data, &data); err != nil || strings.TrimSpace(data.SourceURI) == "" {
+				return nil
+			}
+			u, err := uri.ParseURI(data.SourceURI)
+			if err != nil {
+				return nil
+			}
+			if u.Provider == string(provider.ProviderFile) {
+				root, _, err := fileReflowInputRootAndKey(u.Key, data.SourceKey)
+				if err != nil {
+					return nil
+				}
+				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: root}
+			}
+			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
+		case "gonimbus.index.object.v1":
+			var data struct {
+				BaseURI string `json:"base_uri"`
+			}
+			if err := json.Unmarshal(env.Data, &data); err != nil || strings.TrimSpace(data.BaseURI) == "" {
+				return nil
+			}
+			u, err := uri.ParseURI(data.BaseURI)
+			if err != nil {
+				return nil
+			}
+			if u.Provider == string(provider.ProviderFile) {
+				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Clean(u.Key)}
+			}
+			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
+		default:
+			return nil
+		}
+	}
+	u, err := uri.ParseURI(trimmed)
+	if err != nil {
+		return nil
+	}
+	if u.Provider == string(provider.ProviderFile) {
+		return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Dir(filepath.Clean(u.Key))}
+	}
+	return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
 }

@@ -2,9 +2,11 @@ package reflow
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +61,13 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	if !r.cfg.DryRun && src.Resolve == nil {
 		return Summary{}, errors.New("reflow: RecordStreamSource.Resolve is required for copy execution")
 	}
+	if r.cfg.RequireSourceMatch && !r.cfg.DryRun {
+		preflightSrc, pfErr := preflightRecordStreamRevisionGetter(ctx, src)
+		if pfErr != nil {
+			return Summary{}, pfErr
+		}
+		src = preflightSrc
+	}
 	plan, err := r.prepareRun(ctx)
 	if err != nil {
 		return Summary{}, err
@@ -79,6 +88,61 @@ func (r *Runner) runRecordStream(ctx context.Context, src RecordStreamSource) (S
 	}
 
 	return r.finishRun(ctx, plan)
+}
+
+// preflightRecordStreamRevisionGetter peeks the first resolvable input record
+// before prepareRun so a non-RevisionGetter source provider is refused before
+// any destination IfAbsent write-probe mutates the destination. The peeked
+// prefix is replayed verbatim via io.MultiReader and the resolved provider is
+// reused for that URI so Resolve is not invoked twice for the first item.
+func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSource) (RecordStreamSource, error) {
+	reader := bufio.NewReaderSize(src.Records, 64*1024)
+	var prefetched bytes.Buffer
+	var firstURI string
+	var firstProvider string
+
+	const maxPreflightSniffBytes = 1 << 20
+	for prefetched.Len() < maxPreflightSniffBytes {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			prefetched.Write(line)
+			trimmed := strings.TrimSpace(string(line))
+			if trimmed != "" {
+				if in, parseErr := parseReflowInputLine(trimmed); parseErr == nil && in.SourceURI != "" {
+					firstURI = in.SourceURI
+					firstProvider = in.SourceProvider
+					break
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	replayed := io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader)
+	out := RecordStreamSource{Records: replayed, Resolve: src.Resolve}
+	if firstURI == "" {
+		return out, nil
+	}
+	prov, err := src.Resolve(ctx, firstURI)
+	if err != nil {
+		// Let the normal stream loop report connection failures per-item.
+		return out, nil
+	}
+	if _, ok := prov.(provider.RevisionGetter); !ok {
+		return RecordStreamSource{}, &ReplayUnverifiableError{Provider: firstProvider, Err: provider.ErrReplayUnverifiable}
+	}
+	origResolve := src.Resolve
+	var usedFirst bool
+	out.Resolve = func(ctx context.Context, u string) (provider.Provider, error) {
+		if !usedFirst && u == firstURI {
+			usedFirst = true
+			return prov, nil
+		}
+		return origResolve(ctx, u)
+	}
+	return out, nil
 }
 
 // finishRun emits the terminal summary and maps it to the run's error, shared by
@@ -1367,7 +1431,7 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 		// continues. The terminal UpsertItem is the resume authority: failure is
 		// strict — the object is reported failed, never acknowledged with its
 		// success status on a store that could not record it.
-		if err := r.cfg.Checkpoint.NoteDestKeySource(ctx, destKey, sourceURI, sourceETag, sourceSize); err != nil {
+		if err := r.cfg.Checkpoint.NoteDestKeySource(ctx, destKey, sourceURI, SafeReceiptHandle(sourceETag), sourceSize); err != nil {
 			if werr := r.emitCheckpointWriteWarning(ctx, warningCodeArbitrationStateWrite, destKey, destURI, err); werr != nil {
 				return werr
 			}
@@ -1569,9 +1633,14 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 }
 
 func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Provider, layout DestLayout, limiter *ConcurrencyLimiter, stages *StageStats, in reflowInput, destKey string, dstMeta *provider.ObjectMeta, decisionPath string, opts provider.PutOptions, receipt *transfer.CopyReceipt) (int64, provider.PutResult, *CollisionInfo, string, string, error) {
+	var compareRev *provider.SourceRevision
+	if r.cfg.RequireSourceMatch || in.SourceRevision.Kind != "" || strings.TrimSpace(in.SourceRevision.Value) != "" {
+		rev := in.SourceRevision
+		compareRev = &rev
+	}
 	probeStart := time.Now()
 	duplicate, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (bool, error) {
-		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta)
+		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta, compareRev)
 	})
 	stages.recordCollisionProbe(time.Since(probeStart))
 	if err != nil {
@@ -1826,6 +1895,9 @@ func failedRecordReason(err error, code string, collision *CollisionInfo) string
 	if provider.IsReplayUnverifiable(err) {
 		return "replay_unverifiable"
 	}
+	if provider.IsNotFound(err) {
+		return "not_found"
+	}
 	if collision == nil {
 		return reflowReasonForErrCode(code)
 	}
@@ -1844,7 +1916,7 @@ func (r *Runner) checkpointItem(ctx context.Context, in reflowInput, destURI, de
 		DestURI:      sanitizeSourceURI(destURI),
 		SourceKey:    in.SourceKey,
 		DestKey:      destKey,
-		SourceETag:   in.SourceETag,
+		SourceETag:   SafeReceiptHandle(in.SourceETag),
 		SourceSize:   in.SourceSize,
 		Status:       status,
 		Reason:       reason,
@@ -1866,9 +1938,9 @@ func (r *Runner) noteCollision(ctx context.Context, destKey, kind string, in ref
 		DestKey:    destKey,
 		Kind:       kind,
 		SourceURI:  sanitizeSourceURI(in.SourceURI),
-		SourceETag: in.SourceETag,
+		SourceETag: SafeReceiptHandle(in.SourceETag),
 		SourceSize: in.SourceSize,
-		DestETag:   dstMeta.ETag,
+		DestETag:   SafeReceiptHandle(dstMeta.ETag),
 		DestSize:   dstMeta.Size,
 	})
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -185,6 +186,12 @@ func (fs *fakeS3HTTPServer) put(key, body, etag, versionID string, modTime time.
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fs.objects[key] = fakeS3Entry{body: []byte(body), etag: etag, versionID: versionID, modTime: modTime}
+}
+
+func (fs *fakeS3HTTPServer) del(key string) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	delete(fs.objects, key)
 }
 
 func (fs *fakeS3HTTPServer) counts() (condGets, uncondGets, heads int) {
@@ -423,6 +430,66 @@ func TestTransferReflowRequireSourceMatchPreflightNonRevisionGetterDualPath(t *t
 			require.Contains(t, stdout, `"missing_capability":"RevisionGetter"`)
 			require.Zero(t, src.getCalls.Load(), "preflight must refuse before any source read")
 			require.False(t, dst.hasObject("data/source/file.xml"), "preflight must refuse before any destination write")
+			require.Empty(t, dst.conditionalPutCallsSnapshot(), "preflight must refuse before any destination IfAbsent write-probe mutates the bucket")
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	const unsafeETag = "Bearer top-secret-etag-token"
+
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			s3Srv.put("a/item.bin", "BBBBB", "etag-v2", "", now)
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/item.bin", unsafeETag, 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+			require.NotContains(t, stdout, "top-secret-etag-token", "unsafe source_etag must never appear in stdout JSONL")
+
+			db, dbErr := sql.Open("sqlite", checkpointPath)
+			require.NoError(t, dbErr)
+			defer func() { _ = db.Close() }()
+			var storedETag string
+			require.NoError(t, db.QueryRow(`SELECT COALESCE(source_etag, '') FROM reflow_items WHERE source_key = ?`, "a/item.bin").Scan(&storedETag))
+			require.Empty(t, storedETag, "unsafe source_etag must never persist into checkpoint DB")
 		})
 	}
 }
@@ -665,4 +732,360 @@ type gcsSnapshotListProvider struct {
 
 func (p *gcsSnapshotListProvider) List(_ context.Context, _ provider.ListOptions) (*provider.ListResult, error) {
 	return &provider.ListResult{Objects: append([]provider.ObjectSummary(nil), p.snapshot...)}, nil
+}
+
+type noIfAbsentDestProvider struct {
+	*reflowMemoryProvider
+	onHead func(key string)
+}
+
+func (p *noIfAbsentDestProvider) ConditionalWriteCapabilities() provider.ConditionalWriteCapabilities {
+	return provider.ConditionalWriteCapabilities{}
+}
+
+func (p *noIfAbsentDestProvider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	if p.onHead != nil {
+		p.onHead(key)
+	}
+	return p.reflowMemoryProvider.Head(ctx, key)
+}
+
+func readCheckpointItemStatusReason(t *testing.T, checkpointPath, sourceKey string) (status, reason string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", checkpointPath)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	err = db.QueryRow(`SELECT status, COALESCE(reason, '') FROM reflow_items WHERE source_key = ?`, sourceKey).Scan(&status, &reason)
+	require.NoError(t, err, "expected checkpoint row for source_key=%s", sourceKey)
+	return status, reason
+}
+
+func TestTransferReflowRequireSourceMatchCollisionBodyCompareDualPath(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	} {
+		t.Run(tc.name+"/source-mutated-to-match-dest", func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			// Source mutated in-place to match the existing destination bytes ("NEW!!").
+			s3Srv.put("a/item.bin", "NEW!!", "etag-v2", "ver-2", now)
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstInner := newReflowMemoryProvider()
+			// Existing destination with non-matching multipart ETag forces objectBodiesEqual.
+			dstInner.putFixture("data/a/item.bin", "NEW!!", "deadbeef-2", now)
+			dstProv := &noIfAbsentDestProvider{reflowMemoryProvider: dstInner}
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/item.bin", "etag-v1", 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--on-collision", "skip-if-duplicate",
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+
+			runRec := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runRec.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+
+			records := parseTypedReflowRecords(t, stdout)
+			var terminal reflowpkg.Record
+			for _, rec := range records {
+				if rec.Status != "in_progress" {
+					terminal = rec
+				}
+			}
+			require.Equal(t, "failed", terminal.Status, "mutated source matching dest must fail as source_changed, not skipped/duplicate")
+			require.Equal(t, "source_changed", terminal.Reason)
+			require.NotNil(t, terminal.SourceMatch)
+			require.Equal(t, "etag-v1", terminal.SourceMatch.ExpectedETag)
+			require.Equal(t, "etag-v2", terminal.SourceMatch.ObservedETag)
+
+			st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/item.bin")
+			require.Equal(t, "failed", st)
+			require.Equal(t, "source_changed", rsn)
+
+			_, uncondGets, _ := s3Srv.counts()
+			require.Equal(t, 0, uncondGets, "collision body compare must never call unconditional GetObject")
+		})
+
+		t.Run(tc.name+"/source-deleted-before-body-compare", func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			// Source object intentionally absent (deleted).
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstInner := newReflowMemoryProvider()
+			dstInner.putFixture("data/a/item.bin", "OLD!!", "deadbeef-2", now)
+			dstProv := &noIfAbsentDestProvider{reflowMemoryProvider: dstInner}
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/item.bin", "etag-v1", 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--on-collision", "skip-if-duplicate",
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+
+			records := parseTypedReflowRecords(t, stdout)
+			var terminal reflowpkg.Record
+			for _, rec := range records {
+				if rec.Status != "in_progress" {
+					terminal = rec
+				}
+			}
+			require.Equal(t, "failed", terminal.Status)
+			require.Equal(t, "not_found", terminal.Reason)
+			require.Nil(t, terminal.SourceMatch)
+
+			st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/item.bin")
+			require.Equal(t, "failed", st)
+			require.Equal(t, "not_found", rsn)
+
+			_, uncondGets, _ := s3Srv.counts()
+			require.Equal(t, 0, uncondGets)
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchDeletedOnRequiredHeadDualPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t) // source intentionally absent (404 on required HEAD)
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/gone.bin", "etag-v1", 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--metadata-policy", "preserve",
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+
+			runRec := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runRec.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+
+			records := parseTypedReflowRecords(t, stdout)
+			var terminal reflowpkg.Record
+			for _, rec := range records {
+				if rec.Status != "in_progress" {
+					terminal = rec
+				}
+			}
+			require.Equal(t, "failed", terminal.Status, "required HEAD 404 must emit a failed terminal rather than stopping at in_progress")
+			require.Equal(t, "not_found", terminal.Reason)
+
+			st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/gone.bin")
+			require.Equal(t, "failed", st)
+			require.Equal(t, "not_found", rsn)
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchQuarantineDeletedPreservesNotFound(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("collision-quarantine", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		s3Srv := newFakeS3HTTPServer(t)
+		s3Srv.put("a/item.bin", "AAAAA", "etag-v1", "ver-1", now)
+		srcProv, err := s3.New(context.Background(), s3.Config{
+			Bucket:         "source-bucket",
+			Region:         "us-east-1",
+			Endpoint:       s3Srv.server.URL,
+			ForcePathStyle: true,
+			Anonymous:      true,
+		})
+		require.NoError(t, err)
+
+		dstInner := newReflowMemoryProvider()
+		dstInner.putFixture("data/a/item.bin", "CONFLICT-DIFFERENT-SIZE", "dst-etag", now)
+		dstProv := &noIfAbsentDestProvider{
+			reflowMemoryProvider: dstInner,
+			onHead: func(key string) {
+				if key == "data/a/item.bin" {
+					// Delete source right before the collision quarantine copy executes.
+					s3Srv.del("a/item.bin")
+				}
+			},
+		}
+		checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				if cfg.Bucket == "source-bucket" {
+					return srcProv, nil
+				}
+				return dstProv, nil
+			},
+		})
+
+		line := reflowInputLine("a/item.bin", "etag-v1", 5, "", "") + "\n"
+		stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", checkpointPath,
+			"--on-collision", "quarantine",
+			"--collision-quarantine-prefix", "_quar",
+			"--require-source-match",
+		)
+		require.Error(t, err)
+
+		records := parseTypedReflowRecords(t, stdout)
+		var terminal reflowpkg.Record
+		for _, rec := range records {
+			if rec.Status != "in_progress" {
+				terminal = rec
+			}
+		}
+		require.Equal(t, "failed", terminal.Status)
+		require.Equal(t, "not_found", terminal.Reason)
+		require.Equal(t, "quarantine", terminal.RoutingClass)
+
+		st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/item.bin")
+		require.Equal(t, "failed", st)
+		require.Equal(t, "not_found", rsn)
+	})
+
+	t.Run("metadata-quarantine", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		s3Srv := newFakeS3HTTPServer(t)
+		s3Srv.put("a/item.bin", "AAAAA", "etag-v1", "ver-1", now)
+		s3Srv.onHead = func(key string, call int) {
+			if call == 1 {
+				// HEAD succeeds so metadata derivation runs and routes to quarantine,
+				// then source is deleted immediately before the quarantine copy GET.
+				s3Srv.del(key)
+			}
+		}
+		srcProv, err := s3.New(context.Background(), s3.Config{
+			Bucket:         "source-bucket",
+			Region:         "us-east-1",
+			Endpoint:       s3Srv.server.URL,
+			ForcePathStyle: true,
+			Anonymous:      true,
+		})
+		require.NoError(t, err)
+		dstProv := newReflowMemoryProvider()
+		checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+				if cfg.Bucket == "source-bucket" {
+					return srcProv, nil
+				}
+				return dstProv, nil
+			},
+		})
+
+		line := reflowInputLine("a/item.bin", "etag-v1", 5, "", "") + "\n"
+		stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", checkpointPath,
+			"--metadata-set-from-source-derived", "missing=meta.absent.token",
+			"--metadata-on-missing-source", "fail",
+			"--on-collision", "quarantine",
+			"--collision-quarantine-prefix", "_quar",
+			"--require-source-match",
+		)
+		require.Error(t, err)
+
+		records := parseTypedReflowRecords(t, stdout)
+		var terminal reflowpkg.Record
+		for _, rec := range records {
+			if rec.Status != "in_progress" {
+				terminal = rec
+			}
+		}
+		require.Equal(t, "failed", terminal.Status)
+		require.Equal(t, "not_found", terminal.Reason)
+		require.Equal(t, "quarantine", terminal.RoutingClass)
+
+		st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/item.bin")
+		require.Equal(t, "failed", st)
+		require.Equal(t, "not_found", rsn)
+	})
 }

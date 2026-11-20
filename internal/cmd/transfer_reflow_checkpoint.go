@@ -45,6 +45,30 @@ type reflowStateStore interface {
 	MarkDestKeyObserved(ctx context.Context, destKey string) error
 }
 
+// sanitizingReflowStateStore strips unsafe credential/control-character ETag
+// strings before they reach durable checkpoint tables.
+type sanitizingReflowStateStore struct {
+	reflowStateStore
+}
+
+func (s *sanitizingReflowStateStore) UpsertItem(ctx context.Context, p reflowstate.UpsertItemParams) error {
+	p.SourceETag = reflowpkg.SafeReceiptHandle(p.SourceETag)
+	return s.reflowStateStore.UpsertItem(ctx, p)
+}
+
+func (s *sanitizingReflowStateStore) CheckpointUnit(ctx context.Context, p reflowstate.UpsertItemParams, unitKey string) error {
+	p.SourceETag = reflowpkg.SafeReceiptHandle(p.SourceETag)
+	return s.reflowStateStore.CheckpointUnit(ctx, p, unitKey)
+}
+
+func (s *sanitizingReflowStateStore) NoteDestKeySource(ctx context.Context, destKey, sourceURI, sourceETag string, sourceSize int64) error {
+	return s.reflowStateStore.NoteDestKeySource(ctx, destKey, sourceURI, reflowpkg.SafeReceiptHandle(sourceETag), sourceSize)
+}
+
+func (s *sanitizingReflowStateStore) NoteCollision(ctx context.Context, destKey string, kind reflowstate.CollisionKind, sourceURI, sourceETag string, sourceSize int64, destETag string, destSize int64) error {
+	return s.reflowStateStore.NoteCollision(ctx, destKey, kind, sourceURI, reflowpkg.SafeReceiptHandle(sourceETag), sourceSize, reflowpkg.SafeReceiptHandle(destETag), destSize)
+}
+
 // reflowWriterStatsSource is optionally implemented by checkpoint stores that
 // expose process-local WriterStats (the real reflowstate.Store does). Test
 // fakes need not implement it; emission is then skipped.
@@ -59,6 +83,9 @@ type reflowWriterStatsSource interface {
 func emitCheckpointWriterStatsIfPresent(ctx context.Context, w *output.JSONLWriter, state reflowStateStore) {
 	if w == nil || state == nil {
 		return
+	}
+	if wrapped, ok := state.(*sanitizingReflowStateStore); ok {
+		state = wrapped.reflowStateStore
 	}
 	src, ok := state.(reflowWriterStatsSource)
 	if !ok {

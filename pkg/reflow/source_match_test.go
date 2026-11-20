@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	producerpkg "github.com/3leaps/gonimbus/pkg/producer"
 	"github.com/3leaps/gonimbus/pkg/provider"
 	"github.com/stretchr/testify/require"
 )
@@ -190,6 +191,58 @@ func TestRequireSourceMatchPreflightRefusesNonRevisionGetter(t *testing.T) {
 	require.ErrorAs(t, err, &replayErr)
 	require.Zero(t, src.getCalls.Load(), "preflight must refuse before reading source")
 	require.Equal(t, 0, dst.writeCount("data/a.txt"), "preflight must refuse before writing destination")
+	require.Empty(t, dst.preconditions(), "preflight must refuse before any destination IfAbsent write-probe mutates the bucket")
+	require.Empty(t, dst.writeCounts, "preflight must not perform any destination writes")
+}
+
+func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	unsafeETags := []string{
+		"Bearer super-secret-token",
+		"https://example.test/bucket/key?X-Amz-Signature=deadbeef",
+		"token=secret-value",
+		"bad\nnewline",
+	}
+	for _, unsafeETag := range unsafeETags {
+		t.Run(unsafeETag, func(t *testing.T) {
+			src := newSourceMatchStubProvider()
+			src.put("a.txt", "BBBBB", "etag-v2", "", now)
+			dst := newCopyMemoryProvider()
+			checkpoint := newMemCheckpoint()
+			sink := &collectSink{}
+
+			cfg := copyConfig(dst, sink)
+			cfg.RequireSourceMatch = true
+			cfg.Checkpoint = checkpoint
+			runner, err := NewRunner(cfg)
+			require.NoError(t, err)
+
+			rawLine, err := json.Marshal(map[string]any{
+				"type": "gonimbus.reflow.input.v1",
+				"data": map[string]any{
+					"source_uri":        "s3://source-bucket/a.txt",
+					"source_key":        "a.txt",
+					"source_etag":       unsafeETag,
+					"source_size_bytes": 5,
+					"dest_rel_key":      "a.txt",
+				},
+			})
+			require.NoError(t, err)
+
+			_, err = runner.Run(context.Background(), streamSourceFor(src, string(rawLine)))
+			require.Error(t, err)
+
+			for _, rec := range sink.records {
+				b, marshalErr := json.Marshal(rec)
+				require.NoError(t, marshalErr)
+				require.NotContains(t, string(b), unsafeETag, "unsafe source_etag must never leak into emitted records")
+				require.Empty(t, rec.SourceETag)
+			}
+			for _, item := range checkpoint.items {
+				require.Empty(t, item.SourceETag, "unsafe source_etag must never persist into checkpoint")
+			}
+		})
+	}
 }
 
 func TestRequireSourceMatchMissingTokenFailsItem(t *testing.T) {
@@ -489,29 +542,102 @@ func TestRequireSourceMatchOffPreservesV050RecordShape(t *testing.T) {
 }
 
 func TestPinnedSourceRevisionNeverFallsBackOnNonRevisionGetter(t *testing.T) {
+	authority, ref := laneAuthority(t, "non-fallback-admitted-rev")
+	enumerator := &scriptedLaneEnumerator{objects: []producerpkg.LaneObject{{
+		Lane: ref, Object: obj("a/one.xml", "admitted-etag", 5),
+	}}}
 	inner := newCopyMemoryProvider()
-	inner.putFixture("a.txt", "hello", "etag-1")
-	src := &nonRevisionSourceProvider{
-		inner: inner,
-		listed: []provider.ObjectSummary{
-			{Key: "a.txt", Size: 5, ETag: "etag-1"},
-		},
-	}
+	inner.putFixture("a/one.xml", "hello", "admitted-etag")
+	src := &nonRevisionSourceProvider{inner: inner}
 	dst := newCopyMemoryProvider()
+	checkpoint := newMemCheckpoint()
+	checkpoint.resume = false // non-resume path: reaches limitedCopyConditional with admitted SourceRevision
 	sink := &collectSink{}
 
-	cfg := copyConfig(dst, sink)
+	cfg := positionalCopyConfig(t, dst, sink, checkpoint)
 	cfg.RequireSourceMatch = false
 	runner, err := NewRunner(cfg)
 	require.NoError(t, err)
 
-	source := PrefixSource{
-		Provider: src,
-		URI:      "s3://source-bucket/",
-	}
-
-	_, err = runner.Run(context.Background(), source)
+	summary, err := runner.Run(context.Background(), PrefixSource{
+		Provider:   src,
+		URI:        prefixSelectorURI,
+		Enumerator: enumerator,
+		Authority:  authority,
+	})
 	require.Error(t, err)
+	require.Zero(t, summary.InvalidInputs, "must reach copy path rather than failing destination planning")
+	terminal := terminalRecord(t, sink.records, "a/one.xml")
+	require.Equal(t, "failed", terminal.Status)
+	require.Equal(t, "replay_unverifiable", terminal.Reason)
 	require.Zero(t, src.getCalls.Load(), "pinned SourceRevision must never silently fall back to unpinned GetObject")
-	require.Equal(t, 0, dst.writeCount("data/a.txt"))
+	require.Equal(t, 0, dst.writeCount("data/a/one.xml"))
+}
+
+func TestRequireSourceMatchCollisionDuplicateCompareUsesPinnedRead(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	src := newSourceMatchStubProvider()
+	src.join412Error = true
+	// Source mutated in-place to match the existing destination bytes (same size 5).
+	src.put("item.bin", "NEW!!", "etag-v2", "ver-2", now)
+
+	dst := newCopyMemoryProvider()
+	// Existing destination with non-matching multipart ETag forces objectBodiesEqual.
+	dst.putFixture("data/item.bin", "NEW!!", "deadbeef-2")
+	// Force HEAD fallback so handleExistingDestination runs before conditional PUT
+	// (modeling a known destination / IfAbsent-fallback collision probe).
+	dst.condCaps = &provider.ConditionalWriteCapabilities{}
+
+	sink := &collectSink{}
+	cfg := copyConfig(dst, sink)
+	cfg.RequireSourceMatch = true
+	cfg.Collision.Mode = CollisionSkipIfDuplicate
+	runner, err := NewRunner(cfg)
+	require.NoError(t, err)
+
+	line := `{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/item.bin","source_key":"item.bin","source_etag":"etag-v1","source_size_bytes":5,"dest_rel_key":"item.bin"}}`
+	_, err = runner.Run(context.Background(), streamSourceFor(src, line))
+	require.Error(t, err)
+	require.Equal(t, 0, src.getCalls, "collision duplicate body comparison must never call unpinned GetObject")
+	require.GreaterOrEqual(t, src.revCalls, 1)
+
+	terminal := sink.records[len(sink.records)-1]
+	require.Equal(t, "failed", terminal.Status, "mutated source matching dest must fail as source_changed, not skipped/duplicate")
+	require.Equal(t, "source_changed", terminal.Reason)
+	require.NotNil(t, terminal.SourceMatch)
+	require.Equal(t, "etag-v1", terminal.SourceMatch.ExpectedETag)
+	require.Equal(t, "etag-v2", terminal.SourceMatch.ObservedETag)
+}
+
+func TestRequireSourceMatchDeletedSourceWithExistingDestPreservesNotFound(t *testing.T) {
+	destMod := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	srcMod := destMod.Add(time.Hour)
+
+	for _, mode := range []string{CollisionOverwrite, CollisionOverwriteIfSourceNewer} {
+		t.Run(mode, func(t *testing.T) {
+			src := newSourceMatchStubProvider() // source key intentionally deleted
+			dst := newCopyMemoryProvider()
+			dst.putFixtureAt("data/item.bin", "OLD!!", "dest-etag", destMod)
+			if mode == CollisionOverwriteIfSourceNewer {
+				// Force HEAD fallback so handleExistingDestination runs conflict resolution
+				// against the existing dest and then hits deleted source on conditional overwrite.
+				dst.condCaps = &provider.ConditionalWriteCapabilities{IfMatchETag: true}
+			}
+			sink := &collectSink{}
+			cfg := copyConfig(dst, sink)
+			cfg.RequireSourceMatch = true
+			cfg.Collision.Mode = mode
+			runner, err := NewRunner(cfg)
+			require.NoError(t, err)
+
+			line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/item.bin","source_key":"item.bin","source_etag":"etag-v1","source_size_bytes":5,"source_last_modified":"%s","dest_rel_key":"item.bin"}}`, srcMod.Format(time.RFC3339))
+			_, err = runner.Run(context.Background(), streamSourceFor(src, line))
+			require.Error(t, err)
+
+			terminal := sink.records[len(sink.records)-1]
+			require.Equal(t, "failed", terminal.Status)
+			require.Equal(t, "not_found", terminal.Reason, "deleted source must preserve not_found even when destination collision metadata exists")
+			require.Nil(t, terminal.SourceMatch)
+		})
+	}
 }

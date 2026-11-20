@@ -1674,12 +1674,12 @@ func TestObjectBodiesEqualIgnoresReadChunkBoundaries(t *testing.T) {
 	src := chunkedObjectProvider{body: []byte("byte-identical payload"), chunkSize: 3}
 	dst := chunkedObjectProvider{body: []byte("byte-identical payload"), chunkSize: 7}
 
-	equal, err := objectBodiesEqual(context.Background(), src, dst, "src", "dst")
+	equal, err := objectBodiesEqual(context.Background(), src, dst, "src", "dst", nil)
 	require.NoError(t, err)
 	require.True(t, equal)
 
 	dst.body = []byte("different payload")
-	equal, err = objectBodiesEqual(context.Background(), src, dst, "src", "dst")
+	equal, err = objectBodiesEqual(context.Background(), src, dst, "src", "dst", nil)
 	require.NoError(t, err)
 	require.False(t, equal)
 }

@@ -271,7 +271,7 @@ func (in reflowInput) record(destURI, destKey, status string) Record {
 		SourceURI:          sanitizeSourceURI(in.SourceURI),
 		SourceBucket:       in.SourceBucket,
 		SourceKey:          in.SourceKey,
-		SourceETag:         in.SourceETag,
+		SourceETag:         SafeReceiptHandle(in.SourceETag),
 		SourceSize:         in.SourceSize,
 		SourceLastModified: receiptTimestamp(in.SourceLastMod),
 		DestURI:            destURI,
