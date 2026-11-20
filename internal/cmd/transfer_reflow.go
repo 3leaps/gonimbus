@@ -825,6 +825,29 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 					continue
 				}
 
+				expectedETag := reflowpkg.NormalizeETagForCompare(task.SourceETag)
+				expectedVersionID := task.SourceVersionID
+				hasVersionPin := task.SourceVersionIDPresent || expectedVersionID != ""
+				bindingApplied := reflowRequireSourceMatch || hasVersionPin
+				var sourceRevision *provider.SourceRevision
+				var expectedSourceETag string
+				if hasVersionPin {
+					if strings.TrimSpace(expectedVersionID) == "" || expectedVersionID == "null" || !reflowpkg.ProviderSupportsNativeVersion(task.SourceProvider) {
+						errorCount.Add(1)
+						replayErr := &reflowpkg.ReplayUnverifiableError{Provider: task.SourceProvider, Err: provider.ErrReplayUnverifiable}
+						_ = emitReflowError(context.Background(), w, task.SourceKey, "source provider does not support native source_version_id", replayErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "replay_unverifiable"})
+						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", Reason: "replay_unverifiable", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: replayErr.Error()}); werr != nil {
+							checkpointWriteFailed(werr)
+						}
+						rec := task.reflowRecord(dstURI, dstKey, "failed")
+						rec.Reason = "replay_unverifiable"
+						writeReflowRecord(ctx, rec)
+						continue
+					}
+					sourceRevision = &provider.SourceRevision{Kind: provider.RevisionNative, Value: expectedVersionID}
+					expectedSourceETag = expectedETag
+				}
+
 				if task.RejectSymlinkPath {
 					sourcePath := filepath.Join(task.SourceRoot, filepath.FromSlash(task.SourceKey))
 					hasSymlink, err := filePathContainsSymlink(sourcePath)
@@ -866,28 +889,7 @@ func runTransferReflowWithRunID(cmd *cobra.Command, args []string, runID string)
 
 				writeReflowRecord(ctx, task.reflowRecord(dstURI, dstKey, "in_progress"))
 
-				expectedETag := reflowpkg.NormalizeETagForCompare(task.SourceETag)
-				expectedVersionID := task.SourceVersionID
-				hasVersionPin := task.SourceVersionIDPresent || expectedVersionID != ""
-				bindingApplied := reflowRequireSourceMatch || hasVersionPin
-				var sourceRevision *provider.SourceRevision
-				var expectedSourceETag string
-				if hasVersionPin {
-					if strings.TrimSpace(expectedVersionID) == "" || expectedVersionID == "null" || !reflowpkg.ProviderSupportsNativeVersion(task.SourceProvider) {
-						errorCount.Add(1)
-						replayErr := &reflowpkg.ReplayUnverifiableError{Provider: task.SourceProvider, Err: provider.ErrReplayUnverifiable}
-						_ = emitReflowError(context.Background(), w, task.SourceKey, "source provider does not support native source_version_id", replayErr, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "replay_unverifiable"})
-						if werr := state.UpsertItem(context.Background(), reflowstate.UpsertItemParams{SourceURI: srcCheckpointURI, DestURI: dstURI, SourceKey: task.SourceKey, DestKey: dstKey, SourceETag: task.SourceETag, SourceSize: task.SourceSize, Status: "failed", Reason: "replay_unverifiable", ErrorCode: output.ErrCodeInvalidInput, ErrorMessage: replayErr.Error()}); werr != nil {
-							checkpointWriteFailed(werr)
-						}
-						rec := task.reflowRecord(dstURI, dstKey, "failed")
-						rec.Reason = "replay_unverifiable"
-						writeReflowRecord(ctx, rec)
-						continue
-					}
-					sourceRevision = &provider.SourceRevision{Kind: provider.RevisionNative, Value: expectedVersionID}
-					expectedSourceETag = expectedETag
-				} else if reflowRequireSourceMatch {
+				if !hasVersionPin && reflowRequireSourceMatch {
 					if expectedETag == "" {
 						errorCount.Add(1)
 						_ = emitReflowError(context.Background(), w, task.SourceKey, "source revision token missing", reflowpkg.ErrSourceTokenMissing, map[string]any{"source_uri": srcAuditURI, "dest_uri": dstURI, "reason": "source_token_missing"})

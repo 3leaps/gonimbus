@@ -352,6 +352,15 @@ func (r *verifyingGCSReader) Read(p []byte) (int, error) {
 			}
 		}
 	}
+	if err != nil && !errors.Is(err, io.EOF) && strings.Contains(err.Error(), "bad CRC on read") {
+		return n, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderGCS,
+			Bucket:   r.bucket,
+			Key:      r.key,
+			Err:      errors.Join(provider.ErrSourceChanged, err),
+		}
+	}
 	if errors.Is(err, io.EOF) {
 		if r.checkSize && r.readBytes != r.expectedSize {
 			return n, &provider.ProviderError{

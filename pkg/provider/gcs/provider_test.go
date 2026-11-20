@@ -548,29 +548,80 @@ func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
 		})
 	}
 
-	t.Run("valid-zero-crc32c-object-rejects-different-same-length-body", func(t *testing.T) {
-		zeroCRCBytes := []byte{0xab, 0x9b, 0xe0, 0x9b}
-		require.Equal(t, uint32(0), crc32.Checksum(zeroCRCBytes, gcsCRC32CTable), "sanity: fixture must have Castagnoli CRC32C 0x00000000")
-		wrongBody := []byte{0x01, 0x02, 0x03, 0x04}
+	for _, sendMatchingHeader := range []bool{false, true} {
+		label := "valid-zero-crc32c-object-rejects-different-same-length-body"
+		if sendMatchingHeader {
+			label = "valid-zero-crc32c-object-with-header-translates-sdk-crc-error-to-source-changed"
+		}
+		t.Run(label, func(t *testing.T) {
+			zeroCRCBytes := []byte{0xab, 0x9b, 0xe0, 0x9b}
+			require.Equal(t, uint32(0), crc32.Checksum(zeroCRCBytes, gcsCRC32CTable), "sanity: fixture must have Castagnoli CRC32C 0x00000000")
+			wrongBody := []byte{0x01, 0x02, 0x03, 0x04}
 
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				isMetadata := strings.HasPrefix(r.URL.Path, "/storage/v1/") && r.URL.Query().Get("alt") != "media"
+				if !isMetadata {
+					if sendMatchingHeader {
+						w.Header().Set("X-Goog-Hash", "crc32c="+encodeCRC(0))
+					}
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wrongBody)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(wrongBody)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"bucket":         "bucket",
+					"name":           "zero.bin",
+					"generation":     "303",
+					"metageneration": "1",
+					"size":           fmt.Sprintf("%d", len(zeroCRCBytes)),
+					"etag":           "etag-zero",
+					"crc32c":         encodeCRC(0),
+				})
+			}))
+			defer srv.Close()
+
+			client, err := storage.NewClient(ctx,
+				option.WithEndpoint(srv.URL+"/storage/v1/"),
+				option.WithHTTPClient(srv.Client()),
+				option.WithoutAuthentication(),
+			)
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			p := &Provider{client: client, bucket: "bucket", maxKeys: DefaultMaxKeys}
+			body, _, err := p.GetObjectRevision(ctx, "zero.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "303"})
+			if err == nil {
+				_, readErr := io.ReadAll(body)
+				_ = body.Close()
+				err = readErr
+			}
+			require.Error(t, err)
+			require.True(t, provider.IsSourceChanged(err), "valid zero CRC32C object must reject wrong body as ErrSourceChanged, got %v", err)
+		})
+	}
+
+	t.Run("nonzero-crc32c-matching-header-with-wrong-body-translates-sdk-crc-error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			isMetadata := strings.HasPrefix(r.URL.Path, "/storage/v1/") && r.URL.Query().Get("alt") != "media"
 			if !isMetadata {
-				// Media endpoint omits X-Goog-Hash and serves different 4-byte body.
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wrongBody)))
+				// Media claims v1's CRC header while serving v2 bytes; SDK triggers "bad CRC on read".
+				w.Header().Set("X-Goog-Hash", "crc32c="+encodeCRC(v1CRC))
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(v2Body)))
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(wrongBody)
+				_, _ = w.Write(v2Body)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bucket":         "bucket",
-				"name":           "zero.bin",
-				"generation":     "303",
+				"name":           "doc.txt",
+				"generation":     "101",
 				"metageneration": "1",
-				"size":           fmt.Sprintf("%d", len(zeroCRCBytes)),
-				"etag":           "etag-zero",
-				"crc32c":         encodeCRC(0),
+				"size":           fmt.Sprintf("%d", len(v1Body)),
+				"etag":           "etag-v1",
+				"crc32c":         encodeCRC(v1CRC),
 			})
 		}))
 		defer srv.Close()
@@ -584,14 +635,14 @@ func TestGetObjectRevisionGCSMediaIgnoresGenerationFailsClosed(t *testing.T) {
 		defer func() { _ = client.Close() }()
 
 		p := &Provider{client: client, bucket: "bucket", maxKeys: DefaultMaxKeys}
-		body, _, err := p.GetObjectRevision(ctx, "zero.bin", provider.SourceRevision{Kind: provider.RevisionNative, Value: "303"})
+		body, _, err := p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{Kind: provider.RevisionNative, Value: "101"})
 		if err == nil {
 			_, readErr := io.ReadAll(body)
 			_ = body.Close()
 			err = readErr
 		}
 		require.Error(t, err)
-		require.True(t, provider.IsSourceChanged(err), "valid zero CRC32C object must reject wrong body, got %v", err)
+		require.True(t, provider.IsSourceChanged(err), "SDK bad CRC on read must translate to ErrSourceChanged, got %v", err)
 	})
 
 	t.Run("transparently-decompressed-response-refused-as-unverifiable", func(t *testing.T) {

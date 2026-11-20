@@ -1513,6 +1513,42 @@ func TestTransferReflowSourceVersionIDFileRefusal(t *testing.T) {
 		require.Equal(t, "failed", byDest["data/doc.txt"].Status)
 		require.Equal(t, "replay_unverifiable", byDest["data/doc.txt"].Reason)
 	})
+
+	t.Run("missing-file and symlink with source_version_id report replay_unverifiable before fs checks", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		missingURI := fileURI(filepath.Join(srcRoot, "does-not-exist.txt"))
+		symTarget := filepath.Join(srcRoot, "doc.txt")
+		symPath := filepath.Join(srcRoot, "link.txt")
+		require.NoError(t, os.Symlink(symTarget, symPath))
+		symURI := fileURI(symPath)
+
+		dstProv := newReflowMemoryProvider()
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) { return dstProv, nil },
+		})
+
+		stream := strings.Join([]string{
+			fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":%q,"source_key":"does-not-exist.txt","source_etag":"any","source_version_id":"v1","source_size_bytes":5,"dest_rel_key":"missing.txt"}}`, missingURI),
+			fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":%q,"source_key":"link.txt","source_etag":"any","source_version_id":null,"source_size_bytes":5,"dest_rel_key":"link.txt"}}`, symURI),
+		}, "\n") + "\n"
+		stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(stream),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+		)
+		require.Error(t, execErr)
+		byDest := map[string]reflowpkg.Record{}
+		for _, rec := range parseTypedReflowRecords(t, stdout) {
+			if rec.Status != "in_progress" {
+				byDest[rec.DestKey] = rec
+			}
+		}
+		require.Equal(t, "failed", byDest["data/missing.txt"].Status)
+		require.Equal(t, "replay_unverifiable", byDest["data/missing.txt"].Reason)
+		require.Equal(t, "failed", byDest["data/link.txt"].Status)
+		require.Equal(t, "replay_unverifiable", byDest["data/link.txt"].Reason)
+	})
 }
 
 func TestTransferReflowSourceVersionIDHardeningDualPath(t *testing.T) {
