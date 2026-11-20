@@ -279,7 +279,11 @@ provenance sidecars, and S3-compatible positional sources. `pkg/provider`
 `ConditionalWriteCapabilities` / `ConditionalCapabilityReporter`, and optional
 `Revision` / `RevisionGetter` source-revision reads. Existing embedders that do
 not implement the reporter are treated as unable to prove If-Match and are
-refused fail-closed by `overwrite-if-source-newer`.
+refused fail-closed by `overwrite-if-source-newer`. In v0.5.1, `pkg/provider`
+adds the optional `RevisionHeader` interface (`HeadRevision`) implemented by
+`pkg/provider/s3` and `pkg/provider/gcs` for revision-pinned metadata lookups,
+and `pkg/reflow` adds `Config.RequireSourceMatch` and input `source_version_id`
+native version pinning.
 
 Use the CLI when you want a supported operator interface. Use `pkg/reflow` when
 you are building a Go application that needs to compose the reflow data and

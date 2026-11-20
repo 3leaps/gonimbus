@@ -82,7 +82,7 @@ publication boundary.
   gate execution by verifying the binary SHA-256 against a release's signed
   `SHA256SUMS` should download the exact tagged raw release asset into a
   runner-private directory (for example via
-  `sfetch --repo 3leaps/gonimbus --tag v0.5.0 --dest-dir <runner-bin>` or
+  `sfetch --repo 3leaps/gonimbus --tag v0.5.1 --dest-dir <runner-bin>` or
   verified GitHub Release download) rather than relying on mutable workstation
   `PATH`, or hold workstation upgrades explicitly with `brew pin gonimbus` /
   `scoop hold gonimbus`.
