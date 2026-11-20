@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/3leaps/gonimbus/pkg/provider"
+	"github.com/3leaps/gonimbus/pkg/transfer"
 )
 
 const (
@@ -108,11 +109,18 @@ func isMultipartETag(etag string) bool {
 	return true
 }
 
-func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey, sourceProvider, destProvider, sourceETag string, sourceSize int64, destMeta *provider.ObjectMeta, revision *provider.SourceRevision) (bool, error) {
-	if isDuplicateCollision(sourceProvider, destProvider, sourceETag, sourceSize, destMeta) {
+func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey, sourceProvider, destProvider, sourceETag string, sourceSize int64, destMeta *provider.ObjectMeta, revision *provider.SourceRevision, expectedSourceETag string) (bool, error) {
+	if (revision == nil || revision.Kind != provider.RevisionNative) && isDuplicateCollision(sourceProvider, destProvider, sourceETag, sourceSize, destMeta) {
 		return true, nil
 	}
-	if destMeta == nil || sourceSize != destMeta.Size {
+	if destMeta == nil {
+		return false, nil
+	}
+	if revision == nil || revision.Kind != provider.RevisionNative {
+		if sourceSize != destMeta.Size {
+			return false, nil
+		}
+	} else if sourceSize > 0 && sourceSize != destMeta.Size {
 		return false, nil
 	}
 	if revision == nil && !canCompareObjectBodies(src, dst) {
@@ -123,7 +131,7 @@ func isDuplicateCollisionForReflow(ctx context.Context, src provider.Provider, d
 			return false, nil
 		}
 	}
-	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey, revision)
+	return objectBodiesEqual(ctx, src, dst, srcKey, dstKey, revision, expectedSourceETag)
 }
 
 func canCompareObjectBodies(src provider.Provider, dst provider.Provider) bool {
@@ -132,7 +140,7 @@ func canCompareObjectBodies(src provider.Provider, dst provider.Provider) bool {
 	return srcOK && dstOK
 }
 
-func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, revision *provider.SourceRevision) (bool, error) {
+func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.Provider, srcKey, dstKey string, revision *provider.SourceRevision, expectedSourceETag string) (bool, error) {
 	dstGetter, ok := dst.(provider.ObjectGetter)
 	if !ok {
 		return false, fmt.Errorf("destination provider does not support GetObject")
@@ -148,7 +156,17 @@ func objectBodiesEqual(ctx context.Context, src provider.Provider, dst provider.
 		if !ok {
 			return false, provider.ErrReplayUnverifiable
 		}
-		srcBody, _, err = revGetter.GetObjectRevision(ctx, srcKey, *revision)
+		var meta provider.ObjectMeta
+		srcBody, meta, err = revGetter.GetObjectRevision(ctx, srcKey, *revision)
+		if err == nil && expectedSourceETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedSourceETag) {
+			_ = srcBody.Close()
+			return false, &transfer.SourceETagMismatchError{
+				Key:             srcKey,
+				ExpectedETag:    NormalizeETagForCompare(expectedSourceETag),
+				ObservedETag:    meta.ETag,
+				ObservedVersion: meta.Version,
+			}
+		}
 	} else {
 		srcGetter, ok := src.(provider.ObjectGetter)
 		if !ok {

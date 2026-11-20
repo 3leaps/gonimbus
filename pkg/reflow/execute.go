@@ -103,6 +103,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 	var prefetched bytes.Buffer
 	var firstURI string
 	var firstProvider string
+	var firstVersionID string
 
 	for {
 		remaining := maxPreflightSniffBytes - prefetched.Len()
@@ -124,6 +125,7 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 				if in, parseErr := parseReflowInputLine(trimmed); parseErr == nil && in.SourceURI != "" {
 					firstURI = in.SourceURI
 					firstProvider = in.SourceProvider
+					firstVersionID = strings.TrimSpace(in.SourceVersionID)
 					break
 				}
 			}
@@ -137,6 +139,9 @@ func preflightRecordStreamRevisionGetter(ctx context.Context, src RecordStreamSo
 	out := RecordStreamSource{Records: replayed, Resolve: src.Resolve}
 	if firstURI == "" {
 		return out, nil
+	}
+	if firstVersionID != "" && (firstVersionID == "null" || !ProviderSupportsNativeVersion(firstProvider)) {
+		return RecordStreamSource{}, &ReplayUnverifiableError{Provider: firstProvider, Err: provider.ErrReplayUnverifiable}
 	}
 	prov, err := src.Resolve(ctx, firstURI)
 	if err != nil {
@@ -1335,7 +1340,15 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 
 	bindingRequired := r.cfg.RequireSourceMatch
 	expectedETag := NormalizeETagForCompare(in.SourceETag)
-	if bindingRequired {
+	expectedVersionID := strings.TrimSpace(in.SourceVersionID)
+	hasVersionPin := expectedVersionID != ""
+	bindingApplied := bindingRequired || hasVersionPin
+	if hasVersionPin {
+		if expectedVersionID == "null" || !ProviderSupportsNativeVersion(in.SourceProvider) {
+			return r.recordObjectErrorWithMatch(ctx, stats, in, destURI, destKey, "source provider does not support native source_version_id", provider.ErrReplayUnverifiable, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, nil)
+		}
+		in.SourceRevision = provider.SourceRevision{Kind: provider.RevisionNative, Value: expectedVersionID}
+	} else if bindingRequired {
 		if expectedETag == "" && in.SourceRevision.Validate() != nil {
 			return r.recordObjectErrorWithMatch(ctx, stats, in, destURI, destKey, "source revision token missing", ErrSourceTokenMissing, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, nil)
 		}
@@ -1357,13 +1370,15 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	// mandatory; one probed only to recover an absent etag/size is optional and
 	// tolerates failure (the copy proceeds with the input's values, an unknown
 	// size reserving the conservative memory cap). Mirrors the CLI pool.
+	// When source_version_id pins a historical version, skip optional unversioned
+	// HEAD probes and never overwrite expected ETag/size with current-version HEAD.
 	mandatorySourceHead := r.cfg.Metadata.NeedsSourceHead() || needsSourceHeadForCollision
-	if mandatorySourceHead || sourceETag == "" || sourceSize == 0 {
+	if mandatorySourceHead || (!hasVersionPin && (sourceETag == "" || sourceSize == 0)) {
 		meta, err := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey)
 		switch {
 		case err == nil:
 			sourceMeta = meta
-			if bindingRequired && expectedETag != "" && meta.ETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedETag) {
+			if bindingRequired && !hasVersionPin && expectedETag != "" && meta.ETag != "" && NormalizeETagForCompare(meta.ETag) != NormalizeETagForCompare(expectedETag) {
 				match := &SourceMatchInfo{
 					ExpectedETag:      SafeReceiptHandle(expectedETag),
 					ObservedETag:      SafeReceiptHandle(meta.ETag),
@@ -1371,11 +1386,13 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 				}
 				return r.recordObjectErrorWithMatch(ctx, stats, in.withSourceMeta(expectedETag, sourceSize), destURI, destKey, "source changed before copy", provider.ErrSourceChanged, map[string]any{"source_uri": sourceURI, "dest_uri": destURI}, nil, match)
 			}
-			if !bindingRequired {
+			if !bindingApplied {
 				sourceETag = meta.ETag
 			}
-			sourceSize = meta.Size
-			sourceSizeKnown = true // a successful HEAD measures the size
+			if !hasVersionPin {
+				sourceSize = meta.Size
+				sourceSizeKnown = true // a successful HEAD measures the size
+			}
 			if !meta.LastModified.IsZero() {
 				sourceLastMod = meta.LastModified
 			}
@@ -1446,9 +1463,16 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 			msg = "collision"
 		}
 		var sourceMatch *SourceMatchInfo
-		if bindingRequired && provider.IsSourceChanged(err) {
-			sourceMatch = &SourceMatchInfo{ExpectedETag: SafeReceiptHandle(expectedETag)}
-			if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
+		if bindingApplied && provider.IsSourceChanged(err) {
+			sourceMatch = &SourceMatchInfo{
+				ExpectedETag:      SafeReceiptHandle(expectedETag),
+				ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
+			}
+			var etagMismatch *transfer.SourceETagMismatchError
+			if errors.As(err, &etagMismatch) {
+				sourceMatch.ObservedETag = SafeReceiptHandle(etagMismatch.ObservedETag)
+				sourceMatch.ObservedVersionID = SafeSourceVersionID(etagMismatch.ObservedVersion)
+			} else if headMeta, headErr := limitedHead(ctx, limiter, stages, sourceProvider, in.SourceKey); headErr == nil && headMeta != nil {
 				sourceMatch.ObservedETag = SafeReceiptHandle(headMeta.ETag)
 				sourceMatch.ObservedVersionID = SafeSourceVersionID(headMeta.Version)
 			}
@@ -1504,8 +1528,8 @@ func (r *Runner) copyAndEmit(ctx context.Context, sourceProvider provider.Provid
 	_ = putResult
 	rec := copyInput.record(destURI, destKey, status)
 	rec = RecordWithReceipt(rec, receipt, layout.ProviderID)
-	if bindingRequired {
-		rec = RecordWithSourceBinding(rec, receipt, expectedETag, "")
+	if bindingApplied {
+		rec = RecordWithSourceBinding(rec, receipt, expectedETag, expectedVersionID)
 	}
 	rec.Reason = reason
 	rec.Bytes = bytes
@@ -1617,7 +1641,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 			}
 			return r.handleExistingDestination(ctx, src, layout, limiter, stages, in, destKey, dstMeta, decisionHeadFallback, opts, receipt)
 		case provider.IsNotFound(headErr):
-			bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision, r.cfg.RequireSourceMatch, receipt)
+			bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision, dualExpectedSourceETag(in), r.cfg.RequireSourceMatch, receipt)
 			if err == nil {
 				err = markObserved()
 			}
@@ -1629,7 +1653,7 @@ func (r *Runner) copyWithCollision(ctx context.Context, src provider.Provider, l
 		}
 	}
 
-	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts, in.SourceRevision, r.cfg.RequireSourceMatch, receipt)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfAbsent: true}, opts, in.SourceRevision, dualExpectedSourceETag(in), r.cfg.RequireSourceMatch, receipt)
 	if err == nil {
 		markErr := markObserved()
 		release()
@@ -1679,7 +1703,7 @@ func (r *Runner) copyUnconditionalOverwrite(ctx context.Context, src provider.Pr
 	default:
 		return 0, provider.PutResult{}, nil, "", "", headErr
 	}
-	bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision, r.cfg.RequireSourceMatch, receipt)
+	bytes, err := limitedCopy(ctx, limiter, stages, src, dst, in.SourceKey, destKey, in.SourceSize, opts, in.SourceRevision, dualExpectedSourceETag(in), r.cfg.RequireSourceMatch, receipt)
 	return bytes, provider.PutResult{}, collision, "complete", "", err
 }
 
@@ -1691,7 +1715,7 @@ func (r *Runner) handleExistingDestination(ctx context.Context, src provider.Pro
 	}
 	probeStart := time.Now()
 	duplicate, err := reflowprobe.Run(ctx, limiter, func(ctx context.Context) (bool, error) {
-		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta, compareRev)
+		return isDuplicateCollisionForReflow(ctx, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceProvider, layout.ProviderID, in.SourceETag, in.SourceSize, dstMeta, compareRev, dualExpectedSourceETag(in))
 	})
 	stages.recordCollisionProbe(time.Since(probeStart))
 	if err != nil {
@@ -1778,7 +1802,7 @@ func (r *Runner) resolveSourceNewerConflict(ctx context.Context, src provider.Pr
 
 	collision := newSourceNewerCollisionInfo(collisionOverwritten, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, decisionReason)
 	etag := dstMeta.ETag
-	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts, in.SourceRevision, r.cfg.RequireSourceMatch, receipt)
+	bytes, result, err := limitedCopyConditional(ctx, limiter, stages, src, r.cfg.Destination.Provider, in.SourceKey, destKey, in.SourceSize, provider.PutPrecondition{IfMatchETag: &etag}, opts, in.SourceRevision, dualExpectedSourceETag(in), r.cfg.RequireSourceMatch, receipt)
 	if err != nil {
 		if isConditionalExists(err) {
 			concurrent := newSourceNewerCollisionInfo(collisionConcurrentMut, dstMeta, in.SourceLastMod, sourceNewerDecisionPath, reasonConcurrentMut)
@@ -1885,17 +1909,30 @@ func limitedHead(ctx context.Context, limiter *ConcurrencyLimiter, stages *Stage
 	return meta, err
 }
 
+// ProviderSupportsNativeVersion reports whether a provider scheme supports
+// immutable native version identifiers (S3 VersionId or GCS generation).
+func ProviderSupportsNativeVersion(providerID string) bool {
+	return providerID == string(provider.ProviderS3) || providerID == string(provider.ProviderGCS)
+}
+
+func dualExpectedSourceETag(in reflowInput) string {
+	if strings.TrimSpace(in.SourceVersionID) == "" {
+		return ""
+	}
+	return NormalizeETagForCompare(in.SourceETag)
+}
+
 // limitedCopy phase-splits the global concurrency token across source-read and
 // dest-write for the single-part path (see transfer.CopyGate). Memory
 // reservation still spans the whole copy.
-func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions, revision provider.SourceRevision, requireBinding bool, receipt *transfer.CopyReceipt) (int64, error) {
+func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, opts provider.PutOptions, revision provider.SourceRevision, expectedSourceETag string, requireBinding bool, receipt *transfer.CopyReceipt) (int64, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, err
 	}
 	defer releaseMem()
 	gate := newLimiterCopyGate(limiter, stages)
-	copyOpts := transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: limiter.RetryBufferCap(), PutOptions: opts}, Gate: gate}
+	copyOpts := transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: limiter.RetryBufferCap(), PutOptions: opts}, ExpectedSourceETag: expectedSourceETag, Gate: gate}
 	if requireBinding || revision.Kind != "" || strings.TrimSpace(revision.Value) != "" {
 		if err := revision.Validate(); err != nil {
 			return 0, err
@@ -1910,14 +1947,14 @@ func limitedCopy(ctx context.Context, limiter *ConcurrencyLimiter, stages *Stage
 	return receipt.Bytes, err
 }
 
-func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision, requireBinding bool, receipt *transfer.CopyReceipt) (int64, provider.PutResult, error) {
+func limitedCopyConditional(ctx context.Context, limiter *ConcurrencyLimiter, stages *StageStats, src provider.Provider, dst provider.Provider, srcKey, dstKey string, sourceSize int64, precond provider.PutPrecondition, opts provider.PutOptions, revision provider.SourceRevision, expectedSourceETag string, requireBinding bool, receipt *transfer.CopyReceipt) (int64, provider.PutResult, error) {
 	releaseMem, err := limiter.ReserveCopyMemory(ctx, sourceSize)
 	if err != nil {
 		return 0, provider.PutResult{}, err
 	}
 	defer releaseMem()
 	gate := newLimiterCopyGate(limiter, stages)
-	copyOpts := transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: limiter.RetryBufferCap(), Precondition: precond, PutOptions: opts}, Gate: gate}
+	copyOpts := transfer.CopyReceiptOptions{Upload: transfer.UploadOptions{RetryBufferBytes: limiter.RetryBufferCap(), Precondition: precond, PutOptions: opts}, ExpectedSourceETag: expectedSourceETag, Gate: gate}
 	if requireBinding || revision.Kind != "" || strings.TrimSpace(revision.Value) != "" {
 		if err := revision.Validate(); err != nil {
 			return 0, provider.PutResult{}, err

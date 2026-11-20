@@ -275,6 +275,16 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
 		if provider.IsNotFound(wrapped) {
+			if revision.Kind == provider.RevisionNative {
+				if _, liveErr := obj.Attrs(ctx); liveErr != nil {
+					if ctx.Err() != nil {
+						return nil, provider.ObjectMeta{}, ctx.Err()
+					}
+					if provider.IsNotFound(p.wrapError("GetObjectRevision", key, liveErr)) {
+						return nil, provider.ObjectMeta{}, wrapped
+					}
+				}
+			}
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderGCS,
@@ -289,6 +299,16 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
 		if provider.IsNotFound(wrapped) {
+			if revision.Kind == provider.RevisionNative {
+				if _, liveErr := obj.Attrs(ctx); liveErr != nil {
+					if ctx.Err() != nil {
+						return nil, provider.ObjectMeta{}, ctx.Err()
+					}
+					if provider.IsNotFound(p.wrapError("GetObjectRevision", key, liveErr)) {
+						return nil, provider.ObjectMeta{}, wrapped
+					}
+				}
+			}
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderGCS,
@@ -299,7 +319,18 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		}
 		return nil, provider.ObjectMeta{}, wrapped
 	}
-	return reader, *objectMetaFromAttrs(attrs), nil
+	meta := *objectMetaFromAttrs(attrs)
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
+		_ = reader.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderGCS,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	return reader, meta, nil
 }
 
 // GetRange downloads a byte range as a stream.

@@ -418,3 +418,43 @@ func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
 	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
 	require.False(t, provider.IsSourceChanged(err))
 }
+
+func TestGetObjectRevisionNativeNotFoundVsChangedWithFakeServer(t *testing.T) {
+	ctx := context.Background()
+	p := newFakeProvider(t, []fakestorage.Object{
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("alpha")},
+	})
+
+	head, err := p.Head(ctx, "doc.txt")
+	require.NoError(t, err)
+	require.NotEmpty(t, head.Version)
+
+	// Matching generation succeeds.
+	body, meta, err := p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionNative,
+		Value: head.Version,
+	})
+	require.NoError(t, err)
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "alpha", string(raw))
+	require.Equal(t, head.Version, meta.Version)
+
+	// Non-existent generation while live object exists reports ErrSourceChanged.
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionNative,
+		Value: "999999999999",
+	})
+	require.True(t, provider.IsSourceChanged(err), "expected ErrSourceChanged, got %v", err)
+	require.False(t, provider.IsNotFound(err))
+
+	// Non-existent generation after object deletion reports ErrNotFound.
+	require.NoError(t, p.DeleteObject(ctx, "doc.txt"))
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionNative,
+		Value: "999999999999",
+	})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err))
+}

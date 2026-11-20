@@ -96,8 +96,10 @@ type fakeS3Entry struct {
 type fakeS3HTTPServer struct {
 	mu                sync.Mutex
 	objects           map[string]fakeS3Entry
+	versions          map[string]map[string]fakeS3Entry
 	unconditionalGets int
 	conditionalGets   int
+	versionedGets     int
 	headCalls         int
 	onHead            func(key string, call int)
 	server            *httptest.Server
@@ -106,7 +108,8 @@ type fakeS3HTTPServer struct {
 func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
 	t.Helper()
 	fs := &fakeS3HTTPServer{
-		objects: map[string]fakeS3Entry{},
+		objects:  map[string]fakeS3Entry{},
+		versions: map[string]map[string]fakeS3Entry{},
 	}
 	fs.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		trimmed := strings.TrimPrefix(r.URL.Path, "/")
@@ -144,18 +147,30 @@ func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
 
 		case http.MethodGet:
 			ifMatch := r.Header.Get("If-Match")
+			versionID := r.URL.Query().Get("versionId")
 			fs.mu.Lock()
-			if ifMatch == "" {
-				fs.unconditionalGets++
+			var entry fakeS3Entry
+			var ok bool
+			if versionID != "" {
+				fs.versionedGets++
+				entry, ok = fs.versions[key][versionID]
 			} else {
-				fs.conditionalGets++
+				if ifMatch == "" {
+					fs.unconditionalGets++
+				} else {
+					fs.conditionalGets++
+				}
+				entry, ok = fs.objects[key]
 			}
-			entry, ok := fs.objects[key]
 			fs.mu.Unlock()
 			if !ok {
 				w.Header().Set("Content-Type", "application/xml")
 				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+				if versionID != "" {
+					_, _ = w.Write([]byte(`<Error><Code>NoSuchVersion</Code><Message>The specified version does not exist.</Message></Error>`))
+				} else {
+					_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+				}
 				return
 			}
 			if ifMatch != "" && strings.Trim(ifMatch, `"`) != entry.etag {
@@ -185,7 +200,14 @@ func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
 func (fs *fakeS3HTTPServer) put(key, body, etag, versionID string, modTime time.Time) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	fs.objects[key] = fakeS3Entry{body: []byte(body), etag: etag, versionID: versionID, modTime: modTime}
+	entry := fakeS3Entry{body: []byte(body), etag: etag, versionID: versionID, modTime: modTime}
+	fs.objects[key] = entry
+	if versionID != "" {
+		if fs.versions[key] == nil {
+			fs.versions[key] = map[string]fakeS3Entry{}
+		}
+		fs.versions[key][versionID] = entry
+	}
 }
 
 func (fs *fakeS3HTTPServer) del(key string) {
@@ -1260,5 +1282,186 @@ func TestTransferReflowRequireSourceMatchQuarantineDeletedPreservesNotFound(t *t
 		st, rsn := readCheckpointItemStatusReason(t, checkpointPath, "a/item.bin")
 		require.Equal(t, "failed", st)
 		require.Equal(t, "not_found", rsn)
+	})
+}
+
+func TestTransferReflowSourceVersionIDS3DualPath(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	paths := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+
+	for _, tc := range paths {
+		for _, requireMatch := range []bool{true, false} {
+			modeLabel := "flag-off"
+			if requireMatch {
+				modeLabel = "flag-on"
+			}
+			t.Run(tc.name+"/"+modeLabel, func(t *testing.T) {
+				withTransferReflowTestState(t)
+				s3Srv := newFakeS3HTTPServer(t)
+				// Overwritten key: reviewed v1 still exists historically while latest is v2.
+				s3Srv.put("a/reviewed.xml", "reviewed-v1", "etag-v1", "ver-1", now)
+				s3Srv.put("a/reviewed.xml", "mutated-v2-different-size", "etag-v2", "ver-2", now.Add(time.Minute))
+				// Existing key with another version for NoSuchVersion -> source_changed.
+				s3Srv.put("a/wrongver.xml", "live-v2", "etag-live", "ver-live", now)
+				// Deleted key for NoSuchVersion -> not_found (never put).
+
+				srcProv, err := s3.New(context.Background(), s3.Config{
+					Bucket:         "source-bucket",
+					Region:         "us-east-1",
+					Endpoint:       s3Srv.server.URL,
+					ForcePathStyle: true,
+					Anonymous:      true,
+				})
+				require.NoError(t, err)
+				dstProv := newReflowMemoryProvider()
+				checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+				useTransferReflowProviderFactories(t, providerdispatch.Factories{
+					S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+						if cfg.Bucket == "source-bucket" {
+							return srcProv, nil
+						}
+						return dstProv, nil
+					},
+				})
+
+				input := strings.Join([]string{
+					`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/reviewed.xml","source_key":"a/reviewed.xml","source_etag":"etag-v1","source_version_id":"ver-1","source_size_bytes":11,"dest_rel_key":"a/reviewed.xml"}}`,
+					`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/reviewed.xml","source_key":"a/reviewed.xml","source_etag":"wrong-etag","source_version_id":"ver-1","source_size_bytes":11,"dest_rel_key":"a/mismatch.xml"}}`,
+					`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/wrongver.xml","source_key":"a/wrongver.xml","source_etag":"etag-old","source_version_id":"ver-deleted","source_size_bytes":7,"dest_rel_key":"a/wrongver.xml"}}`,
+					`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":"s3://source-bucket/a/missing.xml","source_key":"a/missing.xml","source_etag":"etag-gone","source_version_id":"ver-gone","source_size_bytes":5,"dest_rel_key":"a/missing.xml"}}`,
+				}, "\n") + "\n"
+
+				args := []string{
+					"--stdin",
+					"--dest", "s3://dest-bucket/data/",
+					"--parallel", "1",
+					"--checkpoint", checkpointPath,
+					"--metadata-policy", "preserve",
+				}
+				if requireMatch {
+					args = append(args, "--require-source-match")
+				}
+				args = append(args, tc.extra...)
+
+				stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(input), args...)
+				require.Error(t, err)
+
+				sum := requireRecord(t, stdout, reflowpkg.SummaryRecordType, "")
+				require.Contains(t, string(sum.Data), fmt.Sprintf(`"execution_path":"%s"`, tc.wantPath))
+
+				byDest := map[string]reflowpkg.Record{}
+				for _, rec := range parseTypedReflowRecords(t, stdout) {
+					if rec.Status != "in_progress" {
+						byDest[rec.DestKey] = rec
+					}
+				}
+
+				// 1. Historical version v1 copied even after v2 overwrite and metadata HEAD.
+				reviewed := byDest["data/a/reviewed.xml"]
+				require.Equal(t, "complete", reviewed.Status)
+				require.Equal(t, "reviewed-v1", string(dstProv.mustObject("data/a/reviewed.xml")))
+				require.Equal(t, "etag-v1", reviewed.SourceETag)
+				require.Equal(t, "ver-1", reviewed.SourceVersionID)
+				require.NotNil(t, reviewed.SourceMatch)
+				require.Equal(t, "etag-v1", reviewed.SourceMatch.ExpectedETag)
+				require.Equal(t, "ver-1", reviewed.SourceMatch.ExpectedVersionID)
+				require.Equal(t, "etag-v1", reviewed.SourceMatch.ObservedETag)
+				require.Equal(t, "ver-1", reviewed.SourceMatch.ObservedVersionID)
+
+				// 2. Dual-token ETag mismatch fails closed with zero dest bytes and pinned version ETag.
+				mismatch := byDest["data/a/mismatch.xml"]
+				require.Equal(t, "failed", mismatch.Status)
+				require.Equal(t, "source_changed", mismatch.Reason)
+				require.False(t, dstProv.hasObject("data/a/mismatch.xml"))
+				require.NotNil(t, mismatch.SourceMatch)
+				require.Equal(t, "wrong-etag", mismatch.SourceMatch.ExpectedETag)
+				require.Equal(t, "ver-1", mismatch.SourceMatch.ExpectedVersionID)
+				require.Equal(t, "etag-v1", mismatch.SourceMatch.ObservedETag)
+				require.Equal(t, "ver-1", mismatch.SourceMatch.ObservedVersionID)
+
+				// 3. NoSuchVersion on existing key reports source_changed with live observed version.
+				wrongver := byDest["data/a/wrongver.xml"]
+				require.Equal(t, "failed", wrongver.Status)
+				require.Equal(t, "source_changed", wrongver.Reason)
+				require.False(t, dstProv.hasObject("data/a/wrongver.xml"))
+				require.NotNil(t, wrongver.SourceMatch)
+				require.Equal(t, "ver-deleted", wrongver.SourceMatch.ExpectedVersionID)
+				require.Equal(t, "ver-live", wrongver.SourceMatch.ObservedVersionID)
+
+				// 4. NoSuchVersion on deleted key reports not_found.
+				missing := byDest["data/a/missing.xml"]
+				require.Equal(t, "failed", missing.Status)
+				require.Equal(t, "not_found", missing.Reason)
+				require.False(t, dstProv.hasObject("data/a/missing.xml"))
+				require.Nil(t, missing.SourceMatch)
+
+				_, uncondGets, _ := s3Srv.counts()
+				require.Zero(t, uncondGets, "version-pinned reflow must never issue unpinned GetObject")
+			})
+		}
+	}
+}
+
+func TestTransferReflowSourceVersionIDFileRefusal(t *testing.T) {
+	srcRoot, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(srcRoot, "doc.txt"), []byte("hello"), 0o600))
+	srcURI := fileURI(filepath.Join(srcRoot, "doc.txt"))
+
+	line := fmt.Sprintf(`{"type":"gonimbus.reflow.input.v1","data":{"source_uri":%q,"source_key":"doc.txt","source_etag":"any-etag","source_version_id":"v1","source_size_bytes":5,"dest_rel_key":"doc.txt"}}`+"\n", srcURI)
+
+	t.Run("flag-on refuses at preflight with exit 40", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		dstProv := newReflowMemoryProvider()
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) { return dstProv, nil },
+		})
+
+		stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+			"--require-source-match",
+		)
+		require.Error(t, execErr)
+		require.Contains(t, execErr.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
+		require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
+		require.Empty(t, dstProv.conditionalPutCallsSnapshot(), "preflight refusal must precede destination probes")
+		require.False(t, dstProv.hasObject("data/doc.txt"))
+	})
+
+	t.Run("flag-off refuses per-line with replay_unverifiable", func(t *testing.T) {
+		withTransferReflowTestState(t)
+		dstProv := newReflowMemoryProvider()
+		useTransferReflowProviderFactories(t, providerdispatch.Factories{
+			S3: func(_ context.Context, _ s3.Config) (provider.Provider, error) { return dstProv, nil },
+		})
+
+		stdout, execErr := runSourceMatchReflowCmd(t, strings.NewReader(line),
+			"--stdin",
+			"--dest", "s3://dest-bucket/data/",
+			"--parallel", "1",
+			"--checkpoint", filepath.Join(t.TempDir(), "state.db"),
+		)
+		require.Error(t, execErr)
+		require.False(t, dstProv.hasObject("data/doc.txt"))
+		records := parseTypedReflowRecords(t, stdout)
+		var terminal reflowpkg.Record
+		for _, rec := range records {
+			if rec.Status != "in_progress" {
+				terminal = rec
+			}
+		}
+		require.Equal(t, "failed", terminal.Status)
+		require.Equal(t, "replay_unverifiable", terminal.Reason)
 	})
 }

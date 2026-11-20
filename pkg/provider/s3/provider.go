@@ -369,6 +369,9 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	input := &s3.GetObjectInput{Bucket: aws.String(p.bucket), Key: aws.String(key)}
 	switch revision.Kind {
 	case provider.RevisionNative:
+		if strings.TrimSpace(revision.Value) == "null" {
+			return nil, provider.ObjectMeta{}, fmt.Errorf("%w: S3 null version ID is not an immutable revision", provider.ErrReplayUnverifiable)
+		}
 		input.VersionId = aws.String(revision.Value)
 	case provider.RevisionETag:
 		input.IfMatch = aws.String(conditionETag(revision.Value))
@@ -379,6 +382,29 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
 		if isPreconditionFailure(err) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderS3,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      errors.Join(provider.ErrSourceChanged, err),
+			}
+		}
+		if revision.Kind == provider.RevisionNative && isNoSuchVersion(err) {
+			if _, headErr := p.Head(ctx, key); headErr != nil {
+				if ctx.Err() != nil {
+					return nil, provider.ObjectMeta{}, ctx.Err()
+				}
+				if provider.IsNotFound(headErr) {
+					return nil, provider.ObjectMeta{}, &provider.ProviderError{
+						Op:       "GetObjectRevision",
+						Provider: provider.ProviderS3,
+						Bucket:   p.bucket,
+						Key:      key,
+						Err:      provider.ErrNotFound,
+					}
+				}
+			}
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderS3,
@@ -403,6 +429,16 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		StorageClass: normalizeStorageClassString(string(out.StorageClass)),
 	}
 	if revision.Kind == provider.RevisionETag && meta.ETag != cleanETag(revision.Value) {
+		_ = out.Body.Close()
+		return nil, provider.ObjectMeta{}, &provider.ProviderError{
+			Op:       "GetObjectRevision",
+			Provider: provider.ProviderS3,
+			Bucket:   p.bucket,
+			Key:      key,
+			Err:      provider.ErrSourceChanged,
+		}
+	}
+	if revision.Kind == provider.RevisionNative && meta.Version != revision.Value {
 		_ = out.Body.Close()
 		return nil, provider.ObjectMeta{}, &provider.ProviderError{
 			Op:       "GetObjectRevision",
@@ -826,6 +862,14 @@ func isPreconditionFailure(err error) bool {
 	}
 	errMsg := err.Error()
 	return strings.Contains(errMsg, "PreconditionFailed") || strings.Contains(errMsg, "status code: 412") || strings.Contains(errMsg, "StatusCode: 412")
+}
+
+func isNoSuchVersion(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchVersion" {
+		return true
+	}
+	return strings.Contains(err.Error(), "NoSuchVersion")
 }
 
 // cleanETag removes surrounding quotes from an ETag value.

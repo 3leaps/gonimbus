@@ -34,6 +34,7 @@ type reflowTask struct {
 	SourceCheckpoint  string
 	SourceKey         string
 	SourceETag        string
+	SourceVersionID   string
 	SourceSize        int64
 	SourceLastMod     time.Time
 	SourceMode        fs.FileMode
@@ -428,6 +429,7 @@ func enqueueReflowLineWithWarnings(
 				SourceURI        string            `json:"source_uri"`
 				SourceKey        string            `json:"source_key"`
 				SourceETag       string            `json:"source_etag"`
+				SourceVersionID  string            `json:"source_version_id"`
 				SourceSize       int64             `json:"source_size_bytes"`
 				SourceLastMod    time.Time         `json:"source_last_modified"`
 				Vars             map[string]string `json:"vars"`
@@ -501,7 +503,7 @@ func enqueueReflowLineWithWarnings(
 				return srcIdentity, fmt.Errorf("quarantine_prefix must be a relative destination prefix")
 			}
 			select {
-			case out <- reflowTask{SourceProvider: u.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.SourceETag, SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix, RejectSymlinkPath: u.Provider == string(provider.ProviderFile)}:
+			case out <- reflowTask{SourceProvider: u.Provider, SourceBucket: sourceBucket, SourceRoot: sourceRoot, SourceURI: srcURI, SourceCheckpoint: sourceCheckpoint, SourceKey: key, SourceETag: data.SourceETag, SourceVersionID: strings.TrimSpace(data.SourceVersionID), SourceSize: data.SourceSize, SourceLastMod: data.SourceLastMod, Vars: data.Vars, Probe: data.Probe, DestRelKey: destRel, RoutingClass: routingClass, QuarantinePrefix: quarantinePrefix, RejectSymlinkPath: u.Provider == string(provider.ProviderFile)}:
 				return srcIdentity, nil
 			case <-ctx.Done():
 				return srcIdentity, ctx.Err()
@@ -805,10 +807,11 @@ func pathWithinRoot(root string, path string) bool {
 // --require-source-match RevisionGetter preflight before running destination
 // IfAbsent probes. Reads are strictly bounded by maxReflowFirstRecordSniffBytes
 // (including oversized individual lines) and non-EOF read errors are returned.
-func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader, error) {
+func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, string, io.Reader, error) {
 	reader := bufio.NewReaderSize(in, 64*1024)
 	var prefetched bytes.Buffer
 	var found *uri.ObjectURI
+	var foundVersionID string
 
 	for {
 		remaining := maxReflowFirstRecordSniffBytes - prefetched.Len()
@@ -817,16 +820,17 @@ func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader, error
 			prefetched.Write(line)
 		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return nil, nil, readErr
+			return nil, "", nil, readErr
 		}
 		if exceeded {
-			return nil, nil, &reflowpkg.ReplayUnverifiableError{
+			return nil, "", nil, &reflowpkg.ReplayUnverifiableError{
 				Err: fmt.Errorf("%w: unable to resolve source provider within %d-byte preflight sniff limit", provider.ErrReplayUnverifiable, maxReflowFirstRecordSniffBytes),
 			}
 		}
 		if len(line) > 0 {
-			if parsed := parseReflowPreflightSourceURI(strings.TrimSpace(string(line))); parsed != nil {
+			if parsed, versionID := parseReflowPreflightSourceURI(strings.TrimSpace(string(line))); parsed != nil {
 				found = parsed
+				foundVersionID = versionID
 				break
 			}
 		}
@@ -834,7 +838,7 @@ func peekCLIReflowFirstSourceURI(in io.Reader) (*uri.ObjectURI, io.Reader, error
 			break
 		}
 	}
-	return found, io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), nil
+	return found, foundVersionID, io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), nil
 }
 
 func readBoundedCLILine(r *bufio.Reader, limit int) (line []byte, exceeded bool, err error) {
@@ -872,9 +876,9 @@ func readBoundedCLILine(r *bufio.Reader, limit int) (line []byte, exceeded bool,
 	return line, true, nil
 }
 
-func parseReflowPreflightSourceURI(trimmed string) *uri.ObjectURI {
+func parseReflowPreflightSourceURI(trimmed string) (*uri.ObjectURI, string) {
 	if trimmed == "" {
-		return nil
+		return nil, ""
 	}
 	if strings.HasPrefix(trimmed, "{") {
 		var env struct {
@@ -882,54 +886,56 @@ func parseReflowPreflightSourceURI(trimmed string) *uri.ObjectURI {
 			Data json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
-			return nil
+			return nil, ""
 		}
 		switch env.Type {
 		case reflowpkg.ReflowInputRecordType:
 			var data struct {
-				SourceURI string `json:"source_uri"`
-				SourceKey string `json:"source_key"`
+				SourceURI       string `json:"source_uri"`
+				SourceKey       string `json:"source_key"`
+				SourceVersionID string `json:"source_version_id"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil || strings.TrimSpace(data.SourceURI) == "" {
-				return nil
+				return nil, ""
 			}
 			u, err := uri.ParseURI(data.SourceURI)
 			if err != nil {
-				return nil
+				return nil, ""
 			}
+			ver := strings.TrimSpace(data.SourceVersionID)
 			if u.Provider == string(provider.ProviderFile) {
 				root, _, err := fileReflowInputRootAndKey(u.Key, data.SourceKey)
 				if err != nil {
-					return nil
+					return nil, ""
 				}
-				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: root}
+				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: root}, ver
 			}
-			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
+			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}, ver
 		case "gonimbus.index.object.v1":
 			var data struct {
 				BaseURI string `json:"base_uri"`
 			}
 			if err := json.Unmarshal(env.Data, &data); err != nil || strings.TrimSpace(data.BaseURI) == "" {
-				return nil
+				return nil, ""
 			}
 			u, err := uri.ParseURI(data.BaseURI)
 			if err != nil {
-				return nil
+				return nil, ""
 			}
 			if u.Provider == string(provider.ProviderFile) {
-				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Clean(u.Key)}
+				return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Clean(u.Key)}, ""
 			}
-			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
+			return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}, ""
 		default:
-			return nil
+			return nil, ""
 		}
 	}
 	u, err := uri.ParseURI(trimmed)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if u.Provider == string(provider.ProviderFile) {
-		return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Dir(filepath.Clean(u.Key))}
+		return &uri.ObjectURI{Provider: string(provider.ProviderFile), Bucket: reflowpkg.SourceBucketFile, Key: filepath.Dir(filepath.Clean(u.Key))}, ""
 	}
-	return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}
+	return &uri.ObjectURI{Provider: u.Provider, Bucket: u.Bucket}, ""
 }

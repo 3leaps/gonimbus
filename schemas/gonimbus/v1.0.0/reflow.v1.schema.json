@@ -21,7 +21,7 @@
     },
     "source_etag": {
       "type": "string",
-      "description": "Source object ETag. Under source-read binding (--require-source-match), records the ETag returned by the pinned read that supplied the copied bytes on complete/quarantined terminals; otherwise carries the input/HEAD observation."
+      "description": "Source object ETag. Under source-read binding (--require-source-match or input source_version_id), records the ETag returned by the pinned read that supplied the copied bytes on complete/quarantined terminals; otherwise carries the input/HEAD observation."
     },
     "source_version_id": {
       "type": "string",
