@@ -614,9 +614,9 @@ func TestTransferReflowRequireSourceMatchFileProviderEndToEnd(t *testing.T) {
 	unchangedPath := filepath.Join(srcDir, "unchanged.txt")
 	replacedPath := filepath.Join(srcDir, "replaced.txt")
 	deletedPath := filepath.Join(srcDir, "deleted.txt")
-	require.NoError(t, os.WriteFile(unchangedPath, []byte("alpha"), 0o600))
-	require.NoError(t, os.WriteFile(replacedPath, []byte("bravo"), 0o600))
-	require.NoError(t, os.WriteFile(deletedPath, []byte("delta"), 0o600))
+	require.NoError(t, os.WriteFile(unchangedPath, []byte("first"), 0o600))
+	require.NoError(t, os.WriteFile(replacedPath, []byte("prior"), 0o600))
+	require.NoError(t, os.WriteFile(deletedPath, []byte("third"), 0o600))
 
 	srcProv, err := providerfile.New(providerfile.Config{BaseDir: srcDir})
 	require.NoError(t, err)
@@ -629,7 +629,7 @@ func TestTransferReflowRequireSourceMatchFileProviderEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	// Mutate replaced.txt with same size + newer mtime, and delete deleted.txt.
-	require.NoError(t, os.WriteFile(replacedPath, []byte("BRAVO"), 0o600))
+	require.NoError(t, os.WriteFile(replacedPath, []byte("AFTER"), 0o600))
 	newer := time.Now().Add(2 * time.Second)
 	require.NoError(t, os.Chtimes(replacedPath, newer, newer))
 	require.NoError(t, os.Remove(deletedPath))
@@ -688,7 +688,7 @@ func TestTransferReflowRequireSourceMatchFileProviderEndToEnd(t *testing.T) {
 	require.Equal(t, headUnchanged.ETag, byKey["unchanged.txt"].SourceMatch.ObservedETag)
 	gotBody, err := os.ReadFile(filepath.Join(dstDir, "unchanged.txt"))
 	require.NoError(t, err)
-	require.Equal(t, "alpha", string(gotBody))
+	require.Equal(t, "first", string(gotBody))
 
 	// Same-size replaced file fails with source_changed and observed_etag.
 	require.Equal(t, "failed", byKey["replaced.txt"].Status)
@@ -712,9 +712,9 @@ func TestTransferReflowRequireSourceMatchGCSFakeServerLibrary(t *testing.T) {
 	server, err := fakestorage.NewServerWithOptions(fakestorage.Options{
 		Scheme: "http",
 		InitialObjects: []fakestorage.Object{
-			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "ok.txt"}, Content: []byte("alpha")},
-			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "same-size.txt"}, Content: []byte("bravo")},
-			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "deleted.txt"}, Content: []byte("delta")},
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "ok.txt"}, Content: []byte("first")},
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "same-size.txt"}, Content: []byte("prior")},
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "deleted.txt"}, Content: []byte("third")},
 		},
 	})
 	require.NoError(t, err)
@@ -735,7 +735,7 @@ func TestTransferReflowRequireSourceMatchGCSFakeServerLibrary(t *testing.T) {
 	require.NoError(t, err)
 
 	// Replace same-size.txt and delete deleted.txt after admission.
-	require.NoError(t, srcProv.PutObject(ctx, "same-size.txt", strings.NewReader("BRAVO"), 5))
+	require.NoError(t, srcProv.PutObject(ctx, "same-size.txt", strings.NewReader("AFTER"), 5))
 	headSameSizeAfter, err := srcProv.Head(ctx, "same-size.txt")
 	require.NoError(t, err)
 	require.NotEqual(t, headSameSize.ETag, headSameSizeAfter.ETag)
@@ -783,7 +783,7 @@ func TestTransferReflowRequireSourceMatchGCSFakeServerLibrary(t *testing.T) {
 	require.Equal(t, headOK.ETag, byKey["ok.txt"].SourceMatch.ExpectedETag)
 	require.Equal(t, headOK.ETag, byKey["ok.txt"].SourceMatch.ObservedETag)
 	require.Equal(t, headOK.Version, byKey["ok.txt"].SourceMatch.ObservedVersionID)
-	require.Equal(t, "alpha", string(dstProv.mustObject("data/ok.txt")))
+	require.Equal(t, "first", string(dstProv.mustObject("data/ok.txt")))
 
 	require.Equal(t, "failed", byKey["same-size.txt"].Status)
 	require.Equal(t, "source_changed", byKey["same-size.txt"].Reason)
