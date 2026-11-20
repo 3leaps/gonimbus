@@ -140,6 +140,7 @@ type transferReflowCheckpointConfig struct {
 	// re-fingerprint identically when no override is in play.
 	MemoryBudgetBytes         int64    `json:"memory_budget_bytes,omitempty"`
 	DryRun                    bool     `json:"dry_run"`
+	RequireSourceMatch        bool     `json:"require_source_match,omitempty"`
 	CheckpointPath            string   `json:"checkpoint_path"`
 	Overwrite                 bool     `json:"overwrite"`
 	OnCollision               string   `json:"on_collision"`
@@ -195,6 +196,7 @@ func transferReflowCheckpointConfigFromEffective(
 		NoAdaptive:                reflowNoAdaptive,
 		MemoryBudgetBytes:         memoryBudgetBytes,
 		DryRun:                    reflowDryRun,
+		RequireSourceMatch:        reflowRequireSourceMatch,
 		CheckpointPath:            checkpointPath,
 		Overwrite:                 reflowOverwrite,
 		OnCollision:               collCfg.Mode,
@@ -429,6 +431,7 @@ func applyTransferReflowCheckpointConfig(cmd *cobra.Command, cfg transferReflowC
 		value bool
 	}{
 		{"dry-run", false},
+		{"require-source-match", cfg.RequireSourceMatch},
 		{"no-adaptive", cfg.NoAdaptive},
 		{"resume", true},
 		{"overwrite", cfg.Overwrite},

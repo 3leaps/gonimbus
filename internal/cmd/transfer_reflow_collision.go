@@ -53,6 +53,9 @@ func recordWithCollision(rec reflowpkg.Record, collision *reflowpkg.CollisionInf
 }
 
 func isConditionalExists(err error) bool {
+	if provider.IsSourceChanged(err) {
+		return false
+	}
 	return provider.IsAlreadyExists(err) || provider.IsPreconditionFailed(err)
 }
 

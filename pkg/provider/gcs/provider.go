@@ -257,7 +257,7 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 		if err != nil {
 			return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
 		}
-		if attrs.Etag != revision.Value {
+		if strings.Trim(strings.TrimSpace(attrs.Etag), "\"") != strings.Trim(strings.TrimSpace(revision.Value), "\"") {
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderGCS,
@@ -287,7 +287,17 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	}
 	reader, err := versioned.NewReader(ctx)
 	if err != nil {
-		return nil, provider.ObjectMeta{}, p.wrapError("GetObjectRevision", key, err)
+		wrapped := p.wrapError("GetObjectRevision", key, err)
+		if provider.IsNotFound(wrapped) {
+			return nil, provider.ObjectMeta{}, &provider.ProviderError{
+				Op:       "GetObjectRevision",
+				Provider: provider.ProviderGCS,
+				Bucket:   p.bucket,
+				Key:      key,
+				Err:      provider.ErrSourceChanged,
+			}
+		}
+		return nil, provider.ObjectMeta{}, wrapped
 	}
 	return reader, *objectMetaFromAttrs(attrs), nil
 }

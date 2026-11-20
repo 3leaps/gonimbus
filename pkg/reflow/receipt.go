@@ -47,6 +47,25 @@ func SafeReceiptSHA256(value string) string {
 	return value
 }
 
+// SafeSourceVersionID normalizes an opaque source version/generation token,
+// omitting empty values and S3's sentinel "null" version id.
+func SafeSourceVersionID(value string) string {
+	if value == "" || value == "null" {
+		return ""
+	}
+	return SafeReceiptHandle(value)
+}
+
+// NormalizeETagForCompare trims surrounding whitespace and HTTP ETag quotes
+// without assuming MD5 or interpreting opaque token internals.
+func NormalizeETagForCompare(etag string) string {
+	trimmed := strings.TrimSpace(etag)
+	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+		return trimmed[1 : len(trimmed)-1]
+	}
+	return trimmed
+}
+
 // RecordWithReceipt projects only successful write facts onto a terminal.
 // Source read metadata takes precedence over an existing input observation.
 func RecordWithReceipt(rec Record, receipt transfer.CopyReceipt, destProvider string) Record {
@@ -63,6 +82,35 @@ func RecordWithReceipt(rec Record, receipt transfer.CopyReceipt, destProvider st
 	rec.DestETag = SafeReceiptHandle(receipt.ETag)
 	if destProvider != string(provider.ProviderFile) && receipt.Version != "null" {
 		rec.DestVersionID = SafeReceiptHandle(receipt.Version)
+	}
+	return rec
+}
+
+// RecordWithSourceBinding projects source-read binding evidence onto a terminal
+// record when source-read binding applied. On complete/quarantined terminals,
+// source_etag (and optional source_version_id) reflect the exact token returned
+// by the read that supplied the bytes, and source_match records expected and
+// observed tokens.
+func RecordWithSourceBinding(rec Record, receipt transfer.CopyReceipt, expectedETag, expectedVersionID string) Record {
+	if rec.Status != "complete" && rec.Status != "quarantined" {
+		return rec
+	}
+	observedETag := SafeReceiptHandle(receipt.SourceETag)
+	observedVersionID := SafeSourceVersionID(receipt.SourceVersion)
+	if observedETag != "" {
+		rec.SourceETag = observedETag
+	}
+	if observedVersionID != "" {
+		rec.SourceVersionID = observedVersionID
+	}
+	match := &SourceMatchInfo{
+		ExpectedETag:      SafeReceiptHandle(NormalizeETagForCompare(expectedETag)),
+		ExpectedVersionID: SafeSourceVersionID(expectedVersionID),
+		ObservedETag:      observedETag,
+		ObservedVersionID: observedVersionID,
+	}
+	if match.ExpectedETag != "" || match.ExpectedVersionID != "" || match.ObservedETag != "" || match.ObservedVersionID != "" {
+		rec.SourceMatch = match
 	}
 	return rec
 }

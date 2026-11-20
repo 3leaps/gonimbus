@@ -366,3 +366,55 @@ func summaryKeys(objects []provider.ObjectSummary) []string {
 	}
 	return keys
 }
+
+func TestGetObjectRevisionETagWithFakeServer(t *testing.T) {
+	ctx := context.Background()
+	p := newFakeProvider(t, []fakestorage.Object{
+		{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "bucket", Name: "doc.txt"}, Content: []byte("alpha")},
+	})
+
+	head, err := p.Head(ctx, "doc.txt")
+	require.NoError(t, err)
+	require.NotEmpty(t, head.ETag)
+	require.NotEmpty(t, head.Version)
+
+	// Unchanged read with RevisionETag (quoted or unquoted) succeeds and returns read-bound metadata.
+	body, meta, err := p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: `"` + head.ETag + `"`,
+	})
+	require.NoError(t, err)
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "alpha", string(raw))
+	require.Equal(t, head.ETag, meta.ETag)
+	require.Equal(t, head.Version, meta.Version)
+
+	// Same-size replacement returns ErrSourceChanged (not ErrNotFound).
+	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("bravo"), 5))
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: head.ETag,
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Different-size replacement returns ErrSourceChanged.
+	require.NoError(t, p.PutObject(ctx, "doc.txt", strings.NewReader("charlie-longer"), int64(len("charlie-longer"))))
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: head.ETag,
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Deleted object returns ErrNotFound (not ErrSourceChanged).
+	require.NoError(t, p.DeleteObject(ctx, "doc.txt"))
+	_, _, err = p.GetObjectRevision(ctx, "doc.txt", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: head.ETag,
+	})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err))
+}

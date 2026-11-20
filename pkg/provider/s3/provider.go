@@ -313,8 +313,10 @@ func (p *Provider) Head(ctx context.Context, key string) (*provider.ObjectMeta, 
 			Key:          key,
 			Size:         aws.ToInt64(output.ContentLength),
 			ETag:         cleanETag(aws.ToString(output.ETag)),
+			Revision:     aws.ToString(output.VersionId),
 			LastModified: aws.ToTime(output.LastModified),
 		},
+		Version:       aws.ToString(output.VersionId),
 		ContentType:   aws.ToString(output.ContentType),
 		Metadata:      output.Metadata,
 		StorageClass:  normalizeStorageClassString(string(output.StorageClass)),
@@ -369,14 +371,14 @@ func (p *Provider) GetObjectRevision(ctx context.Context, key string, revision p
 	case provider.RevisionNative:
 		input.VersionId = aws.String(revision.Value)
 	case provider.RevisionETag:
-		input.IfMatch = aws.String(revision.Value)
+		input.IfMatch = aws.String(conditionETag(revision.Value))
 	default:
 		return nil, provider.ObjectMeta{}, provider.ErrReplayUnverifiable
 	}
 	out, err := p.client.GetObject(ctx, input)
 	if err != nil {
 		wrapped := p.wrapError("GetObjectRevision", key, err)
-		if isPreconditionFailure(err) || provider.IsNotFound(wrapped) {
+		if isPreconditionFailure(err) {
 			return nil, provider.ObjectMeta{}, &provider.ProviderError{
 				Op:       "GetObjectRevision",
 				Provider: provider.ProviderS3,

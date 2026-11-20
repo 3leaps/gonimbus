@@ -891,7 +891,7 @@ func TestAnonymousReadRequestsAreUnsigned(t *testing.T) {
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("ell"))
 		case r.Method == "GET" && r.Header.Get("If-Match") != "":
-			require.Equal(t, "read-etag", r.Header.Get("If-Match"))
+			require.Equal(t, `"read-etag"`, r.Header.Get("If-Match"))
 			w.Header().Set("Content-Length", "5")
 			w.Header().Set("ETag", `"read-etag"`)
 			_, _ = w.Write([]byte("hello"))
@@ -1512,4 +1512,99 @@ func TestListAcceptsTruncatedPageWithAdvancingToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.IsTruncated)
 	assert.Equal(t, "next", res.ContinuationToken)
+}
+
+func TestGetObjectRevisionETagContract(t *testing.T) {
+	ctx := context.Background()
+	type serverState struct {
+		etag        string
+		versionID   string
+		body        string
+		missing     bool
+		ignoreMatch bool
+	}
+	state := &serverState{
+		etag:      `"d41d8cd98f00b204e9800998ecf8427e-3"`,
+		versionID: "v-42",
+		body:      "payload-v1",
+	}
+	var lastIfMatch atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		ifMatch := r.Header.Get("If-Match")
+		lastIfMatch.Store(ifMatch)
+		if state.missing {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+			return
+		}
+		if !state.ignoreMatch && ifMatch != "" && cleanETag(ifMatch) != cleanETag(state.etag) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`))
+			return
+		}
+		w.Header().Set("ETag", state.etag)
+		if state.versionID != "" {
+			w.Header().Set("x-amz-version-id", state.versionID)
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(state.body)))
+		_, _ = w.Write([]byte(state.body))
+	}))
+	defer server.Close()
+
+	p, err := New(ctx, Config{
+		Bucket:         "test-bucket",
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+		Anonymous:      true,
+	})
+	require.NoError(t, err)
+
+	// Matching multipart ETag succeeds and sends quoted If-Match.
+	body, meta, err := p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "payload-v1", string(got))
+	require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e-3", meta.ETag)
+	require.Equal(t, "v-42", meta.Version)
+	require.Equal(t, `"d41d8cd98f00b204e9800998ecf8427e-3"`, lastIfMatch.Load())
+
+	// Replaced object (412 PreconditionFailed) returns ErrSourceChanged, NOT ErrNotFound.
+	state.etag = `"opaque-kms-etag-v2"`
+	state.body = "payload-v2"
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	require.False(t, provider.IsNotFound(err))
+
+	// Broken endpoint that ignores If-Match and returns mismatched ETag still fails closed.
+	state.ignoreMatch = true
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.ErrorIs(t, err, provider.ErrSourceChanged)
+	state.ignoreMatch = false
+
+	// Deleted object (404 NoSuchKey) returns ErrNotFound, NOT ErrSourceChanged.
+	state.missing = true
+	_, _, err = p.GetObjectRevision(ctx, "obj.bin", provider.SourceRevision{
+		Kind:  provider.RevisionETag,
+		Value: "d41d8cd98f00b204e9800998ecf8427e-3",
+	})
+	require.True(t, provider.IsNotFound(err), "expected ErrNotFound, got %v", err)
+	require.False(t, provider.IsSourceChanged(err))
 }

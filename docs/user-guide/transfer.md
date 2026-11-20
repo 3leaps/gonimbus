@@ -714,6 +714,50 @@ The `collision` object also includes `src_last_modified`, `dest_last_modified_ob
 
 `decision_path` values are `ifabsent_then_head`, `unconditional_overwrite`, `quarantine_routed`, `head_compare_then_conditional_overwrite`, and `head_compare_fallback`. `ifabsent_succeeded` is reserved in schemas but not emitted by the default happy path.
 
+### Source-Read Binding (`--require-source-match`)
+
+By default, `transfer reflow` issues unpinned source reads and echoes the input or pre-copy observation in `source_etag`. That default preserves v0.5.0 behavior and record shape, but does not prevent a source object from being overwritten between admission (crawl/index/manifest generation) and copy.
+
+Pass `--require-source-match` (or set `Config.RequireSourceMatch: true` in `pkg/reflow`) to opt in to strict source-read binding:
+
+```bash
+gonimbus transfer reflow --stdin \
+  --dest 's3://dest/landing/' \
+  --require-source-match \
+  < reflow-input.jsonl > reflow-output.jsonl
+```
+
+Behavior when `--require-source-match` is enabled:
+
+- **Preflight refusal (`replay_unverifiable`, exit code 40):** If the resolved source provider does not support pinned revision reads (`provider.RevisionGetter`), reflow refuses at preflight before copying any object, emitting a `gonimbus.error.v1` record with `reason: "replay_unverifiable"` and `missing_capability: "RevisionGetter"`.
+- **Per-provider enforcement:**
+  - **S3 / S3-compatible:** Sends `GetObject` with HTTP `If-Match` set to the expected ETag (supporting single-part, multipart `<hex>-<N>`, and opaque KMS ETags). A `412 PreconditionFailed` response is never retried as an unconditional GET; Gonimbus emits `status: "failed"`, `reason: "source_changed"`, performs a best-effort follow-up `HEAD` to populate `source_match.observed_etag` (and `observed_version_id` when available), and writes nothing to the destination. A `404 NoSuchKey` reports `reason: "not_found"`, not `source_changed`.
+  - **GCS (`pkg/reflow` library):** Verifies the expected ETag and binds the read to the matched object generation; a changed object reports `source_changed` and a deleted object reports `not_found`.
+  - **Local filesystem (`file://`):** Opens the file descriptor without following symlinks and verifies its `fstat` size+mtime revision token against the expected token (best-effort compared to atomic object-store preconditions). Deleted files report `not_found`.
+- **Missing expected token (`source_token_missing`):** Any input item with an absent or empty `source_etag` fails cleanly with `status: "failed"`, `reason: "source_token_missing"` and writes nothing to the destination.
+- **Metadata/collision HEAD preservation:** When `--metadata-policy=preserve` or `--on-collision=overwrite-if-source-newer` issues a pre-copy source `HEAD`, the manifest's expected `source_etag` is preserved (never overwritten by `HEAD`). A mismatch observed at `HEAD` fails early with `source_changed` and both `expected_etag` and `observed_etag`; a mutation between `HEAD` and `GET` is still caught by the pinned `GET`.
+- **Read-bound receipt fields:** On pinned `complete` and `quarantined` records, `source_etag` reflects the exact ETag returned by the read that supplied the landed bytes, optional `source_version_id` records the provider version/generation when non-empty and not `"null"`, and `source_match` records `expected_etag`, `observed_etag`, and (when present) `observed_version_id`. In default unpinned mode, `source_match` and `source_version_id` are omitted and `source_etag` retains its existing unpinned observation semantics.
+
+```json
+{
+  "type": "gonimbus.reflow.v1",
+  "data": {
+    "source_uri": "s3://source/data/object.xml",
+    "source_key": "data/object.xml",
+    "source_etag": "d41d8cd98f00b204e9800998ecf8427e-3",
+    "source_version_id": "v-42",
+    "source_match": {
+      "expected_etag": "d41d8cd98f00b204e9800998ecf8427e-3",
+      "observed_etag": "d41d8cd98f00b204e9800998ecf8427e-3",
+      "observed_version_id": "v-42"
+    },
+    "dest_uri": "s3://dest/landing/object.xml",
+    "dest_key": "landing/object.xml",
+    "status": "complete"
+  }
+}
+```
+
 ### Post-Reflow Verification
 
 Use `inspect-pair` after a reflow run to verify the destination objects claimed

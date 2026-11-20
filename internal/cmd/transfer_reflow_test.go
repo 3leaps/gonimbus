@@ -3715,6 +3715,7 @@ func newTransferReflowTestCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&reflowNoAdaptive, "no-adaptive", false, "")
 	cmd.Flags().StringVar(&reflowMemoryBudget, "memory-budget", "", "")
 	cmd.Flags().BoolVar(&reflowDryRun, "dry-run", false, "")
+	cmd.Flags().BoolVar(&reflowRequireSourceMatch, "require-source-match", false, "")
 	cmd.Flags().BoolVar(&reflowResume, "resume", false, "")
 	cmd.Flags().StringVar(&reflowResumeRun, "resume-run", "", "")
 	cmd.Flags().StringVar(&reflowRunID, "run-id", "", "")
@@ -3763,6 +3764,7 @@ func withTransferReflowTestState(t *testing.T) {
 	oldNoAdaptive := reflowNoAdaptive
 	oldMemoryBudget := reflowMemoryBudget
 	oldDryRun := reflowDryRun
+	oldRequireSourceMatch := reflowRequireSourceMatch
 	oldResume := reflowResume
 	oldResumeRun := reflowResumeRun
 	oldRunID := reflowRunID
@@ -3814,6 +3816,7 @@ func withTransferReflowTestState(t *testing.T) {
 	reflowNoAdaptive = false
 	reflowMemoryBudget = ""
 	reflowDryRun = false
+	reflowRequireSourceMatch = false
 	reflowResume = false
 	reflowResumeRun = ""
 	reflowRunID = ""
@@ -3857,6 +3860,7 @@ func withTransferReflowTestState(t *testing.T) {
 		reflowNoAdaptive = oldNoAdaptive
 		reflowMemoryBudget = oldMemoryBudget
 		reflowDryRun = oldDryRun
+		reflowRequireSourceMatch = oldRequireSourceMatch
 		reflowResume = oldResume
 		reflowResumeRun = oldResumeRun
 		reflowRunID = oldRunID

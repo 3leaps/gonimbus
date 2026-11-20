@@ -1,0 +1,668 @@
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/3leaps/gonimbus/internal/providerdispatch"
+	"github.com/3leaps/gonimbus/pkg/provider"
+	providerfile "github.com/3leaps/gonimbus/pkg/provider/file"
+	"github.com/3leaps/gonimbus/pkg/provider/gcs"
+	"github.com/3leaps/gonimbus/pkg/provider/s3"
+	reflowpkg "github.com/3leaps/gonimbus/pkg/reflow"
+	"github.com/fsouza/fake-gcs-server/fakestorage"
+	"github.com/fulmenhq/gofulmen/foundry"
+	"github.com/stretchr/testify/require"
+)
+
+type cmdNonRevisionProvider struct {
+	inner    *reflowMemoryProvider
+	getCalls atomic.Int32
+}
+
+func (p *cmdNonRevisionProvider) List(ctx context.Context, opts provider.ListOptions) (*provider.ListResult, error) {
+	return p.inner.List(ctx, opts)
+}
+func (p *cmdNonRevisionProvider) Head(ctx context.Context, key string) (*provider.ObjectMeta, error) {
+	return p.inner.Head(ctx, key)
+}
+func (p *cmdNonRevisionProvider) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	p.getCalls.Add(1)
+	return p.inner.GetObject(ctx, key)
+}
+func (p *cmdNonRevisionProvider) Close() error { return p.inner.Close() }
+
+var (
+	_ provider.Provider     = (*cmdNonRevisionProvider)(nil)
+	_ provider.ObjectGetter = (*cmdNonRevisionProvider)(nil)
+)
+
+func runSourceMatchReflowCmd(t *testing.T, in *strings.Reader, args ...string) (string, error) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := newTransferReflowTestCommand()
+	cmd.SetIn(in)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	execErr := cmd.ExecuteContext(context.Background())
+	return stdout.String(), execErr
+}
+
+func parseTypedReflowRecords(t *testing.T, stdout string) []reflowpkg.Record {
+	t.Helper()
+	var out []reflowpkg.Record
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var env struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(line), &env); err != nil {
+			continue
+		}
+		if env.Type != reflowpkg.RecordType {
+			continue
+		}
+		var rec reflowpkg.Record
+		require.NoError(t, json.Unmarshal(env.Data, &rec))
+		out = append(out, rec)
+	}
+	return out
+}
+
+type fakeS3Entry struct {
+	body      []byte
+	etag      string
+	versionID string
+	modTime   time.Time
+}
+
+type fakeS3HTTPServer struct {
+	mu                sync.Mutex
+	objects           map[string]fakeS3Entry
+	unconditionalGets int
+	conditionalGets   int
+	headCalls         int
+	onHead            func(key string, call int)
+	server            *httptest.Server
+}
+
+func newFakeS3HTTPServer(t *testing.T) *fakeS3HTTPServer {
+	t.Helper()
+	fs := &fakeS3HTTPServer{
+		objects: map[string]fakeS3Entry{},
+	}
+	fs.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/")
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		key := parts[1]
+
+		switch r.Method {
+		case http.MethodHead:
+			fs.mu.Lock()
+			fs.headCalls++
+			call := fs.headCalls
+			hook := fs.onHead
+			entry, ok := fs.objects[key]
+			fs.mu.Unlock()
+			if hook != nil {
+				hook(key, call)
+			}
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("ETag", `"`+entry.etag+`"`)
+			if entry.versionID != "" {
+				w.Header().Set("x-amz-version-id", entry.versionID)
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.body)))
+			w.Header().Set("Last-Modified", entry.modTime.UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("x-amz-meta-owner", "team")
+			w.WriteHeader(http.StatusOK)
+
+		case http.MethodGet:
+			ifMatch := r.Header.Get("If-Match")
+			fs.mu.Lock()
+			if ifMatch == "" {
+				fs.unconditionalGets++
+			} else {
+				fs.conditionalGets++
+			}
+			entry, ok := fs.objects[key]
+			fs.mu.Unlock()
+			if !ok {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+				return
+			}
+			if ifMatch != "" && strings.Trim(ifMatch, `"`) != entry.etag {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`))
+				return
+			}
+			w.Header().Set("ETag", `"`+entry.etag+`"`)
+			if entry.versionID != "" {
+				w.Header().Set("x-amz-version-id", entry.versionID)
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.body)))
+			w.Header().Set("Last-Modified", entry.modTime.UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(entry.body)
+
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(fs.server.Close)
+	return fs
+}
+
+func (fs *fakeS3HTTPServer) put(key, body, etag, versionID string, modTime time.Time) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.objects[key] = fakeS3Entry{body: []byte(body), etag: etag, versionID: versionID, modTime: modTime}
+}
+
+func (fs *fakeS3HTTPServer) counts() (condGets, uncondGets, heads int) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.conditionalGets, fs.unconditionalGets, fs.headCalls
+}
+
+func TestTransferReflowRequireSourceMatchS3HTTPTESTDualPath(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	paths := []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	}
+
+	for _, tc := range paths {
+		t.Run(tc.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			s3Srv.put("a/unchanged.bin", "AAAAA", "d41d8cd98f00b204e9800998ecf8427e-3", "ver-1", now)
+			s3Srv.put("a/replaced.bin", "BBBBB", "opaque-kms-etag-v2", "ver-2", now)
+			s3Srv.put("a/missing-token.bin", "CCCCC", "etag-c", "", now)
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					switch cfg.Bucket {
+					case "source-bucket":
+						return srcProv, nil
+					case "dest-bucket":
+						return dstProv, nil
+					default:
+						return nil, fmt.Errorf("unexpected bucket %q", cfg.Bucket)
+					}
+				},
+			})
+
+			lines := strings.Join([]string{
+				reflowInputLine("a/unchanged.bin", "d41d8cd98f00b204e9800998ecf8427e-3", 5, "", ""),
+				reflowInputLine("a/replaced.bin", "etag-v1", 5, "", ""),
+				reflowInputLine("a/deleted.bin", "etag-gone", 5, "", ""),
+				reflowInputLine("a/missing-token.bin", "", 5, "", ""),
+			}, "\n") + "\n"
+
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(lines), args...)
+			require.Error(t, err, "run with failed items must return error")
+
+			runRec := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runRec.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+
+			records := parseTypedReflowRecords(t, stdout)
+			byKey := map[string]reflowpkg.Record{}
+			for _, rec := range records {
+				if rec.Status != "in_progress" {
+					byKey[rec.SourceKey] = rec
+				}
+			}
+
+			// 1. Unchanged multipart ETag copy succeeds with read-bound source_etag & source_match.
+			okRec := byKey["a/unchanged.bin"]
+			require.Equal(t, "complete", okRec.Status)
+			require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e-3", okRec.SourceETag)
+			require.Equal(t, "ver-1", okRec.SourceVersionID)
+			require.NotNil(t, okRec.SourceMatch)
+			require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e-3", okRec.SourceMatch.ExpectedETag)
+			require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e-3", okRec.SourceMatch.ObservedETag)
+			require.Equal(t, "ver-1", okRec.SourceMatch.ObservedVersionID)
+			require.Equal(t, "AAAAA", string(dstProv.mustObject("data/a/unchanged.bin")))
+
+			// 2. Same-size replacement returns failed/source_changed with observed_etag via follow-up HEAD.
+			repRec := byKey["a/replaced.bin"]
+			require.Equal(t, "failed", repRec.Status)
+			require.Equal(t, "source_changed", repRec.Reason)
+			require.NotNil(t, repRec.SourceMatch)
+			require.Equal(t, "etag-v1", repRec.SourceMatch.ExpectedETag)
+			require.Equal(t, "opaque-kms-etag-v2", repRec.SourceMatch.ObservedETag)
+			require.Equal(t, "ver-2", repRec.SourceMatch.ObservedVersionID)
+			require.False(t, dstProv.hasObject("data/a/replaced.bin"), "changed source must never land at destination")
+
+			// 3. Deleted source returns failed/not_found (NOT source_changed).
+			delRec := byKey["a/deleted.bin"]
+			require.Equal(t, "failed", delRec.Status)
+			require.Equal(t, "not_found", delRec.Reason)
+			require.Nil(t, delRec.SourceMatch)
+			require.False(t, dstProv.hasObject("data/a/deleted.bin"))
+
+			// 4. Missing source_etag returns failed/source_token_missing.
+			missRec := byKey["a/missing-token.bin"]
+			require.Equal(t, "failed", missRec.Status)
+			require.Equal(t, "source_token_missing", missRec.Reason)
+			require.False(t, dstProv.hasObject("data/a/missing-token.bin"))
+
+			// Zero unconditional GET fallback calls across the entire run.
+			condGets, uncondGets, _ := s3Srv.counts()
+			require.GreaterOrEqual(t, condGets, 3)
+			require.Equal(t, 0, uncondGets, "pinned run must never issue an unconditional GetObject")
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchHeadPathDualPath(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	} {
+		t.Run(tc.name+"/race-between-head-and-get", func(t *testing.T) {
+			withTransferReflowTestState(t)
+			s3Srv := newFakeS3HTTPServer(t)
+			s3Srv.put("a/race.bin", "AAAAA", "etag-v1", "ver-1", now)
+			s3Srv.onHead = func(key string, call int) {
+				if call == 1 {
+					s3Srv.put(key, "BBBBB", "etag-v2", "ver-2", now.Add(time.Minute))
+				}
+			}
+
+			srcProv, err := s3.New(context.Background(), s3.Config{
+				Bucket:         "source-bucket",
+				Region:         "us-east-1",
+				Endpoint:       s3Srv.server.URL,
+				ForcePathStyle: true,
+				Anonymous:      true,
+			})
+			require.NoError(t, err)
+			dstProv := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return srcProv, nil
+					}
+					return dstProv, nil
+				},
+			})
+
+			line := reflowInputLine("a/race.bin", "etag-v1", 5, "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--metadata-policy", "preserve",
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+
+			runRec := requireRecord(t, stdout, reflowpkg.RunRecordType, "")
+			require.Contains(t, string(runRec.Data), fmt.Sprintf(`"execution_path":%q`, tc.wantPath))
+
+			records := parseTypedReflowRecords(t, stdout)
+			var terminal reflowpkg.Record
+			for _, rec := range records {
+				if rec.Status != "in_progress" {
+					terminal = rec
+				}
+			}
+			require.Equal(t, "failed", terminal.Status)
+			require.Equal(t, "source_changed", terminal.Reason)
+			require.NotNil(t, terminal.SourceMatch)
+			require.Equal(t, "etag-v1", terminal.SourceMatch.ExpectedETag)
+			require.Equal(t, "etag-v2", terminal.SourceMatch.ObservedETag)
+			require.False(t, dstProv.hasObject("data/a/race.bin"))
+			_, uncondGets, _ := s3Srv.counts()
+			require.Equal(t, 0, uncondGets)
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchPreflightNonRevisionGetterDualPath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra []string
+	}{
+		{name: "engine"},
+		{name: "cli-pool", extra: poolRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTransferReflowTestState(t)
+			inner := newReflowMemoryProvider()
+			inner.putFixture("source/file.xml", "payload", "src-etag", time.Date(2026, 1, 15, 20, 53, 44, 0, time.UTC))
+			src := &cmdNonRevisionProvider{inner: inner}
+			dst := newReflowMemoryProvider()
+			checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+			useTransferReflowProviderFactories(t, providerdispatch.Factories{
+				S3: func(_ context.Context, cfg s3.Config) (provider.Provider, error) {
+					if cfg.Bucket == "source-bucket" {
+						return src, nil
+					}
+					return dst, nil
+				},
+			})
+
+			line := reflowInputLine("source/file.xml", "src-etag", int64(len("payload")), "", "") + "\n"
+			args := []string{
+				"--stdin",
+				"--dest", "s3://dest-bucket/data/",
+				"--parallel", "1",
+				"--checkpoint", checkpointPath,
+				"--require-source-match",
+			}
+			args = append(args, tc.extra...)
+			stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(line), args...)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), fmt.Sprintf("(exit code %d)", foundry.ExitInvalidArgument))
+			require.Contains(t, stdout, `"reason":"replay_unverifiable"`)
+			require.Contains(t, stdout, `"missing_capability":"RevisionGetter"`)
+			require.Zero(t, src.getCalls.Load(), "preflight must refuse before any source read")
+			require.False(t, dst.hasObject("data/source/file.xml"), "preflight must refuse before any destination write")
+		})
+	}
+}
+
+func TestTransferReflowRequireSourceMatchFileProviderEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	srcDir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	dstDir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	unchangedPath := filepath.Join(srcDir, "unchanged.txt")
+	replacedPath := filepath.Join(srcDir, "replaced.txt")
+	deletedPath := filepath.Join(srcDir, "deleted.txt")
+	require.NoError(t, os.WriteFile(unchangedPath, []byte("alpha"), 0o600))
+	require.NoError(t, os.WriteFile(replacedPath, []byte("bravo"), 0o600))
+	require.NoError(t, os.WriteFile(deletedPath, []byte("delta"), 0o600))
+
+	srcProv, err := providerfile.New(providerfile.Config{BaseDir: srcDir})
+	require.NoError(t, err)
+
+	headUnchanged, err := srcProv.Head(ctx, "unchanged.txt")
+	require.NoError(t, err)
+	headReplaced, err := srcProv.Head(ctx, "replaced.txt")
+	require.NoError(t, err)
+	headDeleted, err := srcProv.Head(ctx, "deleted.txt")
+	require.NoError(t, err)
+
+	// Mutate replaced.txt with same size + newer mtime, and delete deleted.txt.
+	require.NoError(t, os.WriteFile(replacedPath, []byte("BRAVO"), 0o600))
+	newer := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(replacedPath, newer, newer))
+	require.NoError(t, os.Remove(deletedPath))
+
+	headReplacedAfter, err := srcProv.Head(ctx, "replaced.txt")
+	require.NoError(t, err)
+	require.NotEqual(t, headReplaced.ETag, headReplacedAfter.ETag)
+
+	withTransferReflowTestState(t)
+	checkpointPath := filepath.Join(t.TempDir(), "state.db")
+
+	makeFileInputLine := func(key, etag string, size int64) string {
+		rec := map[string]any{
+			"type": "gonimbus.reflow.input.v1",
+			"data": map[string]any{
+				"source_uri":        "file://" + filepath.Join(srcDir, key),
+				"source_key":        key,
+				"source_etag":       etag,
+				"source_size_bytes": size,
+				"dest_rel_key":      key,
+			},
+		}
+		raw, marshalErr := json.Marshal(rec)
+		require.NoError(t, marshalErr)
+		return string(raw)
+	}
+
+	input := strings.Join([]string{
+		makeFileInputLine("unchanged.txt", headUnchanged.ETag, headUnchanged.Size),
+		makeFileInputLine("replaced.txt", headReplaced.ETag, headReplaced.Size),
+		makeFileInputLine("deleted.txt", headDeleted.ETag, headDeleted.Size),
+	}, "\n") + "\n"
+
+	stdout, err := runSourceMatchReflowCmd(t, strings.NewReader(input),
+		"--stdin",
+		"--dest", "file://"+dstDir,
+		"--parallel", "1",
+		"--checkpoint", checkpointPath,
+		"--require-source-match",
+	)
+	require.Error(t, err)
+
+	records := parseTypedReflowRecords(t, stdout)
+	byKey := map[string]reflowpkg.Record{}
+	for _, rec := range records {
+		if rec.Status != "in_progress" {
+			byKey[rec.SourceKey] = rec
+		}
+	}
+
+	// Unchanged file succeeds with read-bound source_etag & source_match.
+	require.Equal(t, "complete", byKey["unchanged.txt"].Status)
+	require.Equal(t, headUnchanged.ETag, byKey["unchanged.txt"].SourceETag)
+	require.NotNil(t, byKey["unchanged.txt"].SourceMatch)
+	require.Equal(t, headUnchanged.ETag, byKey["unchanged.txt"].SourceMatch.ExpectedETag)
+	require.Equal(t, headUnchanged.ETag, byKey["unchanged.txt"].SourceMatch.ObservedETag)
+	gotBody, err := os.ReadFile(filepath.Join(dstDir, "unchanged.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "alpha", string(gotBody))
+
+	// Same-size replaced file fails with source_changed and observed_etag.
+	require.Equal(t, "failed", byKey["replaced.txt"].Status)
+	require.Equal(t, "source_changed", byKey["replaced.txt"].Reason)
+	require.NotNil(t, byKey["replaced.txt"].SourceMatch)
+	require.Equal(t, headReplaced.ETag, byKey["replaced.txt"].SourceMatch.ExpectedETag)
+	require.Equal(t, headReplacedAfter.ETag, byKey["replaced.txt"].SourceMatch.ObservedETag)
+	_, statErr := os.Stat(filepath.Join(dstDir, "replaced.txt"))
+	require.True(t, os.IsNotExist(statErr), "changed file must not land at destination")
+
+	// Deleted file fails with not_found (NOT source_changed).
+	require.Equal(t, "failed", byKey["deleted.txt"].Status)
+	require.Equal(t, "not_found", byKey["deleted.txt"].Reason)
+	require.Nil(t, byKey["deleted.txt"].SourceMatch)
+	_, statErr = os.Stat(filepath.Join(dstDir, "deleted.txt"))
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestTransferReflowRequireSourceMatchGCSFakeServerLibrary(t *testing.T) {
+	ctx := context.Background()
+	server, err := fakestorage.NewServerWithOptions(fakestorage.Options{
+		Scheme: "http",
+		InitialObjects: []fakestorage.Object{
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "ok.txt"}, Content: []byte("alpha")},
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "same-size.txt"}, Content: []byte("bravo")},
+			{ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "src-bucket", Name: "deleted.txt"}, Content: []byte("delta")},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(server.Stop)
+
+	t.Setenv("STORAGE_EMULATOR_HOST", strings.TrimPrefix(server.URL(), "http://"))
+	srcProv, err := gcs.New(ctx, gcs.Config{
+		Bucket: "src-bucket",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srcProv.Close() })
+
+	headOK, err := srcProv.Head(ctx, "ok.txt")
+	require.NoError(t, err)
+	headSameSize, err := srcProv.Head(ctx, "same-size.txt")
+	require.NoError(t, err)
+	headDeleted, err := srcProv.Head(ctx, "deleted.txt")
+	require.NoError(t, err)
+
+	// Replace same-size.txt and delete deleted.txt after admission.
+	require.NoError(t, srcProv.PutObject(ctx, "same-size.txt", strings.NewReader("BRAVO"), 5))
+	headSameSizeAfter, err := srcProv.Head(ctx, "same-size.txt")
+	require.NoError(t, err)
+	require.NotEqual(t, headSameSize.ETag, headSameSizeAfter.ETag)
+	require.NoError(t, srcProv.DeleteObject(ctx, "deleted.txt"))
+
+	dstProv := newReflowMemoryProvider()
+	sink := &testJSONLSink{}
+	runner, err := reflowpkg.NewRunner(reflowpkg.Config{
+		Destination:        reflowpkg.Destination{Provider: dstProv, ProviderID: "s3", BaseURI: "s3://dest-bucket/data/"},
+		Rewrite:            reflowpkg.RewriteConfig{From: "{key}", To: "{key}"},
+		Collision:          reflowpkg.CollisionPolicy{Mode: reflowpkg.CollisionSkipIfDuplicate},
+		Concurrency:        reflowpkg.ResolveConcurrency(1, true, reflowpkg.DefaultResourceProbe()),
+		RequireSourceMatch: true,
+		Events:             sink,
+	})
+	require.NoError(t, err)
+
+	// Inject the live gcs.Provider backed by fake-gcs-server into reflow.Runner
+	// (PrefixSource URI parsing currently constrains the scheme label to s3://
+	// while delegating all reads/HEADs directly to the injected provider).
+	_, err = runner.Run(ctx, reflowpkg.PrefixSource{
+		Provider: &gcsSnapshotListProvider{
+			Provider: srcProv,
+			snapshot: []provider.ObjectSummary{
+				{Key: "ok.txt", Size: headOK.Size, ETag: headOK.ETag},
+				{Key: "same-size.txt", Size: headSameSize.Size, ETag: headSameSize.ETag},
+				{Key: "deleted.txt", Size: headDeleted.Size, ETag: headDeleted.ETag},
+			},
+		},
+		URI: "s3://src-bucket/",
+	})
+	require.Error(t, err)
+
+	byKey := map[string]reflowpkg.Record{}
+	for _, rec := range sink.records {
+		if rec.Status != "in_progress" {
+			byKey[rec.SourceKey] = rec
+		}
+	}
+
+	require.Equal(t, "complete", byKey["ok.txt"].Status)
+	require.Equal(t, headOK.ETag, byKey["ok.txt"].SourceETag)
+	require.Equal(t, headOK.Version, byKey["ok.txt"].SourceVersionID)
+	require.NotNil(t, byKey["ok.txt"].SourceMatch)
+	require.Equal(t, headOK.ETag, byKey["ok.txt"].SourceMatch.ExpectedETag)
+	require.Equal(t, headOK.ETag, byKey["ok.txt"].SourceMatch.ObservedETag)
+	require.Equal(t, headOK.Version, byKey["ok.txt"].SourceMatch.ObservedVersionID)
+	require.Equal(t, "alpha", string(dstProv.mustObject("data/ok.txt")))
+
+	require.Equal(t, "failed", byKey["same-size.txt"].Status)
+	require.Equal(t, "source_changed", byKey["same-size.txt"].Reason)
+	require.NotNil(t, byKey["same-size.txt"].SourceMatch)
+	require.Equal(t, headSameSize.ETag, byKey["same-size.txt"].SourceMatch.ExpectedETag)
+	require.Equal(t, headSameSizeAfter.ETag, byKey["same-size.txt"].SourceMatch.ObservedETag)
+	require.False(t, dstProv.hasObject("data/same-size.txt"))
+
+	require.Equal(t, "failed", byKey["deleted.txt"].Status)
+	require.Equal(t, "not_found", byKey["deleted.txt"].Reason)
+	require.Nil(t, byKey["deleted.txt"].SourceMatch)
+	require.False(t, dstProv.hasObject("data/deleted.txt"))
+}
+
+func TestTransferReflowRequireSourceMatchOffByteIdenticalDualPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantPath string
+	}{
+		{name: "engine", wantPath: reflowpkg.ExecutionPathEngine},
+		{name: "cli-pool", extra: poolRoute, wantPath: reflowpkg.ExecutionPathCLIPool},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, tc.extra...)
+			requireProbeComplete(t, stdout, err, tc.wantPath)
+			rec := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
+			require.NotContains(t, string(rec.Data), `"source_match"`)
+			require.NotContains(t, string(rec.Data), `"source_version_id"`)
+		})
+	}
+}
+
+type testJSONLSink struct {
+	mu      sync.Mutex
+	records []reflowpkg.Record
+}
+
+func (s *testJSONLSink) OnRun(context.Context, reflowpkg.RunRecord) error          { return nil }
+func (s *testJSONLSink) OnSource(context.Context, reflowpkg.SourceRunRecord) error { return nil }
+func (s *testJSONLSink) OnWarning(context.Context, reflowpkg.Warning) error        { return nil }
+func (s *testJSONLSink) OnError(context.Context, reflowpkg.ErrorEvent) error       { return nil }
+func (s *testJSONLSink) OnSummary(context.Context, reflowpkg.SummaryRecord) error  { return nil }
+func (s *testJSONLSink) OnRecord(_ context.Context, rec reflowpkg.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, rec)
+	return nil
+}
+
+type gcsSnapshotListProvider struct {
+	*gcs.Provider
+	snapshot []provider.ObjectSummary
+}
+
+func (p *gcsSnapshotListProvider) List(_ context.Context, _ provider.ListOptions) (*provider.ListResult, error) {
+	return &provider.ListResult{Objects: append([]provider.ObjectSummary(nil), p.snapshot...)}, nil
+}

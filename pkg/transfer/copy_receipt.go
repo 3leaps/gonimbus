@@ -14,6 +14,8 @@ import (
 type CopyReceipt struct {
 	UploadResult
 	SourceLastModified time.Time
+	SourceETag         string
+	SourceVersion      string
 }
 
 // CopyReceiptOptions preserves revision admission, write preconditions and
@@ -49,6 +51,8 @@ func CopyObjectWithReceipt(ctx context.Context, src, dst provider.Provider, srcK
 			return nil, provider.ObjectMeta{}, &SizeMismatchError{Key: srcKey, Expected: expectedSize, Got: meta.Size}
 		}
 		receipt.SourceLastModified = meta.LastModified
+		receipt.SourceETag = meta.ETag
+		receipt.SourceVersion = meta.Version
 		return body, meta, nil
 	}
 	if expectedSize > 0 && shouldUseMultipart(expectedSize, uploadOpts.MultipartThreshold, putter) {

@@ -375,6 +375,27 @@ var reflowFlagMatrix = map[string]reflowFlagBehavior{
 			require.Contains(t, string(run.Data), `"adaptive_enabled":false`)
 		}},
 	},
+	"require-source-match": {
+		note: "binds source reads to expected revision token on both engine and cli-pool paths, emitting source_match and read-bound source_etag",
+		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.run(t, "--require-source-match")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathEngine)
+			rec := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
+			require.Contains(t, string(rec.Data), `"source_match"`)
+			require.Contains(t, string(rec.Data), `"expected_etag":"src-etag"`)
+			require.Contains(t, string(rec.Data), `"observed_etag":"src-etag"`)
+		}},
+		cliPool: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {
+			env := newFlagProbeEnv(t)
+			stdout, err := env.runPool(t, "--require-source-match")
+			requireProbeComplete(t, stdout, err, reflowpkg.ExecutionPathCLIPool)
+			rec := requireRecord(t, stdout, reflowpkg.RecordType, "complete")
+			require.Contains(t, string(rec.Data), `"source_match"`)
+			require.Contains(t, string(rec.Data), `"expected_etag":"src-etag"`)
+			require.Contains(t, string(rec.Data), `"observed_etag":"src-etag"`)
+		}},
+	},
 	"memory-budget": {
 		note: "operator budget replaces the fraction-derived memory budget; resolved before dispatch, shared by both paths; invalid values refuse before any provider work; values above the detected limit clamp to it with recorded source",
 		engine: flagPathCell{disposition: flagHonored, probe: func(t *testing.T) {

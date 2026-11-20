@@ -67,6 +67,9 @@ func recordWithCollision(rec Record, collision *CollisionInfo) Record {
 }
 
 func isConditionalExists(err error) bool {
+	if provider.IsSourceChanged(err) {
+		return false
+	}
 	return provider.IsAlreadyExists(err) || provider.IsPreconditionFailed(err)
 }
 

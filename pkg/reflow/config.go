@@ -25,6 +25,10 @@ type Config struct {
 	DryRun bool
 	// ReadOnly blocks provider-side mutations, including write-probe preflight.
 	ReadOnly bool
+	// RequireSourceMatch requires every copied object to bind its source read to
+	// an expected revision token via provider.RevisionGetter. Providers lacking
+	// RevisionGetter fail at preflight before any copy is attempted.
+	RequireSourceMatch bool
 	// Metadata controls destination metadata and storage-class PUT options.
 	Metadata MetadataPlan
 	// Provenance controls per-object provenance sidecar emission. The zero value
@@ -59,8 +63,8 @@ type CollisionPolicy struct {
 // String returns a redacted summary; it never recurses into the injected
 // provider handle or the checkpoint/event sinks.
 func (c Config) String() string {
-	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, Metadata:%+v, Provenance:%s, Checkpoint:%s, Events:%s}",
-		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly, c.Metadata, c.Provenance,
+	return fmt.Sprintf("reflow.Config{Destination:%s, Rewrite:%+v, Collision:%+v, DryRun:%t, ReadOnly:%t, RequireSourceMatch:%t, Metadata:%+v, Provenance:%s, Checkpoint:%s, Events:%s}",
+		c.Destination, c.Rewrite, c.Collision, c.DryRun, c.ReadOnly, c.RequireSourceMatch, c.Metadata, c.Provenance,
 		ifacePresence(c.Checkpoint == nil), ifacePresence(c.Events == nil))
 }
 

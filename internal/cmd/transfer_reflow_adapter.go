@@ -167,12 +167,13 @@ func planTransferReflowEngineAdapter(ctx context.Context, input io.Reader, first
 			Mode:             collCfg.Mode,
 			QuarantinePrefix: collCfg.QuarantinePrefix,
 		},
-		Concurrency: concurrencyCfg,
-		DryRun:      reflowDryRun,
-		ReadOnly:    IsReadOnly(),
-		Metadata:    metaCfg,
-		Provenance:  provCfg.enginePlan(jobID),
-		Checkpoint:  checkpointAdapter(state, reflowResume),
+		Concurrency:        concurrencyCfg,
+		DryRun:             reflowDryRun,
+		ReadOnly:           IsReadOnly(),
+		RequireSourceMatch: reflowRequireSourceMatch,
+		Metadata:           metaCfg,
+		Provenance:         provCfg.enginePlan(jobID),
+		Checkpoint:         checkpointAdapter(state, reflowResume),
 	}
 	if positional != nil {
 		// The pool resolves the source provider for a positional argument in both
@@ -368,6 +369,18 @@ func runEnabledTransferReflowEngine(
 	}
 	if errors.Is(runErr, reflowpkg.ErrNotImplemented) {
 		return exitError(foundry.ExitFailure, "Internal error: reflow engine refused a vetted configuration", runErr)
+	}
+	var replayErr *reflowpkg.ReplayUnverifiableError
+	if errors.As(runErr, &replayErr) {
+		details := map[string]any{
+			"reason":             "replay_unverifiable",
+			"missing_capability": "RevisionGetter",
+			"flag":               "--require-source-match",
+		}
+		if replayErr.Provider != "" {
+			details["provider"] = replayErr.Provider
+		}
+		return emitReflowConfigError(ctx, w, "Source provider does not support pinned revision reads", replayErr, details)
 	}
 	return transferReflowEngineTerminalError(runErr)
 }
