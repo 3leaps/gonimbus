@@ -23,10 +23,32 @@ func SafeReceiptHandle(value string) string {
 	if isUnsafeReceiptHandle(value) {
 		return ""
 	}
-	if unquoted := NormalizeETagForCompare(value); unquoted != value && isUnsafeReceiptHandle(unquoted) {
-		return ""
+	candidate := value
+	for {
+		next := stripReceiptHandleWrapper(candidate)
+		if next == candidate {
+			break
+		}
+		if isUnsafeReceiptHandle(next) {
+			return ""
+		}
+		candidate = next
 	}
 	return value
+}
+
+// stripReceiptHandleWrapper peels one RFC 9110 weak-tag prefix (W/ or w/) or
+// enclosing DQUOTE pair so credential-shaped payloads wrapped as W/"Bearer …"
+// or "Bearer …" cannot bypass handle sanitization.
+func stripReceiptHandleWrapper(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) >= 2 && (trimmed[0] == 'W' || trimmed[0] == 'w') && trimmed[1] == '/' {
+		return strings.TrimSpace(trimmed[2:])
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+		return strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	}
+	return trimmed
 }
 
 func isUnsafeReceiptHandle(value string) bool {

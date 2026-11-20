@@ -134,11 +134,20 @@ func BuildProvenanceSidecar(runID, toolVersion, ts string, in ProvenanceSidecarI
 			RewriteTemplate:  in.RewriteTemplate,
 			QuarantinePrefix: quarantinePrefix,
 		},
-		Collision: in.Collision,
+		Collision: sanitizeCollisionInfo(in.Collision),
 		Vars:      in.Vars,
 		Probe:     in.Probe,
 		Action:    in.Action,
 	}
+}
+
+func sanitizeCollisionInfo(in *CollisionInfo) *CollisionInfo {
+	if in == nil {
+		return nil
+	}
+	cp := *in
+	cp.DestETagObserved = SafeReceiptHandle(cp.DestETagObserved)
+	return &cp
 }
 
 // ProvenanceNow returns the RFC3339Nano UTC timestamp used for run.ts.

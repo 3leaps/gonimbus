@@ -440,6 +440,7 @@ func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *te
 	unsafeETags := []string{
 		"Bearer top-secret-etag-token",
 		`"Bearer quoted-secret-etag-token"`,
+		`W/"Bearer weak-secret-etag-token"`,
 	}
 
 	for _, unsafeETag := range unsafeETags {
@@ -494,6 +495,9 @@ func TestTransferReflowRequireSourceMatchSanitizesUnsafeSourceETagDualPath(t *te
 				var storedETag string
 				require.NoError(t, db.QueryRow(`SELECT COALESCE(source_etag, '') FROM reflow_items WHERE source_key = ?`, "a/item.bin").Scan(&storedETag))
 				require.Empty(t, storedETag, "unsafe source_etag must never persist into checkpoint DB")
+
+				coll := newCollisionInfo(collisionConflict, &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{ETag: unsafeETag, Size: 5}}, decisionIfAbsentHead)
+				require.Empty(t, coll.DestETagObserved, "CLI newCollisionInfo must sanitize dest_etag_observed")
 			})
 		}
 	}

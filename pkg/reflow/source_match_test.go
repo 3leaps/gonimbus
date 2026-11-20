@@ -200,6 +200,8 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 	unsafeETags := []string{
 		"Bearer super-secret-token",
 		`"Bearer quoted-secret-token"`,
+		`W/"Bearer weak-secret-token"`,
+		`w/"Bearer lower-weak-secret-token"`,
 		"https://example.test/bucket/key?X-Amz-Signature=deadbeef",
 		"token=secret-value",
 		"bad\nnewline",
@@ -248,10 +250,16 @@ func TestRequireSourceMatchSanitizesUnsafeSourceETagInRecordAndCheckpoint(t *tes
 				SourceETag: unsafeETag,
 				DestURI:    "s3://dest-bucket/data/a.txt",
 				DestETag:   unsafeETag,
+				Collision:  &CollisionInfo{Kind: collisionConflict, DestETagObserved: unsafeETag, DecisionPath: decisionIfAbsentHead},
 				Action:     "copied",
 			})
 			require.Empty(t, sidecar.Source.ETag, "unsafe source_etag must never persist into provenance sidecar")
 			require.Empty(t, sidecar.Destination.ETag, "unsafe dest_etag must never persist into provenance sidecar")
+			require.NotNil(t, sidecar.Collision)
+			require.Empty(t, sidecar.Collision.DestETagObserved, "unsafe collision dest_etag_observed must never persist into provenance sidecar")
+
+			coll := newCollisionInfo(collisionConflict, &provider.ObjectMeta{ObjectSummary: provider.ObjectSummary{ETag: unsafeETag, Size: 5}}, decisionIfAbsentHead)
+			require.Empty(t, coll.DestETagObserved, "newCollisionInfo must sanitize dest_etag_observed")
 		})
 	}
 }

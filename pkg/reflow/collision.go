@@ -34,7 +34,7 @@ func newCollisionInfo(kind string, destMeta *provider.ObjectMeta, decisionPath s
 	info := &CollisionInfo{Kind: kind, DecisionPath: decisionPath}
 	if destMeta != nil {
 		size := destMeta.Size
-		info.DestETagObserved = destMeta.ETag
+		info.DestETagObserved = SafeReceiptHandle(destMeta.ETag)
 		info.DestSizeObserved = &size
 	}
 	return info
